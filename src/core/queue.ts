@@ -19,6 +19,10 @@ interface ChatQueue {
   busy: boolean;
   /** 当前处理开始时间 */
   busySince: number | null;
+  /** cancel 已请求，抑制 flush 中的错误日志 */
+  cancelRequested: boolean;
+  /** cancel 正在进行中，防止重复 cancel */
+  cancelInFlight: boolean;
 }
 
 type ProcessFn = (chatId: string, mergedText: string) => Promise<void>;
@@ -29,6 +33,7 @@ export class MessageQueue {
   private bufferMs: number;
   private cancelThresholdMs: number;
   private cancelFn: ((chatId: string) => Promise<void>) | null = null;
+  private stopped = false;
 
   constructor(bufferMs = 3000, cancelThresholdMs = 10000) {
     this.bufferMs = bufferMs;
@@ -47,55 +52,58 @@ export class MessageQueue {
 
   /** 推入一条新消息 */
   push(msg: QueuedMessage): void {
+    if (this.stopped) return;
+
     const q = this.getQueue(msg.chatId);
 
     if (q.busy) {
       const elapsed = q.busySince ? Date.now() - q.busySince : Infinity;
 
-      if (elapsed < this.cancelThresholdMs && this.cancelFn) {
-        // agent 刚开始处理，cancel + 合并
+      if (elapsed < this.cancelThresholdMs && this.cancelFn && !q.cancelInFlight) {
         log.info("cancel+merge", { chatId: msg.chatId, elapsed });
         void this.cancelAndMerge(q, msg);
       } else {
-        // agent 已有实质进展，排队等待
         log.info("message queued", { chatId: msg.chatId, pending: q.pending.length + 1 });
         q.pending.push(msg);
       }
       return;
     }
 
-    // agent 空闲，放入缓冲区做合并
     q.buffer.push(msg);
     this.resetBufferTimer(q, msg.chatId);
   }
 
-  /** 标记某 chat 处理完成，检查队列 */
-  done(chatId: string): void {
-    const q = this.queues.get(chatId);
-    if (!q) return;
-
-    q.busy = false;
-    q.busySince = null;
-
-    // 检查有没有排队消息
-    if (q.pending.length > 0) {
-      const next = q.pending;
-      q.pending = [];
-      // 合并所有排队消息
-      q.buffer = next;
-      this.resetBufferTimer(q, chatId);
+  /** 停止队列，清除所有计时器 */
+  stop(): void {
+    this.stopped = true;
+    for (const [chatId, q] of this.queues) {
+      if (q.bufferTimer) {
+        clearTimeout(q.bufferTimer);
+        q.bufferTimer = null;
+      }
+      const dropped = q.buffer.length + q.pending.length;
+      if (dropped > 0) {
+        log.warn("dropping buffered messages on stop", { chatId, count: dropped });
+      }
     }
   }
 
-  /** 检查某 chat 的 agent 是否忙 */
-  isBusy(chatId: string): boolean {
-    return this.queues.get(chatId)?.busy ?? false;
+  /** 是否有正在处理的任务 */
+  hasBusyChats(): boolean {
+    for (const [, q] of this.queues) {
+      if (q.busy) return true;
+    }
+    return false;
   }
 
   private getQueue(chatId: string): ChatQueue {
     let q = this.queues.get(chatId);
     if (!q) {
-      q = { buffer: [], bufferTimer: null, pending: [], busy: false, busySince: null };
+      q = {
+        buffer: [], bufferTimer: null, pending: [],
+        busy: false, busySince: null,
+        cancelRequested: false, cancelInFlight: false,
+      };
       this.queues.set(chatId, q);
     }
     return q;
@@ -108,6 +116,23 @@ export class MessageQueue {
     }, this.bufferMs);
   }
 
+  /** 标记某 chat 处理完成，检查后续队列 */
+  private processNext(q: ChatQueue, chatId: string): void {
+    q.busy = false;
+    q.busySince = null;
+    q.cancelInFlight = false;
+
+    // 已停止，不再启动新的处理
+    if (this.stopped) return;
+
+    if (q.pending.length > 0) {
+      const next = q.pending;
+      q.pending = [];
+      q.buffer = next;
+      this.resetBufferTimer(q, chatId);
+    }
+  }
+
   private async flush(q: ChatQueue, chatId: string): Promise<void> {
     if (q.buffer.length === 0) return;
 
@@ -116,32 +141,40 @@ export class MessageQueue {
     q.bufferTimer = null;
     q.busy = true;
     q.busySince = Date.now();
+    q.cancelRequested = false;
 
     const mergedText = messages.map((m) => m.text).join("\n");
+
     log.info("flush", { chatId, messageCount: messages.length, textLength: mergedText.length });
 
     try {
       await this.processFn?.(chatId, mergedText);
     } catch (err) {
-      log.error("process error", { chatId, error: String(err) });
+      if (!q.cancelRequested) {
+        log.error("process error", { chatId, error: String(err) });
+      }
     } finally {
-      this.done(chatId);
+      // flush 始终负责推进队列，无论是否被 cancel
+      // cancelAndMerge 只往 pending 里放消息，不管状态转换
+      q.cancelRequested = false;
+      this.processNext(q, chatId);
     }
   }
 
   private async cancelAndMerge(q: ChatQueue, newMsg: QueuedMessage): Promise<void> {
+    q.cancelRequested = true;
+    q.cancelInFlight = true;
+
     try {
       await this.cancelFn?.(newMsg.chatId);
     } catch (err) {
       log.warn("cancel failed, queuing instead", { chatId: newMsg.chatId, error: String(err) });
-      q.pending.push(newMsg);
-      return;
     }
 
-    // cancel 成功，把新消息放入缓冲区重新发
-    q.busy = false;
-    q.busySince = null;
-    q.buffer.push(newMsg);
-    this.resetBufferTimer(q, newMsg.chatId);
+    // 无论 cancel 成功或失败，新消息都排入 pending
+    // cancel 成功：session 保持存活，原始消息已在 agent 上下文中，只需发新消息
+    // cancel 失败：flush 正常完成后，processNext 处理新消息
+    // cancelInFlight 由 processNext 重置
+    q.pending.push(newMsg);
   }
 }

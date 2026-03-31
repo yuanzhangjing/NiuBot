@@ -15,9 +15,10 @@ Pipeline               ← orchestration: session mgmt, DB persistence
     ↓
 MessageQueue           ← buffer, merge, cancel+requeue
     ↓
-AcpBackend             ← agent layer (swappable)
+AgentBackend           ← agent layer (swappable)
     ↓
-ACP subprocess         ← claude-code-acp or compatible
+ClaudeCliBackend       ← claude -p (default, supports system prompt)
+ or AcpBackend         ← ACP protocol (for other agents)
     ↓
 SQLite                 ← users, chats, sessions, messages (FTS)
 ```
@@ -34,10 +35,18 @@ SQLite                 ← users, chats, sessions, messages (FTS)
 # Install dependencies
 npm install
 
-# Configure (pick one)
-export FEISHU_APP_ID="your-app-id"
-export FEISHU_APP_SECRET="your-app-secret"
-# or edit config/default.yaml
+# Configure (~/.niubot/.env)
+mkdir -p ~/.niubot
+cat > ~/.niubot/.env << 'EOF'
+FEISHU_APP_ID=your-app-id
+FEISHU_APP_SECRET=your-app-secret
+EOF
+
+# Set agent working directory (~/.niubot/config.yaml)
+cat > ~/.niubot/config.yaml << 'EOF'
+agent:
+  workingDirectory: "~/workspace/your-project"
+EOF
 
 # Run
 npm run dev
@@ -47,18 +56,24 @@ Requires Node.js >= 20 and a Feishu app with WebSocket event subscription enable
 
 ## Configuration
 
-Config is loaded from `config/default.yaml` with environment variable overrides:
+All config lives in `~/.niubot/` (override via `NIUBOT_HOME` env var):
+
+```
+~/.niubot/
+├── .env            ← secrets (FEISHU_APP_ID, FEISHU_APP_SECRET)
+├── config.yaml     ← settings
+└── niubot.db       ← database (auto-created)
+```
 
 | Key | Env Var | Default | Description |
 |-----|---------|---------|-------------|
-| `feishu.appId` | `FEISHU_APP_ID` | — | Feishu app ID (required) |
-| `feishu.appSecret` | `FEISHU_APP_SECRET` | — | Feishu app secret (required) |
-| `agent.command` | — | `npx -y @zed-industries/claude-agent-acp` | ACP server command |
-| `agent.workingDirectory` | — | `.` | Agent working directory |
-| `agent.permissionMode` | — | `autoApprove` | `autoApprove` (ACP generic) or `bypass` (Claude Code) |
-| `database.path` | — | `./niubot.db` | SQLite database path |
-| `queue.bufferMs` | — | `3000` | Message merge window (ms) |
-| `queue.cancelThresholdMs` | — | `10000` | Cancel+merge threshold (ms) |
+| `feishu.appId` | `FEISHU_APP_ID` | — | Feishu app ID (**required**) |
+| `feishu.appSecret` | `FEISHU_APP_SECRET` | — | Feishu app secret (**required**) |
+| `agent.workingDirectory` | `NIUBOT_WORK_DIR` | — | Agent working directory (**required**) |
+| `agent.backend` | `NIUBOT_BACKEND` | `claude-code` | `claude-code` or `claude-code-acp` |
+| `database.path` | `NIUBOT_DB_PATH` | `~/.niubot/niubot.db` | SQLite database path |
+| `queue.bufferMs` | `NIUBOT_BUFFER_MS` | `3000` | Message merge window (ms) |
+| `queue.cancelThresholdMs` | `NIUBOT_CANCEL_MS` | `10000` | Cancel+merge threshold (ms) |
 
 ## Project Structure
 
@@ -72,8 +87,10 @@ src/
 │   └── queue.ts          # Per-chat message buffering
 ├── agent/
 │   ├── types.ts          # AgentBackend interface
+│   ├── claude-cli/
+│   │   └── backend.ts    # Claude Code CLI (-p mode)
 │   └── acp/
-│       └── backend.ts    # ACP implementation
+│       └── backend.ts    # ACP protocol implementation
 ├── im/
 │   ├── types.ts          # PlatformAdapter interface
 │   └── feishu/

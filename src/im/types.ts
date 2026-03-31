@@ -5,7 +5,9 @@
 
 export interface NormalizedMessage {
   senderPlatformId: string;
+  senderName?: string;
   chatPlatformId: string;
+  chatType: "p2p" | "group";
   contentText: string;
   contentType: "text" | "image" | "file" | "audio" | "mixed";
   replyToPlatformMsgId?: string;

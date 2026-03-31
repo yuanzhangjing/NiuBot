@@ -51,7 +51,11 @@ export class FeishuAdapter implements PlatformAdapter {
   }
 
   async stop(): Promise<void> {
-    // WSClient 没有暴露 stop 方法，进程退出时自然断开
+    this.handler = null;
+    if (this.wsClient) {
+      try { (this.wsClient as any).close?.(); } catch { /* SDK 可能不暴露 close */ }
+      this.wsClient = null;
+    }
     log.info("feishu adapter stopped");
   }
 
@@ -103,16 +107,23 @@ export class FeishuAdapter implements PlatformAdapter {
     const event = data as {
       message?: {
         chat_id?: string;
+        chat_type?: string;
         message_id?: string;
         message_type?: string;
         content?: string;
-        sender?: { sender_id?: { open_id?: string } };
         create_time?: string;
       };
+      sender?: { sender_id?: { open_id?: string }; sender_type?: string };
     };
 
     const msg = event?.message;
     if (!msg?.chat_id || !msg?.content) return null;
+
+    const senderId = event.sender?.sender_id?.open_id;
+    if (!senderId) {
+      log.warn("skipping message without sender ID", { chatId: msg.chat_id });
+      return null;
+    }
 
     // 只处理文本消息（M1）
     if (msg.message_type !== "text") {
@@ -131,15 +142,22 @@ export class FeishuAdapter implements PlatformAdapter {
     if (!contentText.trim()) return null;
 
     return {
-      senderPlatformId: msg.sender?.sender_id?.open_id ?? "",
+      senderPlatformId: senderId,
       chatPlatformId: msg.chat_id,
+      chatType: msg.chat_type === "group" ? "group" : "p2p",
       contentText,
       contentType: "text",
-      timestamp: msg.create_time ? new Date(Number(msg.create_time)) : new Date(),
+      timestamp: parseTimestamp(msg.create_time),
       platformMsgId: msg.message_id,
       raw: data,
     };
   }
+}
+
+function parseTimestamp(val?: string): Date {
+  if (!val) return new Date();
+  const n = Number(val);
+  return Number.isNaN(n) || n === 0 ? new Date() : new Date(n);
 }
 
 /** 按自然段落边界分割超长消息 */

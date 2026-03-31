@@ -6,8 +6,15 @@ import { createLogger } from "../../logger.js";
 
 const log = createLogger("acp");
 
+/** prompt 超时时间（ms），防止 agent 卡死 */
+const PROMPT_TIMEOUT_MS = 10 * 60 * 1000; // 10 分钟
+
+const DEFAULT_LITE_MODEL = "claude-haiku-4-5-20251001";
+
 export class AcpBackend implements AgentBackend {
   private command: string;
+  private permissionMode: "bypass" | "autoApprove";
+  private liteModel: string;
   private process: ChildProcess | null = null;
   private connection: acp.ClientSideConnection | null = null;
 
@@ -17,32 +24,27 @@ export class AcpBackend implements AgentBackend {
   /** 每个 session 的累计字节数 */
   private sessionBytes = new Map<string, number>();
 
-  /** prompt 完成信号 */
-  private promptResolvers = new Map<string, {
-    resolve: (resp: AgentResponse) => void;
-    reject: (err: Error) => void;
-  }>();
-
-  constructor(command: string) {
+  constructor(command: string, permissionMode: "bypass" | "autoApprove" = "autoApprove", liteModel?: string) {
     this.command = command;
+    this.permissionMode = permissionMode;
+    this.liteModel = liteModel ?? DEFAULT_LITE_MODEL;
   }
 
   async start(): Promise<void> {
-    const [cmd, ...args] = this.command.split(" ");
-    if (!cmd) throw new Error("Empty agent command");
-
     log.info("spawning ACP server", { command: this.command });
 
-    this.process = spawn(cmd, args, {
+    this.process = spawn(this.command, {
       stdio: ["pipe", "pipe", "inherit"],
+      shell: true,
     });
 
     this.process.on("exit", (code) => {
-      log.warn("ACP process exited", { code });
-      // 拒绝所有等待中的 prompt
-      for (const [sessionId, resolver] of this.promptResolvers) {
-        resolver.reject(new Error(`ACP process exited with code ${code}`));
-        this.promptResolvers.delete(sessionId);
+      log.error("ACP process exited unexpectedly", { code });
+      this.connection = null;
+      // ACP 进程崩溃后 bot 无法工作，主动退出让 supervisor 重启
+      if (code !== 0 && code !== null) {
+        log.error("ACP crash is fatal, exiting process for supervisor restart");
+        process.exit(1);
       }
     });
 
@@ -52,7 +54,7 @@ export class AcpBackend implements AgentBackend {
 
     const client: acp.Client = {
       requestPermission: async (params) => {
-        // M1: 自动批准所有权限请求
+        log.debug("auto-approving permission", { tool: params.title });
         return {
           outcome: { outcome: "selected", optionId: params.options[0]!.optionId },
         };
@@ -76,17 +78,19 @@ export class AcpBackend implements AgentBackend {
   }
 
   async stop(): Promise<void> {
+    this.connection = null;
     if (this.process) {
       this.process.kill();
       this.process = null;
     }
-    this.connection = null;
     log.info("ACP backend stopped");
   }
 
   async createSession(config: SessionConfig): Promise<AgentSession> {
     if (!this.connection) throw new Error("ACP not initialized");
 
+    // 注意：ACP 是单进程多 session，无法按 session 传递 env vars（userId/chatId/dbPath）。
+    // ACP 模式下 niubot CLI 工具不可用，memory 只能通过 systemPrompt 注入。
     const session = await this.connection.newSession({
       cwd: config.workingDirectory ?? process.cwd(),
       systemPrompt: config.systemPrompt,
@@ -97,7 +101,41 @@ export class AcpBackend implements AgentBackend {
     this.sessionOutputs.set(sessionId, []);
     this.sessionBytes.set(sessionId, 0);
 
-    log.info("session created", { sessionId });
+    if (this.permissionMode === "bypass") {
+      try {
+        await this.connection!.setSessionMode({
+          sessionId,
+          modeId: "bypassPermissions",
+        });
+        log.info("session created with bypassPermissions", { sessionId });
+      } catch (err) {
+        log.warn("failed to set bypassPermissions, falling back to autoApprove", {
+          sessionId,
+          error: String(err),
+        });
+      }
+    } else {
+      log.info("session created with autoApprove", { sessionId });
+    }
+
+    // 设置模型档位（如有指定）
+    const model = config.modelTier === "lite" ? this.liteModel : undefined;
+    if (model) {
+      try {
+        await this.connection!.unstable_setSessionModel({
+          sessionId,
+          modelId: model,
+        });
+        log.info("session model set", { sessionId, model });
+      } catch (err) {
+        log.warn("failed to set session model, using default", {
+          sessionId,
+          model,
+          error: String(err),
+        });
+      }
+    }
+
     return { id: sessionId };
   }
 
@@ -109,11 +147,27 @@ export class AcpBackend implements AgentBackend {
 
     log.info("sending prompt", { sessionId: session.id, textLength: message.length });
 
-    // prompt 是阻塞调用，等 agent 完成整个 turn
-    const result = await this.connection.prompt({
-      sessionId: session.id,
-      prompt: [{ type: "text", text: message }],
+    // prompt + 超时保护（清理 timer 防止泄漏）
+    let timer: ReturnType<typeof setTimeout>;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error(`Prompt timed out after ${PROMPT_TIMEOUT_MS / 1000}s`)),
+        PROMPT_TIMEOUT_MS,
+      );
     });
+
+    let result: Awaited<ReturnType<acp.ClientSideConnection["prompt"]>>;
+    try {
+      result = await Promise.race([
+        this.connection.prompt({
+          sessionId: session.id,
+          prompt: [{ type: "text", text: message }],
+        }),
+        timeoutPromise,
+      ]);
+    } finally {
+      clearTimeout(timer!);
+    }
 
     const chunks = this.sessionOutputs.get(session.id) ?? [];
     const text = chunks.join("");
@@ -125,7 +179,8 @@ export class AcpBackend implements AgentBackend {
       cumulativeBytes: this.sessionBytes.get(session.id),
     });
 
-    return { text: text || "(no response)" };
+    const cancelled = result.stopReason === "cancelled";
+    return { text: text || (cancelled ? "" : "(no response)"), cancelled };
   }
 
   async cancelSession(session: AgentSession): Promise<void> {
@@ -136,7 +191,6 @@ export class AcpBackend implements AgentBackend {
   }
 
   async closeSession(session: AgentSession): Promise<void> {
-    // ACP 没有显式 close session，清理本地状态即可
     this.sessionOutputs.delete(session.id);
     this.sessionBytes.delete(session.id);
     log.info("session closed", { sessionId: session.id });
@@ -151,7 +205,6 @@ export class AcpBackend implements AgentBackend {
     const { sessionId, update } = params;
     const bytes = JSON.stringify(update).length;
 
-    // 累加字节数
     this.sessionBytes.set(sessionId, (this.sessionBytes.get(sessionId) ?? 0) + bytes);
 
     if (update.sessionUpdate === "agent_message_chunk") {

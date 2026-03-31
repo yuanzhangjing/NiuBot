@@ -3,9 +3,24 @@
  * 换 agent 只需实现 AgentBackend，不改 Core。
  */
 
+/** 模型档位：default 用主力模型，lite 用轻量模型（成本低、速度快） */
+export type ModelTier = "default" | "lite";
+
 export interface SessionConfig {
-  systemPrompt: string;
+  /** agent 工作目录 */
   workingDirectory?: string;
+  /** 模型档位，不设则用 default */
+  modelTier?: ModelTier;
+  /** system prompt（仅部分 backend 支持，如 ClaudeCliBackend） */
+  systemPrompt?: string;
+  /** 当前用户 ID（传递给 agent 环境变量） */
+  userId?: string;
+  /** 当前会话 ID（传递给 agent 环境变量） */
+  chatId?: string;
+  /** 当前会话类型（传递给 agent 环境变量） */
+  chatType?: "p2p" | "group";
+  /** 数据库路径（传递给 agent 环境变量，确保 CLI 工具访问正确的数据库） */
+  dbPath?: string;
 }
 
 export interface AgentSession {
@@ -14,6 +29,7 @@ export interface AgentSession {
 
 export interface AgentResponse {
   text: string;
+  cancelled?: boolean;
   filesChanged?: string[];
 }
 
@@ -38,4 +54,7 @@ export interface AgentBackend {
 
   /** 关闭 session */
   closeSession(session: AgentSession): Promise<void>;
+
+  /** 获取 session 累计字节数（可选，用于统计） */
+  getCumulativeBytes?(sessionId: string): number;
 }

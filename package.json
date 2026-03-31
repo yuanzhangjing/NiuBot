@@ -5,7 +5,7 @@
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "niubot": "dist/index.js"
+    "niubot": "dist/cli.js"
   },
   "scripts": {
     "dev": "tsx src/index.ts",
@@ -16,10 +16,10 @@
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^0.17.1",
-    "@larksuiteoapi/node-sdk": "^1.60.0",
+"@larksuiteoapi/node-sdk": "^1.60.0",
     "better-sqlite3": "^11.0.0",
-    "yaml": "^2.4.0",
-    "zod": "^3.25.0"
+    "dotenv": "^17.3.1",
+    "yaml": "^2.4.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.0",

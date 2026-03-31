@@ -70,6 +70,35 @@ export function initDatabase(dbPath: string): Database.Database {
     CREATE INDEX IF NOT EXISTS idx_messages_chat_time ON messages(chat_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(sender_id);
     CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_key);
+
+    CREATE TABLE IF NOT EXISTS user_memory (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id     TEXT NOT NULL,
+      summary     TEXT NOT NULL,
+      detail      TEXT DEFAULT '',
+      source_chat TEXT,
+      visibility  TEXT DEFAULT 'private',
+      created_at  TEXT DEFAULT (datetime('now')),
+      updated_at  TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_user_memory_user ON user_memory(user_id);
+
+    CREATE TABLE IF NOT EXISTS chat_summary (
+      id           INTEGER PRIMARY KEY AUTOINCREMENT,
+      chat_id      TEXT NOT NULL,
+      level        TEXT NOT NULL,
+      summary      TEXT NOT NULL,
+      detail       TEXT DEFAULT '',
+      period       TEXT,
+      start_msg_id INTEGER,
+      end_msg_id   INTEGER,
+      created_at   TEXT DEFAULT (datetime('now')),
+      updated_at   TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_chat_summary_chat_level ON chat_summary(chat_id, level);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_summary_unique ON chat_summary(chat_id, level, period);
   `);
 
   // FTS5 单独建，因为 IF NOT EXISTS 对虚拟表不生效
@@ -89,31 +118,38 @@ export function initDatabase(dbPath: string): Database.Database {
   return db;
 }
 
-/** 确保用户存在，返回内部 ID */
+/** 确保用户存在，返回内部 ID。事务保护防止并发 ID 冲突 */
 export function ensureUser(
   db: Database.Database,
   platform: string,
   platformId: string,
   name?: string,
 ): string {
-  const existing = db.prepare(
-    "SELECT id FROM users WHERE platform = ? AND platform_id = ?",
-  ).get(platform, platformId) as { id: string } | undefined;
+  const tx = db.transaction(
+    (p: string, pid: string, n: string | null): string => {
+      const existing = db.prepare(
+        "SELECT id FROM users WHERE platform = ? AND platform_id = ?",
+      ).get(p, pid) as { id: string } | undefined;
 
-  if (existing) return existing.id;
+      if (existing) return existing.id;
 
-  const count = db.prepare("SELECT COUNT(*) as c FROM users").get() as { c: number };
-  const id = `u${count.c + 1}`;
+      const max = db.prepare(
+        "SELECT MAX(CAST(SUBSTR(id, 2) AS INTEGER)) as n FROM users",
+      ).get() as { n: number | null };
+      const id = `u${(max.n ?? 0) + 1}`;
 
-  db.prepare(
-    "INSERT INTO users (id, name, platform, platform_id) VALUES (?, ?, ?, ?)",
-  ).run(id, name ?? null, platform, platformId);
+      db.prepare(
+        "INSERT INTO users (id, name, platform, platform_id) VALUES (?, ?, ?, ?)",
+      ).run(id, n, p, pid);
 
-  log.info("user created", { id, platform, platformId, name });
-  return id;
+      log.info("user created", { id, platform: p, platformId: pid, name: n });
+      return id;
+    },
+  );
+  return tx(platform, platformId, name ?? null) as string;
 }
 
-/** 确保会话存在，返回内部 ID */
+/** 确保会话存在，返回内部 ID。事务保护防止并发 ID 冲突 */
 export function ensureChat(
   db: Database.Database,
   platform: string,
@@ -121,24 +157,31 @@ export function ensureChat(
   type: "p2p" | "group",
   name?: string,
 ): string {
-  const existing = db.prepare(
-    "SELECT id FROM chats WHERE platform = ? AND platform_id = ?",
-  ).get(platform, platformId) as { id: string } | undefined;
+  const tx = db.transaction(
+    (p: string, pid: string, t: string, n: string | null): string => {
+      const existing = db.prepare(
+        "SELECT id FROM chats WHERE platform = ? AND platform_id = ?",
+      ).get(p, pid) as { id: string } | undefined;
 
-  if (existing) return existing.id;
+      if (existing) return existing.id;
 
-  const count = db.prepare("SELECT COUNT(*) as c FROM chats").get() as { c: number };
-  const id = `c${count.c + 1}`;
+      const max = db.prepare(
+        "SELECT MAX(CAST(SUBSTR(id, 2) AS INTEGER)) as n FROM chats",
+      ).get() as { n: number | null };
+      const id = `c${(max.n ?? 0) + 1}`;
 
-  db.prepare(
-    "INSERT INTO chats (id, type, name, platform, platform_id) VALUES (?, ?, ?, ?, ?)",
-  ).run(id, type, name ?? null, platform, platformId);
+      db.prepare(
+        "INSERT INTO chats (id, type, name, platform, platform_id) VALUES (?, ?, ?, ?, ?)",
+      ).run(id, t, n, p, pid);
 
-  log.info("chat created", { id, type, platform, platformId });
-  return id;
+      log.info("chat created", { id, type: t, platform: p, platformId: pid });
+      return id;
+    },
+  );
+  return tx(platform, platformId, type, name ?? null) as string;
 }
 
-/** 存储消息，返回内部消息 ID */
+/** 存储消息，返回内部消息 ID。消息 + FTS 索引在同一个事务中 */
 export function storeMessage(
   db: Database.Database,
   msg: {
@@ -154,30 +197,33 @@ export function storeMessage(
     platformRaw?: string;
   },
 ): number {
-  const result = db.prepare(`
-    INSERT INTO messages (chat_id, sender_id, session_key, role, content_text, content_type, reply_to, platform, platform_msg_id, platform_raw)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    msg.chatId,
-    msg.senderId,
-    msg.sessionKey ?? null,
-    msg.role,
-    msg.contentText ?? null,
-    msg.contentType ?? "text",
-    msg.replyTo ?? null,
-    msg.platform,
-    msg.platformMsgId ?? null,
-    msg.platformRaw ?? null,
-  );
+  const tx = db.transaction(() => {
+    const result = db.prepare(`
+      INSERT INTO messages (chat_id, sender_id, session_key, role, content_text, content_type, reply_to, platform, platform_msg_id, platform_raw)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      msg.chatId,
+      msg.senderId,
+      msg.sessionKey ?? null,
+      msg.role,
+      msg.contentText ?? null,
+      msg.contentType ?? "text",
+      msg.replyTo ?? null,
+      msg.platform,
+      msg.platformMsgId ?? null,
+      msg.platformRaw ?? null,
+    );
 
-  const msgId = Number(result.lastInsertRowid);
+    const msgId = Number(result.lastInsertRowid);
 
-  // 更新 FTS 索引
-  if (msg.contentText) {
-    db.prepare(
-      "INSERT INTO messages_fts (rowid, content_text) VALUES (?, ?)",
-    ).run(msgId, msg.contentText);
-  }
+    if (msg.contentText) {
+      db.prepare(
+        "INSERT INTO messages_fts (rowid, content_text) VALUES (?, ?)",
+      ).run(msgId, msg.contentText);
+    }
 
-  return msgId;
+    return msgId;
+  });
+
+  return tx();
 }
