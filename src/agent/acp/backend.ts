@@ -170,7 +170,7 @@ export class AcpBackend implements AgentBackend {
     }
 
     const chunks = this.sessionOutputs.get(session.id) ?? [];
-    const text = chunks.join("");
+    const text = chunks.join("").trim();
 
     log.info("prompt completed", {
       sessionId: session.id,

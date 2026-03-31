@@ -109,7 +109,7 @@ export class ClaudeCliBackend implements AgentBackend {
           session_id?: string;
           is_error?: boolean;
         };
-        text = parsed.result ?? result;
+        text = (parsed.result ?? result).trim();
         sessionId = parsed.session_id;
       } catch {
         // 非 JSON 输出，直接使用原始文本
