@@ -92,6 +92,15 @@ export function loadConfig(configPath?: string): NiuBotConfig {
       throw new Error("Config error: bots array is empty");
     }
     bots = rawBots.map((b) => parseBotConfig(b));
+
+    // 校验 bot name 唯一性
+    const names = new Set<string>();
+    for (const bot of bots) {
+      if (names.has(bot.name)) {
+        throw new Error(`Config error: duplicate bot name '${bot.name}'`);
+      }
+      names.add(bot.name);
+    }
   } else {
     // 旧格式兼容：feishu.appId + feishu.appSecret → 单 bot
     const feishuFile = (fileConfig["feishu"] as Record<string, string>) ?? {};
@@ -124,7 +133,7 @@ export function loadConfig(configPath?: string): NiuBotConfig {
       appSecret,
       workingDirectory: path.resolve(legacyWorkDir),
       dbPath: legacyDbPath,
-      personaPath: path.join(NIUBOT_HOME, "NiuBot", "persona.md"),
+      personaPath: path.join(NIUBOT_HOME, "persona.md"),
       liteModel: process.env["NIUBOT_LITE_MODEL"] ?? agentFile["liteModel"] ?? undefined,
     }];
   }
