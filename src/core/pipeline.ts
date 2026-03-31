@@ -4,14 +4,26 @@ import type { AgentBackend, AgentSession } from "../agent/types.js";
 import { MessageQueue } from "./queue.js";
 import { ensureUser, ensureChat, storeMessage } from "../database/schema.js";
 import { buildSessionContext } from "../memory/inject.js";
+import { loadPersona } from "../persona.js";
 import { ARCHIVE_SUMMARY_PROMPT } from "./prompts.js";
 import { decideRoute, type RouteDecision } from "./routing.js";
 import { createLogger } from "../logger.js";
 
-const log = createLogger("pipeline");
-
-const PLATFORM = "feishu";
 const PROCESSING_EMOJI = "Get";
+
+/** Bot 身份信息，由外部传入 */
+export interface BotIdentity {
+  /** Bot 名称（如 "NiuBot"） */
+  name: string;
+  /** IM 平台标识（如 "feishu"） */
+  platform: string;
+  /** Bot 在平台上的唯一标识（用于 DB 中的 bot 用户记录） */
+  platformBotId: string;
+  /** 人格文件路径 */
+  personaPath: string;
+  /** 轻量模型 ID（可选，覆盖 backend 默认值） */
+  liteModel?: string;
+}
 
 interface ChatSession {
   agentSession: AgentSession;
@@ -25,8 +37,10 @@ export class Pipeline {
   private im: PlatformAdapter;
   private agent: AgentBackend;
   private queue: MessageQueue;
+  private botIdentity: BotIdentity;
+  private log: ReturnType<typeof createLogger>;
 
-  /** 每个 chat 的当前 agent session（M1: 一个 chat 一个 session） */
+  /** 每个 chat 的当前 agent session */
   private chatSessions = new Map<string, ChatSession>();
 
   /** chatId → platformChatId 映射 */
@@ -55,6 +69,7 @@ export class Pipeline {
     db: Database.Database,
     im: PlatformAdapter,
     agent: AgentBackend,
+    botIdentity: BotIdentity,
     workingDirectory: string,
     dbPath: string,
     bufferMs: number,
@@ -63,8 +78,10 @@ export class Pipeline {
     this.db = db;
     this.im = im;
     this.agent = agent;
+    this.botIdentity = botIdentity;
     this.workingDirectory = workingDirectory;
     this.dbPath = dbPath;
+    this.log = createLogger("pipeline", botIdentity.name);
     this.queue = new MessageQueue(bufferMs, cancelThresholdMs);
 
     this.queue.onProcess((chatId, mergedText) => this.process(chatId, mergedText));
@@ -73,15 +90,20 @@ export class Pipeline {
 
   /** 启动管道：注册 IM 消息回调 */
   start(): void {
-    this.botUserId = ensureUser(this.db, PLATFORM, "_niubot_", "NiuBot");
+    this.botUserId = ensureUser(
+      this.db,
+      this.botIdentity.platform,
+      this.botIdentity.platformBotId,
+      this.botIdentity.name,
+    );
     this.im.onMessage((msg) => this.handleMessage(msg));
-    log.info("pipeline started", { botUserId: this.botUserId });
+    this.log.info("pipeline started", { botUserId: this.botUserId });
   }
 
   /** 停止管道：清除队列计时器 */
   stop(): void {
     this.queue.stop();
-    log.info("pipeline stopped");
+    this.log.info("pipeline stopped");
   }
 
   /** 优雅关闭：cancel 所有活跃 session，清理资源（DB 中 session 保持 active，下次启动恢复） */
@@ -94,7 +116,7 @@ export class Pipeline {
         await this.agent.cancelSession(session.agentSession);
         await this.agent.closeSession(session.agentSession);
       } catch (err) {
-        log.warn("failed to close session during shutdown", { chatId, error: String(err) });
+        this.log.warn("failed to close session during shutdown", { chatId, error: String(err) });
       }
     }
     this.chatSessions.clear();
@@ -131,17 +153,18 @@ export class Pipeline {
       return true;
     });
 
-    log.info("recovering active sessions", { count: uniqueRows.length });
+    this.log.info("recovering active sessions", { count: uniqueRows.length });
 
     for (const row of uniqueRows) {
       const chatType = (row.type ?? "p2p") as "p2p" | "group";
 
-      // 重建上下文注入
+      // 重建上下文注入（含 persona）
+      const persona = loadPersona(this.botIdentity.personaPath);
       const userRow = row.user_id
         ? this.db.prepare("SELECT name FROM users WHERE id = ?").get(row.user_id) as { name: string | null } | undefined
         : undefined;
       const context = row.user_id
-        ? buildSessionContext(this.db, row.user_id, row.chat_id, chatType, userRow?.name ?? undefined)
+        ? buildSessionContext(this.db, row.user_id, row.chat_id, chatType, userRow?.name ?? undefined, undefined, persona)
         : "";
       const systemPrompt = context || undefined;
 
@@ -153,6 +176,9 @@ export class Pipeline {
           chatId: row.chat_id,
           chatType,
           dbPath: this.dbPath,
+          botId: this.botIdentity.platformBotId,
+          botName: this.botIdentity.name,
+          liteModel: this.botIdentity.liteModel,
         });
 
         this.chatSessions.set(row.chat_id, {
@@ -164,9 +190,9 @@ export class Pipeline {
         this.platformChatIds.set(row.chat_id, row.platform_id);
         if (row.user_id) this.chatUserIds.set(row.chat_id, row.user_id);
 
-        log.info("session recovered", { chatId: row.chat_id, sessionKey: row.id });
+        this.log.info("session recovered", { chatId: row.chat_id, sessionKey: row.id });
       } catch (err) {
-        log.error("failed to recover session", {
+        this.log.error("failed to recover session", {
           chatId: row.chat_id,
           sessionKey: row.id,
           error: String(err),
@@ -176,9 +202,11 @@ export class Pipeline {
   }
 
   private handleMessage(msg: NormalizedMessage): void {
+    const platform = this.botIdentity.platform;
+
     // 消息去重（飞书 WebSocket 可能重复推送）
     if (msg.platformMsgId && this.processedMsgIds.has(msg.platformMsgId)) {
-      log.debug("duplicate message, skipping", { platformMsgId: msg.platformMsgId });
+      this.log.debug("duplicate message, skipping", { platformMsgId: msg.platformMsgId });
       return;
     }
     if (msg.platformMsgId) {
@@ -189,8 +217,8 @@ export class Pipeline {
       }
     }
 
-    const userId = ensureUser(this.db, PLATFORM, msg.senderPlatformId, msg.senderName);
-    const chatId = ensureChat(this.db, PLATFORM, msg.chatPlatformId, msg.chatType);
+    const userId = ensureUser(this.db, platform, msg.senderPlatformId, msg.senderName);
+    const chatId = ensureChat(this.db, platform, msg.chatPlatformId, msg.chatType);
 
     const sessionKey = this.chatSessions.get(chatId)?.sessionKey;
     storeMessage(this.db, {
@@ -200,12 +228,12 @@ export class Pipeline {
       role: "user",
       contentText: msg.contentText,
       contentType: msg.contentType,
-      platform: PLATFORM,
+      platform,
       platformMsgId: msg.platformMsgId,
       platformRaw: JSON.stringify(msg.raw),
     });
 
-    log.info("message received", { chatId, userId, textLength: msg.contentText.length });
+    this.log.info("message received", { chatId, userId, textLength: msg.contentText.length });
 
     if (msg.platformMsgId) {
       this.im.addReaction(msg.chatPlatformId, msg.platformMsgId, PROCESSING_EMOJI).catch(() => {});
@@ -232,7 +260,7 @@ export class Pipeline {
 
       const chatSession = await this.getOrCreateSession(chatId);
 
-      log.info("sending to agent", {
+      this.log.info("sending to agent", {
         chatId,
         sessionKey: chatSession.sessionKey,
         textLength: mergedText.length,
@@ -242,7 +270,7 @@ export class Pipeline {
 
       // 被 cancel 的 prompt 不存储不发送（cancelled 后会有新的合并消息进来）
       if (response.cancelled) {
-        log.info("prompt was cancelled, skipping response", { chatId });
+        this.log.info("prompt was cancelled, skipping response", { chatId });
         return;
       }
 
@@ -253,7 +281,7 @@ export class Pipeline {
         sessionKey: chatSession.sessionKey,
         role: "assistant",
         contentText: response.text,
-        platform: PLATFORM,
+        platform: this.botIdentity.platform,
       });
 
       // 更新 session 统计
@@ -284,20 +312,20 @@ export class Pipeline {
       try {
         await this.im.sendText(chatSession.platformChatId, sendText);
       } catch (sendErr) {
-        log.error("failed to send response to IM", {
+        this.log.error("failed to send response to IM", {
           chatId,
           error: String(sendErr),
           responseLength: sendText.length,
         });
       }
 
-      log.info("response sent", {
+      this.log.info("response sent", {
         chatId,
         responseLength: response.text.length,
         filesChanged: response.filesChanged,
       });
     } catch (err) {
-      log.error("pipeline error", { chatId, error: String(err) });
+      this.log.error("pipeline error", { chatId, error: String(err) });
 
       if (platformChatId) {
         await this.im.sendText(platformChatId, "处理出错了，请稍后再试。").catch(() => {});
@@ -325,11 +353,14 @@ export class Pipeline {
     this.pendingRouteDecisions.delete(chatId);
     const recallSessionId = routeDecision?.action === "recall" ? routeDecision.recallSessionId : undefined;
 
-    // 构建 session 上下文（user_memory + chat_summary + 今日归档 + recall）
+    // 读取 persona（每次 session 创建时重新读取，支持热更新）
+    const persona = loadPersona(this.botIdentity.personaPath);
+
+    // 构建 session 上下文（persona + user_memory + chat_summary + 今日归档 + recall）
     const userRow = userId
       ? this.db.prepare("SELECT name FROM users WHERE id = ?").get(userId) as { name: string | null } | undefined
       : undefined;
-    const context = userId ? buildSessionContext(this.db, userId, chatId, chatType, userRow?.name ?? undefined, recallSessionId) : "";
+    const context = userId ? buildSessionContext(this.db, userId, chatId, chatType, userRow?.name ?? undefined, recallSessionId, persona) : "";
     const systemPrompt = context || undefined;
 
     const agentSession = await this.agent.createSession({
@@ -339,6 +370,9 @@ export class Pipeline {
       chatId,
       chatType,
       dbPath: this.dbPath,
+      botId: this.botIdentity.platformBotId,
+      botName: this.botIdentity.name,
+      liteModel: this.botIdentity.liteModel,
     });
 
     const sessionKey = `s_${Date.now()}_${crypto.randomUUID().slice(0, 8)}`;
@@ -373,7 +407,7 @@ export class Pipeline {
     };
     this.chatSessions.set(chatId, chatSession);
 
-    log.info("session created", { chatId, sessionKey, userId, agentSessionId: agentSession.id });
+    this.log.info("session created", { chatId, sessionKey, userId, agentSessionId: agentSession.id });
     return chatSession;
   }
 
@@ -407,7 +441,7 @@ export class Pipeline {
     if (decision.action === "continue") return;
 
     // new 或 recall：归档旧 session，暂存决策供 getOrCreateSession 使用
-    log.info("route decision: switching session", {
+    this.log.info("route decision: switching session", {
       chatId,
       action: decision.action,
       reason: decision.reason,
@@ -457,19 +491,19 @@ export class Pipeline {
             this.db.prepare(
               "UPDATE sessions SET summary = ?, topics = ? WHERE id = ?",
             ).run(JSON.stringify(parsed), JSON.stringify(parsed.topics ?? []), sessionKey);
-            log.info("archive summary generated", { chatId, sessionKey });
+            this.log.info("archive summary generated", { chatId, sessionKey });
           } else {
-            log.warn("archive summary response has no JSON", { chatId, sessionKey });
+            this.log.warn("archive summary response has no JSON", { chatId, sessionKey });
           }
         }
       } catch (err) {
-        log.warn("failed to generate archive summary", { chatId, sessionKey, error: String(err) });
+        this.log.warn("failed to generate archive summary", { chatId, sessionKey, error: String(err) });
         // 摘要生成失败不影响归档流程
       } finally {
         this.archivingChats.delete(chatId);
       }
     } else {
-      log.info("skipping archive summary for short session", { chatId, sessionKey, turnCount });
+      this.log.info("skipping archive summary for short session", { chatId, sessionKey, turnCount });
     }
 
     // 更新 session 状态为 archived
@@ -481,10 +515,10 @@ export class Pipeline {
     // 先从内存中移除，再关闭 backend session（确保 closeSession 失败时不留死引用）
     this.chatSessions.delete(chatId);
     await this.agent.closeSession(agentSession).catch((err) => {
-      log.warn("failed to close backend session during archive", { chatId, sessionKey, error: String(err) });
+      this.log.warn("failed to close backend session during archive", { chatId, sessionKey, error: String(err) });
     });
 
-    log.info("session archived", { chatId, sessionKey, turnCount });
+    this.log.info("session archived", { chatId, sessionKey, turnCount });
   }
 
   /** cancel 当前 prompt，但保持 session 存活（供 cancel+merge 复用） */
@@ -494,7 +528,7 @@ export class Pipeline {
 
     // 归档期间不 cancel，保护摘要 prompt 完成
     if (this.archivingChats.has(chatId)) {
-      log.debug("cancel suppressed during archive", { chatId });
+      this.log.debug("cancel suppressed during archive", { chatId });
       return;
     }
 

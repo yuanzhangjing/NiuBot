@@ -18,8 +18,14 @@ export function buildSessionContext(
   chatType: "p2p" | "group",
   userName?: string,
   recallSessionId?: string,
+  persona?: string,
 ): string {
   const parts: string[] = [];
+
+  // 0. 人格注入（如有）
+  if (persona) {
+    parts.push(persona);
+  }
 
   // 1. User memory
   const memories = chatType === "p2p"

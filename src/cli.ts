@@ -6,7 +6,8 @@
  *
  * 环境变量：
  *   NIUBOT_HOME       — 配置/数据目录（默认 ~/.niubot）
- *   NIUBOT_DB_PATH    — 数据库路径（默认 ~/.niubot/niubot.db）
+ *   NIUBOT_DB_PATH    — 数据库路径（优先级最高）
+ *   NIUBOT_BOT_NAME   — Bot 名称（用于定位 per-bot DB：~/.niubot/<name>/niubot.db）
  *   NIUBOT_USER_ID    — 当前用户 ID
  *   NIUBOT_CHAT_ID    — 当前会话 ID
  *   NIUBOT_CHAT_TYPE  — 当前会话类型（p2p / group）
@@ -42,7 +43,9 @@ import {
 
 const NIUBOT_HOME = process.env["NIUBOT_HOME"] ?? path.join(os.homedir(), ".niubot");
 dotenv.config({ path: path.join(NIUBOT_HOME, ".env") });
-const DB_PATH = process.env["NIUBOT_DB_PATH"] ?? path.join(NIUBOT_HOME, "niubot.db");
+const BOT_NAME = process.env["NIUBOT_BOT_NAME"];
+const DB_PATH = process.env["NIUBOT_DB_PATH"]
+  ?? (BOT_NAME ? path.join(NIUBOT_HOME, BOT_NAME, "niubot.db") : path.join(NIUBOT_HOME, "niubot.db"));
 const USER_ID = process.env["NIUBOT_USER_ID"];
 const CHAT_ID = process.env["NIUBOT_CHAT_ID"];
 const CHAT_TYPE = (process.env["NIUBOT_CHAT_TYPE"] ?? "p2p") as "p2p" | "group";

@@ -15,21 +15,25 @@ export { NIUBOT_HOME };
 /** 支持的 agent backend */
 export type AgentBackendType = "claude-code" | "claude-code-acp";
 
+/** 单个 Bot 的配置 */
+export interface BotConfig {
+  name: string;
+  appId: string;
+  appSecret: string;
+  /** agent 工作目录（默认 ~/.niubot/<name>/workspace/） */
+  workingDirectory: string;
+  /** 数据库路径（默认 ~/.niubot/<name>/niubot.db） */
+  dbPath: string;
+  /** 人格文件路径（默认 ~/.niubot/<name>/persona.md） */
+  personaPath: string;
+  /** 轻量模型（可选，不配则用 backend 内置默认值） */
+  liteModel?: string;
+}
+
 export interface NiuBotConfig {
-  feishu: {
-    appId: string;
-    appSecret: string;
-  };
+  bots: BotConfig[];
   agent: {
-    /** 选择 agent backend */
     backend: AgentBackendType;
-    /** agent 工作目录（必填，agent 在此目录下工作） */
-    workingDirectory: string;
-    /** 轻量任务使用的模型（可选，不配则用 backend 内置默认值） */
-    liteModel?: string;
-  };
-  database: {
-    path: string;
   };
   queue: {
     /** 消息缓冲合并窗口（ms），默认 3000 */
@@ -44,9 +48,6 @@ const VALID_BACKENDS = new Set<AgentBackendType>(["claude-code", "claude-code-ac
 const DEFAULTS = {
   agent: {
     backend: "claude-code" as AgentBackendType,
-  },
-  database: {
-    path: path.join(NIUBOT_HOME, "niubot.db"),
   },
   queue: {
     bufferMs: 3000,
@@ -63,29 +64,9 @@ export function loadConfig(configPath?: string): NiuBotConfig {
     fileConfig = filePath.endsWith(".json") ? JSON.parse(raw) : yaml.parse(raw);
   }
 
-  // 2. Env 优先覆盖
-  const appId = process.env["FEISHU_APP_ID"] ?? (fileConfig["feishu"] as Record<string, string>)?.["appId"];
-  const appSecret = process.env["FEISHU_APP_SECRET"] ?? (fileConfig["feishu"] as Record<string, string>)?.["appSecret"];
-
-  if (!appId || !appSecret) {
-    throw new Error(
-      "Missing Feishu credentials. Set FEISHU_APP_ID and FEISHU_APP_SECRET in ~/.niubot/.env, " +
-      "or provide them in ~/.niubot/config.yaml",
-    );
-  }
-
+  // 2. 共享配置
   const agentFile = (fileConfig["agent"] as Record<string, string>) ?? {};
-  const dbFile = (fileConfig["database"] as Record<string, string>) ?? {};
   const queueFile = (fileConfig["queue"] as Record<string, number>) ?? {};
-
-  // workingDirectory 必填
-  const workingDirectory = process.env["NIUBOT_WORK_DIR"] ?? agentFile["workingDirectory"];
-  if (!workingDirectory) {
-    throw new Error(
-      "Missing agent.workingDirectory. Set NIUBOT_WORK_DIR environment variable, " +
-      "or provide agent.workingDirectory in config.yaml",
-    );
-  }
 
   // backend 校验
   const backendRaw = process.env["NIUBOT_BACKEND"] ?? agentFile["backend"] ?? DEFAULTS.agent.backend;
@@ -96,20 +77,88 @@ export function loadConfig(configPath?: string): NiuBotConfig {
   }
   const backend = backendRaw as AgentBackendType;
 
-  return {
-    feishu: { appId, appSecret },
-    agent: {
-      backend,
-      workingDirectory: path.resolve(workingDirectory),
+  const queueConfig = {
+    bufferMs: parseNumEnv(process.env["NIUBOT_BUFFER_MS"]) ?? queueFile["bufferMs"] ?? DEFAULTS.queue.bufferMs,
+    cancelThresholdMs: parseNumEnv(process.env["NIUBOT_CANCEL_MS"]) ?? queueFile["cancelThresholdMs"] ?? DEFAULTS.queue.cancelThresholdMs,
+  };
+
+  // 3. 解析 bots 配置
+  let bots: BotConfig[];
+
+  if (Array.isArray(fileConfig["bots"])) {
+    // 新格式：bots 数组
+    const rawBots = fileConfig["bots"] as Array<Record<string, string>>;
+    if (rawBots.length === 0) {
+      throw new Error("Config error: bots array is empty");
+    }
+    bots = rawBots.map((b) => parseBotConfig(b));
+  } else {
+    // 旧格式兼容：feishu.appId + feishu.appSecret → 单 bot
+    const feishuFile = (fileConfig["feishu"] as Record<string, string>) ?? {};
+    const appId = process.env["FEISHU_APP_ID"] ?? feishuFile["appId"];
+    const appSecret = process.env["FEISHU_APP_SECRET"] ?? feishuFile["appSecret"];
+
+    if (!appId || !appSecret) {
+      throw new Error(
+        "Missing bot credentials. Use new format (bots array in config.yaml) " +
+        "or legacy format (FEISHU_APP_ID + FEISHU_APP_SECRET).",
+      );
+    }
+
+    // 旧格式的 workingDirectory 和 dbPath 沿用原位置
+    const legacyWorkDir = process.env["NIUBOT_WORK_DIR"] ?? agentFile["workingDirectory"];
+    if (!legacyWorkDir) {
+      throw new Error(
+        "Missing agent.workingDirectory. Set NIUBOT_WORK_DIR environment variable, " +
+        "or provide agent.workingDirectory in config.yaml",
+      );
+    }
+
+    const legacyDbPath = process.env["NIUBOT_DB_PATH"]
+      ?? ((fileConfig["database"] as Record<string, string>)?.["path"])
+      ?? path.join(NIUBOT_HOME, "niubot.db");
+
+    bots = [{
+      name: "NiuBot",
+      appId,
+      appSecret,
+      workingDirectory: path.resolve(legacyWorkDir),
+      dbPath: legacyDbPath,
+      personaPath: path.join(NIUBOT_HOME, "NiuBot", "persona.md"),
       liteModel: process.env["NIUBOT_LITE_MODEL"] ?? agentFile["liteModel"] ?? undefined,
-    },
-    database: {
-      path: process.env["NIUBOT_DB_PATH"] ?? (dbFile["path"] as string) ?? DEFAULTS.database.path,
-    },
-    queue: {
-      bufferMs: parseNumEnv(process.env["NIUBOT_BUFFER_MS"]) ?? queueFile["bufferMs"] ?? DEFAULTS.queue.bufferMs,
-      cancelThresholdMs: parseNumEnv(process.env["NIUBOT_CANCEL_MS"]) ?? queueFile["cancelThresholdMs"] ?? DEFAULTS.queue.cancelThresholdMs,
-    },
+    }];
+  }
+
+  return {
+    bots,
+    agent: { backend },
+    queue: queueConfig,
+  };
+}
+
+/** 解析单个 bot 配置，填充默认路径 */
+function parseBotConfig(raw: Record<string, string>): BotConfig {
+  const name = raw["name"];
+  if (!name) throw new Error("Config error: bot entry missing 'name'");
+
+  const appId = raw["appId"];
+  const appSecret = raw["appSecret"];
+  if (!appId || !appSecret) {
+    throw new Error(`Config error: bot '${name}' missing appId or appSecret`);
+  }
+
+  const botDir = path.join(NIUBOT_HOME, name);
+
+  return {
+    name,
+    appId,
+    appSecret,
+    workingDirectory: raw["workingDirectory"]
+      ? path.resolve(raw["workingDirectory"])
+      : path.join(botDir, "workspace"),
+    dbPath: raw["dbPath"] ?? path.join(botDir, "niubot.db"),
+    personaPath: raw["personaPath"] ?? path.join(botDir, "persona.md"),
+    liteModel: raw["liteModel"] ?? undefined,
   };
 }
 

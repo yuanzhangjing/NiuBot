@@ -118,8 +118,8 @@ export class AcpBackend implements AgentBackend {
       log.info("session created with autoApprove", { sessionId });
     }
 
-    // 设置模型档位（如有指定）
-    const model = config.modelTier === "lite" ? this.liteModel : undefined;
+    // 设置模型档位（如有指定，per-session liteModel 优先于 backend 默认值）
+    const model = config.modelTier === "lite" ? (config.liteModel ?? this.liteModel) : undefined;
     if (model) {
       try {
         await this.connection!.unstable_setSessionModel({

@@ -1,11 +1,8 @@
 import { loadConfig } from "./config.js";
-import { initDatabase } from "./database/schema.js";
-import { FeishuAdapter } from "./im/feishu/adapter.js";
 import { AcpBackend } from "./agent/acp/backend.js";
 import { ClaudeCliBackend } from "./agent/claude-cli/backend.js";
 import type { AgentBackend } from "./agent/types.js";
-import { Pipeline } from "./core/pipeline.js";
-import { startSummarizer } from "./summarizer/index.js";
+import { createBotInstance, type BotInstance } from "./bot-instance.js";
 import { createLogger, setLogLevel } from "./logger.js";
 
 const log = createLogger("main");
@@ -25,54 +22,52 @@ async function main(): Promise<void> {
   const config = loadConfig();
   log.info("config loaded", {
     backend: config.agent.backend,
-    workDir: config.agent.workingDirectory,
-    dbPath: config.database.path,
+    botCount: config.bots.length,
+    bots: config.bots.map((b) => b.name).join(", "),
   });
 
-  // 2. 初始化数据库
-  const db = initDatabase(config.database.path);
-
-  // 3. 初始化 IM adapter
-  const im = new FeishuAdapter(config.feishu.appId, config.feishu.appSecret);
-
-  // 4. 初始化 Agent backend
+  // 2. 创建共享 agent backend
   let agent: AgentBackend;
   switch (config.agent.backend) {
     case "claude-code":
-      agent = new ClaudeCliBackend("bypassPermissions", config.agent.liteModel);
+      agent = new ClaudeCliBackend("bypassPermissions");
       break;
     case "claude-code-acp":
-      agent = new AcpBackend("npx -y @agentclientprotocol/claude-agent-acp", "autoApprove", config.agent.liteModel);
+      agent = new AcpBackend("npx -y @agentclientprotocol/claude-agent-acp", "autoApprove");
       break;
   }
-
-  // 5. 构建管道
-  const pipeline = new Pipeline(
-    db,
-    im,
-    agent,
-    config.agent.workingDirectory,
-    config.database.path,
-    config.queue.bufferMs,
-    config.queue.cancelThresholdMs,
-  );
-
-  // 6. 启动 agent backend
   await agent.start();
 
-  // 7. 进程恢复（从 DB 恢复 active sessions，重建 backend session）
-  await pipeline.recover();
+  // 3. 创建所有 bot 实例
+  const bots: BotInstance[] = [];
+  for (const botConfig of config.bots) {
+    try {
+      const instance = await createBotInstance(botConfig, agent, config.queue);
+      bots.push(instance);
+    } catch (err) {
+      log.error("failed to create bot instance", { bot: botConfig.name, error: String(err) });
+      // 单个 bot 创建失败不阻止其他 bot 启动
+    }
+  }
 
-  // 8. 注册消息回调 + 启动管道
-  pipeline.start();
+  if (bots.length === 0) {
+    log.error("no bot instances created, exiting");
+    process.exit(1);
+  }
 
-  // 9. 启动 IM（连接飞书 WebSocket，开始接收消息）
-  await im.start();
+  // 4. 启动所有 bot：recover → start → IM connect
+  for (const bot of bots) {
+    try {
+      await bot.pipeline.recover();
+      bot.pipeline.start();
+      await bot.im.start();
+      log.info("bot started", { name: bot.name });
+    } catch (err) {
+      log.error("failed to start bot", { name: bot.name, error: String(err) });
+    }
+  }
 
-  // 10. 启动定时摘要任务（每天 UTC 20:00 = CST 4:00）
-  const summarizer = startSummarizer(db, agent);
-
-  log.info("NiuBot is running");
+  log.info("NiuBot is running", { activeBots: bots.length });
 
   // 优雅退出
   let shuttingDown = false;
@@ -82,25 +77,29 @@ async function main(): Promise<void> {
 
     log.info("shutting down...");
 
-    // 1. 停止接收新消息
-    try { await im.stop(); } catch (e) { log.error("im.stop failed", { error: String(e) }); }
+    // 1. 停止接收新消息 + 停止摘要任务和队列
+    for (const bot of bots) {
+      try { await bot.im.stop(); } catch (e) { log.error("im.stop failed", { bot: bot.name, error: String(e) }); }
+      bot.summarizer.stop();
+      bot.pipeline.stop();
+    }
 
-    // 2. 停止摘要任务和队列
-    summarizer.stop();
-    pipeline.stop();
-
-    // 3. cancel 所有活跃 session 并等待 in-flight 任务完成（最多 15s）
-    await pipeline.shutdown();
+    // 2. cancel 所有活跃 session 并等待 in-flight 任务完成（最多 15s）
+    for (const bot of bots) {
+      await bot.pipeline.shutdown();
+    }
     const deadline = Date.now() + 15_000;
-    while (pipeline.hasBusyChats() && Date.now() < deadline) {
+    while (bots.some((b) => b.pipeline.hasBusyChats()) && Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, 500));
     }
 
-    // 4. 关闭 agent backend
+    // 3. 关闭 agent backend
     try { await agent.stop(); } catch (e) { log.error("agent.stop failed", { error: String(e) }); }
 
-    // 5. 关闭数据库
-    try { db.close(); } catch (e) { log.error("db.close failed", { error: String(e) }); }
+    // 4. 关闭所有数据库
+    for (const bot of bots) {
+      try { bot.db.close(); } catch (e) { log.error("db.close failed", { bot: bot.name, error: String(e) }); }
+    }
 
     log.info("bye");
     process.exit(0);

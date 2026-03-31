@@ -11,6 +11,8 @@ export interface SessionConfig {
   workingDirectory?: string;
   /** 模型档位，不设则用 default */
   modelTier?: ModelTier;
+  /** 轻量模型 ID（覆盖 backend 默认值） */
+  liteModel?: string;
   /** system prompt（仅部分 backend 支持，如 ClaudeCliBackend） */
   systemPrompt?: string;
   /** 当前用户 ID（传递给 agent 环境变量） */
@@ -21,6 +23,10 @@ export interface SessionConfig {
   chatType?: "p2p" | "group";
   /** 数据库路径（传递给 agent 环境变量，确保 CLI 工具访问正确的数据库） */
   dbPath?: string;
+  /** Bot ID（传递给 agent 环境变量） */
+  botId?: string;
+  /** Bot 名称（传递给 agent 环境变量） */
+  botName?: string;
 }
 
 export interface AgentSession {

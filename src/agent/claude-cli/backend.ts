@@ -53,10 +53,12 @@ export class ClaudeCliBackend implements AgentBackend {
     if (config.chatId) extraEnv["NIUBOT_CHAT_ID"] = config.chatId;
     if (config.chatType) extraEnv["NIUBOT_CHAT_TYPE"] = config.chatType;
     if (config.dbPath) extraEnv["NIUBOT_DB_PATH"] = config.dbPath;
+    if (config.botId) extraEnv["NIUBOT_BOT_ID"] = config.botId;
+    if (config.botName) extraEnv["NIUBOT_BOT_NAME"] = config.botName;
 
     this.sessions.set(id, {
       workingDirectory: config.workingDirectory ?? process.cwd(),
-      model: config.modelTier === "lite" ? this.liteModel : undefined,
+      model: config.modelTier === "lite" ? (config.liteModel ?? this.liteModel) : undefined,
       systemPrompt: config.systemPrompt,
       extraEnv,
       cumulativeBytes: 0,

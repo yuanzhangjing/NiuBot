@@ -1,7 +1,8 @@
 /**
  * 结构化日志。人类可读格式输出，按级别区分。
  *
- * 格式：2026-03-31 18:08:46 [INFO] [pipeline] session recovered chatId=c1 sessionKey=s_xxx
+ * 单 bot：2026-03-31 18:08:46 [INFO] [pipeline] session recovered chatId=c1
+ * 多 bot：2026-03-31 18:08:46 [INFO] [NiuBot/pipeline] session recovered chatId=c1
  */
 
 type LogLevel = "debug" | "info" | "warn" | "error";
@@ -42,20 +43,22 @@ function formatData(data?: Record<string, unknown>): string {
   return parts.length > 0 ? " " + parts.join(" ") : "";
 }
 
-function log(level: LogLevel, module: string, msg: string, data?: Record<string, unknown>): void {
+function log(level: LogLevel, tag: string, msg: string, data?: Record<string, unknown>): void {
   if (LEVEL_PRIORITY[level] < LEVEL_PRIORITY[minLevel]) return;
 
-  const line = `${formatTimestamp()} [${LEVEL_LABEL[level]}] [${module}] ${msg}${formatData(data)}\n`;
+  const line = `${formatTimestamp()} [${LEVEL_LABEL[level]}] [${tag}] ${msg}${formatData(data)}\n`;
 
   const output = level === "error" ? process.stderr : process.stdout;
   output.write(line);
 }
 
-export function createLogger(module: string) {
+/** 创建 logger。botName 可选，设置后输出 [botName/module] 格式 */
+export function createLogger(module: string, botName?: string) {
+  const tag = botName ? `${botName}/${module}` : module;
   return {
-    debug: (msg: string, data?: Record<string, unknown>) => log("debug", module, msg, data),
-    info: (msg: string, data?: Record<string, unknown>) => log("info", module, msg, data),
-    warn: (msg: string, data?: Record<string, unknown>) => log("warn", module, msg, data),
-    error: (msg: string, data?: Record<string, unknown>) => log("error", module, msg, data),
+    debug: (msg: string, data?: Record<string, unknown>) => log("debug", tag, msg, data),
+    info: (msg: string, data?: Record<string, unknown>) => log("info", tag, msg, data),
+    warn: (msg: string, data?: Record<string, unknown>) => log("warn", tag, msg, data),
+    error: (msg: string, data?: Record<string, unknown>) => log("error", tag, msg, data),
   };
 }
