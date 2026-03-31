@@ -27,7 +27,7 @@ SQLite                 ← users, chats, sessions, messages (FTS)
 - **Interface-driven**: IM adapter and agent backend are swappable via interfaces
 - **Per-chat message queue**: buffers rapid messages, cancels+merges when agent is busy briefly, queues when agent is in a long task
 - **Session persistence**: SQLite tracks users, chats, sessions, and all messages with FTS search
-- **Crash recovery**: on startup, marks stale `active` sessions as `aborted`
+- **Session recovery**: on startup, restores active sessions from DB and recreates backend sessions
 
 ## Quick Start
 

@@ -57,11 +57,11 @@ async function main(): Promise<void> {
     config.queue.cancelThresholdMs,
   );
 
-  // 6. 进程恢复（标记残留 active session 为 aborted）
-  pipeline.recover();
-
-  // 7. 启动 agent backend
+  // 6. 启动 agent backend
   await agent.start();
+
+  // 7. 进程恢复（从 DB 恢复 active sessions，重建 backend session）
+  await pipeline.recover();
 
   // 8. 注册消息回调 + 启动管道
   pipeline.start();
