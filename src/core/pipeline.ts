@@ -3,8 +3,7 @@ import type { PlatformAdapter, NormalizedMessage } from "../im/types.js";
 import type { AgentBackend, AgentSession } from "../agent/types.js";
 import { MessageQueue } from "./queue.js";
 import { ensureUser, ensureChat, storeMessage } from "../database/schema.js";
-import { buildSessionContext } from "../memory/inject.js";
-import { loadPersona } from "../persona.js";
+import { buildImportantContext, buildNormalContext, type SceneInfo } from "../memory/inject.js";
 import { ARCHIVE_SUMMARY_PROMPT } from "./prompts.js";
 import { decideRoute, type RouteDecision } from "./routing.js";
 import { createLogger } from "../logger.js";
@@ -19,8 +18,6 @@ export interface BotIdentity {
   platform: string;
   /** Bot 在平台上的唯一标识（用于 DB 中的 bot 用户记录） */
   platformBotId: string;
-  /** 人格文件路径 */
-  personaPath: string;
   /** 轻量模型 ID（可选，覆盖 backend 默认值） */
   liteModel?: string;
 }
@@ -158,20 +155,24 @@ export class Pipeline {
     for (const row of uniqueRows) {
       const chatType = (row.type ?? "p2p") as "p2p" | "group";
 
-      // 重建上下文注入（含 persona）
-      const persona = loadPersona(this.botIdentity.personaPath);
+      // 重建 important 上下文
       const userRow = row.user_id
         ? this.db.prepare("SELECT name FROM users WHERE id = ?").get(row.user_id) as { name: string | null } | undefined
         : undefined;
-      const context = row.user_id
-        ? buildSessionContext(this.db, row.user_id, row.chat_id, chatType, userRow?.name ?? undefined, undefined, persona)
-        : "";
-      const systemPrompt = context || undefined;
+      const importantContext = row.user_id
+        ? buildImportantContext(this.db, {
+            botName: this.botIdentity.name,
+            userName: userRow?.name ?? undefined,
+            userId: row.user_id,
+            chatId: row.chat_id,
+            chatType,
+          })
+        : undefined;
 
       try {
         const agentSession = await this.agent.createSession({
           workingDirectory: this.workingDirectory,
-          systemPrompt,
+          importantContext: importantContext || undefined,
           userId: row.user_id ?? undefined,
           chatId: row.chat_id,
           chatType,
@@ -260,13 +261,21 @@ export class Pipeline {
 
       const chatSession = await this.getOrCreateSession(chatId);
 
+      // 拼接 normal 上下文前缀（新 session 的首条消息）
+      let messageToSend = mergedText;
+      const normalContext = this.pendingNormalContext.get(chatId);
+      if (normalContext) {
+        this.pendingNormalContext.delete(chatId);
+        messageToSend = `<context>\n${normalContext}\n</context>\n\n${mergedText}`;
+      }
+
       this.log.info("sending to agent", {
         chatId,
         sessionKey: chatSession.sessionKey,
-        textLength: mergedText.length,
+        textLength: messageToSend.length,
       });
 
-      const response = await this.agent.sendMessage(chatSession.agentSession, mergedText);
+      const response = await this.agent.sendMessage(chatSession.agentSession, messageToSend);
 
       // 被 cancel 的 prompt 不存储不发送（cancelled 后会有新的合并消息进来）
       if (response.cancelled) {
@@ -353,19 +362,29 @@ export class Pipeline {
     this.pendingRouteDecisions.delete(chatId);
     const recallSessionId = routeDecision?.action === "recall" ? routeDecision.recallSessionId : undefined;
 
-    // 读取 persona（每次 session 创建时重新读取，支持热更新）
-    const persona = loadPersona(this.botIdentity.personaPath);
-
-    // 构建 session 上下文（persona + user_memory + chat_summary + 今日归档 + recall）
+    // 构建 important 上下文（当前场景 + 用户记忆）
     const userRow = userId
       ? this.db.prepare("SELECT name FROM users WHERE id = ?").get(userId) as { name: string | null } | undefined
       : undefined;
-    const context = userId ? buildSessionContext(this.db, userId, chatId, chatType, userRow?.name ?? undefined, recallSessionId, persona) : "";
-    const systemPrompt = context || undefined;
+    const importantContext = userId
+      ? buildImportantContext(this.db, {
+          botName: this.botIdentity.name,
+          userName: userRow?.name ?? undefined,
+          userId,
+          chatId,
+          chatType,
+        })
+      : undefined;
+
+    // 构建 normal 上下文（摘要 + 今日归档 + recall）— 后续拼到首条消息前缀
+    const normalContext = buildNormalContext(this.db, chatId, chatType, recallSessionId);
+    if (normalContext) {
+      this.pendingNormalContext.set(chatId, normalContext);
+    }
 
     const agentSession = await this.agent.createSession({
       workingDirectory: this.workingDirectory,
-      systemPrompt,
+      importantContext: importantContext || undefined,
       userId: userId ?? undefined,
       chatId,
       chatType,
@@ -413,6 +432,9 @@ export class Pipeline {
 
   /** 路由决策结果暂存：chatId → RouteDecision（在 process 中传递给 getOrCreateSession） */
   private pendingRouteDecisions = new Map<string, RouteDecision>();
+
+  /** normal 上下文暂存：chatId → context（新 session 首条消息时拼到前缀） */
+  private pendingNormalContext = new Map<string, string>();
 
   /** 路由判断的最小轮次门槛：低于此值直接续，不调 LLM */
   private static readonly ROUTE_MIN_TURNS = 10;

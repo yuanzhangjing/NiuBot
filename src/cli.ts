@@ -43,12 +43,40 @@ import {
 
 const NIUBOT_HOME = process.env["NIUBOT_HOME"] ?? path.join(os.homedir(), ".niubot");
 dotenv.config({ path: path.join(NIUBOT_HOME, ".env") });
+
+// 命令行参数解析（全局 flags 优先于环境变量）
+// 注意：extractGlobalFlags 会原地修改传入的数组（splice），
+// 所以必须传入一个持久引用，后续 main() 也用这个引用。
+const cliArgs = process.argv.slice(2);
+const globalFlags = extractGlobalFlags(cliArgs);
+
 const BOT_NAME = process.env["NIUBOT_BOT_NAME"];
-const DB_PATH = process.env["NIUBOT_DB_PATH"]
+const DB_PATH = globalFlags["db-path"]
+  ?? process.env["NIUBOT_DB_PATH"]
   ?? (BOT_NAME ? path.join(NIUBOT_HOME, BOT_NAME, "niubot.db") : path.join(NIUBOT_HOME, "niubot.db"));
-const USER_ID = process.env["NIUBOT_USER_ID"];
-const CHAT_ID = process.env["NIUBOT_CHAT_ID"];
-const CHAT_TYPE = (process.env["NIUBOT_CHAT_TYPE"] ?? "p2p") as "p2p" | "group";
+const USER_ID = globalFlags["user-id"] ?? process.env["NIUBOT_USER_ID"];
+const CHAT_ID = globalFlags["chat-id"] ?? process.env["NIUBOT_CHAT_ID"];
+const CHAT_TYPE = (globalFlags["chat-type"] ?? process.env["NIUBOT_CHAT_TYPE"] ?? "p2p") as "p2p" | "group";
+
+/** 提取全局 flags（--user-id, --chat-id, --db-path, --chat-type）并从 argv 中移除 */
+function extractGlobalFlags(args: string[]): Record<string, string> {
+  const flags: Record<string, string> = {};
+  const globalKeys = new Set(["user-id", "chat-id", "db-path", "chat-type"]);
+  let i = 0;
+  while (i < args.length) {
+    const arg = args[i]!;
+    if (arg.startsWith("--")) {
+      const key = arg.slice(2);
+      if (globalKeys.has(key) && i + 1 < args.length && !args[i + 1]!.startsWith("--")) {
+        flags[key] = args[i + 1]!;
+        args.splice(i, 2);
+        continue;
+      }
+    }
+    i++;
+  }
+  return flags;
+}
 
 function requireUserId(): string {
   if (!USER_ID) { console.error("Error: NIUBOT_USER_ID not set"); process.exit(1); }
@@ -108,7 +136,7 @@ function checkChatAccess(targetChatId: string): void {
 // ─── Main ──────────────────────────────────────────────────
 
 async function main(): Promise<void> {
-  const args = process.argv.slice(2);
+  const args = cliArgs; // 已被 extractGlobalFlags 清理过
   const command = args[0];
 
   switch (command) {

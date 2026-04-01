@@ -24,6 +24,15 @@ export class AcpBackend implements AgentBackend {
   /** 每个 session 的累计字节数 */
   private sessionBytes = new Map<string, number>();
 
+  /** 每个 session 的 important 上下文（ACP 不支持 system prompt，拼到首条消息前缀） */
+  private sessionImportantContext = new Map<string, string>();
+
+  /** 记录每个 session 是否已发送过消息（用于判断是否需要拼前缀） */
+  private sessionFirstMessage = new Set<string>();
+
+  /** ACP 模式不支持 system prompt 注入 */
+  readonly supportsSystemPrompt = false;
+
   constructor(command: string, permissionMode: "bypass" | "autoApprove" = "autoApprove", liteModel?: string) {
     this.command = command;
     this.permissionMode = permissionMode;
@@ -89,17 +98,20 @@ export class AcpBackend implements AgentBackend {
   async createSession(config: SessionConfig): Promise<AgentSession> {
     if (!this.connection) throw new Error("ACP not initialized");
 
-    // 注意：ACP 是单进程多 session，无法按 session 传递 env vars（userId/chatId/dbPath）。
-    // ACP 模式下 niubot CLI 工具不可用，memory 只能通过 systemPrompt 注入。
     const session = await this.connection.newSession({
       cwd: config.workingDirectory ?? process.cwd(),
-      systemPrompt: config.systemPrompt,
       mcpServers: [],
     });
 
     const sessionId = session.sessionId;
     this.sessionOutputs.set(sessionId, []);
     this.sessionBytes.set(sessionId, 0);
+
+    // 保存 important 上下文，在首条消息时拼到前缀
+    if (config.importantContext) {
+      this.sessionImportantContext.set(sessionId, config.importantContext);
+    }
+    this.sessionFirstMessage.add(sessionId);
 
     if (this.permissionMode === "bypass") {
       try {
@@ -142,10 +154,21 @@ export class AcpBackend implements AgentBackend {
   async sendMessage(session: AgentSession, message: string): Promise<AgentResponse> {
     if (!this.connection) throw new Error("ACP not initialized");
 
+    // 首条消息：拼接 important 上下文前缀
+    let finalMessage = message;
+    if (this.sessionFirstMessage.has(session.id)) {
+      this.sessionFirstMessage.delete(session.id);
+      const importantContext = this.sessionImportantContext.get(session.id);
+      if (importantContext) {
+        finalMessage = `<system-context>\n${importantContext}\n</system-context>\n\n${message}`;
+        this.sessionImportantContext.delete(session.id);
+      }
+    }
+
     // 重置输出缓冲
     this.sessionOutputs.set(session.id, []);
 
-    log.info("sending prompt", { sessionId: session.id, textLength: message.length });
+    log.info("sending prompt", { sessionId: session.id, textLength: finalMessage.length });
 
     // prompt + 超时保护（清理 timer 防止泄漏）
     let timer: ReturnType<typeof setTimeout>;
@@ -161,7 +184,7 @@ export class AcpBackend implements AgentBackend {
       result = await Promise.race([
         this.connection.prompt({
           sessionId: session.id,
-          prompt: [{ type: "text", text: message }],
+          prompt: [{ type: "text", text: finalMessage }],
         }),
         timeoutPromise,
       ]);
@@ -193,6 +216,8 @@ export class AcpBackend implements AgentBackend {
   async closeSession(session: AgentSession): Promise<void> {
     this.sessionOutputs.delete(session.id);
     this.sessionBytes.delete(session.id);
+    this.sessionImportantContext.delete(session.id);
+    this.sessionFirstMessage.delete(session.id);
     log.info("session closed", { sessionId: session.id });
   }
 

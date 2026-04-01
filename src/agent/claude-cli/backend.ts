@@ -14,7 +14,8 @@ interface CliSession {
   claudeSessionId?: string;
   workingDirectory: string;
   model?: string;
-  systemPrompt?: string;
+  /** important 上下文，通过 --append-system-prompt 注入 */
+  importantContext?: string;
   /** 传递给 agent 进程的额外环境变量 */
   extraEnv: Record<string, string>;
   cumulativeBytes: number;
@@ -24,6 +25,9 @@ export class ClaudeCliBackend implements AgentBackend {
   private permissionMode: string;
   private liteModel: string;
   private sessions = new Map<string, CliSession>();
+
+  /** CLI 模式支持 system prompt 注入 */
+  readonly supportsSystemPrompt = true;
 
   constructor(permissionMode = "bypassPermissions", liteModel?: string) {
     this.permissionMode = permissionMode;
@@ -59,7 +63,7 @@ export class ClaudeCliBackend implements AgentBackend {
     this.sessions.set(id, {
       workingDirectory: config.workingDirectory ?? process.cwd(),
       model: config.modelTier === "lite" ? (config.liteModel ?? this.liteModel) : undefined,
-      systemPrompt: config.systemPrompt,
+      importantContext: config.importantContext,
       extraEnv,
       cumulativeBytes: 0,
     });
@@ -82,8 +86,8 @@ export class ClaudeCliBackend implements AgentBackend {
       args.push("--model", s.model);
     }
 
-    if (s.systemPrompt) {
-      args.push("--append-system-prompt", s.systemPrompt);
+    if (s.importantContext) {
+      args.push("--append-system-prompt", s.importantContext);
     }
 
     if (s.claudeSessionId) {
