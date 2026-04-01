@@ -414,6 +414,9 @@ export class Pipeline {
   /** 路由决策结果暂存：chatId → RouteDecision（在 process 中传递给 getOrCreateSession） */
   private pendingRouteDecisions = new Map<string, RouteDecision>();
 
+  /** 路由判断的最小轮次门槛：低于此值直接续，不调 LLM */
+  private static readonly ROUTE_MIN_TURNS = 10;
+
   /**
    * M3: 路由决策 — 如果当前 chat 有 active session 且间隔超过阈值，调 LLM 判断。
    * 如果判断为 new/recall，先归档旧 session，让后续 getOrCreateSession 创建新的。
@@ -422,12 +425,15 @@ export class Pipeline {
     const existing = this.chatSessions.get(chatId);
     if (!existing) return; // 没有 active session，直接走新建
 
-    // 查 last_active_at
+    // 查 session 状态
     const sessionRow = this.db.prepare(
-      "SELECT last_active_at FROM sessions WHERE id = ?",
-    ).get(existing.sessionKey) as { last_active_at: string | null } | undefined;
+      "SELECT last_active_at, turn_count FROM sessions WHERE id = ?",
+    ).get(existing.sessionKey) as { last_active_at: string | null; turn_count: number } | undefined;
 
     if (!sessionRow?.last_active_at) return;
+
+    // 上下文很轻（不满 10 轮），直接续，省一次 LLM 调用
+    if (sessionRow.turn_count < Pipeline.ROUTE_MIN_TURNS) return;
 
     const decision = await decideRoute(
       this.agent,
