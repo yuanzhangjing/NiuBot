@@ -340,6 +340,24 @@ export function getUserShortLabelByPlatformId(
   return row.name ? `${shortId}(${row.name})` : shortId;
 }
 
+/** Get chat short label, e.g. "C1(U1(Zen))" for p2p or "C2(GroupName)" for group */
+export function getChatShortLabel(
+  db: Database.Database,
+  chatId: string,
+): string {
+  const row = db.prepare(
+    "SELECT id, name, type, user_id FROM chats WHERE id = ?",
+  ).get(chatId) as { id: string; name: string | null; type: string | null; user_id: string | null } | undefined;
+  if (!row) return chatId;
+  const shortId = row.id.toUpperCase();
+  // p2p: show user label; group: show chat name
+  if (row.type === "p2p" && row.user_id) {
+    const userLabel = getUserShortLabel(db, row.user_id);
+    return `${shortId}(${userLabel})`;
+  }
+  return row.name ? `${shortId}(${row.name})` : shortId;
+}
+
 /** 确保会话存在，返回内部 ID。事务保护防止并发 ID 冲突 */
 export function ensureChat(
   db: Database.Database,

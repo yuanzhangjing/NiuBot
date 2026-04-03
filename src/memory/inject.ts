@@ -11,11 +11,17 @@ const log = createLogger("inject");
 
 export interface SceneInfo {
   botName: string;
+  /** Bot 的 short label，如 "U2(NiuBot)" */
+  botLabel?: string;
   userName?: string;
   userId: string;
   chatId: string;
   chatType: "p2p" | "group";
+  /** Chat 的 short label，如 "C1(U1(Zen))" */
+  chatLabel?: string;
   isAdmin?: boolean;
+  /** 人设文件路径（仅 admin 可见） */
+  personaPath?: string;
 }
 
 /**
@@ -27,14 +33,39 @@ export function buildImportantContext(
   scene: SceneInfo,
 ): string {
   const parts: string[] = [];
+  const isGroup = scene.chatType === "group";
+
+  // 0. 场景规则（群聊隐私 / 私聊自由）
+  if (isGroup) {
+    parts.push(`你现在在群聊中，回复内容对所有群成员可见。
+- 不要提及任何用户隐私信息（个人经历、健康状况、私聊内容等）
+- 涉及隐私话题时，引导用户回私聊继续
+- 回复面向所有群成员，保持中立`);
+  } else {
+    parts.push("这是你和用户的私密空间，可以自由讨论。");
+  }
 
   // 1. 当前场景
   const sceneLines: string[] = [];
-  sceneLines.push(`Bot：${scene.botName}`);
-  sceneLines.push(`会话：${scene.chatId}（${scene.chatType === "group" ? "群聊" : "私聊"}）`);
-  const adminLabel = scene.isAdmin ? "，admin" : "";
-  sceneLines.push(`用户：${scene.userName ?? scene.userId}（${scene.userId}${adminLabel}）`);
+  const botDisplay = scene.botLabel ?? scene.botName;
+  sceneLines.push(`Bot：${botDisplay}（即你自己，消息历史中显示为 assistant 角色。${botDisplay} 是你的平台注册标识）`);
+  const chatDisplay = scene.chatLabel ?? scene.chatId;
+  sceneLines.push(`会话：${chatDisplay}（${isGroup ? "群聊" : "私聊"}）`);
+  const userDisplay = scene.userName
+    ? `${scene.userId.toUpperCase()}(${scene.userName})`
+    : scene.userId.toUpperCase();
+  if (scene.isAdmin) {
+    sceneLines.push(`用户：${userDisplay}（admin）`);
+  } else {
+    sceneLines.push(`用户：${userDisplay}`);
+  }
+  if (scene.isAdmin && scene.personaPath) {
+    sceneLines.push(`人设配置：${scene.personaPath}（管理员可要求修改）`);
+  }
   parts.push(`[当前场景]\n${sceneLines.join("\n")}`);
+
+  // 短标识说明
+  parts.push("短标识说明：U+数字（如 U1）是用户的本地唯一标识，C+数字（如 C1）是会话的本地唯一标识。同一用户/会话在所有场景中标识相同，可用于跨会话检索。\n注意：所有 ID 标识（Short ID、平台 user ID 等）仅供内部工具调用使用，对话中不要主动向用户展示，除非用户明确要求。");
 
   // 2. User memory
   const memories = scene.chatType === "p2p"
@@ -185,11 +216,14 @@ export function buildStaticContext(botName: string, persona?: string): string {
   // 1. 基本行为规则
   parts.push(`You are ${botName}, an AI bot running inside NiuBot runtime.
 Your responses are automatically delivered to the user — just reply normally.
-Do NOT mention NiuBot, Claude, or Anthropic to the user. Present yourself according to your persona below.
+Do NOT mention NiuBot, Claude, or Anthropic to the user. Present yourself according to your persona (injected in the session context).
+The user can ONLY see the LAST text block in your response — any text you write before a tool call is NOT delivered to the user.
+Therefore: complete ALL tool calls first, then write your final response containing all important content. Do NOT interleave important content between tool calls.
+You MUST include any important results (command output, file content, query results, etc.) directly in your final text. Never assume the user has seen tool outputs, and never reference them with phrases like "see above" or "as shown in the output".
+NEVER attempt to start, stop, or restart the NiuBot service from within an agent session. Doing so will kill the process hosting your session, causing a restart loop. Service management must be done by the user from an external terminal.
 All user data (memories, messages) must be accessed through niubot CLI tools. Do NOT directly read database files.
-Do NOT use the built-in memory system (auto memory). All persistent information must go through niubot tools.
-When you learn something noteworthy about a user, proactively save it as a memory using niubot user-memory add.
-If you are unsure about the current user or their preferences, use niubot user-memory list to check.`);
+Do NOT use the built-in memory system (auto memory). All persistent information must go through niubot tools: \`user-memory\` for user-specific data, \`chat-summary\` for conversation summaries, \`task\` for project tracking.
+When you learn something noteworthy about a user, proactively save it as a memory using niubot user-memory add.`);
 
   // 2. Persona
   if (persona) {
@@ -232,84 +266,123 @@ Three levels: overview (positioning), daily (per-day detail), weekly (per-week t
 **Writing**: all entries are maintained by the auto-summarizer. Do NOT call upsert commands — they are reserved for the summarizer service.
 
 Common options:
-      --chat-id <id>       Specify chat (default: current chat)
+      --chat-id <id>       Specify chat (short ID like C1 or chat_id, default: current chat)
+
+Access control: cross-chat queries are denied in group chat. In private chat, you can only access chats you participate in.
 
 Delete any entry by ID:
   niubot chat-summary del <id>
 
 #### Overview
-View overview:
+Each chat has one overview — a "status card" with conversation positioning, topic index, and current focus.
+
+View overview (outputs summary + detail):
   niubot chat-summary overview [--chat-id <id>]
 
 #### Daily
-List recent dailies:
-  niubot chat-summary daily [--chat-id <id>] [--since <date>] [--before <date>] [--limit N]
+Per-day conversation summaries recording specific discussions and decisions.
 
-View daily detail:
+List recent dailies (summary only):
+  niubot chat-summary daily [options]
+
+Options:
+      --chat-id <id>       Specify chat (short ID like C1 or chat_id, default: current chat)
+      --since <date>       Only entries after this date
+      --before <date>      Only entries before this date
+  -n, --limit <count>      Max results (default 7)
+
+View daily detail (summary + detail):
   niubot chat-summary daily get <id>
 
 #### Weekly
-List recent weeklies:
-  niubot chat-summary weekly [--chat-id <id>] [--since <date>] [--before <date>] [--limit N]
+Per-week conversation summaries aggregating topics across the week. Covers Monday through Sunday.
 
-View weekly detail:
+List recent weeklies (summary only):
+  niubot chat-summary weekly [options]
+
+Options:
+      --chat-id <id>       Specify chat (short ID like C1 or chat_id, default: current chat)
+      --since <date>       Only entries after this date
+      --before <date>      Only entries before this date
+  -n, --limit <count>      Max results (default 4)
+
+View weekly detail (summary + detail):
   niubot chat-summary weekly get <id>
 
 View any summary by ID:
-  niubot chat-summary get <id>`);
+  niubot chat-summary get <id>
+
+Notes:
+- \`daily get\` / \`weekly get\` by ID also enforces access control on the entry's chat.`);
 
   parts.push(`### Message history
-Query past conversation messages.
+Query past conversation messages. Use when the user references earlier discussions or needs cross-session context.
 
 List messages (chronological order):
   niubot messages list [options]
 
-Full-text search:
+Full-text search (supports Chinese):
   niubot messages search <query> [options]
 
 Common options:
-  -n, --limit <count>      Max results (list: default 20, search: default 10)
-      --offset <id>        Pagination cursor: show messages after [#id]
+  -n, --limit <count>      Max results (list: default 20, search: default 10). Negative = backward from --offset
+      --offset <id>        Pagination cursor (exclusive): show messages after [#id], or before [#id] with negative --limit. IDs are global and may not be consecutive within a chat
       --since <time>       Only messages after this time
       --before <time>      Only messages before this time
       --role <role>        Filter by "user" or "assistant"
-      --user-id <id>       Filter by sender (short ID like U1)
+      --user-id <id>       Filter by sender (short ID like U1 or user_id)
       --content-type <t>   Filter by content type: text/image/audio/file/mixed
-      --chat-id <id>       Specify chat (default: current chat)
+      --chat-id <id>       Specify chat (short ID like C1 or chat_id, default: current chat)
+
+  Time supports date ("2026-03-08") or datetime ("2026-03-08 14:30:00").
+
+Output format:
+  Each message is prefixed with [#id], a database-assigned sequential ID.
+  Use this ID with --offset for pagination (e.g., --offset 1045 to continue from that point).
 
 Search-only options:
   -C, --context <count>    Show N messages before and after each match
       --all                Search across all chats (default: current chat only)
-
-Output format:
-  Each message is prefixed with [#id], a database-assigned sequential ID.
+      --chat-type <type>   Filter by chat type: p2p/group (with --all)
 
 Examples:
   niubot messages list
   niubot messages list --user-id U1
+  niubot messages list --chat-id C1
+  niubot messages list --offset 100 --limit -20   # 20 messages before #100
   niubot messages list --since "2026-03-08" --role user
   niubot messages search "部署"
-  niubot messages search "bug" --all --context 3`);
+  niubot messages search "bug" --all --context 3
+  niubot messages search "deploy" --all --chat-type group`);
 
   parts.push(`### Contacts
-Query user/chat information.
+Query and manage user/chat information.
 
 List users/chats:
-  niubot contacts list-users [--name <keyword>]
-  niubot contacts list-chats [--type p2p|group] [--user-id <id>]
+  niubot contacts list-users [options]
+  niubot contacts list-chats [options]
 
-Get details (accepts short ID like U1/C1):
+List options:
+  --name <keyword>       Filter by name (substring, case-insensitive)
+  --platform <name>      Filter by platform
+  --type <type>          (chats only) Filter by "p2p" or "group"
+  --user-id <id>         (chats only) Filter by associated user
+
+Get details (accepts short ID like U1/C1 or platform ID):
   niubot contacts get-user <id>
   niubot contacts get-chat <id>
 
-Set user display name:
+Set user name:
   niubot contacts set-name <id> <name>
 
 Examples:
   niubot contacts list-users
   niubot contacts list-users --name 张三
   niubot contacts list-chats --type group
-  niubot contacts get-user U1`);
+  niubot contacts list-chats --user-id U1
+  niubot contacts get-user U1
+  niubot contacts get-chat C1
+  niubot contacts set-name U1 张三`);
 
   parts.push(`### Send message
 Send a message to a chat via IPC.
@@ -318,55 +391,74 @@ Send a message to a chat via IPC.
   niubot send --chat-id <id> <text>
 
 ### Send file
-Send a file to a chat.
+Send a file to the user via their messaging platform:
 
   niubot send-file <file-path>
-  niubot send-file --chat-id <id> <file-path>`);
+  niubot send-file --chat-id <id> <file-path>
+
+Examples:
+  niubot send-file /path/to/report.pdf
+  niubot send-file ./screenshot.png`);
 
   parts.push(`### Scheduled tasks (cron)
-Schedule recurring or one-time tasks.
+When the user asks you to do something on a schedule, use the Bash tool to run:
 
-Recurring tasks (cron expression):
-  niubot cron add --cron "<min> <hour> <day> <month> <weekday>" --prompt "<task>" --desc "<label>"
+**Recurring tasks** (cron expression):
+  niubot cron add --cron "<min> <hour> <day> <month> <weekday>" --prompt "<task description>" --desc "<short label>"
 
-One-time tasks:
-  niubot cron add --at "<datetime>" --prompt "<task>" --desc "<label>"
+**One-time tasks at a specific time** (absolute timestamp):
+  niubot cron add --at "<datetime>" --prompt "<task description>" --desc "<short label>"
 
-Bounded recurring tasks:
+**Bounded recurring tasks** (with execution limits):
   niubot cron add --cron "<expr>" --times <n> --prompt "<task>" --desc "<label>"
   niubot cron add --cron "<expr>" --until "<datetime>" --prompt "<task>" --desc "<label>"
 
-List or delete cron jobs:
-  niubot cron list
-  niubot cron del <job-id>
+Datetime formats: "2026-03-17T10:52:00", "2026-03-17 10:52", "2026-03-17"
+Convert relative times (e.g. "5 minutes from now") to absolute timestamps before calling.
 
 Examples:
-  niubot cron add --cron "0 9 * * *" --prompt "Daily summary" --desc "Morning Report"
+  niubot cron add --cron "0 6 * * *" --prompt "Collect GitHub trending repos" --desc "Daily Trending"
   niubot cron add --at "2026-04-05 10:00" --prompt "Remind: meeting" --desc "Meeting"
-  niubot cron del 3`);
+  niubot cron add --cron "0 9 * * *" --times 10 --prompt "Morning exercise" --desc "10-day challenge"
+  niubot cron add --cron "0 18 * * 1,3,5" --until "2026-03-31" --prompt "Review PRs" --desc "PR Review"
+
+List or delete cron jobs:
+  niubot cron list
+  niubot cron del <job-id>`);
 
   parts.push(`### Task management
-Manage tasks with visibility control. Tasks are organized in a tasks/ directory.
+Manage tasks and projects with visibility control. Tasks are organized in a \`tasks/\` directory.
+Public tasks are visible to all users. Private tasks are only visible to the owner.
 
 Create a task:
   niubot task create <name> [--private] [--public] [--desc "..."]
 
-List visible tasks:
+  Private chat defaults to --private, group chat defaults to --public.
+
+List visible tasks (public + own private):
   niubot task list [<name>]
 
-Update a task:
+Options:
+      <name> or --name <name>    Filter tasks whose name contains this substring (case-insensitive)
+
+Update a task (own tasks only):
   niubot task update <name> [--name <new-name>] [--desc "..."] [--private] [--public]
 
-Delete a task (archives):
+Delete a task (own tasks only, archives):
   niubot task delete <name>
-
-Private chat defaults to --private, group chat defaults to --public.
 
 Examples:
   niubot task create my-research --desc "AI research project"
+  niubot task create health-tracking --private
   niubot task list
+  niubot task list research          # lists tasks with "research" in the name
   niubot task update my-research --desc "Updated description"
-  niubot task delete my-research`);
+  niubot task update my-research --public
+  niubot task delete my-research
+
+Notes:
+- Always use \`niubot task create\` to create tasks, do not manually create directories under \`tasks/\`.
+- Do not access other users' private tasks.`);
 
   parts.push(`### Restart bot
 Restart the bot process (admin only, via IPC to the running daemon).

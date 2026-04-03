@@ -4,7 +4,7 @@ import type { AgentBackend, AgentSession } from "../agent/types.js";
 import { MessageQueue } from "./queue.js";
 import {
   ensureUser, ensureChat, storeMessage, updateChatName,
-  getUserShortLabel, getMessageByPlatformId, updateMessageContent,
+  getUserShortLabel, getChatShortLabel, getMessageByPlatformId, updateMessageContent,
 } from "../database/schema.js";
 import { buildImportantContext, buildNormalContext, type SceneInfo } from "../memory/inject.js";
 import { ARCHIVE_SUMMARY_PROMPT } from "./prompts.js";
@@ -32,6 +32,8 @@ export interface BotIdentity {
   liteModel?: string;
   /** Admin 用户的 platform ID 列表 */
   adminPlatformIds?: string[];
+  /** 人设文件路径（注入到 admin 的场景信息中） */
+  personaPath?: string;
 }
 
 interface ChatSession {
@@ -242,14 +244,18 @@ export class Pipeline {
       const userRow = row.user_id
         ? this.db.prepare("SELECT name FROM users WHERE id = ?").get(row.user_id) as { name: string | null } | undefined
         : undefined;
+      const isAdmin = row.user_id ? this.adminUserIds.has(row.user_id) : false;
       const importantContext = row.user_id
         ? buildImportantContext(this.db, {
             botName: this.botIdentity.name,
+            botLabel: this.botUserId ? getUserShortLabel(this.db, this.botUserId) : undefined,
             userName: userRow?.name ?? undefined,
             userId: row.user_id,
             chatId: row.chat_id,
+            chatLabel: getChatShortLabel(this.db, row.chat_id),
             chatType,
-            isAdmin: row.user_id ? this.adminUserIds.has(row.user_id) : false,
+            isAdmin,
+            personaPath: isAdmin ? this.botIdentity.personaPath : undefined,
           })
         : undefined;
 
@@ -661,11 +667,14 @@ export class Pipeline {
     const importantContext = userId
       ? buildImportantContext(this.db, {
           botName: this.botIdentity.name,
+          botLabel: this.botUserId ? getUserShortLabel(this.db, this.botUserId) : undefined,
           userName: userRow?.name ?? undefined,
           userId,
           chatId,
+          chatLabel: getChatShortLabel(this.db, chatId),
           chatType,
           isAdmin,
+          personaPath: isAdmin ? this.botIdentity.personaPath : undefined,
         })
       : undefined;
 

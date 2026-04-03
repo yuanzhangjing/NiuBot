@@ -55,6 +55,7 @@ export async function createBotInstance(
     platformBotId: `_bot_${botConfig.name}_`,
     liteModel: botConfig.liteModel,
     adminPlatformIds: botConfig.adminUsers,
+    personaPath: botConfig.personaPath,
   };
 
   const pipeline = new Pipeline(
