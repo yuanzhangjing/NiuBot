@@ -39,6 +39,7 @@ import {
   toMonday,
   toSunday,
 } from "./memory/chat-summary.js";
+import { getUserShortLabel, getChatShortLabel } from "./database/schema.js";
 import { handleMessages } from "./cli/messages.js";
 import { handleContacts } from "./cli/contacts.js";
 import { handleSend, handleSendFile, handleRestart } from "./cli/send.js";
@@ -173,6 +174,9 @@ async function main(): Promise<void> {
       break;
     case "restart":
       handleRestart();
+      break;
+    case "whoami":
+      handleWhoami();
       break;
     default:
       printUsage();
@@ -549,6 +553,56 @@ function chatSummaryDel(db: Database.Database, args: string[]): void {
   console.log(`Deleted chat summary #${id} [${s.level}] ${s.summary}`);
 }
 
+// ─── whoami ───────────────────────────────────────────────
+
+function handleWhoami(): void {
+  const db = openDb();
+  const botName = process.env["NIUBOT_BOT_NAME"] ?? "NiuBot";
+  const botId = process.env["NIUBOT_BOT_ID"];
+  const isAdmin = process.env["NIUBOT_IS_ADMIN"] === "true";
+
+  // Bot identity
+  let botLabel = botName;
+  if (botId) {
+    const row = db.prepare(
+      "SELECT id, name FROM users WHERE platform_id = ? OR id = ?",
+    ).get(botId, botId) as { id: string; name: string | null } | undefined;
+    if (row) {
+      botLabel = getUserShortLabel(db, row.id);
+    }
+  }
+  console.log(`Bot: ${botLabel}`);
+
+  // Chat
+  if (CHAT_ID) {
+    const chatLabel = getChatShortLabel(db, CHAT_ID);
+    console.log(`Chat: ${chatLabel} (${CHAT_TYPE})`);
+  } else {
+    console.log("Chat: (not set)");
+  }
+
+  // User
+  if (USER_ID) {
+    const userLabel = getUserShortLabel(db, USER_ID);
+    console.log(`User: ${userLabel}${isAdmin ? " (admin)" : ""}`);
+  } else {
+    console.log("User: (not set)");
+  }
+
+  // User memories (summary count)
+  if (USER_ID) {
+    const memories = listUserMemory(db, USER_ID);
+    if (memories.length > 0) {
+      console.log(`Memories: ${memories.length} entries`);
+      for (const m of memories) {
+        console.log(`  #${m.id}  ${m.summary}`);
+      }
+    }
+  }
+
+  db.close();
+}
+
 // ─── Usage ─────────────────────────────────────────────────
 
 function printUsage(): void {
@@ -566,6 +620,7 @@ Commands:
   cron          add|list|del                Manage scheduled tasks
   task          create|list|update|delete   Manage task projects
   restart                                   Restart bot (admin, via IPC)
+  whoami                                    Show current scene info
   summarize                                 Run summarizer
 
 Global flags (apply to all commands):
