@@ -46,7 +46,6 @@ async function main(): Promise<void> {
       bots.push(instance);
     } catch (err) {
       log.error("failed to create bot instance", { bot: botConfig.name, error: String(err) });
-      // 单个 bot 创建失败不阻止其他 bot 启动
     }
   }
 
@@ -55,12 +54,19 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  // 4. 启动所有 bot：recover → start → IM connect
+  // 4. 启动所有 bot：recover → start → IM connect → API server → Cron
   for (const bot of bots) {
     try {
       await bot.pipeline.recover();
-      bot.pipeline.start();
+      await bot.pipeline.start();
       await bot.im.start();
+
+      // Start API server for IPC
+      await bot.apiServer.start();
+
+      // Start cron scheduler
+      bot.cronScheduler.start();
+
       log.info("bot started", { name: bot.name });
     } catch (err) {
       log.error("failed to start bot", { name: bot.name, error: String(err) });
@@ -77,11 +83,13 @@ async function main(): Promise<void> {
 
     log.info("shutting down...");
 
-    // 1. 停止接收新消息 + 停止摘要任务和队列
+    // 1. 停止接收新消息 + 停止 cron/摘要/队列/API
     for (const bot of bots) {
       try { await bot.im.stop(); } catch (e) { log.error("im.stop failed", { bot: bot.name, error: String(e) }); }
+      bot.cronScheduler.stop();
       bot.summarizer.stop();
       bot.pipeline.stop();
+      bot.apiServer.stop();
     }
 
     // 2. cancel 所有活跃 session 并等待 in-flight 任务完成（最多 15s）

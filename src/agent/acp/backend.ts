@@ -1,5 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { Readable, Writable } from "node:stream";
+import fs from "node:fs";
+import path from "node:path";
 import * as acp from "@agentclientprotocol/sdk";
 import type { AgentBackend, AgentSession, AgentResponse, SessionConfig } from "../types.js";
 import { createLogger } from "../../logger.js";
@@ -45,6 +47,10 @@ export class AcpBackend implements AgentBackend {
     this.process = spawn(this.command, {
       stdio: ["pipe", "pipe", "inherit"],
       shell: true,
+      env: {
+        ...process.env,
+        CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1",
+      },
     });
 
     this.process.on("exit", (code) => {
@@ -98,8 +104,13 @@ export class AcpBackend implements AgentBackend {
   async createSession(config: SessionConfig): Promise<AgentSession> {
     if (!this.connection) throw new Error("ACP not initialized");
 
+    const cwd = config.workingDirectory ?? process.cwd();
+
+    // Write per-session env file for CLI tools (ACP process is shared, can't set per-session env)
+    this.writeSessionEnvFile(cwd, config);
+
     const session = await this.connection.newSession({
-      cwd: config.workingDirectory ?? process.cwd(),
+      cwd,
       mcpServers: [],
     });
 
@@ -224,6 +235,28 @@ export class AcpBackend implements AgentBackend {
   /** 获取 session 累计字节数 */
   getCumulativeBytes(sessionId: string): number {
     return this.sessionBytes.get(sessionId) ?? 0;
+  }
+
+  /**
+   * Write a `.niubot.env` file in the session's cwd so CLI tools pick up per-session env vars.
+   * ACP runs a single shared process — process-level env vars can't be per-session.
+   */
+  private writeSessionEnvFile(cwd: string, config: SessionConfig): void {
+    const lines: string[] = [];
+    if (config.userId) lines.push(`NIUBOT_USER_ID=${config.userId}`);
+    if (config.chatId) lines.push(`NIUBOT_CHAT_ID=${config.chatId}`);
+    if (config.chatType) lines.push(`NIUBOT_CHAT_TYPE=${config.chatType}`);
+    if (config.dbPath) lines.push(`NIUBOT_DB_PATH=${config.dbPath}`);
+    if (config.botId) lines.push(`NIUBOT_BOT_ID=${config.botId}`);
+    if (config.botName) lines.push(`NIUBOT_BOT_NAME=${config.botName}`);
+    if (config.isAdmin) lines.push(`NIUBOT_IS_ADMIN=true`);
+    lines.push(`NIUBOT_WORK_DIR=${cwd}`);
+
+    try {
+      fs.writeFileSync(path.join(cwd, ".niubot.env"), lines.join("\n") + "\n");
+    } catch (err) {
+      log.warn("failed to write session env file", { cwd, error: String(err) });
+    }
   }
 
   private handleSessionUpdate(params: acp.SessionNotification): void {

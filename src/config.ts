@@ -28,6 +28,8 @@ export interface BotConfig {
   personaPath: string;
   /** 轻量模型（可选，不配则用 backend 内置默认值） */
   liteModel?: string;
+  /** Admin user platform IDs（配置文件中指定的管理员） */
+  adminUsers?: string[];
 }
 
 export interface NiuBotConfig {
@@ -158,6 +160,11 @@ function parseBotConfig(raw: Record<string, string>): BotConfig {
 
   const botDir = path.join(NIUBOT_HOME, name);
 
+  const adminUsersRaw = (raw as Record<string, unknown>)["adminUsers"];
+  const adminUsers = Array.isArray(adminUsersRaw)
+    ? adminUsersRaw.map(String)
+    : undefined;
+
   return {
     name,
     appId,
@@ -168,6 +175,7 @@ function parseBotConfig(raw: Record<string, string>): BotConfig {
     dbPath: raw["dbPath"] ?? path.join(botDir, "niubot.db"),
     personaPath: raw["personaPath"] ?? path.join(botDir, "persona.md"),
     liteModel: raw["liteModel"] ?? undefined,
+    adminUsers,
   };
 }
 

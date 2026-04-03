@@ -2,13 +2,23 @@ import type Database from "better-sqlite3";
 import type { PlatformAdapter, NormalizedMessage } from "../im/types.js";
 import type { AgentBackend, AgentSession } from "../agent/types.js";
 import { MessageQueue } from "./queue.js";
-import { ensureUser, ensureChat, storeMessage } from "../database/schema.js";
+import {
+  ensureUser, ensureChat, storeMessage, updateChatName,
+  getUserShortLabel, getMessageByPlatformId, updateMessageContent,
+} from "../database/schema.js";
 import { buildImportantContext, buildNormalContext, type SceneInfo } from "../memory/inject.js";
 import { ARCHIVE_SUMMARY_PROMPT } from "./prompts.js";
 import { decideRoute, type RouteDecision } from "./routing.js";
+import { containsMarkdown } from "../im/feishu/adapter.js";
 import { createLogger } from "../logger.js";
 
 const PROCESSING_EMOJI = "Get";
+
+/** 过期消息阈值（ms）：超过 2 分钟的消息丢弃 */
+const STALE_MESSAGE_THRESHOLD_MS = 2 * 60 * 1000;
+
+/** 短词打断关键词 */
+const INTERRUPT_WORDS = new Set(["停", "算了", "取消", "stop", "cancel", "abort"]);
 
 /** Bot 身份信息，由外部传入 */
 export interface BotIdentity {
@@ -20,6 +30,8 @@ export interface BotIdentity {
   platformBotId: string;
   /** 轻量模型 ID（可选，覆盖 backend 默认值） */
   liteModel?: string;
+  /** Admin 用户的 platform ID 列表 */
+  adminPlatformIds?: string[];
 }
 
 interface ChatSession {
@@ -27,6 +39,10 @@ interface ChatSession {
   sessionKey: string;
   platformChatId: string;
   userId: string;
+  /** 触发消息的 platform msg ID（用于首条回复时引用） */
+  triggerPlatformMsgId?: string;
+  /** 是否已发送过回复（首条用 reply，后续用普通 send） */
+  hasReplied: boolean;
 }
 
 export class Pipeline {
@@ -49,6 +65,9 @@ export class Pipeline {
   /** bot 的内部用户 ID */
   private botUserId: string | null = null;
 
+  /** admin 内部用户 ID 集合 */
+  private adminUserIds = new Set<string>();
+
   /** agent 工作目录 */
   private workingDirectory: string;
 
@@ -61,6 +80,9 @@ export class Pipeline {
 
   /** 正在归档的 chatId 集合，期间 cancel 不发送到 agent（保护摘要 prompt） */
   private archivingChats = new Set<string>();
+
+  /** chatId → triggerPlatformMsgId，暂存触发消息 ID */
+  private triggerMsgIds = new Map<string, string>();
 
   constructor(
     db: Database.Database,
@@ -86,15 +108,34 @@ export class Pipeline {
   }
 
   /** 启动管道：注册 IM 消息回调 */
-  start(): void {
+  async start(): Promise<void> {
+    // Resolve bot's real open_id
+    try {
+      const realBotId = await this.im.getBotOpenId();
+      if (realBotId) {
+        this.botIdentity.platformBotId = realBotId;
+      }
+    } catch (err) {
+      this.log.warn("failed to fetch bot open_id", { error: String(err) });
+    }
+
     this.botUserId = ensureUser(
       this.db,
       this.botIdentity.platform,
       this.botIdentity.platformBotId,
       this.botIdentity.name,
+      "bot_info",
     );
+
+    // Detect admin users
+    await this.detectAdmins();
+
     this.im.onMessage((msg) => this.handleMessage(msg));
-    this.log.info("pipeline started", { botUserId: this.botUserId });
+    this.log.info("pipeline started", {
+      botUserId: this.botUserId,
+      botPlatformId: this.botIdentity.platformBotId,
+      adminCount: this.adminUserIds.size,
+    });
   }
 
   /** 停止管道：清除队列计时器 */
@@ -122,6 +163,48 @@ export class Pipeline {
   /** 是否有正在处理的 chat */
   hasBusyChats(): boolean {
     return this.queue.hasBusyChats();
+  }
+
+  /** 检查用户是否为 admin */
+  isAdmin(userId: string): boolean {
+    return this.adminUserIds.has(userId);
+  }
+
+  /** 获取 bot 用户 ID */
+  getBotUserId(): string | null {
+    return this.botUserId;
+  }
+
+  /** 通过 IPC 发送消息到指定 chat */
+  async sendToChat(platformChatId: string, text: string): Promise<void> {
+    await this.im.sendText(platformChatId, text);
+  }
+
+  /** 通过 IPC 发送文件到指定 chat */
+  async sendFileToChat(platformChatId: string, filePath: string): Promise<void> {
+    await this.im.sendFile(platformChatId, filePath);
+  }
+
+  /**
+   * 注入 prompt 到 agent pipeline（用于 cron 等内部触发场景）。
+   * 和用户消息走相同的 queue → process → agent 链路。
+   */
+  injectPrompt(chatId: string, userId: string, text: string): void {
+    // Ensure maps are populated so getOrCreateSession can find the chat
+    if (!this.platformChatIds.has(chatId)) {
+      const row = this.db.prepare("SELECT platform_id FROM chats WHERE id = ?")
+        .get(chatId) as { platform_id: string } | undefined;
+      if (!row) {
+        this.log.warn("injectPrompt: chat not found", { chatId });
+        return;
+      }
+      this.platformChatIds.set(chatId, row.platform_id);
+    }
+    if (!this.chatUserIds.has(chatId)) {
+      this.chatUserIds.set(chatId, userId);
+    }
+
+    this.queue.push({ chatId, text, timestamp: Date.now() });
   }
 
   /** 进程恢复：从 DB 恢复 active sessions，重建 backend session */
@@ -166,6 +249,7 @@ export class Pipeline {
             userId: row.user_id,
             chatId: row.chat_id,
             chatType,
+            isAdmin: row.user_id ? this.adminUserIds.has(row.user_id) : false,
           })
         : undefined;
 
@@ -187,6 +271,7 @@ export class Pipeline {
           sessionKey: row.id,
           platformChatId: row.platform_id,
           userId: row.user_id ?? "",
+          hasReplied: true, // recovered sessions skip reply-to
         });
         this.platformChatIds.set(row.chat_id, row.platform_id);
         if (row.user_id) this.chatUserIds.set(row.chat_id, row.user_id);
@@ -212,14 +297,83 @@ export class Pipeline {
     }
     if (msg.platformMsgId) {
       this.processedMsgIds.add(msg.platformMsgId);
-      // 超过上限时清空旧数据（简单策略，飞书重复推送间隔很短，不会跨越万条消息）
       if (this.processedMsgIds.size > Pipeline.MAX_PROCESSED_IDS) {
         this.processedMsgIds.clear();
       }
     }
 
-    const userId = ensureUser(this.db, platform, msg.senderPlatformId, msg.senderName);
-    const chatId = ensureChat(this.db, platform, msg.chatPlatformId, msg.chatType);
+    // 过期消息检测（>2min 丢弃）
+    if (msg.platformTs) {
+      const delay = Date.now() - msg.platformTs;
+      if (delay > STALE_MESSAGE_THRESHOLD_MS) {
+        this.log.warn("stale message, dropping", {
+          chatId: msg.chatPlatformId,
+          delayMs: delay,
+          msgId: msg.platformMsgId,
+        });
+        if (msg.platformMsgId) {
+          this.im.addReaction(msg.chatPlatformId, msg.platformMsgId, "Alarm").catch(() => {});
+        }
+        return;
+      }
+    }
+
+    // 群聊触发检测：需要 @bot 或 reply-to-bot
+    if (msg.chatType === "group" && !msg.botMentioned) {
+      // Check if it's a reply to bot's message
+      const isReplyToBot = msg.parentPlatformMsgId
+        ? this.isMessageFromBot(platform, msg.parentPlatformMsgId)
+        : false;
+
+      if (!isReplyToBot) {
+        // 群聊中未 @ bot 也未回复 bot，只存消息不触发
+        this.storeMessageOnly(msg, platform);
+        return;
+      }
+    }
+
+    // Collect user info from mentions
+    if (msg.mentions) {
+      for (const m of msg.mentions) {
+        if (!m.isBot && m.platformUserId && m.name) {
+          ensureUser(this.db, platform, m.platformUserId, m.name, "mention");
+        }
+      }
+    }
+
+    const userId = ensureUser(this.db, platform, msg.senderPlatformId, msg.senderName, "bot_sender");
+
+    // For p2p chats, link user_id
+    const chatUserId = msg.chatType === "p2p" ? msg.senderPlatformId : undefined;
+    const chatId = ensureChat(this.db, platform, msg.chatPlatformId, msg.chatType, msg.chatName, chatUserId);
+
+    // Fetch group chat name if not known
+    if (msg.chatType === "group") {
+      const chatRow = this.db.prepare("SELECT name FROM chats WHERE id = ?").get(chatId) as { name: string | null } | undefined;
+      if (!chatRow?.name) {
+        this.im.getChatName(msg.chatPlatformId).then((name) => {
+          if (name) updateChatName(this.db, chatId, name);
+        }).catch(() => {});
+      }
+    }
+
+    // Build display text with group sender annotation
+    let displayText = msg.contentText;
+    if (msg.chatType === "group") {
+      const label = getUserShortLabel(this.db, userId);
+      displayText = `[${label}]: ${msg.contentText}`;
+    }
+
+    // Build reply context
+    let replyContext = "";
+    if (msg.parentPlatformMsgId) {
+      replyContext = this.buildReplyContext(platform, msg.parentPlatformMsgId);
+    }
+
+    // Store platform_ts as ISO string
+    const platformTsStr = msg.platformTs
+      ? new Date(msg.platformTs).toISOString().slice(0, 19).replace("T", " ")
+      : undefined;
 
     const sessionKey = this.chatSessions.get(chatId)?.sessionKey;
     storeMessage(this.db, {
@@ -231,24 +385,140 @@ export class Pipeline {
       contentType: msg.contentType,
       platform,
       platformMsgId: msg.platformMsgId,
+      platformTs: platformTsStr,
       platformRaw: JSON.stringify(msg.raw),
     });
 
-    this.log.info("message received", { chatId, userId, textLength: msg.contentText.length });
+    this.log.info("message received", {
+      chatId, userId,
+      type: msg.contentType,
+      textLength: msg.contentText.length,
+      mentions: msg.mentions?.length ?? 0,
+      hasParent: !!msg.parentPlatformMsgId,
+    });
 
     if (msg.platformMsgId) {
       this.im.addReaction(msg.chatPlatformId, msg.platformMsgId, PROCESSING_EMOJI).catch(() => {});
     }
 
-    // 缓存映射（每次都更新，防止 cancel 后丢失）
+    // 缓存映射
     this.platformChatIds.set(chatId, msg.chatPlatformId);
     this.chatUserIds.set(chatId, userId);
 
+    // Save trigger msg ID for reply-to-message
+    if (msg.platformMsgId) {
+      this.triggerMsgIds.set(chatId, msg.platformMsgId);
+    }
+
+    // Prepare text to send to agent (with reply context and sender annotation)
+    let agentText = displayText;
+    if (replyContext) {
+      agentText = `${replyContext}\n\n${displayText}`;
+    }
+
+    // 短词打断检测
+    const trimmedText = msg.contentText.trim().toLowerCase();
+    if (INTERRUPT_WORDS.has(trimmedText) && this.chatSessions.has(chatId)) {
+      this.log.info("interrupt word detected", { chatId, word: trimmedText });
+      this.cancelChat(chatId).catch(() => {});
+      this.im.sendText(msg.chatPlatformId, "好的，已停止。").catch(() => {});
+      return;
+    }
+
     this.queue.push({
       chatId,
-      text: msg.contentText,
+      text: agentText,
       timestamp: Date.now(),
     });
+  }
+
+  /** Store message without triggering agent (for group chat non-targeted messages) */
+  private storeMessageOnly(msg: NormalizedMessage, platform: string): void {
+    const userId = ensureUser(this.db, platform, msg.senderPlatformId, msg.senderName, "bot_sender");
+    const chatId = ensureChat(this.db, platform, msg.chatPlatformId, msg.chatType, msg.chatName);
+
+    const platformTsStr = msg.platformTs
+      ? new Date(msg.platformTs).toISOString().slice(0, 19).replace("T", " ")
+      : undefined;
+
+    storeMessage(this.db, {
+      chatId,
+      senderId: userId,
+      role: "user",
+      contentText: msg.contentText,
+      contentType: msg.contentType,
+      platform,
+      platformMsgId: msg.platformMsgId,
+      platformTs: platformTsStr,
+      platformRaw: JSON.stringify(msg.raw),
+    });
+
+    // Collect mentions
+    if (msg.mentions) {
+      for (const m of msg.mentions) {
+        if (!m.isBot && m.platformUserId && m.name) {
+          ensureUser(this.db, platform, m.platformUserId, m.name, "mention");
+        }
+      }
+    }
+  }
+
+  /** Check if a platform message was sent by the bot */
+  private isMessageFromBot(platform: string, platformMsgId: string): boolean {
+    const msg = getMessageByPlatformId(this.db, platform, platformMsgId);
+    return msg?.senderId === this.botUserId;
+  }
+
+  /** Build reply context string from a parent message */
+  private buildReplyContext(platform: string, parentPlatformMsgId: string): string {
+    // First try DB
+    const dbMsg = getMessageByPlatformId(this.db, platform, parentPlatformMsgId);
+    if (dbMsg?.contentText) {
+      const label = getUserShortLabel(this.db, dbMsg.senderId);
+      const truncated = dbMsg.contentText.length > 200
+        ? dbMsg.contentText.slice(0, 200) + "..."
+        : dbMsg.contentText;
+      return `> 引用 ${label}：${truncated}`;
+    }
+
+    // Fallback: try API (async — cache result for next time)
+    this.im.getMessageContent(parentPlatformMsgId).then((content) => {
+      if (content && dbMsg) {
+        // Update the existing message's content for future lookups
+        updateMessageContent(this.db, dbMsg.id, content);
+        this.log.debug("fetched and cached reply context from API", { parentMsgId: parentPlatformMsgId });
+      } else if (content) {
+        this.log.debug("fetched reply context from API (no DB record to update)", { parentMsgId: parentPlatformMsgId });
+      }
+    }).catch(() => {});
+
+    return "";
+  }
+
+  /** Detect admin users from platform + config */
+  private async detectAdmins(): Promise<void> {
+    const platform = this.botIdentity.platform;
+
+    // 1. App creator
+    try {
+      const creatorId = await this.im.getAppCreatorId();
+      if (creatorId) {
+        const userId = ensureUser(this.db, platform, creatorId, undefined, undefined);
+        this.adminUserIds.add(userId);
+        this.log.info("admin detected (app creator)", { userId, platformId: creatorId });
+      }
+    } catch (err) {
+      this.log.warn("failed to detect app creator", { error: String(err) });
+    }
+
+    // 2. Config adminUsers
+    if (this.botIdentity.adminPlatformIds) {
+      for (const pid of this.botIdentity.adminPlatformIds) {
+        const userId = ensureUser(this.db, platform, pid, undefined, undefined);
+        this.adminUserIds.add(userId);
+        this.log.info("admin detected (config)", { userId, platformId: pid });
+      }
+    }
   }
 
   private async process(chatId: string, mergedText: string): Promise<void> {
@@ -305,27 +575,54 @@ export class Pipeline {
         WHERE id = ?
       `).run(chatSession.sessionKey, cumulativeBytes, replyMsgId, chatSession.sessionKey);
 
-      // 拼接 debug meta 信息（NIUBOT_DEBUG_META=1 时启用）
+      // 拼接 debug meta 信息
       let sendText = response.text;
       if (process.env["NIUBOT_DEBUG_META"] === "1") {
         const stats = this.db.prepare(
           "SELECT turn_count FROM sessions WHERE id = ?",
         ).get(chatSession.sessionKey) as { turn_count: number } | undefined;
-
-        // 取 session key 末尾 8 位作为短 ID
         const shortId = chatSession.sessionKey.slice(-8);
         sendText += `\n\n---\n${shortId} #${stats?.turn_count ?? "?"}`;
       }
 
-      // 发送到 IM（独立 try/catch，不影响已存储的数据）
+      // 发送到 IM
       try {
-        await this.im.sendText(chatSession.platformChatId, sendText);
+        // Reply-to-Message: first response quotes trigger, subsequent are normal
+        const triggerMsgId = this.triggerMsgIds.get(chatId);
+        if (!chatSession.hasReplied && triggerMsgId) {
+          // Detect markdown and choose send method
+          if (containsMarkdown(sendText)) {
+            await this.im.sendMarkdownCard(chatSession.platformChatId, sendText);
+          } else {
+            await this.im.sendReply(chatSession.platformChatId, sendText, triggerMsgId);
+          }
+          chatSession.hasReplied = true;
+        } else {
+          if (containsMarkdown(sendText)) {
+            await this.im.sendMarkdownCard(chatSession.platformChatId, sendText);
+          } else {
+            await this.im.sendText(chatSession.platformChatId, sendText);
+          }
+        }
       } catch (sendErr) {
         this.log.error("failed to send response to IM", {
           chatId,
           error: String(sendErr),
           responseLength: sendText.length,
         });
+        // Fallback to plain text if markdown card fails
+        try {
+          await this.im.sendText(chatSession.platformChatId, sendText);
+        } catch {
+          // Give up
+        }
+      }
+
+      // Remove processing emoji
+      const triggerMsgId = this.triggerMsgIds.get(chatId);
+      if (triggerMsgId) {
+        this.im.removeReaction(chatSession.platformChatId, triggerMsgId, PROCESSING_EMOJI).catch(() => {});
+        this.triggerMsgIds.delete(chatId);
       }
 
       this.log.info("response sent", {
@@ -335,6 +632,13 @@ export class Pipeline {
       });
     } catch (err) {
       this.log.error("pipeline error", { chatId, error: String(err) });
+
+      // Clean up processing emoji
+      const triggerMsgId = this.triggerMsgIds.get(chatId);
+      if (triggerMsgId && platformChatId) {
+        this.im.removeReaction(platformChatId, triggerMsgId, PROCESSING_EMOJI).catch(() => {});
+        this.triggerMsgIds.delete(chatId);
+      }
 
       if (platformChatId) {
         await this.im.sendText(platformChatId, "处理出错了，请稍后再试。").catch(() => {});
@@ -366,6 +670,7 @@ export class Pipeline {
     const userRow = userId
       ? this.db.prepare("SELECT name FROM users WHERE id = ?").get(userId) as { name: string | null } | undefined
       : undefined;
+    const isAdmin = userId ? this.adminUserIds.has(userId) : false;
     const importantContext = userId
       ? buildImportantContext(this.db, {
           botName: this.botIdentity.name,
@@ -373,6 +678,7 @@ export class Pipeline {
           userId,
           chatId,
           chatType,
+          isAdmin,
         })
       : undefined;
 
@@ -392,12 +698,12 @@ export class Pipeline {
       botId: this.botIdentity.platformBotId,
       botName: this.botIdentity.name,
       liteModel: this.botIdentity.liteModel,
+      isAdmin,
     });
 
     const sessionKey = `s_${Date.now()}_${crypto.randomUUID().slice(0, 8)}`;
 
     try {
-      // 认领无主消息（session 创建前已存入的消息）并获取 start_msg_id
       const orphan = this.db.prepare(
         "SELECT MIN(id) as startId FROM messages WHERE chat_id = ? AND session_key IS NULL",
       ).get(chatId) as { startId: number | null } | undefined;
@@ -408,12 +714,10 @@ export class Pipeline {
         VALUES (?, ?, ?, 'active', ?, datetime('now'), datetime('now'))
       `).run(sessionKey, chatId, userId ?? null, startMsgId);
 
-      // 回填无主消息的 session_key
       this.db.prepare(
         "UPDATE messages SET session_key = ? WHERE chat_id = ? AND session_key IS NULL",
       ).run(sessionKey, chatId);
     } catch (dbErr) {
-      // DB 插入失败，清理已创建的 ACP session 防泄漏
       await this.agent.closeSession(agentSession).catch(() => {});
       throw dbErr;
     }
@@ -423,6 +727,8 @@ export class Pipeline {
       sessionKey,
       platformChatId,
       userId: userId ?? "",
+      triggerPlatformMsgId: this.triggerMsgIds.get(chatId),
+      hasReplied: false,
     };
     this.chatSessions.set(chatId, chatSession);
 
@@ -430,31 +736,24 @@ export class Pipeline {
     return chatSession;
   }
 
-  /** 路由决策结果暂存：chatId → RouteDecision（在 process 中传递给 getOrCreateSession） */
+  /** 路由决策结果暂存 */
   private pendingRouteDecisions = new Map<string, RouteDecision>();
 
-  /** normal 上下文暂存：chatId → context（新 session 首条消息时拼到前缀） */
+  /** normal 上下文暂存 */
   private pendingNormalContext = new Map<string, string>();
 
-  /** 路由判断的最小轮次门槛：低于此值直接续，不调 LLM */
+  /** 路由判断的最小轮次门槛 */
   private static readonly ROUTE_MIN_TURNS = 10;
 
-  /**
-   * M3: 路由决策 — 如果当前 chat 有 active session 且间隔超过阈值，调 LLM 判断。
-   * 如果判断为 new/recall，先归档旧 session，让后续 getOrCreateSession 创建新的。
-   */
   private async maybeRouteSession(chatId: string, newMessage: string): Promise<void> {
     const existing = this.chatSessions.get(chatId);
-    if (!existing) return; // 没有 active session，直接走新建
+    if (!existing) return;
 
-    // 查 session 状态
     const sessionRow = this.db.prepare(
       "SELECT last_active_at, turn_count FROM sessions WHERE id = ?",
     ).get(existing.sessionKey) as { last_active_at: string | null; turn_count: number } | undefined;
 
     if (!sessionRow?.last_active_at) return;
-
-    // 上下文很轻（不满 10 轮），直接续，省一次 LLM 调用
     if (sessionRow.turn_count < Pipeline.ROUTE_MIN_TURNS) return;
 
     const decision = await decideRoute(
@@ -468,7 +767,6 @@ export class Pipeline {
 
     if (decision.action === "continue") return;
 
-    // new 或 recall：归档旧 session，暂存决策供 getOrCreateSession 使用
     this.log.info("route decision: switching session", {
       chatId,
       action: decision.action,
@@ -478,8 +776,6 @@ export class Pipeline {
 
     await this.archiveSession(chatId);
 
-    // 归档后，将新到达的消息（end_msg_id 之后的）从旧 session 移出，
-    // 标记为 orphan，让 getOrCreateSession 的新 session 认领
     this.db.prepare(`
       UPDATE messages SET session_key = NULL
       WHERE chat_id = ? AND session_key = ?
@@ -489,17 +785,14 @@ export class Pipeline {
     this.pendingRouteDecisions.set(chatId, decision);
   }
 
-  /** 归档阈值：低于此 turn 数的 session 跳过摘要生成 */
   private static readonly ARCHIVE_SUMMARY_MIN_TURNS = 5;
 
-  /** M3: 归档当前 session — 生成摘要并关闭 */
   private async archiveSession(chatId: string): Promise<void> {
     const session = this.chatSessions.get(chatId);
     if (!session) return;
 
     const { agentSession, sessionKey } = session;
 
-    // 检查 turn_count — 短 session 跳过摘要生成
     const sessionRow = this.db.prepare(
       "SELECT turn_count FROM sessions WHERE id = ?",
     ).get(sessionKey) as { turn_count: number } | undefined;
@@ -507,7 +800,6 @@ export class Pipeline {
     const turnCount = sessionRow?.turn_count ?? 0;
 
     if (turnCount >= Pipeline.ARCHIVE_SUMMARY_MIN_TURNS) {
-      // 保护摘要 prompt 不被 cancelChat 误杀
       this.archivingChats.add(chatId);
       try {
         const response = await this.agent.sendMessage(agentSession, ARCHIVE_SUMMARY_PROMPT);
@@ -526,7 +818,6 @@ export class Pipeline {
         }
       } catch (err) {
         this.log.warn("failed to generate archive summary", { chatId, sessionKey, error: String(err) });
-        // 摘要生成失败不影响归档流程
       } finally {
         this.archivingChats.delete(chatId);
       }
@@ -534,13 +825,11 @@ export class Pipeline {
       this.log.info("skipping archive summary for short session", { chatId, sessionKey, turnCount });
     }
 
-    // 更新 session 状态为 archived
     this.db.prepare(`
       UPDATE sessions SET status = 'archived', ended_at = datetime('now'), last_active_at = datetime('now')
       WHERE id = ?
     `).run(sessionKey);
 
-    // 先从内存中移除，再关闭 backend session（确保 closeSession 失败时不留死引用）
     this.chatSessions.delete(chatId);
     await this.agent.closeSession(agentSession).catch((err) => {
       this.log.warn("failed to close backend session during archive", { chatId, sessionKey, error: String(err) });
@@ -549,19 +838,15 @@ export class Pipeline {
     this.log.info("session archived", { chatId, sessionKey, turnCount });
   }
 
-  /** cancel 当前 prompt，但保持 session 存活（供 cancel+merge 复用） */
   private async cancelChat(chatId: string): Promise<void> {
     const session = this.chatSessions.get(chatId);
     if (!session) return;
 
-    // 归档期间不 cancel，保护摘要 prompt 完成
     if (this.archivingChats.has(chatId)) {
       this.log.debug("cancel suppressed during archive", { chatId });
       return;
     }
 
     await this.agent.cancelSession(session.agentSession);
-    // 不 close session，不从 chatSessions 删除
-    // session 保持存活，后续消息复用同一个 agent session
   }
 }

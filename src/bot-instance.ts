@@ -5,6 +5,8 @@ import type { BotConfig } from "./config.js";
 import { initDatabase } from "./database/schema.js";
 import { FeishuAdapter } from "./im/feishu/adapter.js";
 import { Pipeline, type BotIdentity } from "./core/pipeline.js";
+import { ApiServer, type ApiHandler } from "./core/api.js";
+import { CronScheduler } from "./core/cron.js";
 import { startSummarizer } from "./summarizer/index.js";
 import { loadPersona } from "./persona.js";
 import { buildStaticContext } from "./memory/inject.js";
@@ -17,11 +19,13 @@ export interface BotInstance {
   db: Database.Database;
   im: FeishuAdapter;
   pipeline: Pipeline;
+  apiServer: ApiServer;
+  cronScheduler: CronScheduler;
   summarizer: { stop: () => void };
 }
 
 /**
- * 创建一个 Bot 实例：初始化目录、DB、IM adapter、Pipeline、Summarizer。
+ * 创建一个 Bot 实例：初始化目录、DB、IM adapter、Pipeline、API Server、Cron、Summarizer。
  */
 export async function createBotInstance(
   botConfig: BotConfig,
@@ -50,6 +54,7 @@ export async function createBotInstance(
     platform: "feishu",
     platformBotId: `_bot_${botConfig.name}_`,
     liteModel: botConfig.liteModel,
+    adminPlatformIds: botConfig.adminUsers,
   };
 
   const pipeline = new Pipeline(
@@ -63,12 +68,43 @@ export async function createBotInstance(
     queueConfig.cancelThresholdMs,
   );
 
-  // 6. 创建 Summarizer
+  // 6. 创建 API Server
+  const socketPath = path.join(path.dirname(botConfig.dbPath), "api.sock");
+  const apiHandler: ApiHandler = {
+    sendMessage: (chatId, text) => pipeline.sendToChat(chatId, text),
+    sendFile: (chatId, filePath) => pipeline.sendFileToChat(chatId, filePath),
+    resolveChatPlatformId: (input: string) => {
+      // Try as internal ID (c1, c2)
+      const lower = input.toLowerCase();
+      if (/^c\d+$/.test(lower)) {
+        const row = db.prepare("SELECT platform_id FROM chats WHERE id = ?").get(lower) as { platform_id: string } | undefined;
+        return row?.platform_id;
+      }
+      // Try as platform ID directly
+      const row = db.prepare("SELECT platform_id FROM chats WHERE platform_id = ?").get(input) as { platform_id: string } | undefined;
+      return row?.platform_id ?? input;
+    },
+    getDefaultPlatformChatId: () => undefined,
+    restart: () => {
+      log.info("restart requested via API");
+      process.exit(0); // Exit cleanly, let supervisor restart
+    },
+  };
+  const apiServer = new ApiServer(socketPath, apiHandler);
+
+  // 7. 创建 Cron Scheduler
+  const cronScheduler = new CronScheduler(db, async (chatId, userId, prompt) => {
+    // Route cron prompt through the agent pipeline (same path as user messages)
+    pipeline.injectPrompt(chatId, userId, `[定时任务] ${prompt}`);
+  });
+
+  // 8. 创建 Summarizer
   const summarizer = startSummarizer(db, agent);
 
   log.info("bot instance created", {
     workDir: botConfig.workingDirectory,
     persona: botConfig.personaPath,
+    socketPath,
   });
 
   return {
@@ -77,13 +113,14 @@ export async function createBotInstance(
     db,
     im,
     pipeline,
+    apiServer,
+    cronScheduler,
     summarizer,
   };
 }
 
 /**
  * 在 workingDirectory 下生成 AGENTS.md 和 CLAUDE.md（→ AGENTS.md 的 symlink）。
- * 每次启动时重新生成，支持 persona 热更新。
  */
 function generateAgentFiles(
   botConfig: BotConfig,
@@ -92,12 +129,10 @@ function generateAgentFiles(
   const agentsPath = path.join(botConfig.workingDirectory, "AGENTS.md");
   const claudePath = path.join(botConfig.workingDirectory, "CLAUDE.md");
 
-  // 生成 AGENTS.md
   const persona = loadPersona(botConfig.personaPath);
   const content = buildStaticContext(botConfig.name, persona);
   fs.writeFileSync(agentsPath, content, "utf-8");
 
-  // CLAUDE.md → AGENTS.md symlink（先删再建，防止残留）
   try { fs.unlinkSync(claudePath); } catch { /* 不存在就忽略 */ }
   fs.symlinkSync("AGENTS.md", claudePath);
 

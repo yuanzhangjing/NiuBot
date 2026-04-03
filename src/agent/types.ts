@@ -27,6 +27,8 @@ export interface SessionConfig {
   botId?: string;
   /** Bot 名称（传递给 agent 环境变量） */
   botName?: string;
+  /** 是否为管理员（传递给 agent 环境变量） */
+  isAdmin?: boolean;
 }
 
 export interface AgentSession {

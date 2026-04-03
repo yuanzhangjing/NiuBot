@@ -59,6 +59,8 @@ export class ClaudeCliBackend implements AgentBackend {
     if (config.dbPath) extraEnv["NIUBOT_DB_PATH"] = config.dbPath;
     if (config.botId) extraEnv["NIUBOT_BOT_ID"] = config.botId;
     if (config.botName) extraEnv["NIUBOT_BOT_NAME"] = config.botName;
+    if (config.isAdmin) extraEnv["NIUBOT_IS_ADMIN"] = "true";
+    if (config.workingDirectory) extraEnv["NIUBOT_WORK_DIR"] = config.workingDirectory;
 
     this.sessions.set(id, {
       workingDirectory: config.workingDirectory ?? process.cwd(),

@@ -129,12 +129,45 @@ const migrations: Migration[] = [
       }
     },
   },
-  // ── 新版本追加在这里 ──
-  // {
-  //   version: 2,
-  //   description: "Add xxx column to sessions",
-  //   up: (db) => { db.exec("ALTER TABLE sessions ADD COLUMN xxx TEXT"); },
-  // },
+  {
+    version: 2,
+    description: "M4: busy_timeout, chats.user_id, users name_source priority, cron_jobs table, messages.platform_ts",
+    up: (db) => {
+      db.pragma("busy_timeout = 5000");
+
+      // chats.user_id: for p2p chats, links to peer's open_id
+      db.exec("ALTER TABLE chats ADD COLUMN user_id TEXT");
+
+      // messages.platform_ts: explicit platform-side timestamp
+      // (may already exist via platform_raw, but dedicated column for queries)
+      try {
+        db.exec("ALTER TABLE messages ADD COLUMN platform_ts TEXT");
+      } catch {
+        // column already exists from v1 schema
+      }
+
+      // cron_jobs table for scheduled tasks
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS cron_jobs (
+          id              INTEGER PRIMARY KEY AUTOINCREMENT,
+          chat_id         TEXT NOT NULL,
+          creator_user_id TEXT NOT NULL,
+          cron_expr       TEXT,
+          run_at          TEXT,
+          prompt          TEXT NOT NULL,
+          description     TEXT DEFAULT '',
+          max_times       INTEGER,
+          until_time      TEXT,
+          run_count       INTEGER DEFAULT 0,
+          status          TEXT DEFAULT 'active',
+          created_at      TEXT DEFAULT (datetime('now')),
+          last_run_at     TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_cron_jobs_status ON cron_jobs(status);
+        CREATE INDEX IF NOT EXISTS idx_cron_jobs_chat ON cron_jobs(chat_id);
+      `);
+    },
+  },
 ];
 
 const LATEST_VERSION = migrations[migrations.length - 1]!.version;
@@ -145,6 +178,7 @@ export function initDatabase(dbPath: string): Database.Database {
   const db = new Database(dbPath);
   db.pragma("journal_mode = WAL");
   db.pragma("foreign_keys = ON");
+  db.pragma("busy_timeout = 5000");
 
   runMigrations(db);
 
@@ -201,20 +235,47 @@ function runMigrations(db: Database.Database): void {
 
 // ── CRUD helpers ────────────────────────────────────────────────────
 
+/**
+ * Name source priority (higher = better, won't overwrite with lower):
+ * manual > bot_info > app_info > api > mention > bot_sender > platform
+ */
+const NAME_SOURCE_PRIORITY: Record<string, number> = {
+  platform: 0,
+  bot_sender: 1,
+  mention: 2,
+  api: 3,
+  app_info: 4,
+  bot_info: 5,
+  manual: 6,
+};
+
 /** 确保用户存在，返回内部 ID。事务保护防止并发 ID 冲突 */
 export function ensureUser(
   db: Database.Database,
   platform: string,
   platformId: string,
   name?: string,
+  nameSource?: string,
 ): string {
   const tx = db.transaction(
-    (p: string, pid: string, n: string | null): string => {
+    (p: string, pid: string, n: string | null, ns: string | null): string => {
       const existing = db.prepare(
-        "SELECT id FROM users WHERE platform = ? AND platform_id = ?",
-      ).get(p, pid) as { id: string } | undefined;
+        "SELECT id, name, name_source FROM users WHERE platform = ? AND platform_id = ?",
+      ).get(p, pid) as { id: string; name: string | null; name_source: string | null } | undefined;
 
-      if (existing) return existing.id;
+      if (existing) {
+        // Update name if new source has higher priority
+        if (n && ns) {
+          const currentPriority = NAME_SOURCE_PRIORITY[existing.name_source ?? "platform"] ?? 0;
+          const newPriority = NAME_SOURCE_PRIORITY[ns] ?? 0;
+          if (newPriority >= currentPriority && n !== existing.name) {
+            db.prepare("UPDATE users SET name = ?, name_source = ? WHERE id = ?")
+              .run(n, ns, existing.id);
+            log.info("user name updated", { id: existing.id, name: n, source: ns });
+          }
+        }
+        return existing.id;
+      }
 
       const max = db.prepare(
         "SELECT MAX(CAST(SUBSTR(id, 2) AS INTEGER)) as n FROM users",
@@ -222,14 +283,61 @@ export function ensureUser(
       const id = `u${(max.n ?? 0) + 1}`;
 
       db.prepare(
-        "INSERT INTO users (id, name, platform, platform_id) VALUES (?, ?, ?, ?)",
-      ).run(id, n, p, pid);
+        "INSERT INTO users (id, name, name_source, platform, platform_id) VALUES (?, ?, ?, ?, ?)",
+      ).run(id, n, ns ?? "platform", p, pid);
 
       log.info("user created", { id, platform: p, platformId: pid, name: n });
       return id;
     },
   );
-  return tx(platform, platformId, name ?? null) as string;
+  return tx(platform, platformId, name ?? null, nameSource ?? null) as string;
+}
+
+/** Update user name with source priority check */
+export function updateUserName(
+  db: Database.Database,
+  userId: string,
+  name: string,
+  nameSource: string,
+): void {
+  const existing = db.prepare(
+    "SELECT name, name_source FROM users WHERE id = ?",
+  ).get(userId) as { name: string | null; name_source: string | null } | undefined;
+  if (!existing) return;
+
+  const currentPriority = NAME_SOURCE_PRIORITY[existing.name_source ?? "platform"] ?? 0;
+  const newPriority = NAME_SOURCE_PRIORITY[nameSource] ?? 0;
+  if (newPriority >= currentPriority && name !== existing.name) {
+    db.prepare("UPDATE users SET name = ?, name_source = ? WHERE id = ?")
+      .run(name, nameSource, userId);
+  }
+}
+
+/** Get user short label: "U3(张三)" or "U3" */
+export function getUserShortLabel(
+  db: Database.Database,
+  userId: string,
+): string {
+  const row = db.prepare(
+    "SELECT id, name FROM users WHERE id = ?",
+  ).get(userId) as { id: string; name: string | null } | undefined;
+  if (!row) return userId;
+  const shortId = row.id.toUpperCase();
+  return row.name ? `${shortId}(${row.name})` : shortId;
+}
+
+/** Get user short label by platform ID */
+export function getUserShortLabelByPlatformId(
+  db: Database.Database,
+  platform: string,
+  platformId: string,
+): string {
+  const row = db.prepare(
+    "SELECT id, name FROM users WHERE platform = ? AND platform_id = ?",
+  ).get(platform, platformId) as { id: string; name: string | null } | undefined;
+  if (!row) return platformId;
+  const shortId = row.id.toUpperCase();
+  return row.name ? `${shortId}(${row.name})` : shortId;
 }
 
 /** 确保会话存在，返回内部 ID。事务保护防止并发 ID 冲突 */
@@ -239,14 +347,26 @@ export function ensureChat(
   platformId: string,
   type: "p2p" | "group",
   name?: string,
+  userId?: string,
 ): string {
   const tx = db.transaction(
-    (p: string, pid: string, t: string, n: string | null): string => {
+    (p: string, pid: string, t: string, n: string | null, uid: string | null): string => {
       const existing = db.prepare(
-        "SELECT id FROM chats WHERE platform = ? AND platform_id = ?",
-      ).get(p, pid) as { id: string } | undefined;
+        "SELECT id, name FROM chats WHERE platform = ? AND platform_id = ?",
+      ).get(p, pid) as { id: string; name: string | null } | undefined;
 
-      if (existing) return existing.id;
+      if (existing) {
+        // Update name if provided and currently null
+        if (n && !existing.name) {
+          db.prepare("UPDATE chats SET name = ? WHERE id = ?").run(n, existing.id);
+        }
+        // Update user_id for p2p chats if not yet set
+        if (uid && t === "p2p") {
+          db.prepare("UPDATE chats SET user_id = ? WHERE id = ? AND user_id IS NULL")
+            .run(uid, existing.id);
+        }
+        return existing.id;
+      }
 
       const max = db.prepare(
         "SELECT MAX(CAST(SUBSTR(id, 2) AS INTEGER)) as n FROM chats",
@@ -254,14 +374,23 @@ export function ensureChat(
       const id = `c${(max.n ?? 0) + 1}`;
 
       db.prepare(
-        "INSERT INTO chats (id, type, name, platform, platform_id) VALUES (?, ?, ?, ?, ?)",
-      ).run(id, t, n, p, pid);
+        "INSERT INTO chats (id, type, name, platform, platform_id, user_id) VALUES (?, ?, ?, ?, ?, ?)",
+      ).run(id, t, n, p, pid, uid);
 
       log.info("chat created", { id, type: t, platform: p, platformId: pid });
       return id;
     },
   );
-  return tx(platform, platformId, type, name ?? null) as string;
+  return tx(platform, platformId, type, name ?? null, userId ?? null) as string;
+}
+
+/** Update chat name */
+export function updateChatName(
+  db: Database.Database,
+  chatId: string,
+  name: string,
+): void {
+  db.prepare("UPDATE chats SET name = ? WHERE id = ?").run(name, chatId);
 }
 
 /** 存储消息，返回内部消息 ID。消息 + FTS 索引在同一个事务中 */
@@ -277,13 +406,14 @@ export function storeMessage(
     replyTo?: number;
     platform: string;
     platformMsgId?: string;
+    platformTs?: string;
     platformRaw?: string;
   },
 ): number {
   const tx = db.transaction(() => {
     const result = db.prepare(`
-      INSERT INTO messages (chat_id, sender_id, session_key, role, content_text, content_type, reply_to, platform, platform_msg_id, platform_raw)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO messages (chat_id, sender_id, session_key, role, content_text, content_type, reply_to, platform, platform_msg_id, platform_ts, platform_raw)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       msg.chatId,
       msg.senderId,
@@ -294,6 +424,7 @@ export function storeMessage(
       msg.replyTo ?? null,
       msg.platform,
       msg.platformMsgId ?? null,
+      msg.platformTs ?? null,
       msg.platformRaw ?? null,
     );
 
@@ -309,4 +440,24 @@ export function storeMessage(
   });
 
   return tx();
+}
+
+/** Get message content by platform message ID (for reply context) */
+export function getMessageByPlatformId(
+  db: Database.Database,
+  platform: string,
+  platformMsgId: string,
+): { id: number; contentText: string | null; senderId: string } | undefined {
+  return db.prepare(
+    "SELECT id, content_text AS contentText, sender_id AS senderId FROM messages WHERE platform = ? AND platform_msg_id = ? LIMIT 1",
+  ).get(platform, platformMsgId) as { id: number; contentText: string | null; senderId: string } | undefined;
+}
+
+/** Update content_text for an existing message (e.g., after fetching reply context from API) */
+export function updateMessageContent(
+  db: Database.Database,
+  id: number,
+  contentText: string,
+): void {
+  db.prepare("UPDATE messages SET content_text = ? WHERE id = ?").run(contentText, id);
 }

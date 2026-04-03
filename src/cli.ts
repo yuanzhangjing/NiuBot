@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * NiuBot CLI — agent 调用的 memory/summary 操作工具。
+ * NiuBot CLI — agent 调用的 memory/summary/messages/contacts/send/cron/task 操作工具。
  * 命令和权限逻辑对齐 cc-connect。
  *
  * 环境变量：
@@ -11,6 +11,7 @@
  *   NIUBOT_USER_ID    — 当前用户 ID
  *   NIUBOT_CHAT_ID    — 当前会话 ID
  *   NIUBOT_CHAT_TYPE  — 当前会话类型（p2p / group）
+ *   NIUBOT_WORK_DIR   — 工作目录（用于 task 操作）
  */
 
 import path from "node:path";
@@ -38,15 +39,21 @@ import {
   toMonday,
   toSunday,
 } from "./memory/chat-summary.js";
+import { handleMessages } from "./cli/messages.js";
+import { handleContacts } from "./cli/contacts.js";
+import { handleSend, handleSendFile, handleRestart } from "./cli/send.js";
+import { handleCron } from "./cli/cron.js";
+import { handleTask } from "./cli/task.js";
 
 // ─── Context ───────────────────────────────────────────────
 
 const NIUBOT_HOME = process.env["NIUBOT_HOME"] ?? path.join(os.homedir(), ".niubot");
+// Load per-session env first (written by ACP backend), then global defaults.
+// dotenv won't override already-set vars, so first-loaded wins.
+dotenv.config({ path: path.join(process.cwd(), ".niubot.env") });
 dotenv.config({ path: path.join(NIUBOT_HOME, ".env") });
 
 // 命令行参数解析（全局 flags 优先于环境变量）
-// 注意：extractGlobalFlags 会原地修改传入的数组（splice），
-// 所以必须传入一个持久引用，后续 main() 也用这个引用。
 const cliArgs = process.argv.slice(2);
 const globalFlags = extractGlobalFlags(cliArgs);
 
@@ -57,8 +64,9 @@ const DB_PATH = globalFlags["db-path"]
 const USER_ID = globalFlags["user-id"] ?? process.env["NIUBOT_USER_ID"];
 const CHAT_ID = globalFlags["chat-id"] ?? process.env["NIUBOT_CHAT_ID"];
 const CHAT_TYPE = (globalFlags["chat-type"] ?? process.env["NIUBOT_CHAT_TYPE"] ?? "p2p") as "p2p" | "group";
+const WORK_DIR = process.env["NIUBOT_WORK_DIR"] ?? (BOT_NAME ? path.join(NIUBOT_HOME, BOT_NAME, "workspace") : ".");
 
-/** 提取全局 flags（--user-id, --chat-id, --db-path, --chat-type）并从 argv 中移除 */
+/** 提取全局 flags 并从 argv 中移除 */
 function extractGlobalFlags(args: string[]): Record<string, string> {
   const flags: Record<string, string> = {};
   const globalKeys = new Set(["user-id", "chat-id", "db-path", "chat-type"]);
@@ -85,7 +93,9 @@ function requireUserId(): string {
 
 function openDb(): Database.Database {
   try {
-    return new Database(DB_PATH);
+    const db = new Database(DB_PATH);
+    db.pragma("busy_timeout = 5000");
+    return db;
   } catch {
     console.error(`Error: cannot open database at ${DB_PATH}`);
     process.exit(1);
@@ -105,7 +115,6 @@ function parseArgs(args: string[]): { positional: string[]; flags: Record<string
       if (next && !next.startsWith("--")) { flags[key] = next; i++; }
       else { flags[key] = "true"; }
     } else if (arg.startsWith("-") && arg.length === 2) {
-      // short flags: -n, -s, -d, -v
       const key = arg.slice(1);
       const next = args[i + 1];
       if (next && !next.startsWith("-")) { flags[key] = next; i++; }
@@ -119,24 +128,19 @@ function parseArgs(args: string[]): { positional: string[]; flags: Record<string
 
 // ─── Access control helpers ────────────────────────────────
 
-/** 检查跨会话访问权限（对齐 cc-connect checkChatAccess） */
 function checkChatAccess(targetChatId: string): void {
-  // 没有当前会话上下文时，允许显式指定的 chat-id（admin/调试场景）
   if (!CHAT_ID) return;
   if (targetChatId === CHAT_ID) return;
-
-  // 群聊中不允许跨会话查询
   if (CHAT_TYPE === "group") {
     console.error("Error: cross-chat query is not allowed in group chat");
     process.exit(1);
   }
-  // 私聊中允许跨会话（信任 admin）
 }
 
 // ─── Main ──────────────────────────────────────────────────
 
 async function main(): Promise<void> {
-  const args = cliArgs; // 已被 extractGlobalFlags 清理过
+  const args = cliArgs;
   const command = args[0];
 
   switch (command) {
@@ -148,6 +152,27 @@ async function main(): Promise<void> {
       break;
     case "summarize":
       await handleSummarize();
+      break;
+    case "messages":
+      handleMessages(openDb(), args.slice(1), CHAT_ID, CHAT_TYPE, USER_ID, checkChatAccess, parseArgs);
+      break;
+    case "contacts":
+      handleContacts(openDb(), args.slice(1), CHAT_ID, CHAT_TYPE, parseArgs);
+      break;
+    case "send":
+      handleSend(args.slice(1), CHAT_ID, parseArgs);
+      break;
+    case "send-file":
+      handleSendFile(args.slice(1), CHAT_ID, parseArgs);
+      break;
+    case "cron":
+      handleCron(openDb(), args.slice(1), CHAT_ID, USER_ID, parseArgs);
+      break;
+    case "task":
+      handleTask(args.slice(1), WORK_DIR, CHAT_ID, CHAT_TYPE, USER_ID, parseArgs);
+      break;
+    case "restart":
+      handleRestart();
       break;
     default:
       printUsage();
@@ -234,15 +259,12 @@ function userMemoryList(db: Database.Database, userId: string, args: string[]): 
 
   let memories;
   if (targetUserId && targetUserId !== userId) {
-    // 查看其他用户的记忆
     if (CHAT_TYPE === "p2p") {
       console.error("Error: cannot view other user's memories in private chat");
       process.exit(1);
     }
-    // 群聊中只能看 public
     memories = listUserMemory(db, targetUserId, "public");
   } else {
-    // 查看自己的记忆
     memories = listUserMemory(db, userId);
   }
 
@@ -263,7 +285,6 @@ function userMemoryGet(db: Database.Database, userId: string, args: string[]): v
   const m = getUserMemory(db, id);
   if (!m) { console.error(`Memory #${id} not found`); process.exit(1); }
 
-  // 权限检查
   if (m.userId !== userId) {
     if (CHAT_TYPE === "p2p") {
       console.error("Error: cannot view other user's memories in private chat");
@@ -372,7 +393,6 @@ function resolveChatId(flags: Record<string, string>): string {
 }
 
 function chatSummaryOverview(db: Database.Database, args: string[]): void {
-  // 检查是否有 upsert 子命令
   if (args[0] === "upsert") {
     const { flags } = parseArgs(args.slice(1));
     const chatId = resolveChatId(flags);
@@ -398,7 +418,6 @@ function chatSummaryOverview(db: Database.Database, args: string[]): void {
 }
 
 function chatSummaryDaily(db: Database.Database, args: string[]): void {
-  // 子命令：get 或 upsert
   if (args[0] === "get") {
     const { positional } = parseArgs(args.slice(1));
     const id = Number(positional[0]);
@@ -418,7 +437,7 @@ function chatSummaryDaily(db: Database.Database, args: string[]): void {
     const date = flags["date"];
     const summary = flags["summary"];
     if (!date || !summary) {
-      console.error("Usage: niubot chat-summary daily upsert --date <YYYY-MM-DD> --summary \"...\" [--detail \"...\"] [--start-msg-id N] [--end-msg-id N]");
+      console.error("Usage: niubot chat-summary daily upsert --date <YYYY-MM-DD> --summary \"...\" [--detail \"...\"]");
       process.exit(1);
     }
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
@@ -432,7 +451,6 @@ function chatSummaryDaily(db: Database.Database, args: string[]): void {
     return;
   }
 
-  // 列表
   const { flags } = parseArgs(args);
   const chatId = resolveChatId(flags);
   const limit = flags["limit"] ?? flags["n"];
@@ -452,7 +470,6 @@ function chatSummaryDaily(db: Database.Database, args: string[]): void {
 }
 
 function chatSummaryWeekly(db: Database.Database, args: string[]): void {
-  // 子命令：get 或 upsert
   if (args[0] === "get") {
     const { positional } = parseArgs(args.slice(1));
     const id = Number(positional[0]);
@@ -476,14 +493,12 @@ function chatSummaryWeekly(db: Database.Database, args: string[]): void {
       console.error("Usage: niubot chat-summary weekly upsert --week <Monday-date> --summary \"...\" [--detail \"...\"]");
       process.exit(1);
     }
-    // 自动转换为周一
     const monday = toMonday(week);
     const id = upsertWeekly(db, chatId, monday, summary, flags["detail"] ?? "");
     console.log(`Upserted weekly #${id}`);
     return;
   }
 
-  // 列表
   const { flags } = parseArgs(args);
   const chatId = resolveChatId(flags);
   const limit = flags["limit"] ?? flags["n"];
@@ -542,31 +557,22 @@ function printUsage(): void {
 Usage: niubot <command> <subcommand> [options]
 
 Commands:
-  user-memory add --summary "..." [--detail "..."] [--visibility private|public]
-  user-memory list [--user-id <id>]
-  user-memory get <id>
-  user-memory update <id> [--summary "..."] [--detail "..."] [--visibility private|public]
-  user-memory del <id>
+  user-memory   add|list|get|update|del     Manage user memories
+  chat-summary  overview|daily|weekly|get|del  View/manage chat summaries
+  messages      list|search                 Query message history
+  contacts      list-users|list-chats|get-user|get-chat|set-name
+  send          <text>                      Send message via IPC
+  send-file     <file-path>                 Send file via IPC
+  cron          add|list|del                Manage scheduled tasks
+  task          create|list|update|delete   Manage task projects
+  restart                                   Restart bot (admin, via IPC)
+  summarize                                 Run summarizer
 
-  chat-summary overview [--chat-id <id>]
-  chat-summary overview upsert --summary "..." [--detail "..."]
-  chat-summary daily [--chat-id <id>] [--since <date>] [--before <date>] [--limit N]
-  chat-summary daily get <id>
-  chat-summary daily upsert --date <YYYY-MM-DD> --summary "..." [--detail "..."] [--start-msg-id N] [--end-msg-id N]
-  chat-summary weekly [--chat-id <id>] [--since <date>] [--before <date>] [--limit N]
-  chat-summary weekly get <id>
-  chat-summary weekly upsert --week <Monday-date> --summary "..." [--detail "..."]
-  chat-summary get <id>
-  chat-summary del <id>
-
-  summarize                  Run summarizer (generate daily/weekly/overview for all active chats)
-
-Environment:
-  NIUBOT_USER_ID     Current user ID (set by NiuBot runtime)
-  NIUBOT_CHAT_ID     Current chat ID (set by NiuBot runtime)
-  NIUBOT_CHAT_TYPE   Chat type: p2p or group (set by NiuBot runtime)
-  NIUBOT_HOME        NiuBot home directory (default: ~/.niubot)
-  NIUBOT_DB_PATH     Database path (default: ~/.niubot/niubot.db)`);
+Global flags (apply to all commands):
+  --user-id <id>     Override NIUBOT_USER_ID
+  --chat-id <id>     Override NIUBOT_CHAT_ID
+  --chat-type <type> Override NIUBOT_CHAT_TYPE (p2p/group)
+  --db-path <path>   Override NIUBOT_DB_PATH`);
 }
 
 main().catch((err) => {
