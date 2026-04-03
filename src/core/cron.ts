@@ -97,7 +97,7 @@ export class CronScheduler {
 
   private async tick(): Promise<void> {
     const now = new Date();
-    const nowStr = now.toISOString().slice(0, 19).replace("T", " ");
+    const nowStr = formatLocalDateTime(now);
 
     const jobs = this.db.prepare(
       "SELECT * FROM cron_jobs WHERE status = 'active'",
@@ -262,4 +262,10 @@ function matchesCronField(field: string, value: number): boolean {
     }
   }
   return false;
+}
+
+/** Format a Date as "YYYY-MM-DD HH:MM:SS" in system local time (consistent with matchesCron) */
+function formatLocalDateTime(d: Date): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }

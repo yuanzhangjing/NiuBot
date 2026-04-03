@@ -162,6 +162,10 @@ function messagesSearch(
     sql += " AND m.chat_id = ?";
     params.push(targetChatId);
   }
+  if (searchAll && flags["chat-type"]) {
+    sql += " AND m.chat_id IN (SELECT id FROM chats WHERE type = ?)";
+    params.push(flags["chat-type"]);
+  }
   if (flags["since"]) {
     sql += " AND m.created_at >= ?";
     params.push(flags["since"]);

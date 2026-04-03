@@ -170,8 +170,6 @@ export class FeishuAdapter implements PlatformAdapter {
 
   async sendFile(chatId: string, filePath: string, fileName?: string): Promise<string> {
     const name = fileName ?? path.basename(filePath);
-    const stat = fs.statSync(filePath);
-
     // Upload file first
     const uploadResp = await this.client.im.file.create({
       data: {
