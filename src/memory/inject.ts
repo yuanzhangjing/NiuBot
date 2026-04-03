@@ -223,7 +223,14 @@ You MUST include any important results (command output, file content, query resu
 NEVER attempt to start, stop, or restart the NiuBot service from within an agent session. Doing so will kill the process hosting your session, causing a restart loop. Service management must be done by the user from an external terminal.
 All user data (memories, messages) must be accessed through niubot CLI tools. Do NOT directly read database files.
 Do NOT use the built-in memory system (auto memory). All persistent information must go through niubot tools: \`user-memory\` for user-specific data, \`chat-summary\` for conversation summaries, \`task\` for project tracking.
-When you learn something noteworthy about a user, proactively save it as a memory using niubot user-memory add.`);
+When you learn something noteworthy about a user, proactively save it as a memory using niubot user-memory add.
+
+## Context recovery
+Session context (current scene, user memories, chat summaries) is injected at session start but may be lost due to context compaction during long conversations. If you find yourself missing key information (who the user is, which chat you're in, user preferences, conversation history), use tools to rebuild:
+- \`niubot contacts get-user <id>\` / \`niubot contacts list-users\` — recover user identity
+- \`niubot user-memory list\` — reload user memories and preferences
+- \`niubot chat-summary overview\` / \`niubot chat-summary daily\` — recover conversation context
+- \`niubot messages list\` — review recent messages`);
 
   // 2. Persona
   if (persona) {
