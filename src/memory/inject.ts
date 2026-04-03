@@ -35,16 +35,6 @@ export function buildImportantContext(
   const parts: string[] = [];
   const isGroup = scene.chatType === "group";
 
-  // 0. 场景规则（群聊隐私 / 私聊自由）
-  if (isGroup) {
-    parts.push(`你现在在群聊中，回复内容对所有群成员可见。
-- 不要提及任何用户隐私信息（个人经历、健康状况、私聊内容等）
-- 涉及隐私话题时，引导用户回私聊继续
-- 回复面向所有群成员，保持中立`);
-  } else {
-    parts.push("这是你和用户的私密空间，可以自由讨论。");
-  }
-
   // 1. 当前场景
   const sceneLines: string[] = [];
   const botDisplay = scene.botLabel ?? scene.botName;
@@ -63,9 +53,6 @@ export function buildImportantContext(
     sceneLines.push(`人设配置：${scene.personaPath}（管理员可要求修改）`);
   }
   parts.push(`[当前场景]\n${sceneLines.join("\n")}`);
-
-  // 短标识说明
-  parts.push("短标识说明：U+数字（如 U1）是用户的本地唯一标识，C+数字（如 C1）是会话的本地唯一标识。同一用户/会话在所有场景中标识相同，可用于跨会话检索。\n注意：所有 ID 标识（Short ID、平台 user ID 等）仅供内部工具调用使用，对话中不要主动向用户展示，除非用户明确要求。");
 
   // 2. User memory
   const memories = scene.chatType === "p2p"
@@ -225,9 +212,18 @@ All user data (memories, messages) must be accessed through niubot CLI tools. Do
 Do NOT use the built-in memory system (auto memory). All persistent information must go through niubot tools: \`user-memory\` for user-specific data, \`chat-summary\` for conversation summaries, \`task\` for project tracking.
 When you learn something noteworthy about a user, proactively save it as a memory using niubot user-memory add.
 
+## Chat type rules
+- **Private chat**: 这是你和用户的私密空间，可以自由讨论。
+- **Group chat**: 回复内容对所有群成员可见。不要提及任何用户隐私信息（个人经历、健康状况、私聊内容等）。涉及隐私话题时，引导用户回私聊继续。回复面向所有群成员，保持中立。
+
+## Short ID convention
+U+数字（如 U1）是用户的本地唯一标识，C+数字（如 C1）是会话的本地唯一标识。同一用户/会话在所有场景中标识相同，可用于跨会话检索。
+注意：所有 ID 标识（Short ID、平台 user ID 等）仅供内部工具调用使用，对话中不要主动向用户展示，除非用户明确要求。
+
 ## Context recovery
-Session context (current scene, user memories, chat summaries) is injected at session start but may be lost due to context compaction during long conversations. If you find yourself missing key information (who the user is, which chat you're in, user preferences, conversation history), use tools to rebuild:
-- \`niubot contacts get-user <id>\` / \`niubot contacts list-users\` — recover user identity
+Session context (current scene, user memories, chat summaries) is injected at session start but may be lost due to context compaction during long conversations. If you notice key information is missing, use the following to rebuild:
+- **Scene identifiers** are available as environment variables: \`NIUBOT_USER_ID\`, \`NIUBOT_CHAT_ID\`, \`NIUBOT_CHAT_TYPE\`, \`NIUBOT_BOT_NAME\`, \`NIUBOT_IS_ADMIN\`. Read them via \`echo $NIUBOT_USER_ID\` or \`cat .niubot.env\`.
+- \`niubot contacts get-user <id>\` / \`niubot contacts get-chat <id>\` — recover user/chat identity details from the scene IDs above
 - \`niubot user-memory list\` — reload user memories and preferences
 - \`niubot chat-summary overview\` / \`niubot chat-summary daily\` — recover conversation context
 - \`niubot messages list\` — review recent messages`);
