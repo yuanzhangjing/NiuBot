@@ -397,18 +397,9 @@ export class Pipeline {
       hasParent: !!msg.parentPlatformMsgId,
     });
 
-    if (msg.platformMsgId) {
-      this.im.addReaction(msg.chatPlatformId, msg.platformMsgId, PROCESSING_EMOJI).catch(() => {});
-    }
-
     // 缓存映射
     this.platformChatIds.set(chatId, msg.chatPlatformId);
     this.chatUserIds.set(chatId, userId);
-
-    // Save trigger msg ID for reply-to-message
-    if (msg.platformMsgId) {
-      this.triggerMsgIds.set(chatId, msg.platformMsgId);
-    }
 
     // Prepare text to send to agent (with reply context and sender annotation)
     let agentText = displayText;
@@ -416,13 +407,29 @@ export class Pipeline {
       agentText = `${replyContext}\n\n${displayText}`;
     }
 
-    // 短词打断检测
+    // 短词打断检测（在添加 processing emoji 之前，避免孤立 emoji）
     const trimmedText = msg.contentText.trim().toLowerCase();
     if (INTERRUPT_WORDS.has(trimmedText) && this.chatSessions.has(chatId)) {
       this.log.info("interrupt word detected", { chatId, word: trimmedText });
+      // Clean up previous message's processing emoji
+      const prevTriggerMsgId = this.triggerMsgIds.get(chatId);
+      if (prevTriggerMsgId) {
+        this.im.removeReaction(msg.chatPlatformId, prevTriggerMsgId, PROCESSING_EMOJI).catch(() => {});
+        this.triggerMsgIds.delete(chatId);
+      }
       this.cancelChat(chatId).catch(() => {});
       this.im.sendText(msg.chatPlatformId, "好的，已停止。").catch(() => {});
       return;
+    }
+
+    // Add processing emoji AFTER interrupt check to avoid orphan emoji
+    if (msg.platformMsgId) {
+      this.im.addReaction(msg.chatPlatformId, msg.platformMsgId, PROCESSING_EMOJI).catch(() => {});
+    }
+
+    // Save trigger msg ID for reply-to-message
+    if (msg.platformMsgId) {
+      this.triggerMsgIds.set(chatId, msg.platformMsgId);
     }
 
     this.queue.push({
@@ -550,6 +557,12 @@ export class Pipeline {
       // 被 cancel 的 prompt 不存储不发送（cancelled 后会有新的合并消息进来）
       if (response.cancelled) {
         this.log.info("prompt was cancelled, skipping response", { chatId });
+        // Clean up processing emoji on cancelled prompt
+        const triggerMsgId = this.triggerMsgIds.get(chatId);
+        if (triggerMsgId && platformChatId) {
+          this.im.removeReaction(platformChatId, triggerMsgId, PROCESSING_EMOJI).catch(() => {});
+          this.triggerMsgIds.delete(chatId);
+        }
         return;
       }
 
