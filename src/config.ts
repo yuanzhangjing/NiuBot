@@ -13,7 +13,7 @@ dotenv.config({ path: path.join(NIUBOT_HOME, ".env") });
 export { NIUBOT_HOME };
 
 /** 支持的 agent backend */
-export type AgentBackendType = "claude-code" | "claude-code-acp";
+export type AgentBackendType = "claude-code";
 
 /** 单个 Bot 的配置 */
 export interface BotConfig {
@@ -45,7 +45,7 @@ export interface NiuBotConfig {
   };
 }
 
-const VALID_BACKENDS = new Set<AgentBackendType>(["claude-code", "claude-code-acp"]);
+const VALID_BACKENDS = new Set<AgentBackendType>(["claude-code"]);
 
 const DEFAULTS = {
   agent: {

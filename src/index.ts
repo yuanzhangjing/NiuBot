@@ -1,5 +1,4 @@
 import { loadConfig } from "./config.js";
-import { AcpBackend } from "./agent/acp/backend.js";
 import { ClaudeCliBackend } from "./agent/claude-cli/backend.js";
 import type { AgentBackend } from "./agent/types.js";
 import { createBotInstance, type BotInstance } from "./bot-instance.js";
@@ -31,9 +30,6 @@ async function main(): Promise<void> {
   switch (config.agent.backend) {
     case "claude-code":
       agent = new ClaudeCliBackend("bypassPermissions");
-      break;
-    case "claude-code-acp":
-      agent = new AcpBackend("npx -y @agentclientprotocol/claude-agent-acp", "autoApprove");
       break;
   }
   await agent.start();

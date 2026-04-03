@@ -260,9 +260,11 @@ export class Pipeline {
         : undefined;
 
       try {
+        const supportsSystemPrompt = this.agent.supportsSystemPrompt !== false;
+
         const agentSession = await this.agent.createSession({
           workingDirectory: this.workingDirectory,
-          importantContext: importantContext || undefined,
+          importantContext: supportsSystemPrompt ? (importantContext || undefined) : undefined,
           userId: row.user_id ?? undefined,
           chatId: row.chat_id,
           chatType,
@@ -271,6 +273,11 @@ export class Pipeline {
           botName: this.botIdentity.name,
           liteModel: this.botIdentity.liteModel,
         });
+
+        // fallback 模式下 recover 也需要注入 important context（agent session 是全新的）
+        if (!supportsSystemPrompt && importantContext) {
+          this.pendingImportantContext.set(row.chat_id, importantContext);
+        }
 
         this.chatSessions.set(row.chat_id, {
           agentSession,
@@ -538,12 +545,26 @@ export class Pipeline {
 
       const chatSession = await this.getOrCreateSession(chatId);
 
-      // 拼接 normal 上下文前缀（新 session 的首条消息）
+      // 拼接上下文前缀（新 session 的首条消息）
       let messageToSend = mergedText;
-      const normalContext = this.pendingNormalContext.get(chatId);
-      if (normalContext) {
+      const importantCtx = this.pendingImportantContext.get(chatId);
+      const normalCtx = this.pendingNormalContext.get(chatId);
+      if (importantCtx || normalCtx) {
+        const parts: string[] = [];
+        if (importantCtx) {
+          parts.push(
+            `<important-context preserve="true">\n` +
+            `以下是关键场景信息，上下文压缩时必须保留。如果丢失，用 niubot whoami 重建。\n\n` +
+            `${importantCtx}\n` +
+            `</important-context>`,
+          );
+        }
+        if (normalCtx) {
+          parts.push(`<context>\n${normalCtx}\n</context>`);
+        }
+        this.pendingImportantContext.delete(chatId);
         this.pendingNormalContext.delete(chatId);
-        messageToSend = `<context>\n${normalContext}\n</context>\n\n${mergedText}`;
+        messageToSend = `${parts.join("\n\n")}\n\n${mergedText}`;
       }
 
       this.log.info("sending to agent", {
@@ -684,9 +705,12 @@ export class Pipeline {
       this.pendingNormalContext.set(chatId, normalContext);
     }
 
+    // backend 不支持 system prompt 时，important 上下文 fallback 到首条消息前缀
+    const supportsSystemPrompt = this.agent.supportsSystemPrompt !== false;
+
     const agentSession = await this.agent.createSession({
       workingDirectory: this.workingDirectory,
-      importantContext: importantContext || undefined,
+      importantContext: supportsSystemPrompt ? (importantContext || undefined) : undefined,
       userId: userId ?? undefined,
       chatId,
       chatType,
@@ -696,6 +720,10 @@ export class Pipeline {
       liteModel: this.botIdentity.liteModel,
       isAdmin,
     });
+
+    if (!supportsSystemPrompt && importantContext) {
+      this.pendingImportantContext.set(chatId, importantContext);
+    }
 
     const sessionKey = `s_${Date.now()}_${crypto.randomUUID().slice(0, 8)}`;
 
@@ -737,6 +765,9 @@ export class Pipeline {
 
   /** normal 上下文暂存 */
   private pendingNormalContext = new Map<string, string>();
+
+  /** important 上下文暂存（backend 不支持 system prompt 时 fallback） */
+  private pendingImportantContext = new Map<string, string>();
 
   /** 路由判断的最小轮次门槛 */
   private static readonly ROUTE_MIN_TURNS = 10;

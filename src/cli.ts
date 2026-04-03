@@ -49,9 +49,7 @@ import { handleTask } from "./cli/task.js";
 // ─── Context ───────────────────────────────────────────────
 
 const NIUBOT_HOME = process.env["NIUBOT_HOME"] ?? path.join(os.homedir(), ".niubot");
-// Load per-session env first (written by ACP backend), then global defaults.
-// dotenv won't override already-set vars, so first-loaded wins.
-dotenv.config({ path: path.join(process.cwd(), ".niubot.env") });
+// Load global defaults from NIUBOT_HOME/.env
 dotenv.config({ path: path.join(NIUBOT_HOME, ".env") });
 
 // 命令行参数解析（全局 flags 优先于环境变量）

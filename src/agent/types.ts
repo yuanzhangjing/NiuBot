@@ -13,7 +13,7 @@ export interface SessionConfig {
   modelTier?: ModelTier;
   /** 轻量模型 ID（覆盖 backend 默认值） */
   liteModel?: string;
-  /** important 上下文（CLI: 注入 system prompt；ACP: 拼到首条 prompt 前缀） */
+  /** important 上下文（通过 system prompt 注入） */
   importantContext?: string;
   /** 当前用户 ID（传递给 agent 环境变量） */
   userId?: string;
@@ -66,6 +66,6 @@ export interface AgentBackend {
   /** 获取 session 累计字节数（可选，用于统计） */
   getCumulativeBytes?(sessionId: string): number;
 
-  /** 是否支持 system prompt 注入（CLI 支持，ACP 不支持） */
+  /** 是否支持 system prompt 注入 */
   supportsSystemPrompt?: boolean;
 }
