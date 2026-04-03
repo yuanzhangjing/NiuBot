@@ -13,6 +13,7 @@ import {
   toMonday,
   toSunday,
 } from "../memory/chat-summary.js";
+import { localToday, localYesterday, localDateStartUTC, nextDay, sqlTZModifier } from "../tz.js";
 
 const log = createLogger("summarizer");
 
@@ -29,33 +30,37 @@ interface DayStats {
   endId: number;
 }
 
-/** 获取指定 chat 在 since 之后每天的消息统计 */
+/** 获取指定 chat 在 since 之后每天的消息统计（按本地日期分组，排除今天） */
 function getDailyMessageStats(db: Database.Database, chatId: string, since: string): DayStats[] {
-  const today = new Date().toISOString().slice(0, 10);
+  const todayStartUTC = localDateStartUTC(localToday());
+  const sinceUTC = localDateStartUTC(since);
+  const tzMod = sqlTZModifier();
 
   const rows = db.prepare(`
-    SELECT SUBSTR(created_at, 1, 10) as day,
+    SELECT SUBSTR(datetime(created_at, '${tzMod}'), 1, 10) as day,
            COUNT(*) as cnt,
            MIN(id) as start_id,
            MAX(id) as end_id
     FROM messages
-    WHERE chat_id = ? AND created_at >= ? AND SUBSTR(created_at, 1, 10) != ?
-    GROUP BY SUBSTR(created_at, 1, 10)
+    WHERE chat_id = ? AND created_at >= ? AND created_at < ?
+    GROUP BY 1
     ORDER BY day
-  `).all(chatId, since, today) as Array<{ day: string; cnt: number; start_id: number; end_id: number }>;
+  `).all(chatId, sinceUTC, todayStartUTC) as Array<{ day: string; cnt: number; start_id: number; end_id: number }>;
 
   return rows.map((r) => ({ day: r.day, count: r.cnt, startId: r.start_id, endId: r.end_id }));
 }
 
-/** 获取指定 chat 某天的消息文本 */
+/** 获取指定 chat 某天（本地日期）的消息文本 */
 function getDayMessages(db: Database.Database, chatId: string, date: string): string {
+  const dateStartUTC = localDateStartUTC(date);
+  const dateEndUTC = localDateStartUTC(nextDay(date));
   const rows = db.prepare(`
     SELECT u.name, m.role, m.content_text
     FROM messages m
     LEFT JOIN users u ON m.sender_id = u.id
-    WHERE m.chat_id = ? AND SUBSTR(m.created_at, 1, 10) = ?
+    WHERE m.chat_id = ? AND m.created_at >= ? AND m.created_at < ?
     ORDER BY m.id
-  `).all(chatId, date) as Array<{ name: string | null; role: string; content_text: string | null }>;
+  `).all(chatId, dateStartUTC, dateEndUTC) as Array<{ name: string | null; role: string; content_text: string | null }>;
 
   let result = "";
   for (const r of rows) {
@@ -79,13 +84,11 @@ function getActiveChats(db: Database.Database, since: string): string[] {
   return rows.map((r) => r.chat_id);
 }
 
-/** 计算回溯起点（4 周前的周一） */
+/** 计算回溯起点（4 周前的周一，基于本地日期） */
 function maxSince(): string {
-  const now = new Date();
-  const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
-  const day = d.getUTCDay();
-  const diff = day === 0 ? -6 : 1 - day;
-  d.setUTCDate(d.getUTCDate() + diff - MAX_LOOKBACK_WEEKS * 7);
+  const monday = toMonday(localToday());
+  const d = new Date(monday + "T00:00:00Z");
+  d.setUTCDate(d.getUTCDate() - MAX_LOOKBACK_WEEKS * 7);
   return d.toISOString().slice(0, 10);
 }
 
@@ -126,9 +129,7 @@ async function summarizeChat(db: Database.Database, agent: AgentBackend, chatId:
   }
 
   // Phase 2: 生成 weekly
-  const yesterday = new Date();
-  yesterday.setUTCDate(yesterday.getUTCDate() - 1);
-  const yesterdayStr = yesterday.toISOString().slice(0, 10);
+  const yesterdayStr = localYesterday();
 
   const existingWeeklies = new Set(
     listWeeklies(db, chatId, { limit: 20 }).map((w) => w.period),

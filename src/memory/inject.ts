@@ -3,6 +3,7 @@ import { listUserMemory } from "./user-memory.js";
 import { getOverview, listDailies, listWeeklies } from "./chat-summary.js";
 import { toSunday } from "./chat-summary.js";
 import { createLogger } from "../logger.js";
+import { localToday, localDateStartUTC, nextDay, utcToLocalHHMM, utcToLocalDateTime } from "../tz.js";
 
 const log = createLogger("inject");
 
@@ -67,10 +68,11 @@ export function buildNormalContext(
   const dailies = listDailies(db, chatId, { limit: 30 });
   const weeklies = listWeeklies(db, chatId, { limit: 8 });
 
-  const today = new Date().toISOString().slice(0, 10);
+  const today = localToday();
+  const todayStartUTC = localDateStartUTC(today);
   const todayCount = db.prepare(
     "SELECT COUNT(*) as n FROM messages WHERE chat_id = ? AND created_at >= ?",
-  ).get(chatId, today) as { n: number };
+  ).get(chatId, todayStartUTC) as { n: number };
 
   const todayFullyCovered = isTodayDailyFullyCovering(db, chatId, today, dailies);
 
@@ -128,7 +130,7 @@ export function buildNormalContext(
     const archivedSessions = getTodayArchivedSessions(db, chatId);
     if (archivedSessions.length > 0) {
       const lines = archivedSessions.map((s) => {
-        const time = s.ended_at.slice(11, 16);
+        const time = utcToLocalHHMM(s.ended_at);
         const summaryText = s.parsedSummary ?? "(无摘要)";
         return `  [${time}] ${summaryText}`;
       });
@@ -152,7 +154,7 @@ export function buildNormalContext(
           open_items?: string[];
         };
         const recallLines: string[] = [];
-        const time = recallSession.ended_at?.slice(0, 16).replace("T", " ") ?? "未知时间";
+        const time = recallSession.ended_at ? utcToLocalDateTime(recallSession.ended_at) : "未知时间";
         recallLines.push(`之前讨论（${time}）：${parsed.summary ?? ""}`);
         if (parsed.decisions?.length) {
           recallLines.push(`决策：${parsed.decisions.join("；")}`);
@@ -303,11 +305,13 @@ function isTodayDailyFullyCovering(
   const todayDaily = dailies.find((d) => d.period === today);
   if (!todayDaily?.endMsgId) return false;
 
+  const todayStartUTC = localDateStartUTC(today);
+  const tomorrowStartUTC = localDateStartUTC(nextDay(today));
   const maxSession = db.prepare(`
     SELECT MAX(end_msg_id) as max_end
     FROM sessions
-    WHERE chat_id = ? AND status = 'archived' AND DATE(ended_at) = ?
-  `).get(chatId, today) as { max_end: number | null } | undefined;
+    WHERE chat_id = ? AND status = 'archived' AND ended_at >= ? AND ended_at < ?
+  `).get(chatId, todayStartUTC, tomorrowStartUTC) as { max_end: number | null } | undefined;
 
   if (!maxSession?.max_end) return true;
 
@@ -318,14 +322,16 @@ function getTodayArchivedSessions(
   db: Database.Database,
   chatId: string,
 ): Array<{ id: string; ended_at: string; parsedSummary: string | null }> {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = localToday();
+  const todayStartUTC = localDateStartUTC(today);
+  const tomorrowStartUTC = localDateStartUTC(nextDay(today));
 
   const rows = db.prepare(`
     SELECT id, summary, ended_at
     FROM sessions
-    WHERE chat_id = ? AND status = 'archived' AND DATE(ended_at) = ?
+    WHERE chat_id = ? AND status = 'archived' AND ended_at >= ? AND ended_at < ?
     ORDER BY ended_at ASC
-  `).all(chatId, today) as Array<{
+  `).all(chatId, todayStartUTC, tomorrowStartUTC) as Array<{
     id: string;
     summary: string | null;
     ended_at: string;

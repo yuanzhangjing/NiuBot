@@ -12,6 +12,7 @@ import type Database from "better-sqlite3";
 import type { AgentBackend } from "../agent/types.js";
 import { ROUTE_DECISION_PROMPT } from "./prompts.js";
 import { createLogger } from "../logger.js";
+import { utcToLocalHHMM, localToday, localDateStartUTC, nextDay } from "../tz.js";
 
 const log = createLogger("routing");
 
@@ -166,7 +167,7 @@ function getRecentMessages(db: Database.Database, sessionKey: string, beforeTime
 
   return rows.map((r) => {
     const sender = r.role === "assistant" ? "Bot" : (r.sender_name ?? "User");
-    const time = r.created_at.slice(11, 16); // HH:MM
+    const time = utcToLocalHHMM(r.created_at);
     const text = r.content_text.length > 200 ? r.content_text.slice(0, 200) + "..." : r.content_text;
     return `[${time}] ${sender}: ${text}`;
   }).join("\n");
@@ -174,14 +175,16 @@ function getRecentMessages(db: Database.Database, sessionKey: string, beforeTime
 
 /** 查询今日已归档的 session 列表，格式化为文本 */
 function getTodayArchivedSessions(db: Database.Database, chatId: string): string {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = localToday();
+  const todayStartUTC = localDateStartUTC(today);
+  const tomorrowStartUTC = localDateStartUTC(nextDay(today));
 
   const rows = db.prepare(`
     SELECT id, summary, topics, ended_at
     FROM sessions
-    WHERE chat_id = ? AND status = 'archived' AND DATE(ended_at) = ?
+    WHERE chat_id = ? AND status = 'archived' AND ended_at >= ? AND ended_at < ?
     ORDER BY ended_at ASC
-  `).all(chatId, today) as Array<{
+  `).all(chatId, todayStartUTC, tomorrowStartUTC) as Array<{
     id: string;
     summary: string | null;
     topics: string | null;
@@ -191,7 +194,7 @@ function getTodayArchivedSessions(db: Database.Database, chatId: string): string
   if (rows.length === 0) return "";
 
   return rows.map((r) => {
-    const time = r.ended_at.slice(11, 16);
+    const time = utcToLocalHHMM(r.ended_at);
     const summaryObj = r.summary ? tryParseJson(r.summary) : null;
     const summaryText = summaryObj?.summary ?? "(无摘要)";
     const topics = r.topics ? tryParseJson(r.topics) : [];
