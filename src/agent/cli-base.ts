@@ -21,6 +21,10 @@ export interface ParsedOutput {
   text: string;
   /** agent 侧的 session ID（用于 resume） */
   agentSessionId?: string;
+  /** 本次调用的上下文 token 总数 */
+  contextTokens?: number;
+  /** 本次调用使用的模型 */
+  model?: string;
 }
 
 export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession> implements AgentBackend {
@@ -104,7 +108,11 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
         cumulativeBytes: s.cumulativeBytes,
       });
 
-      return { text: parsed.text };
+      return {
+        text: parsed.text,
+        contextTokens: parsed.contextTokens,
+        model: parsed.model,
+      };
     } catch (err: any) {
       if (err.killed) {
         this.log.warn("prompt timed out", { sessionId: agentSession.id });

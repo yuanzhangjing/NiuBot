@@ -29,6 +29,8 @@ export interface SessionConfig {
   botName?: string;
   /** 是否为管理员（传递给 agent 环境变量） */
   isAdmin?: boolean;
+  /** Agent 侧 session ID（用于 recover 时 resume） */
+  agentSessionId?: string;
 }
 
 export interface AgentSession {
@@ -39,6 +41,10 @@ export interface AgentResponse {
   text: string;
   cancelled?: boolean;
   filesChanged?: string[];
+  /** 本次调用的上下文 token 总数 */
+  contextTokens?: number;
+  /** 本次调用使用的模型 */
+  model?: string;
 }
 
 export interface AgentBackend {
@@ -65,6 +71,9 @@ export interface AgentBackend {
 
   /** 获取 session 累计字节数（可选，用于统计） */
   getCumulativeBytes?(sessionId: string): number;
+
+  /** 获取 agent 侧 session ID（用于持久化，recover 时 resume） */
+  getAgentSessionId?(sessionId: string): string | undefined;
 
   /** 是否支持 system prompt 注入 */
   supportsSystemPrompt?: boolean;

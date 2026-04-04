@@ -44,6 +44,7 @@ export class ClaudeCliBackend extends CliAgentBackend<ClaudeSession> {
       workingDirectory: config.workingDirectory ?? process.cwd(),
       model: config.modelTier === "lite" ? (config.liteModel ?? this.liteModel) : undefined,
       importantContext: config.importantContext,
+      claudeSessionId: config.agentSessionId,
       extraEnv: buildNiubotEnv(config),
       cumulativeBytes: 0,
       permissionMode: this.permissionMode,
@@ -76,10 +77,34 @@ export class ClaudeCliBackend extends CliAgentBackend<ClaudeSession> {
         result?: string;
         session_id?: string;
         is_error?: boolean;
+        usage?: {
+          input_tokens?: number;
+          cache_creation_input_tokens?: number;
+          cache_read_input_tokens?: number;
+          output_tokens?: number;
+        };
+        modelUsage?: Record<string, unknown>;
       };
+
+      // context tokens = input + cache_creation + cache_read + output
+      let contextTokens: number | undefined;
+      if (parsed.usage) {
+        const u = parsed.usage;
+        const total = (u.input_tokens ?? 0)
+          + (u.cache_creation_input_tokens ?? 0)
+          + (u.cache_read_input_tokens ?? 0)
+          + (u.output_tokens ?? 0);
+        if (total > 0) contextTokens = total;
+      }
+
+      // model name from modelUsage keys
+      const model = parsed.modelUsage ? Object.keys(parsed.modelUsage)[0] : undefined;
+
       return {
         text: (parsed.result ?? stdout).trim(),
         agentSessionId: parsed.session_id,
+        contextTokens,
+        model,
       };
     } catch {
       return { text: stdout.trim() };
@@ -90,6 +115,10 @@ export class ClaudeCliBackend extends CliAgentBackend<ClaudeSession> {
     if (parsed.agentSessionId) {
       session.claudeSessionId = parsed.agentSessionId;
     }
+  }
+
+  getAgentSessionId(sessionId: string): string | undefined {
+    return this.sessions.get(sessionId)?.claudeSessionId;
   }
 
   protected agentEnv(): Record<string, string> {

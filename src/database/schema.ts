@@ -168,6 +168,13 @@ const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 3,
+    description: "M4: sessions.agent_session_id for Claude CLI resume on recover",
+    up: (db) => {
+      db.exec("ALTER TABLE sessions ADD COLUMN agent_session_id TEXT");
+    },
+  },
 ];
 
 const LATEST_VERSION = migrations[migrations.length - 1]!.version;

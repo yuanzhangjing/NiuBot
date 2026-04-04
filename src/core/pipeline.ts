@@ -14,7 +14,6 @@ import { buildImportantContext, buildNormalContext, type SceneInfo } from "../me
 import { loadPersona } from "../persona.js";
 import { ARCHIVE_SUMMARY_PROMPT } from "./prompts.js";
 import { decideRoute, type RouteDecision } from "./routing.js";
-import { containsMarkdown } from "../im/feishu/adapter.js";
 import { createLogger } from "../logger.js";
 
 const execAsync = promisify(exec);
@@ -229,7 +228,7 @@ export class Pipeline {
   /** 进程恢复：从 DB 恢复 active sessions，重建 backend session */
   async recover(): Promise<void> {
     const rows = this.db.prepare(`
-      SELECT s.id, s.chat_id, s.user_id, c.platform_id, c.type
+      SELECT s.id, s.chat_id, s.user_id, s.agent_session_id, c.platform_id, c.type
       FROM sessions s
       JOIN chats c ON s.chat_id = c.id
       WHERE s.status = 'active'
@@ -238,6 +237,7 @@ export class Pipeline {
       id: string;
       chat_id: string;
       user_id: string | null;
+      agent_session_id: string | null;
       platform_id: string;
       type: string;
     }>;
@@ -291,6 +291,8 @@ export class Pipeline {
           botId: this.botIdentity.platformBotId,
           botName: this.botIdentity.name,
           liteModel: this.botIdentity.liteModel,
+          isAdmin,
+          agentSessionId: row.agent_session_id ?? undefined,
         });
 
         // fallback 模式下 recover 也需要注入 important context（agent session 是全新的）
@@ -444,9 +446,11 @@ export class Pipeline {
       this.im.addReaction(msg.chatPlatformId, msg.platformMsgId, PROCESSING_EMOJI).catch(() => {});
     }
 
-    // Save trigger msg ID for reply-to-message
+    // Save trigger msg ID for reply-to-message, reset hasReplied so each message gets a reply
     if (msg.platformMsgId) {
       this.triggerMsgIds.set(chatId, msg.platformMsgId);
+      const session = this.chatSessions.get(chatId);
+      if (session) session.hasReplied = false;
     }
 
     // 短词打断检测
@@ -769,56 +773,53 @@ export class Pipeline {
         platform: this.botIdentity.platform,
       });
 
-      // 更新 session 统计
+      // 更新 session 统计（COALESCE 保证 agent_session_id 只写一次，后续不覆盖）
       const cumulativeBytes = this.agent.getCumulativeBytes?.(chatSession.agentSession.id) ?? 0;
+      const agentSessionId = this.agent.getAgentSessionId?.(chatSession.agentSession.id);
       this.db.prepare(`
         UPDATE sessions
         SET message_count = (SELECT COUNT(*) FROM messages WHERE session_key = ?),
             turn_count = turn_count + 1,
             cumulative_bytes = ?,
             last_active_at = datetime('now'),
-            end_msg_id = ?
+            end_msg_id = ?,
+            agent_session_id = COALESCE(agent_session_id, ?)
         WHERE id = ?
-      `).run(chatSession.sessionKey, cumulativeBytes, replyMsgId, chatSession.sessionKey);
+      `).run(chatSession.sessionKey, cumulativeBytes, replyMsgId, agentSessionId ?? null, chatSession.sessionKey);
 
-      // 拼接 debug meta 信息
-      let sendText = response.text;
-      if (process.env["NIUBOT_DEBUG_META"] === "1") {
-        const stats = this.db.prepare(
-          "SELECT turn_count FROM sessions WHERE id = ?",
-        ).get(chatSession.sessionKey) as { turn_count: number } | undefined;
-        const shortId = chatSession.sessionKey.slice(-8);
-        sendText += `\n\n---\n${shortId} #${stats?.turn_count ?? "?"}`;
+      // 构建 footer（对齐 cc-connect：shortId · #turn · context · model）
+      const stats = this.db.prepare(
+        "SELECT turn_count FROM sessions WHERE id = ?",
+      ).get(chatSession.sessionKey) as { turn_count: number } | undefined;
+      const shortId = chatSession.sessionKey.slice(-8);
+      const footerParts = [`${shortId} · #${stats?.turn_count ?? "?"}`];
+      if (response.contextTokens && response.contextTokens > 0) {
+        footerParts.push(`${(response.contextTokens / 1000).toFixed(1)}k`);
       }
+      if (response.model) {
+        footerParts.push(formatModelName(response.model));
+      }
+      const footer = footerParts.join(" · ");
 
-      // 发送到 IM
+      // 发送到 IM（始终用卡片，footer 带 session 信息）
       try {
-        // Reply-to-Message: first response quotes trigger, subsequent are normal
         const triggerMsgId = this.triggerMsgIds.get(chatId);
+        this.log.debug("send decision", { chatId, hasReplied: chatSession.hasReplied, triggerMsgId: triggerMsgId ?? "none" });
         if (!chatSession.hasReplied && triggerMsgId) {
-          // Detect markdown and choose send method
-          if (containsMarkdown(sendText)) {
-            await this.im.sendMarkdownCard(chatSession.platformChatId, sendText);
-          } else {
-            await this.im.sendReply(chatSession.platformChatId, sendText, triggerMsgId);
-          }
+          await this.im.replyCard(triggerMsgId, "", response.text, footer);
           chatSession.hasReplied = true;
         } else {
-          if (containsMarkdown(sendText)) {
-            await this.im.sendMarkdownCard(chatSession.platformChatId, sendText);
-          } else {
-            await this.im.sendText(chatSession.platformChatId, sendText);
-          }
+          await this.im.sendCard(chatSession.platformChatId, "", response.text, footer);
         }
       } catch (sendErr) {
         this.log.error("failed to send response to IM", {
           chatId,
           error: String(sendErr),
-          responseLength: sendText.length,
+          responseLength: response.text.length,
         });
-        // Fallback to plain text if markdown card fails
+        // Fallback to plain text if card fails
         try {
-          await this.im.sendText(chatSession.platformChatId, sendText);
+          await this.im.sendText(chatSession.platformChatId, response.text);
         } catch {
           // Give up
         }
@@ -1106,4 +1107,15 @@ function formatUptime(ms: number): string {
   if (minutes > 0) parts.push(`${minutes}m`);
   parts.push(`${secs}s`);
   return parts.join(" ");
+}
+
+/** "claude-opus-4-6" → "Opus 4.6", "claude-haiku-4-5-20251001" → "Haiku 4.5" */
+function formatModelName(raw: string): string {
+  const s = raw.replace(/^claude-/, "");
+  // Remove date suffix like -20251001
+  const parts = s.split("-").filter((p) => p.length > 0 && !(p.length === 8 && /^\d+$/.test(p)));
+  if (parts.length === 0) return raw;
+  // Capitalize first part, join rest with dots
+  const name = parts[0]![0]!.toUpperCase() + parts[0]!.slice(1);
+  return parts.length > 1 ? `${name} ${parts.slice(1).join(".")}` : name;
 }
