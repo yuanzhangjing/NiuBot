@@ -50,11 +50,11 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  // 4. 启动所有 bot：recover → start → IM connect → API server → Cron
+  // 4. 启动所有 bot：start（identity + admin 检测） → recover → IM connect → API server → Cron
   for (const bot of bots) {
     try {
-      await bot.pipeline.recover();
       await bot.pipeline.start();
+      await bot.pipeline.recover();
       await bot.im.start();
 
       // Start API server for IPC
