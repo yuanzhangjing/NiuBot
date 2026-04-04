@@ -1,5 +1,7 @@
-import { exec, execFileSync } from "node:child_process";
+import { exec, execFileSync, spawn } from "node:child_process";
+import path from "node:path";
 import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
 import type Database from "better-sqlite3";
 import type { PlatformAdapter, NormalizedMessage } from "../im/types.js";
 import type { AgentBackend, AgentSession } from "../agent/types.js";
@@ -582,7 +584,7 @@ export class Pipeline {
         }
         this.log.info("builtin command: restart", { userId });
         this.im.sendText(platformChatId, "正在重启...").catch(() => {});
-        setTimeout(() => process.exit(0), 500);
+        this.spawnRestart(platformChatId);
         return true;
       }
       case "/status": {
@@ -656,6 +658,42 @@ export class Pipeline {
       const errMsg = err instanceof Error ? err.message : String(err);
       this.im.sendText(platformChatId, `命令执行失败: ${errMsg}`).catch(() => {});
     });
+  }
+
+  /**
+   * Spawn detached restart.sh（对齐 cc-connect cmdRestart）。
+   * restart.sh 负责：sleep → kill old → start new → health check → notify result。
+   */
+  private spawnRestart(platformChatId: string): void {
+    // restart.sh 位于项目根目录（和 package.json 同级）
+    const projectRoot = path.resolve(
+      path.dirname(fileURLToPath(import.meta.url)),
+      "../..",
+    );
+    const restartScript = path.join(projectRoot, "restart.sh");
+
+    // 找到 chatId（内部 ID）用于通知
+    let chatId: string | undefined;
+    for (const [cid, pid] of this.platformChatIds) {
+      if (pid === platformChatId) { chatId = cid; break; }
+    }
+
+    const socketPath = path.join(path.dirname(this.dbPath), "api.sock");
+
+    const child = spawn("nohup", ["bash", restartScript], {
+      cwd: projectRoot,
+      detached: true,
+      stdio: "ignore",
+      env: {
+        ...process.env,
+        NIUBOT_BOT_NAME: this.botIdentity.name,
+        NIUBOT_CHAT_ID: chatId ?? "",
+        NIUBOT_API_SOCKET: socketPath,
+      },
+    });
+    child.unref();
+
+    this.log.info("restart script spawned", { pid: child.pid, chatId, socketPath });
   }
 
   private async process(chatId: string, mergedText: string): Promise<void> {
