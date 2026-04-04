@@ -1,3 +1,5 @@
+import { exec, execFileSync } from "node:child_process";
+import { promisify } from "node:util";
 import type Database from "better-sqlite3";
 import type { PlatformAdapter, NormalizedMessage } from "../im/types.js";
 import type { AgentBackend, AgentSession } from "../agent/types.js";
@@ -12,6 +14,8 @@ import { ARCHIVE_SUMMARY_PROMPT } from "./prompts.js";
 import { decideRoute, type RouteDecision } from "./routing.js";
 import { containsMarkdown } from "../im/feishu/adapter.js";
 import { createLogger } from "../logger.js";
+
+const execAsync = promisify(exec);
 
 const PROCESSING_EMOJI = "Get";
 
@@ -76,6 +80,9 @@ export class Pipeline {
 
   /** 数据库路径（传递给 agent 子进程） */
   private dbPath: string;
+
+  /** 启动时间戳，用于 /status 计算 uptime */
+  private startedAt = Date.now();
 
   /** 已处理的消息 ID 去重集合（有上限防内存泄漏） */
   private processedMsgIds = new Set<string>();
@@ -449,6 +456,11 @@ export class Pipeline {
       return;
     }
 
+    // 内置命令拦截：/xxx 开头的消息先匹配内置命令，命中则不传给 agent
+    if (this.handleBuiltinCommand(msg.contentText.trim(), userId, msg.chatPlatformId)) {
+      return;
+    }
+
     this.queue.push({
       chatId,
       text: agentText,
@@ -543,6 +555,105 @@ export class Pipeline {
         this.log.info("admin detected (config)", { userId, platformId: pid });
       }
     }
+  }
+
+  /**
+   * 内置命令拦截：匹配 /xxx 格式的消息，命中则直接处理并返回 true。
+   * 未命中返回 false，消息继续走 agent 流程。
+   *
+   * 分发顺序（对齐 cc-connect）：
+   *   1. 内置命令 switch（/restart, /status）
+   *   2. 管理员 shell 命令（tryShellCommand）
+   *   3. return false → 转发给 agent
+   */
+  private handleBuiltinCommand(text: string, userId: string, platformChatId: string): boolean {
+    if (!text.startsWith("/")) return false;
+
+    const parts = text.split(/\s+/);
+    const cmd = parts[0].toLowerCase();
+    const isAdmin = this.adminUserIds.has(userId);
+
+    // 1. 内置命令
+    switch (cmd) {
+      case "/restart": {
+        if (!isAdmin) {
+          this.im.sendText(platformChatId, "restart 仅管理员可用。").catch(() => {});
+          return true;
+        }
+        this.log.info("builtin command: restart", { userId });
+        this.im.sendText(platformChatId, "正在重启...").catch(() => {});
+        setTimeout(() => process.exit(0), 500);
+        return true;
+      }
+      case "/status": {
+        this.log.info("builtin command: status", { userId });
+        this.sendStatus(platformChatId);
+        return true;
+      }
+    }
+
+    // 2. 管理员 shell 命令：检查首个 token 是否在 PATH 中，是则执行，否则转发 agent
+    if (isAdmin) {
+      const shellCmd = text.slice(1); // 去掉 / 前缀
+      const firstToken = shellCmd.split(/\s+/)[0];
+      if (firstToken && commandExistsSync(firstToken)) {
+        this.tryShellCommand(shellCmd, platformChatId);
+        return true;
+      }
+    }
+
+    // 3. 未识别的 / 命令，交给 agent 处理
+    return false;
+  }
+
+  /**
+   * /status：输出 bot 运行状态信息。
+   */
+  private sendStatus(platformChatId: string): void {
+    const uptimeMs = Date.now() - this.startedAt;
+    const uptimeStr = formatUptime(uptimeMs);
+
+    const activeSessions = this.chatSessions.size;
+
+    // 统计活跃 cron 任务数
+    const cronRow = this.db.prepare(
+      "SELECT COUNT(*) as count FROM cron_jobs WHERE status = 'active'",
+    ).get() as { count: number } | undefined;
+    const cronCount = cronRow?.count ?? 0;
+
+    const lines = [
+      `Bot: ${this.botIdentity.name}`,
+      `Platform: ${this.botIdentity.platform}`,
+      `Uptime: ${uptimeStr}`,
+      `Active sessions: ${activeSessions}`,
+      `Cron jobs: ${cronCount}`,
+      `Working directory: ${this.workingDirectory}`,
+    ];
+
+    this.im.sendText(platformChatId, lines.join("\n")).catch(() => {});
+  }
+
+  /**
+   * 管理员 shell 命令执行（对齐 cc-connect tryShellCommand）。
+   * 通过 sh -c 执行，30s 超时。调用前已由 commandExistsSync 确认命令存在。
+   */
+  private tryShellCommand(cmd: string, platformChatId: string): void {
+    this.log.info("shell command", { cmd });
+
+    execAsync(cmd, {
+      timeout: 30_000,
+      cwd: this.workingDirectory,
+    }).then(({ stdout, stderr }) => {
+      const output = (stdout + stderr).trim();
+      if (output) {
+        this.im.sendText(platformChatId, output).catch(() => {});
+      } else {
+        this.im.sendText(platformChatId, "(命令执行完成，无输出)").catch(() => {});
+      }
+    }).catch((err: unknown) => {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      this.im.sendText(platformChatId, `命令执行失败: ${errMsg}`).catch(() => {});
+    });
   }
 
   private async process(chatId: string, mergedText: string): Promise<void> {
@@ -888,4 +999,30 @@ export class Pipeline {
 
     await this.agent.cancelSession(session.agentSession);
   }
+}
+
+/** 检查命令是否在 PATH 中（对齐 Go exec.LookPath） */
+function commandExistsSync(cmd: string): boolean {
+  try {
+    execFileSync("which", [cmd], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** 格式化 uptime 毫秒为可读字符串 */
+function formatUptime(ms: number): string {
+  const seconds = Math.floor(ms / 1000);
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor((seconds % 86400) / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const secs = seconds % 60;
+
+  const parts: string[] = [];
+  if (days > 0) parts.push(`${days}d`);
+  if (hours > 0) parts.push(`${hours}h`);
+  if (minutes > 0) parts.push(`${minutes}m`);
+  parts.push(`${secs}s`);
+  return parts.join(" ");
 }
