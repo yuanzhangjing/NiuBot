@@ -4,14 +4,13 @@ Instructions for AI coding agents working on this codebase.
 
 ## Project Overview
 
-NiuBot is a TypeScript AI persona runtime that bridges IM platforms (Feishu) with AI coding agents via ACP (Agent Client Protocol). It uses SQLite for persistence and a per-chat message queue for buffering/merging.
+NiuBot Engine is a TypeScript AI persona runtime that bridges IM platforms (Feishu) with AI coding agents. It uses SQLite for persistence and a per-chat message queue for buffering/merging.
 
 ## Tech Stack
 
 - **Language**: TypeScript (ES2022, Node16 module resolution, strict mode)
 - **Runtime**: Node.js >= 20
 - **IM SDK**: `@larksuiteoapi/node-sdk` (Feishu/Lark)
-- **Agent Protocol**: `@agentclientprotocol/sdk` (ACP)
 - **Database**: `better-sqlite3` (SQLite with WAL mode)
 - **Build**: `tsc` → `dist/`
 - **Test**: `vitest`
@@ -36,7 +35,7 @@ The system has three layers connected by interfaces:
    - `Pipeline`: orchestration hub — routes messages, manages sessions, persists to DB
    - `MessageQueue`: per-chat buffering with cancel+merge logic
 
-3. **Agent Layer** (`src/agent/`): `AgentBackend` interface. Currently ACP over stdio subprocess.
+3. **Agent Layer** (`src/agent/`): `AgentBackend` interface. Currently CLI-based (Claude Code).
 
 4. **Database** (`src/database/`): SQLite with `users`, `chats`, `sessions`, `messages` tables + FTS5.
 
@@ -50,7 +49,7 @@ The system has three layers connected by interfaces:
 
 ## Code Conventions
 
-- No classes where plain functions suffice, but current code uses classes for stateful components (Pipeline, MessageQueue, AcpBackend, FeishuAdapter)
-- Error handling: log and continue for non-critical paths (e.g., reaction failures); crash for unrecoverable errors (e.g., ACP process exit)
+- No classes where plain functions suffice, but current code uses classes for stateful components (Pipeline, MessageQueue, CliAgentBackend, FeishuAdapter)
+- Error handling: log and continue for non-critical paths (e.g., reaction failures); crash for unrecoverable errors (e.g., agent process exit)
 - Config: environment variables override YAML file values
 - Database operations use explicit transactions for multi-step writes

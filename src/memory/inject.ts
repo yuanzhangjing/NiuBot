@@ -22,6 +22,8 @@ export interface SceneInfo {
   isAdmin?: boolean;
   /** 人设文件路径（仅 admin 可见） */
   personaPath?: string;
+  /** 人设内容（每次 session 启动时从文件读取，支持热更新） */
+  personaContent?: string;
 }
 
 /**
@@ -34,6 +36,11 @@ export function buildImportantContext(
 ): string {
   const parts: string[] = [];
   const isGroup = scene.chatType === "group";
+
+  // 0. Persona（每次 session 启动时从文件读取，支持不重启热更新）
+  if (scene.personaContent) {
+    parts.push(scene.personaContent);
+  }
 
   // 1. 当前场景
   const sceneLines: string[] = [];
@@ -195,19 +202,20 @@ export function buildNormalContext(
 // ── Static context (写入 AGENTS.md) ─────────────────────────
 
 /**
- * 生成 AGENTS.md 的内容：persona + bot 身份 + skill 工具文档 + 行为规则。
+ * 生成 AGENTS.md 的内容：行为规则 + 工具文档。
+ * Bot 身份（名字）由场景信息注入，人格由 persona.md 注入，均在 per-session important context 中。
  */
-export function buildStaticContext(botName: string, persona?: string): string {
+export function buildStaticContext(): string {
   const parts: string[] = [];
 
   // 1. 基本行为规则
-  parts.push(`You are ${botName}, an AI bot running inside NiuBot runtime.
+  parts.push(`You are an AI bot running inside NiuBot Engine. Your identity (name, persona) is injected in the session context.
 Your responses are automatically delivered to the user — just reply normally.
-Do NOT mention NiuBot, Claude, or Anthropic to the user. Present yourself according to your persona (injected in the session context).
+Do NOT mention NiuBot Engine, Claude, or Anthropic to the user. Present yourself according to your persona (injected in the session context).
 The user can ONLY see the LAST text block in your response — any text you write before a tool call is NOT delivered to the user.
 Therefore: complete ALL tool calls first, then write your final response containing all important content. Do NOT interleave important content between tool calls.
 You MUST include any important results (command output, file content, query results, etc.) directly in your final text. Never assume the user has seen tool outputs, and never reference them with phrases like "see above" or "as shown in the output".
-NEVER attempt to start, stop, or restart the NiuBot service from within an agent session. Doing so will kill the process hosting your session, causing a restart loop. Service management must be done by the user from an external terminal.
+NEVER attempt to start, stop, or restart the NiuBot Engine service from within an agent session. Doing so will kill the process hosting your session, causing a restart loop. Service management must be done by the user from an external terminal.
 All user data (memories, messages) must be accessed through niubot CLI tools. Do NOT directly read database files.
 Do NOT use the built-in memory system (auto memory). All persistent information must go through niubot tools: \`user-memory\` for user-specific data, \`chat-summary\` for conversation summaries, \`task\` for project tracking.
 When you learn something noteworthy about a user, proactively save it as a memory using niubot user-memory add.
@@ -225,12 +233,7 @@ Session context (current scene, user memories, chat summaries) is injected at se
 - \`niubot chat-summary overview\` / \`niubot chat-summary daily\` — recover conversation context
 - \`niubot messages list\` — review recent messages`);
 
-  // 2. Persona
-  if (persona) {
-    parts.push(persona);
-  }
-
-  // 3. Tools documentation
+  // 2. Tools documentation
   parts.push(`## Available Tools
 
 ### User memory (about people)

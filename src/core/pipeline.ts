@@ -7,6 +7,7 @@ import {
   getUserShortLabel, getChatShortLabel, getMessageByPlatformId, updateMessageContent,
 } from "../database/schema.js";
 import { buildImportantContext, buildNormalContext, type SceneInfo } from "../memory/inject.js";
+import { loadPersona } from "../persona.js";
 import { ARCHIVE_SUMMARY_PROMPT } from "./prompts.js";
 import { decideRoute, type RouteDecision } from "./routing.js";
 import { containsMarkdown } from "../im/feishu/adapter.js";
@@ -22,7 +23,7 @@ const INTERRUPT_WORDS = new Set(["停", "算了", "取消", "stop", "cancel", "a
 
 /** Bot 身份信息，由外部传入 */
 export interface BotIdentity {
-  /** Bot 名称（如 "NiuBot"） */
+  /** Bot 显示名称（如 "CowBot"，从平台 API 获取或 config 指定） */
   name: string;
   /** IM 平台标识（如 "feishu"） */
   platform: string;
@@ -111,14 +112,21 @@ export class Pipeline {
 
   /** 启动管道：注册 IM 消息回调 */
   async start(): Promise<void> {
-    // Resolve bot's real open_id
+    // Resolve bot's real open_id and name from platform
     try {
-      const realBotId = await this.im.getBotOpenId();
+      const [realBotId, platformBotName] = await Promise.all([
+        this.im.getBotOpenId(),
+        this.im.getBotName(),
+      ]);
       if (realBotId) {
         this.botIdentity.platformBotId = realBotId;
       }
+      if (platformBotName) {
+        this.botIdentity.name = platformBotName;
+        this.log.info("bot name updated from platform", { name: platformBotName });
+      }
     } catch (err) {
-      this.log.warn("failed to fetch bot open_id", { error: String(err) });
+      this.log.warn("failed to fetch bot identity", { error: String(err) });
     }
 
     this.botUserId = ensureUser(
@@ -245,6 +253,7 @@ export class Pipeline {
         ? this.db.prepare("SELECT name FROM users WHERE id = ?").get(row.user_id) as { name: string | null } | undefined
         : undefined;
       const isAdmin = row.user_id ? this.adminUserIds.has(row.user_id) : false;
+      const persona = this.botIdentity.personaPath ? loadPersona(this.botIdentity.personaPath) : undefined;
       const importantContext = row.user_id
         ? buildImportantContext(this.db, {
             botName: this.botIdentity.name,
@@ -256,6 +265,7 @@ export class Pipeline {
             chatType,
             isAdmin,
             personaPath: isAdmin ? this.botIdentity.personaPath : undefined,
+            personaContent: persona,
           })
         : undefined;
 
@@ -685,6 +695,7 @@ export class Pipeline {
       ? this.db.prepare("SELECT name FROM users WHERE id = ?").get(userId) as { name: string | null } | undefined
       : undefined;
     const isAdmin = userId ? this.adminUserIds.has(userId) : false;
+    const persona = this.botIdentity.personaPath ? loadPersona(this.botIdentity.personaPath) : undefined;
     const importantContext = userId
       ? buildImportantContext(this.db, {
           botName: this.botIdentity.name,
@@ -696,6 +707,7 @@ export class Pipeline {
           chatType,
           isAdmin,
           personaPath: isAdmin ? this.botIdentity.personaPath : undefined,
+          personaContent: persona,
         })
       : undefined;
 

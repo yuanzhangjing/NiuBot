@@ -1,7 +1,7 @@
 {
   "name": "niubot",
   "version": "0.1.0",
-  "description": "AI Persona Runtime — an autonomous digital coworker with memory and personality",
+  "description": "NiuBot Engine — AI Persona Runtime powering autonomous digital coworkers with memory and personality",
   "type": "module",
   "main": "dist/index.js",
   "bin": {

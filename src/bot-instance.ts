@@ -8,7 +8,7 @@ import { Pipeline, type BotIdentity } from "./core/pipeline.js";
 import { ApiServer, type ApiHandler } from "./core/api.js";
 import { CronScheduler } from "./core/cron.js";
 import { startSummarizer } from "./summarizer/index.js";
-import { loadPersona } from "./persona.js";
+import { ensurePersonaFile } from "./persona.js";
 import { buildStaticContext } from "./memory/inject.js";
 import { createLogger } from "./logger.js";
 import type Database from "better-sqlite3";
@@ -34,9 +34,10 @@ export async function createBotInstance(
 ): Promise<BotInstance> {
   const log = createLogger("bot-instance", botConfig.name);
 
-  // 1. 确保目录存在
+  // 1. 确保目录和默认文件存在
   fs.mkdirSync(path.dirname(botConfig.dbPath), { recursive: true });
   fs.mkdirSync(botConfig.workingDirectory, { recursive: true });
+  ensurePersonaFile(botConfig.personaPath);
 
   // 2. 初始化数据库
   const db = initDatabase(botConfig.dbPath);
@@ -130,8 +131,7 @@ function generateAgentFiles(
   const agentsPath = path.join(botConfig.workingDirectory, "AGENTS.md");
   const claudePath = path.join(botConfig.workingDirectory, "CLAUDE.md");
 
-  const persona = loadPersona(botConfig.personaPath);
-  const content = buildStaticContext(botConfig.name, persona);
+  const content = buildStaticContext();
   fs.writeFileSync(agentsPath, content, "utf-8");
 
   try { fs.unlinkSync(claudePath); } catch { /* 不存在就忽略 */ }

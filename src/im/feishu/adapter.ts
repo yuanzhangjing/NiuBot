@@ -19,6 +19,9 @@ export class FeishuAdapter implements PlatformAdapter {
   /** Bot 自身的 open_id（启动时获取） */
   private botOpenId: string | null = null;
 
+  /** Bot 显示名称（从 /bot/v3/info/ 获取） */
+  private botName: string | null = null;
+
   /** App creator open_id（用于 admin 检测） */
   private appCreatorId: string | null = null;
 
@@ -199,6 +202,12 @@ export class FeishuAdapter implements PlatformAdapter {
     return this.botOpenId ?? "";
   }
 
+  async getBotName(): Promise<string | undefined> {
+    if (this.botName) return this.botName;
+    await this.fetchBotIdentity();
+    return this.botName ?? undefined;
+  }
+
   async getChatName(chatId: string): Promise<string | undefined> {
     try {
       const resp = await this.client.im.chat.get({
@@ -261,6 +270,10 @@ export class FeishuAdapter implements PlatformAdapter {
       if (botInfo?.open_id) {
         this.botOpenId = botInfo.open_id;
         log.info("bot open_id fetched", { openId: this.botOpenId });
+      }
+      if (botInfo?.app_name) {
+        this.botName = botInfo.app_name;
+        log.info("bot name fetched", { name: this.botName });
       }
     } catch (err) {
       log.warn("failed to fetch bot open_id, will use app_id as fallback", { error: String(err) });

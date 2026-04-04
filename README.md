@@ -1,8 +1,8 @@
-# NiuBot
+# NiuBot Engine
 
-AI Persona Runtime — an autonomous digital coworker with memory and personality.
+AI Persona Runtime — powering autonomous digital coworkers with memory and personality.
 
-NiuBot bridges IM platforms with AI coding agents via [ACP (Agent Client Protocol)](https://agentclientprotocol.org/). It's not a chatbot framework — it's a **persona runtime** where an AI agent lives as an independent team member: receiving messages, thinking, writing code, and replying, all autonomously.
+NiuBot Engine bridges IM platforms with AI coding agents. It's not a chatbot framework — it's a **persona runtime** where an AI agent lives as an independent team member: receiving messages, thinking, writing code, and replying, all autonomously.
 
 ## Architecture
 
@@ -70,7 +70,7 @@ All config lives in `~/.niubot/` (override via `NIUBOT_HOME` env var):
 | `feishu.appId` | `FEISHU_APP_ID` | — | Feishu app ID (**required**) |
 | `feishu.appSecret` | `FEISHU_APP_SECRET` | — | Feishu app secret (**required**) |
 | `agent.workingDirectory` | `NIUBOT_WORK_DIR` | — | Agent working directory (**required**) |
-| `agent.backend` | `NIUBOT_BACKEND` | `claude-code` | `claude-code` or `claude-code-acp` |
+| `agent.backend` | `NIUBOT_BACKEND` | `claude-code` | Agent backend type |
 | `database.path` | `NIUBOT_DB_PATH` | `~/.niubot/niubot.db` | SQLite database path |
 | `queue.bufferMs` | `NIUBOT_BUFFER_MS` | `3000` | Message merge window (ms) |
 | `queue.cancelThresholdMs` | `NIUBOT_CANCEL_MS` | `10000` | Cancel+merge threshold (ms) |

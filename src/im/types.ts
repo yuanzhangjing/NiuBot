@@ -75,6 +75,9 @@ export interface PlatformAdapter {
   /** 获取 bot 自身的 open_id */
   getBotOpenId(): Promise<string>;
 
+  /** 获取 bot 显示名称（从平台 API） */
+  getBotName(): Promise<string | undefined>;
+
   /** 获取群聊名称 */
   getChatName(chatId: string): Promise<string | undefined>;
 

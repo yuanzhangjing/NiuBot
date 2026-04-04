@@ -40,6 +40,8 @@ import {
   toSunday,
 } from "./memory/chat-summary.js";
 import { getUserShortLabel, getChatShortLabel } from "./database/schema.js";
+import { buildImportantContext, type SceneInfo } from "./memory/inject.js";
+import { loadPersona } from "./persona.js";
 import { handleMessages } from "./cli/messages.js";
 import { handleContacts } from "./cli/contacts.js";
 import { handleSend, handleSendFile, handleRestart } from "./cli/send.js";
@@ -559,44 +561,49 @@ function handleWhoami(): void {
   const botId = process.env["NIUBOT_BOT_ID"];
   const isAdmin = process.env["NIUBOT_IS_ADMIN"] === "true";
 
-  // Bot identity
-  let botLabel = botName;
+  // 构建 persona 路径并读取内容
+  const personaPath = BOT_NAME
+    ? path.join(NIUBOT_HOME, BOT_NAME, "persona.md")
+    : path.join(NIUBOT_HOME, "persona.md");
+  const personaContent = loadPersona(personaPath);
+
+  // 构建 bot label
+  let botLabel: string | undefined;
   if (botId) {
     const row = db.prepare(
-      "SELECT id, name FROM users WHERE platform_id = ? OR id = ?",
-    ).get(botId, botId) as { id: string; name: string | null } | undefined;
+      "SELECT id FROM users WHERE platform_id = ? OR id = ?",
+    ).get(botId, botId) as { id: string } | undefined;
     if (row) {
       botLabel = getUserShortLabel(db, row.id);
     }
   }
-  console.log(`Bot: ${botLabel}`);
 
-  // Chat
-  if (CHAT_ID) {
-    const chatLabel = getChatShortLabel(db, CHAT_ID);
-    console.log(`Chat: ${chatLabel} (${CHAT_TYPE})`);
-  } else {
-    console.log("Chat: (not set)");
-  }
+  // 构建 chat label
+  const chatLabel = CHAT_ID ? getChatShortLabel(db, CHAT_ID) : undefined;
 
-  // User
+  // 构建 user name
+  let userName: string | undefined;
   if (USER_ID) {
-    const userLabel = getUserShortLabel(db, USER_ID);
-    console.log(`User: ${userLabel}${isAdmin ? " (admin)" : ""}`);
-  } else {
-    console.log("User: (not set)");
+    const row = db.prepare("SELECT name FROM users WHERE id = ?").get(USER_ID) as { name: string | null } | undefined;
+    userName = row?.name ?? undefined;
   }
 
-  // User memories (summary count)
-  if (USER_ID) {
-    const memories = listUserMemory(db, USER_ID);
-    if (memories.length > 0) {
-      console.log(`Memories: ${memories.length} entries`);
-      for (const m of memories) {
-        console.log(`  #${m.id}  ${m.summary}`);
-      }
-    }
-  }
+  // 复用 buildImportantContext，输出和 session 注入完全一致
+  const scene: SceneInfo = {
+    botName: botLabel ?? botName,
+    botLabel,
+    userName,
+    userId: USER_ID ?? "unknown",
+    chatId: CHAT_ID ?? "unknown",
+    chatType: CHAT_TYPE as "p2p" | "group",
+    chatLabel,
+    isAdmin,
+    personaPath: isAdmin ? personaPath : undefined,
+    personaContent,
+  };
+
+  const output = buildImportantContext(db, scene);
+  console.log(output);
 
   db.close();
 }
