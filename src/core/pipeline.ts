@@ -459,7 +459,7 @@ export class Pipeline {
     }
 
     // 内置命令拦截：/xxx 开头的消息先匹配内置命令，命中则不传给 agent
-    if (this.handleBuiltinCommand(msg.contentText.trim(), userId, msg.chatPlatformId)) {
+    if (this.handleBuiltinCommand(msg.contentText.trim(), userId, msg.chatPlatformId, msg.platformMsgId)) {
       return;
     }
 
@@ -568,7 +568,7 @@ export class Pipeline {
    *   2. 管理员 shell 命令（tryShellCommand）
    *   3. return false → 转发给 agent
    */
-  private handleBuiltinCommand(text: string, userId: string, platformChatId: string): boolean {
+  private handleBuiltinCommand(text: string, userId: string, platformChatId: string, msgId?: string): boolean {
     if (!text.startsWith("/")) return false;
 
     const parts = text.split(/\s+/);
@@ -579,17 +579,17 @@ export class Pipeline {
     switch (cmd) {
       case "/restart": {
         if (!isAdmin) {
-          this.im.sendText(platformChatId, "restart 仅管理员可用。").catch(() => {});
+          this.replyText(platformChatId, msgId, "restart 仅管理员可用。");
           return true;
         }
         this.log.info("builtin command: restart", { userId });
-        this.im.sendText(platformChatId, "正在重启...").catch(() => {});
+        this.replyText(platformChatId, msgId, "正在重启...");
         this.spawnRestart(platformChatId);
         return true;
       }
       case "/status": {
         this.log.info("builtin command: status", { userId });
-        this.sendStatus(platformChatId);
+        this.sendStatus(platformChatId, msgId);
         return true;
       }
     }
@@ -599,7 +599,7 @@ export class Pipeline {
       const shellCmd = text.slice(1); // 去掉 / 前缀
       const firstToken = shellCmd.split(/\s+/)[0];
       if (firstToken && commandExistsSync(firstToken)) {
-        this.tryShellCommand(shellCmd, platformChatId);
+        this.tryShellCommand(shellCmd, platformChatId, msgId);
         return true;
       }
     }
@@ -608,31 +608,42 @@ export class Pipeline {
     return false;
   }
 
+  /** 回复文本：有 msgId 时引用回复，否则直接发送 */
+  private replyText(platformChatId: string, msgId: string | undefined, text: string): void {
+    if (msgId) {
+      this.im.sendReply(platformChatId, text, msgId).catch(() => {});
+    } else {
+      this.im.sendText(platformChatId, text).catch(() => {});
+    }
+  }
+
   /**
    * /status：输出 bot 运行状态信息。
    */
-  private sendStatus(platformChatId: string): void {
+  private sendStatus(platformChatId: string, msgId?: string): void {
     const uptimeMs = Date.now() - this.startedAt;
     const uptimeStr = formatUptime(uptimeMs);
 
     const activeSessions = this.chatSessions.size;
 
-    // 统计活跃 cron 任务数
     const cronRow = this.db.prepare(
       "SELECT COUNT(*) as count FROM cron_jobs WHERE status = 'active'",
     ).get() as { count: number } | undefined;
     const cronCount = cronRow?.count ?? 0;
 
-    const lines = [
-      `Bot: ${this.botIdentity.name}`,
-      `Platform: ${this.botIdentity.platform}`,
-      `Uptime: ${uptimeStr}`,
-      `Active sessions: ${activeSessions}`,
-      `Cron jobs: ${cronCount}`,
-      `Working directory: ${this.workingDirectory}`,
-    ];
+    const content = [
+      `**Bot:** ${this.botIdentity.name}`,
+      `**Platform:** ${this.botIdentity.platform}`,
+      `**Uptime:** ${uptimeStr}`,
+      `**Active sessions:** ${activeSessions}`,
+      `**Cron jobs:** ${cronCount}`,
+      `**Working directory:** \`${this.workingDirectory}\``,
+    ].join("\n");
 
-    this.im.sendText(platformChatId, lines.join("\n"))
+    const send = msgId
+      ? this.im.replyCard(msgId, "Status", content)
+      : this.im.sendCard(platformChatId, "Status", content);
+    send
       .then(() => this.log.info("status sent", { platformChatId }))
       .catch((err) => this.log.error("status send failed", { platformChatId, error: String(err) }));
   }
@@ -641,22 +652,28 @@ export class Pipeline {
    * 管理员 shell 命令执行（对齐 cc-connect tryShellCommand）。
    * 通过 sh -c 执行，30s 超时。调用前已由 commandExistsSync 确认命令存在。
    */
-  private tryShellCommand(cmd: string, platformChatId: string): void {
+  private tryShellCommand(cmd: string, platformChatId: string, msgId?: string): void {
     this.log.info("shell command", { cmd });
+
+    const sendResult = (content: string) => {
+      if (msgId) {
+        this.im.replyCard(msgId, "Shell", content).catch(() => {});
+      } else {
+        this.im.sendCard(platformChatId, "Shell", content).catch(() => {});
+      }
+    };
 
     execAsync(cmd, {
       timeout: 30_000,
       cwd: this.workingDirectory,
     }).then(({ stdout, stderr }) => {
       const output = (stdout + stderr).trim();
-      if (output) {
-        this.im.sendText(platformChatId, output).catch(() => {});
-      } else {
-        this.im.sendText(platformChatId, "(命令执行完成，无输出)").catch(() => {});
-      }
+      sendResult(formatShellOutput(this.workingDirectory, cmd, output, 0));
     }).catch((err: unknown) => {
-      const errMsg = err instanceof Error ? err.message : String(err);
-      this.im.sendText(platformChatId, `命令执行失败: ${errMsg}`).catch(() => {});
+      const execErr = err as { stdout?: string; stderr?: string; code?: number };
+      const output = ((execErr.stdout ?? "") + (execErr.stderr ?? "")).trim();
+      const exitCode = execErr.code ?? 1;
+      sendResult(formatShellOutput(this.workingDirectory, cmd, output, exitCode));
     });
   }
 
@@ -1049,6 +1066,30 @@ function commandExistsSync(cmd: string): boolean {
   } catch {
     return false;
   }
+}
+
+/** Shell 输出最大字符数（超出截断） */
+const SHELL_MAX_OUTPUT_LEN = 4000;
+
+/** 格式化 shell 命令输出（对齐 cc-connect FormatOutput） */
+function formatShellOutput(cwd: string, cmd: string, output: string, exitCode: number): string {
+  let body = "";
+  if (!output && exitCode === 0) {
+    body = "(no output)\n";
+  } else {
+    if (output.length > SHELL_MAX_OUTPUT_LEN) {
+      body = output.slice(0, SHELL_MAX_OUTPUT_LEN);
+      if (!body.endsWith("\n")) body += "\n";
+      body += `... (output truncated, ${output.length} chars total)\n`;
+    } else {
+      body = output;
+      if (body && !body.endsWith("\n")) body += "\n";
+    }
+  }
+  if (exitCode !== 0) {
+    body += `exit code: ${exitCode}\n`;
+  }
+  return `\`\`\`\n$ ${cwd}> ${cmd}\n${body}\`\`\``;
 }
 
 /** 格式化 uptime 毫秒为可读字符串 */

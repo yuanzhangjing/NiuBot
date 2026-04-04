@@ -106,21 +106,29 @@ export class FeishuAdapter implements PlatformAdapter {
   }
 
   async sendMarkdownCard(chatId: string, markdown: string): Promise<string> {
-    // Feishu Card v2 with markdown element
-    const card = {
-      schema: "2.0",
-      config: { wide_screen_mode: true },
-      body: {
-        elements: [{ tag: "markdown", content: markdown }],
-      },
-    };
+    return this.sendCard(chatId, "", markdown);
+  }
 
+  async sendCard(chatId: string, header: string, content: string, footer?: string): Promise<string> {
+    const cardJson = buildCardJSON(header, content, footer);
     const resp = await this.client.im.message.create({
       params: { receive_id_type: "chat_id" },
       data: {
         receive_id: chatId,
         msg_type: "interactive",
-        content: JSON.stringify(card),
+        content: cardJson,
+      },
+    });
+    return resp?.data?.message_id ?? "";
+  }
+
+  async replyCard(msgId: string, header: string, content: string, footer?: string): Promise<string> {
+    const cardJson = buildCardJSON(header, content, footer);
+    const resp = await this.client.im.message.reply({
+      path: { message_id: msgId },
+      data: {
+        msg_type: "interactive",
+        content: cardJson,
       },
     });
     return resp?.data?.message_id ?? "";
@@ -547,6 +555,31 @@ export class FeishuAdapter implements PlatformAdapter {
 
     return parts.length > 0 ? parts.join("\n") : "[合并转发消息]";
   }
+}
+
+/** 构建飞书卡片 JSON（对齐 cc-connect buildRichCardJSON） */
+function buildCardJSON(header: string, content: string, footer?: string): string {
+  let mdContent = content;
+  if (footer) {
+    mdContent += `\n\n---\n<font color='grey'>${footer}</font>`;
+  }
+  const card: Record<string, unknown> = {
+    schema: "2.0",
+    config: { wide_screen_mode: true },
+  };
+  if (header) {
+    card.header = {
+      template: "blue",
+      title: { tag: "plain_text", content: header },
+    };
+  }
+  if (mdContent) {
+    card.body = {
+      direction: "vertical",
+      elements: [{ tag: "markdown", content: mdContent }],
+    };
+  }
+  return JSON.stringify(card);
 }
 
 function parsePlatformTs(val?: string): number | undefined {
