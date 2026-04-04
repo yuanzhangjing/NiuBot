@@ -630,7 +630,9 @@ export class Pipeline {
       `Working directory: ${this.workingDirectory}`,
     ];
 
-    this.im.sendText(platformChatId, lines.join("\n")).catch(() => {});
+    this.im.sendText(platformChatId, lines.join("\n"))
+      .then(() => this.log.info("status sent", { platformChatId }))
+      .catch((err) => this.log.error("status send failed", { platformChatId, error: String(err) }));
   }
 
   /**

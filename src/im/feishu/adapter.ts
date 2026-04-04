@@ -247,7 +247,8 @@ export class FeishuAdapter implements PlatformAdapter {
         path: { app_id: this.appId },
         params: { lang: "zh_cn" },
       } as any);
-      const creatorId = (resp?.data?.app as any)?.owner?.open_id;
+      const owner = (resp?.data?.app as any)?.owner;
+      const creatorId = owner?.owner_id ?? owner?.open_id;
       if (creatorId) {
         this.appCreatorId = creatorId;
         log.info("app creator detected", { creatorId });
@@ -266,7 +267,7 @@ export class FeishuAdapter implements PlatformAdapter {
         method: "GET",
         url: "/open-apis/bot/v3/info/",
       });
-      const botInfo = resp?.data?.bot;
+      const botInfo = resp?.bot ?? resp?.data?.bot;
       if (botInfo?.open_id) {
         this.botOpenId = botInfo.open_id;
         log.info("bot open_id fetched", { openId: this.botOpenId });
