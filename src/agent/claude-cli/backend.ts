@@ -177,13 +177,19 @@ export class ClaudeCliBackend extends CliAgentBackend<ClaudeSession> {
               } else if (entry.subtype === "init" && entry.model) {
                 model = entry.model;
               }
-            } else if (entry.type === "assistant" && entry.message?.usage) {
-              const u = entry.message.usage;
-              const total = (u.input_tokens ?? 0)
-                + (u.cache_creation_input_tokens ?? 0)
-                + (u.cache_read_input_tokens ?? 0)
-                + (u.output_tokens ?? 0);
-              if (total > 0) contextTokens = total;
+            } else if (entry.type === "assistant") {
+              // model 从 assistant message 获取（-p 模式没有 system/init 事件）
+              if (entry.message?.model) {
+                model = entry.message.model;
+              }
+              if (entry.message?.usage) {
+                const u = entry.message.usage;
+                const total = (u.input_tokens ?? 0)
+                  + (u.cache_creation_input_tokens ?? 0)
+                  + (u.cache_read_input_tokens ?? 0)
+                  + (u.output_tokens ?? 0);
+                if (total > 0) contextTokens = total;
+              }
             }
           } catch { /* skip malformed lines */ }
         }
