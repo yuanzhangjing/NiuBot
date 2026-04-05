@@ -714,7 +714,10 @@ export class Pipeline {
     });
     child.unref();
 
-    this.log.info("restart script spawned", { pid: child.pid, chatId, socketPath });
+    // 立即停止接收新消息，避免窗口期内的消息被老进程接住后丢失
+    this.stop();
+
+    this.log.info("restart script spawned, pipeline stopped", { pid: child.pid, chatId, socketPath });
   }
 
   private async process(chatId: string, mergedText: string): Promise<void> {

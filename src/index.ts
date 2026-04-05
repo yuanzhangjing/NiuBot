@@ -1,3 +1,5 @@
+import { writeFileSync, unlinkSync, mkdirSync } from "node:fs";
+import { resolve } from "node:path";
 import { loadConfig } from "./config.js";
 import { ClaudeCliBackend } from "./agent/claude-cli/backend.js";
 import type { AgentBackend } from "./agent/types.js";
@@ -71,6 +73,17 @@ async function main(): Promise<void> {
 
   log.info("NiuBot is running", { activeBots: bots.length });
 
+  // 写 PID 文件，供 restart.sh / start.sh 精确杀进程
+  const niubotHome = process.env["NIUBOT_HOME"] ?? resolve(process.env["HOME"] ?? "", ".niubot");
+  const pidFile = resolve(niubotHome, "niubot.pid");
+  try {
+    mkdirSync(niubotHome, { recursive: true });
+    writeFileSync(pidFile, String(process.pid));
+    log.info("PID file written", { pidFile, pid: process.pid });
+  } catch (e) {
+    log.warn("failed to write PID file", { pidFile, error: String(e) });
+  }
+
   // 优雅退出
   let shuttingDown = false;
   const shutdown = async () => {
@@ -92,18 +105,36 @@ async function main(): Promise<void> {
     for (const bot of bots) {
       await bot.pipeline.shutdown();
     }
+    const busyCount = bots.reduce((n, b) => n + (b.pipeline.hasBusyChats() ? 1 : 0), 0);
+    if (busyCount > 0) {
+      log.info("waiting for in-flight tasks", { busyBots: busyCount });
+    }
     const deadline = Date.now() + 15_000;
     while (bots.some((b) => b.pipeline.hasBusyChats()) && Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, 500));
     }
+    if (bots.some((b) => b.pipeline.hasBusyChats())) {
+      log.warn("in-flight wait timed out, forcing exit");
+    } else if (busyCount > 0) {
+      log.info("in-flight tasks completed");
+    }
 
     // 3. 关闭 agent backend
-    try { await agent.stop(); } catch (e) { log.error("agent.stop failed", { error: String(e) }); }
+    try {
+      await agent.stop();
+      log.info("agent backend stopped");
+    } catch (e) { log.error("agent.stop failed", { error: String(e) }); }
 
     // 4. 关闭所有数据库
     for (const bot of bots) {
       try { bot.db.close(); } catch (e) { log.error("db.close failed", { bot: bot.name, error: String(e) }); }
     }
+
+    // 删除 PID 文件
+    try {
+      unlinkSync(pidFile);
+      log.info("PID file removed");
+    } catch { /* ignore */ }
 
     log.info("bye");
     process.exit(0);

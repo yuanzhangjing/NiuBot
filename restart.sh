@@ -33,23 +33,60 @@ notify() {
 
 stop_service() {
     debug "stopping process..."
-    pkill -TERM -f "tsx src/index.ts" 2>/dev/null || true
-    pkill -TERM -f "node dist/index.js" 2>/dev/null || true
-    local wait=0
-    while [ "$wait" -lt 5 ]; do
-        if ! pgrep -f "tsx src/index.ts" > /dev/null 2>&1 && \
-           ! pgrep -f "node dist/index.js" > /dev/null 2>&1; then
-            break
+    local PID_FILE="$NIUBOT_HOME/niubot.pid"
+    local target_pid=""
+
+    # 优先从 PID 文件获取精确 PID
+    if [ -f "$PID_FILE" ]; then
+        target_pid=$(cat "$PID_FILE")
+        if kill -0 "$target_pid" 2>/dev/null; then
+            debug "killing PID $target_pid (from PID file)"
+            kill -TERM "$target_pid" 2>/dev/null || true
+        else
+            debug "PID $target_pid not running, cleaning up PID file"
+            target_pid=""
         fi
+        rm -f "$PID_FILE"
+    fi
+
+    # 兜底：pkill 模式匹配（处理没有 PID 文件的情况）
+    if [ -z "$target_pid" ]; then
+        debug "no PID file, falling back to pkill"
+        pkill -TERM -f "tsx src/index.ts" 2>/dev/null || true
+        pkill -TERM -f "node dist/index.js" 2>/dev/null || true
+    fi
+
+    # 等待进程退出（最多 10s）
+    local wait=0
+    while [ "$wait" -lt 10 ]; do
+        local still_alive=false
+        if [ -n "$target_pid" ] && kill -0 "$target_pid" 2>/dev/null; then
+            still_alive=true
+        elif [ -z "$target_pid" ]; then
+            if pgrep -f "tsx src/index.ts" > /dev/null 2>&1 || \
+               pgrep -f "node dist/index.js" > /dev/null 2>&1; then
+                still_alive=true
+            fi
+        fi
+        if ! $still_alive; then break; fi
         sleep 1
         wait=$((wait + 1))
+        debug "  waiting... ($wait/10)"
     done
-    if pgrep -f "tsx src/index.ts" > /dev/null 2>&1 || \
-       pgrep -f "node dist/index.js" > /dev/null 2>&1; then
-        debug "force killing..."
-        pkill -9 -f "tsx src/index.ts" 2>/dev/null || true
-        pkill -9 -f "node dist/index.js" 2>/dev/null || true
+
+    # 强制杀
+    if [ -n "$target_pid" ] && kill -0 "$target_pid" 2>/dev/null; then
+        debug "force killing PID $target_pid"
+        kill -9 "$target_pid" 2>/dev/null || true
         sleep 1
+    elif [ -z "$target_pid" ]; then
+        if pgrep -f "tsx src/index.ts" > /dev/null 2>&1 || \
+           pgrep -f "node dist/index.js" > /dev/null 2>&1; then
+            debug "force killing via pkill"
+            pkill -9 -f "tsx src/index.ts" 2>/dev/null || true
+            pkill -9 -f "node dist/index.js" 2>/dev/null || true
+            sleep 1
+        fi
     fi
     debug "process stopped"
 }
@@ -57,7 +94,7 @@ stop_service() {
 start_service() {
     debug "starting new process..."
     cd "$SCRIPT_DIR"
-    NIUBOT_LOG_LEVEL="${NIUBOT_LOG_LEVEL:-info}" nohup npm run start >> "$LOG_FILE" 2>&1 &
+    NIUBOT_LOG_LEVEL="${NIUBOT_LOG_LEVEL:-info}" nohup node dist/index.js >> "$LOG_FILE" 2>&1 &
     debug "new process launched, PID=$!"
 }
 
