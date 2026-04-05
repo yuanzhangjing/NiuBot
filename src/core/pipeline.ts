@@ -446,11 +446,9 @@ export class Pipeline {
       this.im.addReaction(msg.chatPlatformId, msg.platformMsgId, PROCESSING_EMOJI).catch(() => {});
     }
 
-    // Save trigger msg ID for reply-to-message, reset hasReplied so each message gets a reply
+    // Save trigger msg ID for reply-to-message（process() 会快照并清除）
     if (msg.platformMsgId) {
       this.triggerMsgIds.set(chatId, msg.platformMsgId);
-      const session = this.chatSessions.get(chatId);
-      if (session) session.hasReplied = false;
     }
 
     // 短词打断检测
@@ -724,6 +722,10 @@ export class Pipeline {
     const platformChatId = this.chatSessions.get(chatId)?.platformChatId
       ?? this.platformChatIds.get(chatId);
 
+    // 快照 triggerMsgId 并从 map 中移除，防止后续消息覆盖
+    const triggerMsgId = this.triggerMsgIds.get(chatId);
+    this.triggerMsgIds.delete(chatId);
+
     try {
       // M3: 路由决策 — 判断是否需要切换 session
       await this.maybeRouteSession(chatId, mergedText);
@@ -810,11 +812,10 @@ export class Pipeline {
 
       // 发送到 IM（始终用卡片，footer 带 session 信息）
       try {
-        const triggerMsgId = this.triggerMsgIds.get(chatId);
-        this.log.debug("send decision", { chatId, hasReplied: chatSession.hasReplied, triggerMsgId: triggerMsgId ?? "none" });
-        if (!chatSession.hasReplied && triggerMsgId) {
-          await this.im.replyCard(triggerMsgId, "", response.text, footer);
-          chatSession.hasReplied = true;
+        const useReply = !!triggerMsgId;
+        this.log.info("send decision", { chatId, useReply, triggerMsgId: triggerMsgId ?? "none" });
+        if (useReply) {
+          await this.im.replyCard(triggerMsgId!, "", response.text, footer);
         } else {
           await this.im.sendCard(chatSession.platformChatId, "", response.text, footer);
         }
