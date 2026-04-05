@@ -34,6 +34,7 @@ export class MessageQueue {
   private bufferMs: number;
   private cancelThresholdMs: number;
   private cancelFn: ((chatId: string) => Promise<void>) | null = null;
+  private mergeFn: ((msg: QueuedMessage) => void) | null = null;
   private stopped = false;
 
   constructor(bufferMs = 3000, cancelThresholdMs = 10000) {
@@ -51,9 +52,14 @@ export class MessageQueue {
     this.cancelFn = fn;
   }
 
-  /** 推入一条新消息 */
-  push(msg: QueuedMessage): void {
-    if (this.stopped) return;
+  /** 注册 pending 通知函数（消息进入等待队列时立即回调） */
+  onPending(fn: (msg: QueuedMessage) => void): void {
+    this.mergeFn = fn;
+  }
+
+  /** 推入一条新消息，返回是否进入 pending 队列 */
+  push(msg: QueuedMessage): boolean {
+    if (this.stopped) return false;
 
     const q = this.getQueue(msg.chatId);
 
@@ -67,11 +73,13 @@ export class MessageQueue {
         log.info("message queued", { chatId: msg.chatId, pending: q.pending.length + 1 });
         q.pending.push(msg);
       }
-      return;
+      this.mergeFn?.(msg);
+      return true;
     }
 
     q.buffer.push(msg);
     this.resetBufferTimer(q, msg.chatId);
+    return false;
   }
 
   /** 停止队列，清除所有计时器 */
@@ -176,6 +184,7 @@ export class MessageQueue {
     // cancel 成功：session 保持存活，原始消息已在 agent 上下文中，只需发新消息
     // cancel 失败：flush 正常完成后，processNext 处理新消息
     // cancelInFlight 由 processNext 重置
+    // 注意：mergeFn 已在 push() 中调用，此处不重复调用
     q.pending.push(newMsg);
   }
 }

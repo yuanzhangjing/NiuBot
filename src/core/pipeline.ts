@@ -19,7 +19,7 @@ import { createLogger } from "../logger.js";
 const execAsync = promisify(exec);
 
 const PROCESSING_EMOJI = "Get";
-const MERGED_EMOJI = "PUSHPIN";
+const MERGED_EMOJI = "Pin";
 
 /** 过期消息阈值（ms）：超过 2 分钟的消息丢弃 */
 const STALE_MESSAGE_THRESHOLD_MS = 2 * 60 * 1000;
@@ -117,6 +117,12 @@ export class Pipeline {
 
     this.queue.onProcess((chatId, mergedText, messages) => this.process(chatId, mergedText, messages));
     this.queue.onCancel((chatId) => this.cancelChat(chatId));
+    this.queue.onPending((msg) => {
+      const platformChatId = this.platformChatIds.get(msg.chatId);
+      if (platformChatId && msg.platformMsgId) {
+        this.im.addReaction(platformChatId, msg.platformMsgId, MERGED_EMOJI).catch(() => {});
+      }
+    });
   }
 
   /** 启动管道：注册 IM 消息回调 */
@@ -442,11 +448,6 @@ export class Pipeline {
       agentText = `${replyContext}\n\n${displayText}`;
     }
 
-    // Processing emoji: 标记已收到（永久保留，作为已读回执）
-    if (msg.platformMsgId) {
-      this.im.addReaction(msg.chatPlatformId, msg.platformMsgId, PROCESSING_EMOJI).catch(() => {});
-    }
-
     // Save trigger msg ID for reply-to-message（process() 会快照并清除）
     if (msg.platformMsgId) {
       this.triggerMsgIds.set(chatId, msg.platformMsgId);
@@ -466,12 +467,16 @@ export class Pipeline {
       return;
     }
 
-    this.queue.push({
+    // Reaction 策略：Get = 正在处理，Pin = 排队等待，互斥
+    const isPending = this.queue.push({
       chatId,
       text: agentText,
       timestamp: Date.now(),
       platformMsgId: msg.platformMsgId,
     });
+    if (!isPending && msg.platformMsgId) {
+      this.im.addReaction(msg.chatPlatformId, msg.platformMsgId, PROCESSING_EMOJI).catch(() => {});
+    }
   }
 
   /** Store message without triggering agent (for group chat non-targeted messages) */
@@ -729,15 +734,7 @@ export class Pipeline {
     const triggerMsgId = lastMsg?.platformMsgId ?? this.triggerMsgIds.get(chatId);
     this.triggerMsgIds.delete(chatId);
 
-    // 多条消息合并时，给每条加 📌 reaction
     const isMerged = messages.length > 1;
-    if (isMerged && platformChatId) {
-      for (const m of messages) {
-        if (m.platformMsgId) {
-          this.im.addReaction(platformChatId, m.platformMsgId, MERGED_EMOJI).catch(() => {});
-        }
-      }
-    }
 
     try {
       // M3: 路由决策 — 判断是否需要切换 session
@@ -827,7 +824,7 @@ export class Pipeline {
       let displayText = response.text;
       if (isMerged) {
         const lines = messages.map((m) => {
-          const brief = m.text.length > 20 ? m.text.slice(0, 20) + "…" : m.text;
+          const brief = m.text.length > 10 ? m.text.slice(0, 10) + "…" : m.text;
           return `• ${brief}`;
         });
         displayText = `> 📌 回复 ${messages.length} 条消息：\n${lines.map((l) => `> ${l}`).join("\n")}\n\n${response.text}`;
