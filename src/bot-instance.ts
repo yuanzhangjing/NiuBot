@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { AgentBackend } from "./agent/types.js";
 import type { BotConfig } from "./config.js";
-import { initDatabase } from "./database/schema.js";
+import { initDatabase, getUserShortLabelByPlatformId, getMessageByPlatformId } from "./database/schema.js";
 import { FeishuAdapter } from "./im/feishu/adapter.js";
 import { Pipeline, type BotIdentity } from "./core/pipeline.js";
 import { ApiServer, type ApiHandler } from "./core/api.js";
@@ -46,8 +46,16 @@ export async function createBotInstance(
   // 3. 生成 AGENTS.md + CLAUDE.md symlink
   generateAgentFiles(botConfig, log);
 
-  // 4. 创建 IM adapter
+  // 4. 创建 IM adapter（注入 DB resolver 用于 merge_forward 等场景）
   const im = new FeishuAdapter(botConfig.appId, botConfig.appSecret);
+  im.setNameResolver((platformId) => {
+    const label = getUserShortLabelByPlatformId(db, "feishu", platformId);
+    return label !== platformId ? label : undefined; // 未找到时返回 undefined，走 fallback
+  });
+  im.setContentResolver((platformMsgId) => {
+    const msg = getMessageByPlatformId(db, "feishu", platformMsgId);
+    return msg?.contentText ?? undefined;
+  });
 
   // 5. 创建 Pipeline
   const botIdentity: BotIdentity = {

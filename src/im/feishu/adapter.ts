@@ -25,6 +25,12 @@ export class FeishuAdapter implements PlatformAdapter {
   /** App creator open_id（用于 admin 检测） */
   private appCreatorId: string | null = null;
 
+  /** 可选：通过 platform ID 解析发送者显示名称（注入自 DB） */
+  private nameResolver: ((platformId: string) => string | undefined) | null = null;
+
+  /** 可选：通过 platform msg ID 查询已缓存的消息内容（注入自 DB） */
+  private contentResolver: ((platformMsgId: string) => string | undefined) | null = null;
+
   constructor(appId: string, appSecret: string) {
     this.appId = appId;
     this.appSecret = appSecret;
@@ -39,6 +45,16 @@ export class FeishuAdapter implements PlatformAdapter {
     this.handler = handler;
   }
 
+  /** 注入发送者名称解析（DB 查询），用于 merge_forward 等场景 */
+  setNameResolver(fn: (platformId: string) => string | undefined): void {
+    this.nameResolver = fn;
+  }
+
+  /** 注入消息内容缓存查询（DB 查询），用于 merge_forward 等场景 */
+  setContentResolver(fn: (platformMsgId: string) => string | undefined): void {
+    this.contentResolver = fn;
+  }
+
   async start(): Promise<void> {
     // Fetch bot identity before starting WebSocket
     await this.fetchBotIdentity();
@@ -46,7 +62,7 @@ export class FeishuAdapter implements PlatformAdapter {
     const eventDispatcher = new lark.EventDispatcher({}).register({
       "im.message.receive_v1": async (data) => {
         try {
-          const msg = this.normalize(data);
+          const msg = await this.normalize(data);
           if (msg) this.handler?.(msg);
         } catch (err) {
           log.error("failed to process message", { error: String(err) });
@@ -293,7 +309,7 @@ export class FeishuAdapter implements PlatformAdapter {
     await this.getAppCreatorId().catch(() => {});
   }
 
-  private normalize(data: unknown): NormalizedMessage | null {
+  private async normalize(data: unknown): Promise<NormalizedMessage | null> {
     const event = data as {
       message?: {
         chat_id?: string;
@@ -345,7 +361,12 @@ export class FeishuAdapter implements PlatformAdapter {
     }
 
     // Parse content based on message type
-    const { text, contentType, images } = this.parseContent(msgType, msg.content, mentions);
+    let { text, contentType, images } = this.parseContent(msgType, msg.content, mentions);
+
+    // For merge_forward, fetch actual content from API (event payload is empty)
+    if (contentType === "merge_forward" && msg.message_id) {
+      text = await this.parseMergeForward(msg.message_id);
+    }
 
     // For non-text types with empty text, still store but mark appropriately
     if (!text && !images?.length) {
@@ -426,9 +447,8 @@ export class FeishuAdapter implements PlatformAdapter {
       }
 
       case "merge_forward": {
-        // Forwarded messages: extract all nested text
-        const text = this.extractMergeForwardText(parsed);
-        return { text, contentType: "merge_forward" };
+        // Content will be fetched via API in normalize() — return placeholder
+        return { text: "[合并转发消息]", contentType: "merge_forward" };
       }
 
       default: {
@@ -530,30 +550,146 @@ export class FeishuAdapter implements PlatformAdapter {
     return parts.join("\n") || "[卡片消息]";
   }
 
-  /** Extract text from merge_forward (forwarded) messages */
-  private extractMergeForwardText(parsed: any): string {
-    const parts: string[] = [];
-    const messages = parsed.messages ?? parsed.msg_list ?? [];
+  /** Fetch and format merge_forward message content via API (recursive) */
+  private async parseMergeForward(messageId: string): Promise<string> {
+    const visited = new Set<string>();
+    const lines = await this.parseMergeForwardInner(messageId, visited, 0);
+    if (lines.length === 0) return "[合并转发消息]";
+    return "【合并转发消息】\n" + lines.join("\n");
+  }
 
-    if (!Array.isArray(messages)) {
-      return "[合并转发消息]";
+  private async parseMergeForwardInner(
+    messageId: string,
+    visited: Set<string>,
+    depth: number,
+  ): Promise<string[]> {
+    if (depth > 5 || visited.has(messageId)) return [];
+    visited.add(messageId);
+
+    let items: any[];
+    try {
+      const resp = await this.client.im.message.get({
+        path: { message_id: messageId },
+      });
+      items = (resp?.data as any)?.items ?? [];
+      if (!Array.isArray(items) || items.length === 0) return [];
+    } catch (err) {
+      log.warn("parseMergeForward fetch failed", { messageId, depth, error: String(err) });
+      return [];
     }
 
-    for (const msg of messages) {
-      const senderName = msg.sender_name ?? msg.from_name ?? "用户";
-      let text = "";
-      if (msg.content) {
-        try {
-          const content = typeof msg.content === "string" ? JSON.parse(msg.content) : msg.content;
-          text = content.text ?? JSON.stringify(content);
-        } catch {
-          text = String(msg.content);
+    const indent = "  ".repeat(depth);
+    const lines: string[] = [];
+
+    for (const item of items) {
+      const msgType: string = item.msg_type ?? "";
+      const childId: string = item.message_id ?? "";
+      if (!childId) continue;
+
+      const senderName = this.resolveSenderFromItem(item);
+
+      // Nested merge_forward: recurse
+      if (msgType === "merge_forward") {
+        const inner = await this.parseMergeForwardInner(childId, visited, depth + 1);
+        if (inner.length > 0) {
+          lines.push(`${indent}${senderName} 转发了一组消息：`);
+          lines.push(`${indent}<forwarded>`);
+          lines.push(...inner);
+          lines.push(`${indent}</forwarded>`);
         }
+        continue;
       }
-      parts.push(`[${senderName}]: ${text}`);
+
+      // Leaf message: extract content
+      const text = this.extractChildMessageText(msgType, item);
+      lines.push(`${indent}${senderName}: ${text || `[${msgType || "unknown"}]`}`);
     }
 
-    return parts.length > 0 ? parts.join("\n") : "[合并转发消息]";
+    return lines;
+  }
+
+  /** Resolve sender display name from message.get() item (DB → fallback) */
+  private resolveSenderFromItem(item: any): string {
+    const sender = item.sender;
+    if (!sender?.id) return "未知";
+
+    // DB 优先：通过 platform ID 查已知用户名
+    if (this.nameResolver) {
+      const name = this.nameResolver(sender.id);
+      if (name) return name;
+    }
+
+    // Fallback: bot 识别
+    if (sender.sender_type === "app") {
+      return sender.id === this.botOpenId ? (this.botName ?? "Bot") : "Bot";
+    }
+    return "用户";
+  }
+
+  /** Fetch child message content: DB cache → API item body → type fallback */
+  private extractChildMessageText(msgType: string, item: any): string {
+    const childId: string = item.message_id ?? "";
+
+    // DB 优先：查已缓存的消息内容
+    if (childId && this.contentResolver) {
+      const cached = this.contentResolver(childId);
+      if (cached) return cached;
+    }
+
+    // Fallback: 从 API 响应体解析
+    const raw = item.body?.content;
+    if (!raw) return "";
+
+    try {
+      const parsed = JSON.parse(raw);
+      let text: string;
+      switch (msgType) {
+        case "text":
+          text = parsed.text ?? "";
+          break;
+        case "post":
+          text = this.extractPostText(parsed, []);
+          break;
+        case "interactive":
+          text = this.extractInteractiveText(parsed);
+          break;
+        case "image":
+          return "[图片]";
+        case "audio":
+          return "[语音]";
+        case "file":
+          return `[文件: ${parsed.file_name ?? ""}]`;
+        case "media":
+          return `[视频: ${parsed.file_name ?? ""}]`;
+        default:
+          return `[${msgType}]`;
+      }
+
+      // Mention 替换（API 响应中携带 mentions 列表）
+      if (text && Array.isArray(item.mentions) && item.mentions.length > 0) {
+        text = this.applyItemMentions(text, item.mentions);
+      }
+
+      return text;
+    } catch {
+      return raw;
+    }
+  }
+
+  /** Apply mention replacements from message.get() API response */
+  private applyItemMentions(text: string, mentions: any[]): string {
+    for (const m of mentions) {
+      const key: string = m.key ?? "";
+      if (!key) continue;
+      const id: string = m.id ?? "";
+      if (id && this.botOpenId && id === this.botOpenId) {
+        text = text.replace(key, "").trim();
+      } else {
+        const name: string = m.name ?? "";
+        text = text.replace(key, name ? `@${name}` : "");
+      }
+    }
+    return text;
   }
 }
 
