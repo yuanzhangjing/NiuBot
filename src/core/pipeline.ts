@@ -19,6 +19,7 @@ import { createLogger } from "../logger.js";
 const execAsync = promisify(exec);
 
 const PROCESSING_EMOJI = "Get";
+const MERGED_EMOJI = "PUSHPIN";
 
 /** 过期消息阈值（ms）：超过 2 分钟的消息丢弃 */
 const STALE_MESSAGE_THRESHOLD_MS = 2 * 60 * 1000;
@@ -114,7 +115,7 @@ export class Pipeline {
     this.log = createLogger("pipeline", botIdentity.name);
     this.queue = new MessageQueue(bufferMs, cancelThresholdMs);
 
-    this.queue.onProcess((chatId, mergedText) => this.process(chatId, mergedText));
+    this.queue.onProcess((chatId, mergedText, messages) => this.process(chatId, mergedText, messages));
     this.queue.onCancel((chatId) => this.cancelChat(chatId));
   }
 
@@ -469,6 +470,7 @@ export class Pipeline {
       chatId,
       text: agentText,
       timestamp: Date.now(),
+      platformMsgId: msg.platformMsgId,
     });
   }
 
@@ -718,13 +720,24 @@ export class Pipeline {
     this.log.info("restart script spawned, pipeline stopped", { pid: child.pid, chatId, socketPath });
   }
 
-  private async process(chatId: string, mergedText: string): Promise<void> {
+  private async process(chatId: string, mergedText: string, messages: import("./queue.js").QueuedMessage[] = []): Promise<void> {
     const platformChatId = this.chatSessions.get(chatId)?.platformChatId
       ?? this.platformChatIds.get(chatId);
 
-    // 快照 triggerMsgId 并从 map 中移除，防止后续消息覆盖
-    const triggerMsgId = this.triggerMsgIds.get(chatId);
+    // 从消息列表中取最后一条的 platformMsgId 作为 reply 目标
+    const lastMsg = messages.length > 0 ? messages[messages.length - 1] : undefined;
+    const triggerMsgId = lastMsg?.platformMsgId ?? this.triggerMsgIds.get(chatId);
     this.triggerMsgIds.delete(chatId);
+
+    // 多条消息合并时，给每条加 📌 reaction
+    const isMerged = messages.length > 1;
+    if (isMerged && platformChatId) {
+      for (const m of messages) {
+        if (m.platformMsgId) {
+          this.im.addReaction(platformChatId, m.platformMsgId, MERGED_EMOJI).catch(() => {});
+        }
+      }
+    }
 
     try {
       // M3: 路由决策 — 判断是否需要切换 session
@@ -810,14 +823,24 @@ export class Pipeline {
       }
       const footer = footerParts.join(" · ");
 
+      // 合并消息提示头
+      let displayText = response.text;
+      if (isMerged) {
+        const lines = messages.map((m) => {
+          const brief = m.text.length > 20 ? m.text.slice(0, 20) + "…" : m.text;
+          return `• ${brief}`;
+        });
+        displayText = `> 📌 回复 ${messages.length} 条消息：\n${lines.map((l) => `> ${l}`).join("\n")}\n\n${response.text}`;
+      }
+
       // 发送到 IM（始终用卡片，footer 带 session 信息）
       try {
         const useReply = !!triggerMsgId;
-        this.log.info("send decision", { chatId, useReply, triggerMsgId: triggerMsgId ?? "none" });
+        this.log.info("send decision", { chatId, useReply, merged: isMerged, messageCount: messages.length, triggerMsgId: triggerMsgId ?? "none" });
         if (useReply) {
-          await this.im.replyCard(triggerMsgId!, "", response.text, footer);
+          await this.im.replyCard(triggerMsgId!, "", displayText, footer);
         } else {
-          await this.im.sendCard(chatSession.platformChatId, "", response.text, footer);
+          await this.im.sendCard(chatSession.platformChatId, "", displayText, footer);
         }
       } catch (sendErr) {
         this.log.error("failed to send response to IM", {

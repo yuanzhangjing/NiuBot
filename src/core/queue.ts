@@ -6,6 +6,7 @@ export interface QueuedMessage {
   chatId: string;
   text: string;
   timestamp: number;
+  platformMsgId?: string;
 }
 
 interface ChatQueue {
@@ -25,7 +26,7 @@ interface ChatQueue {
   cancelInFlight: boolean;
 }
 
-type ProcessFn = (chatId: string, mergedText: string) => Promise<void>;
+type ProcessFn = (chatId: string, mergedText: string, messages: QueuedMessage[]) => Promise<void>;
 
 export class MessageQueue {
   private queues = new Map<string, ChatQueue>();
@@ -148,7 +149,7 @@ export class MessageQueue {
     log.info("flush", { chatId, messageCount: messages.length, textLength: mergedText.length });
 
     try {
-      await this.processFn?.(chatId, mergedText);
+      await this.processFn?.(chatId, mergedText, messages);
     } catch (err) {
       if (!q.cancelRequested) {
         log.error("process error", { chatId, error: String(err) });
