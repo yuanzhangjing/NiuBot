@@ -47,6 +47,11 @@ NIUBOT_BOT_NAME=NiuBot NIUBOT_HOME=~/.niubot bash restart.sh
 NiuBot 的能力和实现风格对齐 cc-connect（Go 版本），代码在 `/Users/yuanmouren/workspace/cc-connect/`。
 关键对齐点：飞书卡片格式、footer 信息、命令输出格式、restart 流程、context 注入架构。
 
-## 项目进展
+## 任务管理
 
-进展和设计文档统一在任务中管理，见工作空间 `tasks/niubot-engine/README.md`。
+进展和设计文档统一在工作空间的 task 中管理：
+- 任务目录：`../../tasks/niubot-engine/`
+- 进展跟踪：`../../tasks/niubot-engine/README.md`（Bug / Todo / In Progress / Done 分区）
+- 设计文档：同目录下的 `.md` 文件
+
+开发完成后及时更新 README.md 中对应条目的状态。
