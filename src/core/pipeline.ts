@@ -799,6 +799,9 @@ export class Pipeline {
       if (response.model) {
         footerParts.push(formatModelName(response.model));
       }
+      if (response.compactCount && response.compactCount > 0) {
+        footerParts.push(`compact×${response.compactCount}`);
+      }
       const footer = footerParts.join(" · ");
 
       // 发送到 IM（始终用卡片，footer 带 session 信息）

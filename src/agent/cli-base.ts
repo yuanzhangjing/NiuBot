@@ -14,6 +14,10 @@ export interface BaseCliSession {
   importantContext?: string;
   extraEnv: Record<string, string>;
   cumulativeBytes: number;
+  /** 累计 compact 次数 */
+  compactCount: number;
+  /** JSONL 文件上次扫描的字节偏移（用于增量扫描） */
+  jsonlOffset: number;
 }
 
 /** 子类解析输出后返回的结构 */
@@ -112,6 +116,7 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
         text: parsed.text,
         contextTokens: parsed.contextTokens,
         model: parsed.model,
+        compactCount: s.compactCount || undefined,
       };
     } catch (err: any) {
       if (err.killed) {

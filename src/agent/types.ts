@@ -45,6 +45,8 @@ export interface AgentResponse {
   contextTokens?: number;
   /** 本次调用使用的模型 */
   model?: string;
+  /** 累计 compact 次数 */
+  compactCount?: number;
 }
 
 export interface AgentBackend {

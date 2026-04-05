@@ -611,25 +611,3 @@ function splitMessage(text: string): string[] {
   if (remaining) chunks.push(remaining);
   return chunks;
 }
-
-/** 检测文本是否包含 Markdown 格式 */
-export function containsMarkdown(text: string): boolean {
-  // Check for common markdown patterns
-  const patterns = [
-    /^#{1,6}\s/m,           // Headers
-    /\*\*[\s\S]+?\*\*/,     // Bold (**text**)
-    /__.+?__/,              // Bold (__text__)
-    /(?<!\*)\*(?!\*)[^*\n]+\*(?!\*)/,  // Italic (*text*) — not bold
-    /(?<!_)_(?!_)[^_\n]+_(?!_)/,       // Italic (_text_) — not bold
-    /```[\s\S]*?```/,       // Code blocks
-    /`[^`\n]+`/,            // Inline code
-    /~~.+?~~/,              // Strikethrough
-    /^\s*[-*+]\s/m,         // Unordered lists
-    /^\s*\d+\.\s/m,         // Ordered lists
-    /\[.+?\]\(.+?\)/,       // Links
-    /^\|.*\|.*\|$/m,        // Tables
-    /^>\s/m,                // Blockquotes
-    /^---$/m,               // Horizontal rule
-  ];
-  return patterns.some((p) => p.test(text));
-}

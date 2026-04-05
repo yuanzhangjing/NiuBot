@@ -3,6 +3,9 @@
  * 每个 session 一个独立子进程，env 天然隔离。
  */
 
+import { statSync, openSync, readSync, closeSync } from "node:fs";
+import { homedir } from "node:os";
+import { resolve, sep } from "node:path";
 import { CliAgentBackend, buildNiubotEnv, type BaseCliSession, type ParsedOutput } from "../cli-base.js";
 import type { SessionConfig } from "../types.js";
 
@@ -47,6 +50,8 @@ export class ClaudeCliBackend extends CliAgentBackend<ClaudeSession> {
       claudeSessionId: config.agentSessionId,
       extraEnv: buildNiubotEnv(config),
       cumulativeBytes: 0,
+      compactCount: 0,
+      jsonlOffset: 0,
       permissionMode: this.permissionMode,
     };
   }
@@ -115,6 +120,58 @@ export class ClaudeCliBackend extends CliAgentBackend<ClaudeSession> {
     if (parsed.agentSessionId) {
       session.claudeSessionId = parsed.agentSessionId;
     }
+    // 增量扫描 JSONL，更新 compactCount
+    if (session.claudeSessionId) {
+      this.scanCompactCount(session);
+    }
+  }
+
+  /**
+   * 增量扫描 Claude Code session JSONL，统计新增的 compact_boundary 事件。
+   * 从 session.jsonlOffset 开始读到文件末尾，只扫描增量部分。
+   */
+  private scanCompactCount(session: ClaudeSession): void {
+    const jsonlPath = this.getJsonlPath(session);
+    if (!jsonlPath) return;
+
+    try {
+      const stat = statSync(jsonlPath);
+      const fileSize = stat.size;
+      if (fileSize <= session.jsonlOffset) return;
+
+      const fd = openSync(jsonlPath, "r");
+      try {
+        const readLen = fileSize - session.jsonlOffset;
+        const buf = Buffer.alloc(readLen);
+        readSync(fd, buf, 0, readLen, session.jsonlOffset);
+        session.jsonlOffset = fileSize;
+
+        const chunk = buf.toString("utf-8");
+        for (const line of chunk.split("\n")) {
+          if (!line.includes("compact_boundary")) continue;
+          try {
+            const entry = JSON.parse(line) as { type?: string; subtype?: string };
+            if (entry.type === "system" && entry.subtype === "compact_boundary") {
+              session.compactCount++;
+            }
+          } catch { /* skip malformed lines */ }
+        }
+      } finally {
+        closeSync(fd);
+      }
+    } catch {
+      // JSONL file not found or not readable — skip silently
+    }
+  }
+
+  /** 构造 Claude Code session JSONL 文件路径 */
+  private getJsonlPath(session: ClaudeSession): string | null {
+    if (!session.claudeSessionId) return null;
+    const home = homedir();
+    const absWorkDir = resolve(session.workingDirectory);
+    const projectKey = absWorkDir.split(sep).join("-");
+    const dir = resolve(home, ".claude", "projects", projectKey);
+    return resolve(dir, `${session.claudeSessionId}.jsonl`);
   }
 
   getAgentSessionId(sessionId: string): string | undefined {
