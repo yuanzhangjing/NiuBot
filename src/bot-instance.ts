@@ -122,8 +122,7 @@ export async function createBotInstance(
 }
 
 /**
- * 在 workingDirectory 下生成 AGENTS.md（工具文档）。
- * CLAUDE.md 如果已存在则保留（用户自定义的项目指南），仅在不存在时创建 symlink。
+ * 在 workingDirectory 下生成 AGENTS.md 和 CLAUDE.md（→ AGENTS.md 的 symlink）。
  */
 function generateAgentFiles(
   botConfig: BotConfig,
@@ -135,10 +134,8 @@ function generateAgentFiles(
   const content = buildStaticContext();
   fs.writeFileSync(agentsPath, content, "utf-8");
 
-  // 仅在 CLAUDE.md 不存在时创建 symlink，避免覆盖用户自定义内容
-  if (!fs.existsSync(claudePath)) {
-    fs.symlinkSync("AGENTS.md", claudePath);
-  }
+  try { fs.unlinkSync(claudePath); } catch { /* 不存在就忽略 */ }
+  fs.symlinkSync("AGENTS.md", claudePath);
 
   log.info("agent files generated", { agentsPath, claudePath });
 }
