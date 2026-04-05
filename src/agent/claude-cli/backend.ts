@@ -120,24 +120,30 @@ export class ClaudeCliBackend extends CliAgentBackend<ClaudeSession> {
     if (parsed.agentSessionId) {
       session.claudeSessionId = parsed.agentSessionId;
     }
-    // 增量扫描 JSONL，更新 compactCount
+    // 增量扫描 JSONL，提取主 agent 的 model、usage 和 compactCount
     if (session.claudeSessionId) {
-      this.scanCompactCount(session);
+      const meta = this.scanJsonl(session);
+      if (meta.model) parsed.model = meta.model;
+      if (meta.contextTokens) parsed.contextTokens = meta.contextTokens;
     }
   }
 
   /**
-   * 增量扫描 Claude Code session JSONL，统计新增的 compact_boundary 事件。
-   * 从 session.jsonlOffset 开始读到文件末尾，只扫描增量部分。
+   * 增量扫描 Claude Code session JSONL，提取主 agent 信息。
+   * 对齐 cc-connect：model 从 system/init 事件获取，usage 从最后一条 assistant message 获取。
+   * 这样排除了 subagent 的 token 和模型干扰。
    */
-  private scanCompactCount(session: ClaudeSession): void {
+  private scanJsonl(session: ClaudeSession): { model?: string; contextTokens?: number } {
     const jsonlPath = this.getJsonlPath(session);
-    if (!jsonlPath) return;
+    if (!jsonlPath) return {};
+
+    let model: string | undefined;
+    let contextTokens: number | undefined;
 
     try {
       const stat = statSync(jsonlPath);
       const fileSize = stat.size;
-      if (fileSize <= session.jsonlOffset) return;
+      if (fileSize <= session.jsonlOffset) return {};
 
       const fd = openSync(jsonlPath, "r");
       try {
@@ -148,11 +154,36 @@ export class ClaudeCliBackend extends CliAgentBackend<ClaudeSession> {
 
         const chunk = buf.toString("utf-8");
         for (const line of chunk.split("\n")) {
-          if (!line.includes("compact_boundary")) continue;
+          if (!line) continue;
           try {
-            const entry = JSON.parse(line) as { type?: string; subtype?: string };
-            if (entry.type === "system" && entry.subtype === "compact_boundary") {
-              session.compactCount++;
+            const entry = JSON.parse(line) as {
+              type?: string;
+              subtype?: string;
+              model?: string;
+              message?: {
+                model?: string;
+                usage?: {
+                  input_tokens?: number;
+                  cache_creation_input_tokens?: number;
+                  cache_read_input_tokens?: number;
+                  output_tokens?: number;
+                };
+              };
+            };
+
+            if (entry.type === "system") {
+              if (entry.subtype === "compact_boundary") {
+                session.compactCount++;
+              } else if (entry.subtype === "init" && entry.model) {
+                model = entry.model;
+              }
+            } else if (entry.type === "assistant" && entry.message?.usage) {
+              const u = entry.message.usage;
+              const total = (u.input_tokens ?? 0)
+                + (u.cache_creation_input_tokens ?? 0)
+                + (u.cache_read_input_tokens ?? 0)
+                + (u.output_tokens ?? 0);
+              if (total > 0) contextTokens = total;
             }
           } catch { /* skip malformed lines */ }
         }
@@ -162,6 +193,8 @@ export class ClaudeCliBackend extends CliAgentBackend<ClaudeSession> {
     } catch {
       // JSONL file not found or not readable — skip silently
     }
+
+    return { model, contextTokens };
   }
 
   /** 构造 Claude Code session JSONL 文件路径 */
