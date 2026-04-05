@@ -794,13 +794,14 @@ export class Pipeline {
       const shortId = chatSession.sessionKey.slice(-8);
       const footerParts = [`${shortId} · #${stats?.turn_count ?? "?"}`];
       if (response.contextTokens && response.contextTokens > 0) {
-        footerParts.push(`${(response.contextTokens / 1000).toFixed(1)}k`);
+        let contextStr = `${(response.contextTokens / 1000).toFixed(1)}k`;
+        if (response.compactCount && response.compactCount > 0) {
+          contextStr += ` 📦×${response.compactCount}`;
+        }
+        footerParts.push(contextStr);
       }
       if (response.model) {
         footerParts.push(formatModelName(response.model));
-      }
-      if (response.compactCount && response.compactCount > 0) {
-        footerParts.push(`compact×${response.compactCount}`);
       }
       const footer = footerParts.join(" · ");
 
