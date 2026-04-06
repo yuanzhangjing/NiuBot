@@ -486,3 +486,12 @@ export function updateMessageContent(
 ): void {
   db.prepare("UPDATE messages SET content_text = ? WHERE id = ?").run(contentText, id);
 }
+
+/** Update platform_msg_id for an existing message (e.g., after bot sends and gets platform ID back) */
+export function updateMessagePlatformId(
+  db: Database.Database,
+  id: number,
+  platformMsgId: string,
+): void {
+  db.prepare("UPDATE messages SET platform_msg_id = ? WHERE id = ?").run(platformMsgId, id);
+}

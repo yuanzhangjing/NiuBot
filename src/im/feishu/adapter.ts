@@ -643,9 +643,18 @@ export class FeishuAdapter implements PlatformAdapter {
     // 2. App/Bot 识别
     if (sender.sender_type === "app") {
       if (sender.id === this.botOpenId || sender.id === this.appId) {
+        // 用 bot 的 open_id 查 DB，保持 "U3(NiuBot)" 统一格式
+        if (this.nameLookup && this.botOpenId) {
+          const label = this.nameLookup(this.botOpenId);
+          if (label) return label;
+        }
         return this.botName ?? "Bot";
       }
-      // TODO: fetchAppName — 通过飞书 API 获取其他 app 名称
+      // 其他 app/bot：注册并返回 "U{n}(未知Bot)"
+      // TODO: fetchAppName — 通过飞书 API 获取 app 名称
+      if (this.nameRegister) {
+        return this.nameRegister(sender.id).replace("未知用户", "未知Bot");
+      }
       return "Bot";
     }
 
