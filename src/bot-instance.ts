@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { AgentBackend } from "./agent/types.js";
 import type { BotConfig } from "./config.js";
-import { initDatabase, getUserShortLabelByPlatformId, getMessageByPlatformId } from "./database/schema.js";
+import { initDatabase, ensureUser, getUserShortLabel, getMessageByPlatformId } from "./database/schema.js";
 import { FeishuAdapter } from "./im/feishu/adapter.js";
 import { Pipeline, type BotIdentity } from "./core/pipeline.js";
 import { ApiServer, type ApiHandler } from "./core/api.js";
@@ -49,8 +49,11 @@ export async function createBotInstance(
   // 4. 创建 IM adapter（注入 DB resolver 用于 merge_forward 等场景）
   const im = new FeishuAdapter(botConfig.appId, botConfig.appSecret);
   im.setNameResolver((platformId) => {
-    const label = getUserShortLabelByPlatformId(db, "feishu", platformId);
-    return label !== platformId ? label : undefined; // 未找到时返回 undefined，走 fallback
+    // 确保用户存在（不存在则注册，获得 short ID）
+    const userId = ensureUser(db, "feishu", platformId);
+    const label = getUserShortLabel(db, userId);
+    // label 格式：有名 "U2(Name)"，无名 "U2"
+    return label.includes("(") ? label : `${label}(未知用户)`;
   });
   im.setContentResolver((platformMsgId) => {
     const msg = getMessageByPlatformId(db, "feishu", platformMsgId);

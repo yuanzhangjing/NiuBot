@@ -343,6 +343,16 @@ export class FeishuAdapter implements PlatformAdapter {
     const chatType = msg.chat_type === "group" ? "group" as const : "p2p" as const;
     const platformTs = parsePlatformTs(msg.create_time);
 
+    // 非 text 类型记录原始结构，便于排查解析问题
+    if (msgType !== "text") {
+      log.info("non-text message", {
+        msgType,
+        messageId: msg.message_id,
+        contentLength: msg.content?.length,
+        contentPreview: msg.content?.slice(0, 100),
+      });
+    }
+
     // Parse mentions
     const mentions: MentionInfo[] = [];
     let botMentioned = false;
@@ -400,11 +410,19 @@ export class FeishuAdapter implements PlatformAdapter {
     rawContent: string,
     mentions: MentionInfo[],
   ): { text: string; contentType: NormalizedMessage["contentType"]; images?: Array<{ mimeType: string; data: Buffer }> } {
+    // merge_forward: content 是纯文本占位符（非 JSON），须在 JSON.parse 前处理
+    if (msgType === "merge_forward") {
+      return { text: "[合并转发消息]", contentType: "merge_forward" };
+    }
+
     let parsed: any;
     try {
       parsed = JSON.parse(rawContent);
     } catch {
-      return { text: rawContent, contentType: "text" };
+      // JSON 解析失败时保留原始 msgType（已知类型映射为对应 contentType）
+      const knownTypes = new Set(["image", "audio", "file", "media", "post", "interactive"]);
+      const contentType: NormalizedMessage["contentType"] = knownTypes.has(msgType) ? msgType as any : "text";
+      return { text: rawContent, contentType };
     }
 
     switch (msgType) {
@@ -444,11 +462,6 @@ export class FeishuAdapter implements PlatformAdapter {
       case "media": {
         const fileName = parsed.file_name ?? "视频";
         return { text: `[视频: ${fileName}]`, contentType: "media" };
-      }
-
-      case "merge_forward": {
-        // Content will be fetched via API in normalize() — return placeholder
-        return { text: "[合并转发消息]", contentType: "merge_forward" };
       }
 
       default: {
@@ -619,9 +632,12 @@ export class FeishuAdapter implements PlatformAdapter {
       if (name) return name;
     }
 
-    // Fallback: bot 识别
+    // Fallback: bot 识别（app sender 的 id 可能是 app_id 或 open_id）
     if (sender.sender_type === "app") {
-      return sender.id === this.botOpenId ? (this.botName ?? "Bot") : "Bot";
+      if (sender.id === this.botOpenId || sender.id === this.appId) {
+        return this.botName ?? "Bot";
+      }
+      return "Bot";
     }
     return "用户";
   }
