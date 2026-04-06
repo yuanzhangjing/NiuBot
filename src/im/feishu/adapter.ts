@@ -602,6 +602,9 @@ export class FeishuAdapter implements PlatformAdapter {
     const indent = "  ".repeat(depth);
     const lines: string[] = [];
 
+    // 记录已解析消息的内容和发送者，用于构建引用上下文
+    const resolvedMap = new Map<string, { sender: string; text: string }>();
+
     for (const item of items) {
       const msgType: string = item.msg_type ?? "";
       const childId: string = item.message_id ?? "";
@@ -621,9 +624,27 @@ export class FeishuAdapter implements PlatformAdapter {
         continue;
       }
 
+      // Reply context: parent_id → 引用
+      const parentId: string | undefined = item.parent_id;
+      if (parentId) {
+        const parent = resolvedMap.get(parentId);
+        if (parent) {
+          const truncated = parent.text.length > 50 ? parent.text.slice(0, 50) + "..." : parent.text;
+          lines.push(`${indent}> 引用 ${parent.sender}：${truncated}`);
+        } else if (this.contentResolver) {
+          const cached = this.contentResolver(parentId);
+          if (cached) {
+            const truncated = cached.length > 50 ? cached.slice(0, 50) + "..." : cached;
+            lines.push(`${indent}> 引用：${truncated}`);
+          }
+        }
+      }
+
       // Leaf message: extract content
       const text = this.extractChildMessageText(msgType, item);
-      lines.push(`${indent}${senderName}: ${text || `[${msgType || "unknown"}]`}`);
+      const content = text || `[${msgType || "unknown"}]`;
+      resolvedMap.set(childId, { sender: senderName, text: content });
+      lines.push(`${indent}${senderName}: ${content}`);
     }
 
     return lines;
