@@ -25,8 +25,11 @@ export class FeishuAdapter implements PlatformAdapter {
   /** App creator open_id（用于 admin 检测） */
   private appCreatorId: string | null = null;
 
-  /** 可选：通过 platform ID 解析发送者显示名称（注入自 DB） */
-  private nameResolver: ((platformId: string) => string | undefined) | null = null;
+  /** 可选：通过 platform ID 查询发送者显示名称（只读，注入自 DB） */
+  private nameLookup: ((platformId: string) => string | undefined) | null = null;
+
+  /** 可选：注册未知用户并返回显示名称（写入，注入自 DB） */
+  private nameRegister: ((platformId: string) => string) | null = null;
 
   /** 可选：通过 platform msg ID 查询已缓存的消息内容（注入自 DB） */
   private contentResolver: ((platformMsgId: string) => string | undefined) | null = null;
@@ -45,9 +48,14 @@ export class FeishuAdapter implements PlatformAdapter {
     this.handler = handler;
   }
 
-  /** 注入发送者名称解析（DB 查询），用于 merge_forward 等场景 */
-  setNameResolver(fn: (platformId: string) => string | undefined): void {
-    this.nameResolver = fn;
+  /** 注入发送者名称查询（只读 DB），用于 merge_forward 等场景 */
+  setNameLookup(fn: (platformId: string) => string | undefined): void {
+    this.nameLookup = fn;
+  }
+
+  /** 注入未知用户注册（写 DB），用于 merge_forward 等场景 */
+  setNameRegister(fn: (platformId: string) => string): void {
+    this.nameRegister = fn;
   }
 
   /** 注入消息内容缓存查询（DB 查询），用于 merge_forward 等场景 */
@@ -621,23 +629,29 @@ export class FeishuAdapter implements PlatformAdapter {
     return lines;
   }
 
-  /** Resolve sender display name from message.get() item (DB → fallback) */
+  /** Resolve sender display name (对齐 cc-connect resolveSenderName: lookup → bot → register) */
   private resolveSenderFromItem(item: any): string {
     const sender = item.sender;
     if (!sender?.id) return "未知";
 
-    // DB 优先：通过 platform ID 查已知用户名
-    if (this.nameResolver) {
-      const name = this.nameResolver(sender.id);
+    // 1. DB 只读查询（已知用户直接返回）
+    if (this.nameLookup) {
+      const name = this.nameLookup(sender.id);
       if (name) return name;
     }
 
-    // Fallback: bot 识别（app sender 的 id 可能是 app_id 或 open_id）
+    // 2. App/Bot 识别
     if (sender.sender_type === "app") {
       if (sender.id === this.botOpenId || sender.id === this.appId) {
         return this.botName ?? "Bot";
       }
+      // TODO: fetchAppName — 通过飞书 API 获取其他 app 名称
       return "Bot";
+    }
+
+    // 3. 未知用户：注册并返回 "U{n}(未知用户)"
+    if (this.nameRegister) {
+      return this.nameRegister(sender.id);
     }
     return "用户";
   }

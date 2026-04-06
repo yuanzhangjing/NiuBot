@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { AgentBackend } from "./agent/types.js";
 import type { BotConfig } from "./config.js";
-import { initDatabase, ensureUser, getUserShortLabel, getMessageByPlatformId } from "./database/schema.js";
+import { initDatabase, ensureUser, getUserShortLabel, getUserShortLabelByPlatformId, getMessageByPlatformId } from "./database/schema.js";
 import { FeishuAdapter } from "./im/feishu/adapter.js";
 import { Pipeline, type BotIdentity } from "./core/pipeline.js";
 import { ApiServer, type ApiHandler } from "./core/api.js";
@@ -48,11 +48,16 @@ export async function createBotInstance(
 
   // 4. 创建 IM adapter（注入 DB resolver 用于 merge_forward 等场景）
   const im = new FeishuAdapter(botConfig.appId, botConfig.appSecret);
-  im.setNameResolver((platformId) => {
-    // 确保用户存在（不存在则注册，获得 short ID）
+  // 只读查询：DB 中已有名字的用户
+  im.setNameLookup((platformId) => {
+    const label = getUserShortLabelByPlatformId(db, "feishu", platformId);
+    if (label === platformId) return undefined; // 不在 DB 中
+    return label.includes("(") ? label : undefined; // 无名字则不命中，走后续逻辑
+  });
+  // 注册未知用户：写 DB，返回 "U{n}(未知用户)"
+  im.setNameRegister((platformId) => {
     const userId = ensureUser(db, "feishu", platformId);
     const label = getUserShortLabel(db, userId);
-    // label 格式：有名 "U2(Name)"，无名 "U2"
     return label.includes("(") ? label : `${label}(未知用户)`;
   });
   im.setContentResolver((platformMsgId) => {
