@@ -575,7 +575,7 @@ export class FeishuAdapter implements PlatformAdapter {
   private async parseMergeForward(messageId: string): Promise<string> {
     const visited = new Set<string>();
     const lines = await this.parseMergeForwardInner(messageId, visited, 0);
-    if (lines.length === 0) return "[合并转发消息]";
+    if (lines.length === 0) return "[merge_forward]";
     return "【合并转发消息】\n" + lines.join("\n");
   }
 
