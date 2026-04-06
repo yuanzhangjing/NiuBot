@@ -30,8 +30,10 @@ export function handleMessages(
     messagesList(db, args.slice(1), chatId, chatType, checkChatAccess, parseArgs);
   } else if (sub === "search") {
     messagesSearch(db, args.slice(1), chatId, chatType, checkChatAccess, parseArgs);
+  } else if (sub === "get") {
+    messagesGet(db, args.slice(1), parseArgs);
   } else {
-    console.log("Usage: niubot messages <list|search>");
+    console.log("Usage: niubot messages <list|search|get>");
   }
 }
 
@@ -217,18 +219,56 @@ function messagesSearch(
   }
 }
 
+function messagesGet(
+  db: Database.Database,
+  args: string[],
+  parseArgs: (args: string[]) => { positional: string[]; flags: Record<string, string> },
+): void {
+  const { positional } = parseArgs(args);
+  const id = positional[0];
+  if (!id) {
+    console.error("Usage: niubot messages get <id>");
+    process.exit(1);
+  }
+
+  const row = db.prepare(`
+    SELECT m.id, m.chat_id, m.sender_id, m.role, m.content_text, m.content_type, m.created_at,
+           u.name as sender_name
+    FROM messages m
+    LEFT JOIN users u ON m.sender_id = u.id
+    WHERE m.id = ?
+  `).get(Number(id)) as MessageRow | undefined;
+
+  if (!row) {
+    console.log(`Message #${id} not found.`);
+    return;
+  }
+
+  const senderLabel = row.sender_name
+    ? `${row.sender_id.toUpperCase()}(${row.sender_name})`
+    : row.sender_id.toUpperCase();
+  const roleLabel = row.role === "assistant" ? "assistant" : "user";
+  const ts = row.created_at.replace("T", " ").slice(0, 19);
+
+  console.log(`[#${row.id}] [${ts}] ${senderLabel} (${roleLabel}):`);
+  console.log(row.content_text ?? "");
+}
+
 function formatMessage(r: MessageRow, prefix = ""): void {
   const senderLabel = r.sender_name
     ? `${r.sender_id.toUpperCase()}(${r.sender_name})`
     : r.sender_id.toUpperCase();
   const roleLabel = r.role === "assistant" ? "assistant" : "user";
   const ts = r.created_at.replace("T", " ").slice(0, 19);
-  const text = truncate(r.content_text ?? "", 200);
+  const content = (r.content_text ?? "").replaceAll("\n", " ");
+  const text = truncate(content, 200);
 
   console.log(`${prefix}[#${r.id}] [${ts}] ${senderLabel} (${roleLabel}): ${text}`);
 }
 
+/** Rune-safe truncation (对齐 cc-connect: []rune 截断) */
 function truncate(text: string, max: number): string {
-  if (text.length <= max) return text;
-  return text.slice(0, max) + "...";
+  const runes = [...text];
+  if (runes.length <= max) return text;
+  return runes.slice(0, max).join("") + "...";
 }

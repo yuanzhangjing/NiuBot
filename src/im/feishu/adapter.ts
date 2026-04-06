@@ -650,10 +650,10 @@ export class FeishuAdapter implements PlatformAdapter {
         }
         return this.botName ?? "Bot";
       }
-      // 其他 app/bot：注册并返回 "U{n}(未知Bot)"
+      // 其他 app/bot：注册并返回 label
       // TODO: fetchAppName — 通过飞书 API 获取 app 名称
       if (this.nameRegister) {
-        return this.nameRegister(sender.id).replace("未知用户", "未知Bot");
+        return this.nameRegister(sender.id);
       }
       return "Bot";
     }

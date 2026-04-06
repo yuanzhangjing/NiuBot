@@ -48,17 +48,16 @@ export async function createBotInstance(
 
   // 4. 创建 IM adapter（注入 DB resolver 用于 merge_forward 等场景）
   const im = new FeishuAdapter(botConfig.appId, botConfig.appSecret);
-  // 只读查询：DB 中已有名字的用户
+  // 只读查询：DB 中已有用户直接返回 label
   im.setNameLookup((platformId) => {
     const label = getUserShortLabelByPlatformId(db, "feishu", platformId);
     if (label === platformId) return undefined; // 不在 DB 中
-    return label.includes("(") ? label : undefined; // 无名字则不命中，走后续逻辑
+    return label; // 有名字 "U2(名字)"，无名字 "U2"
   });
-  // 注册未知用户：写 DB，返回 "U{n}(未知用户)"
+  // 注册新用户：写 DB，返回 label
   im.setNameRegister((platformId) => {
     const userId = ensureUser(db, "feishu", platformId);
-    const label = getUserShortLabel(db, userId);
-    return label.includes("(") ? label : `${label}(未知用户)`;
+    return getUserShortLabel(db, userId);
   });
   im.setContentResolver((platformMsgId) => {
     const msg = getMessageByPlatformId(db, "feishu", platformMsgId);
