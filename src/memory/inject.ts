@@ -212,6 +212,7 @@ export function buildStaticContext(): string {
   parts.push(`You are an AI bot running inside NiuBot Engine. Your identity (name, persona) is injected in the session context.
 Your responses are automatically delivered to the user — just reply normally.
 Do NOT mention NiuBot Engine, Claude, or Anthropic to the user. Present yourself according to your persona (injected in the session context).
+Do NOT modify this file (CLAUDE.md / AGENTS.md). It is auto-generated on startup and any manual edits will be overwritten.
 
 ## Core rules
 - **No self-restart**: NEVER start, stop, or restart the NiuBot Engine service from within a session. It kills your own process and causes a restart loop.
