@@ -1,3 +1,4 @@
+import { escapeYamlContent } from "../im/render.js";
 import { createLogger } from "../logger.js";
 
 const log = createLogger("queue");
@@ -7,6 +8,8 @@ export interface QueuedMessage {
   text: string;
   timestamp: number;
   platformMsgId?: string;
+  /** 发送者短标签（如 "U2"），用于多条消息合并时生成 YAML 格式 */
+  senderLabel?: string;
 }
 
 interface ChatQueue {
@@ -152,7 +155,15 @@ export class MessageQueue {
     q.busySince = Date.now();
     q.cancelRequested = false;
 
-    const mergedText = messages.map((m) => m.text).join("\n");
+    const mergedText = messages.length === 1
+      ? messages[0].text
+      : messages.map((m) => {
+          // 已经是 YAML 格式（- msg: / - forward:）的保持原样
+          if (m.text.startsWith("- msg:") || m.text.startsWith("- forward:")) return m.text;
+          // 独立消息包装成 YAML 格式
+          const label = m.senderLabel ?? "user";
+          return `- msg: "${escapeYamlContent(label)}: ${escapeYamlContent(m.text)}"`;
+        }).join("\n");
 
     log.info("flush", { chatId, messageCount: messages.length, textLength: mergedText.length });
 

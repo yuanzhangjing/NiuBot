@@ -491,6 +491,7 @@ export class Pipeline {
     const isPending = this.queue.push({
       chatId,
       text: agentText,
+      senderLabel: label,
       timestamp: Date.now(),
       platformMsgId: msg.platformMsgId,
     });
