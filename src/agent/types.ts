@@ -43,6 +43,8 @@ export interface AgentResponse {
   filesChanged?: string[];
   /** 本次调用的上下文 token 总数 */
   contextTokens?: number;
+  /** 模型上下文窗口大小 */
+  contextWindow?: number;
   /** 本次调用使用的模型 */
   model?: string;
   /** 累计 compact 次数 */

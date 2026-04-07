@@ -3,6 +3,9 @@
  * 每个 session 一个独立子进程，JSON 事件流输出。
  */
 
+import { existsSync, openSync, readSync, closeSync, readdirSync, statSync } from "node:fs";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
 import { CliAgentBackend, buildNiubotEnv, type BaseCliSession, type ParsedOutput } from "../cli-base.js";
 import type { SessionConfig } from "../types.js";
 
@@ -11,6 +14,7 @@ const DEFAULT_LITE_MODEL = "gpt-4.1-mini";
 interface CodexSession extends BaseCliSession {
   /** Codex 的 thread ID（首次调用后由 CLI 返回，用于 resume） */
   codexThreadId?: string;
+  sessionLogPath?: string;
   sandboxMode: string;
 }
 
@@ -97,7 +101,6 @@ export class CodexCliBackend extends CliAgentBackend<CodexSession> {
     let lastAgentText = "";
     let inputTokens = 0;
     let outputTokens = 0;
-    let cachedTokens = 0;
 
     for (const line of stdout.split("\n")) {
       if (!line) continue;
@@ -129,12 +132,11 @@ export class CodexCliBackend extends CliAgentBackend<CodexSession> {
         if (event.type === "turn.completed" && event.usage) {
           inputTokens += event.usage.input_tokens ?? 0;
           outputTokens += event.usage.output_tokens ?? 0;
-          cachedTokens += event.usage.cached_input_tokens ?? 0;
         }
       } catch { /* skip non-JSON lines */ }
     }
 
-    const totalTokens = inputTokens + outputTokens + cachedTokens;
+    const totalTokens = inputTokens + outputTokens;
 
     return {
       text: lastAgentText.trim(),
@@ -147,9 +149,96 @@ export class CodexCliBackend extends CliAgentBackend<CodexSession> {
     if (parsed.agentSessionId) {
       session.codexThreadId = parsed.agentSessionId;
     }
+    if (session.codexThreadId) {
+      const meta = this.scanJsonl(session);
+      if (meta.model) parsed.model = meta.model;
+      if (meta.contextWindow) parsed.contextWindow = meta.contextWindow;
+    }
   }
 
   getAgentSessionId(sessionId: string): string | undefined {
     return this.sessions.get(sessionId)?.codexThreadId;
+  }
+
+  private scanJsonl(session: CodexSession): { model?: string; contextWindow?: number } {
+    const jsonlPath = this.getJsonlPath(session);
+    if (!jsonlPath) return {};
+
+    let model: string | undefined;
+    let contextWindow: number | undefined;
+
+    try {
+      const stat = statSync(jsonlPath);
+      const fileSize = stat.size;
+      if (fileSize <= session.jsonlOffset) return {};
+
+      const fd = openSync(jsonlPath, "r");
+      try {
+        const readLen = fileSize - session.jsonlOffset;
+        const buf = Buffer.alloc(readLen);
+        readSync(fd, buf, 0, readLen, session.jsonlOffset);
+        session.jsonlOffset = fileSize;
+
+        for (const line of buf.toString("utf-8").split("\n")) {
+          if (!line) continue;
+          try {
+            const entry = JSON.parse(line) as {
+              type?: string;
+              payload?: {
+                model?: string;
+                collaboration_mode?: {
+                  settings?: {
+                    model?: string;
+                  };
+                };
+                type?: string;
+                info?: {
+                  model_context_window?: number;
+                };
+              };
+            };
+
+            if (entry.type === "turn_context") {
+              model = entry.payload?.model ?? entry.payload?.collaboration_mode?.settings?.model ?? model;
+            } else if (entry.type === "event_msg" && entry.payload?.type === "token_count") {
+              contextWindow = entry.payload.info?.model_context_window ?? contextWindow;
+            }
+          } catch { /* skip malformed lines */ }
+        }
+      } finally {
+        closeSync(fd);
+      }
+    } catch {
+      return {};
+    }
+
+    return { model, contextWindow };
+  }
+
+  private getJsonlPath(session: CodexSession): string | null {
+    if (session.sessionLogPath && existsSync(session.sessionLogPath)) {
+      return session.sessionLogPath;
+    }
+    if (!session.codexThreadId) return null;
+
+    const sessionsRoot = resolve(homedir(), ".codex", "sessions");
+    if (!existsSync(sessionsRoot)) return null;
+
+    for (const year of readdirSync(sessionsRoot)) {
+      const yearDir = join(sessionsRoot, year);
+      for (const month of readdirSync(yearDir)) {
+        const monthDir = join(yearDir, month);
+        for (const day of readdirSync(monthDir)) {
+          const dayDir = join(monthDir, day);
+          const match = readdirSync(dayDir).find((name) => name.endsWith(`${session.codexThreadId}.jsonl`));
+          if (match) {
+            session.sessionLogPath = join(dayDir, match);
+            return session.sessionLogPath;
+          }
+        }
+      }
+    }
+
+    return null;
   }
 }

@@ -17,6 +17,7 @@ import { loadPersona } from "../persona.js";
 import { ARCHIVE_SUMMARY_PROMPT } from "./prompts.js";
 import { decideRoute, type RouteDecision } from "./routing.js";
 import { createLogger } from "../logger.js";
+import { buildResponseFooter } from "./footer.js";
 
 const execAsync = promisify(exec);
 
@@ -921,19 +922,12 @@ export class Pipeline {
       const stats = this.db.prepare(
         "SELECT turn_count FROM sessions WHERE id = ?",
       ).get(chatSession.sessionKey) as { turn_count: number } | undefined;
-      const shortId = chatSession.sessionKey.slice(-8);
-      const footerParts = [`${shortId} · #${stats?.turn_count ?? "?"}`];
-      if (response.contextTokens && response.contextTokens > 0) {
-        let contextStr = `${(response.contextTokens / 1000).toFixed(1)}k`;
-        if (response.compactCount && response.compactCount > 0) {
-          contextStr += ` 📦×${response.compactCount}`;
-        }
-        footerParts.push(contextStr);
-      }
-      if (response.model) {
-        footerParts.push(formatModelName(response.model));
-      }
-      const footer = footerParts.join(" · ");
+      const footer = buildResponseFooter({
+        sessionKey: chatSession.sessionKey,
+        turnCount: stats?.turn_count,
+        contextTokens: response.contextTokens,
+        model: response.model,
+      });
 
       // 合并消息提示头
       let displayText = response.text;
@@ -1260,15 +1254,4 @@ function formatUptime(ms: number): string {
   if (minutes > 0) parts.push(`${minutes}m`);
   parts.push(`${secs}s`);
   return parts.join(" ");
-}
-
-/** "claude-opus-4-6" → "Opus 4.6", "claude-haiku-4-5-20251001" → "Haiku 4.5" */
-function formatModelName(raw: string): string {
-  const s = raw.replace(/^claude-/, "");
-  // Remove date suffix like -20251001
-  const parts = s.split("-").filter((p) => p.length > 0 && !(p.length === 8 && /^\d+$/.test(p)));
-  if (parts.length === 0) return raw;
-  // Capitalize first part, join rest with dots
-  const name = parts[0]![0]!.toUpperCase() + parts[0]!.slice(1);
-  return parts.length > 1 ? `${name} ${parts.slice(1).join(".")}` : name;
 }
