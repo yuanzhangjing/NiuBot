@@ -27,6 +27,11 @@ const STALE_MESSAGE_THRESHOLD_MS = 2 * 60 * 1000;
 /** 短词打断关键词 */
 const INTERRUPT_WORDS = new Set(["停", "算了", "取消", "stop", "cancel", "abort"]);
 
+/** 转义 YAML msg 值中的特殊字符（双引号、换行、反斜杠） */
+function escapeYamlContent(s: string): string {
+  return s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n");
+}
+
 /** Bot 身份信息，由外部传入 */
 export interface BotIdentity {
   /** Bot 显示名称（如 "CowBot"，从平台 API 获取或 config 指定） */
@@ -415,10 +420,10 @@ export class Pipeline {
       displayText = `[${label}]: ${msg.contentText}`;
     }
 
-    // Build reply context
-    let replyContext = "";
+    // Build reply quoted block (sub-field of - msg:)
+    let replyQuoted = "";
     if (msg.parentPlatformMsgId) {
-      replyContext = this.buildReplyContext(platform, msg.parentPlatformMsgId);
+      replyQuoted = this.buildReplyQuoted(platform, msg.parentPlatformMsgId);
     }
 
     // Store platform_ts as ISO string
@@ -452,10 +457,14 @@ export class Pipeline {
     this.platformChatIds.set(chatId, msg.chatPlatformId);
     this.chatUserIds.set(chatId, userId);
 
-    // Prepare text to send to agent (with reply context and sender annotation)
-    let agentText = displayText;
-    if (replyContext) {
-      agentText = `${replyContext}\n${displayText}`;
+    // Prepare text to send to agent (unified YAML format for replies)
+    let agentText: string;
+    if (replyQuoted) {
+      const label = getUserShortLabel(this.db, userId);
+      const escaped = escapeYamlContent(msg.contentText);
+      agentText = `- msg: "${label}: ${escaped}"\n${replyQuoted}`;
+    } else {
+      agentText = displayText;
     }
 
     // Save trigger msg ID for reply-to-message（process() 会快照并清除）
@@ -544,14 +553,17 @@ export class Pipeline {
     return msg?.senderId === this.botUserId;
   }
 
-  /** Build reply context string from a parent message using unified rendering */
-  private buildReplyContext(platform: string, parentPlatformMsgId: string): string {
+  /**
+   * Build reply quoted block (indented as sub-field of `- msg:`).
+   * Returns `"  quoted:\n    msg: \"label: content\""` or empty string.
+   */
+  private buildReplyQuoted(platform: string, parentPlatformMsgId: string): string {
     // First try DB
     const dbMsg = getMessageByPlatformId(this.db, platform, parentPlatformMsgId);
     if (dbMsg?.contentText) {
       const label = getUserShortLabel(this.db, dbMsg.senderId);
-      const escaped = dbMsg.contentText.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n");
-      return `quoted:\n  msg: "${label}: ${escaped}"`;
+      const escaped = escapeYamlContent(dbMsg.contentText);
+      return `  quoted:\n    msg: "${label}: ${escaped}"`;
     }
 
     // Fallback: try API (async — cache result for next time)
