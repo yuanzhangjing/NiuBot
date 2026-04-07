@@ -2,7 +2,14 @@ import fs from "node:fs";
 import path from "node:path";
 import type { AgentBackend } from "./agent/types.js";
 import type { BotConfig, AgentBackendType } from "./config.js";
-import { initDatabase, ensureUser, getUserShortLabel, getUserShortLabelByPlatformId, getMessageByPlatformId } from "./database/schema.js";
+import {
+  initDatabase,
+  ensureUser,
+  getUserShortLabel,
+  getUserShortLabelByPlatformId,
+  getMessageByPlatformId,
+  setBotRuntimeBackend,
+} from "./database/schema.js";
 import { FeishuAdapter } from "./im/feishu/adapter.js";
 import { Pipeline, type BotIdentity } from "./core/pipeline.js";
 import { ApiServer, type ApiHandler } from "./core/api.js";
@@ -43,6 +50,9 @@ export async function createBotInstance(
 
   // 2. 初始化数据库
   const db = initDatabase(botConfig.dbPath);
+  if (backendType) {
+    setBotRuntimeBackend(db, botConfig.name, backendType);
+  }
   log.info("database initialized", { dbPath: botConfig.dbPath });
 
   // 3. 生成 AGENTS.md + CLAUDE.md symlink

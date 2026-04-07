@@ -1,4 +1,7 @@
+import { existsSync } from "node:fs";
 import Database from "better-sqlite3";
+import type { AgentBackendType } from "../config.js";
+import { VALID_BACKENDS } from "../config.js";
 import { createLogger } from "../logger.js";
 
 const log = createLogger("database");
@@ -175,6 +178,26 @@ const migrations: Migration[] = [
       db.exec("ALTER TABLE sessions ADD COLUMN agent_session_id TEXT");
     },
   },
+  {
+    version: 4,
+    description: "Track sessions.backend_type so recover only resumes compatible agent sessions",
+    up: (db) => {
+      db.exec("ALTER TABLE sessions ADD COLUMN backend_type TEXT");
+    },
+  },
+  {
+    version: 5,
+    description: "Persist current backend per bot for restart recovery",
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS bot_runtime_state (
+          bot_name      TEXT PRIMARY KEY,
+          backend_type  TEXT NOT NULL,
+          updated_at    TEXT DEFAULT (datetime('now'))
+        )
+      `);
+    },
+  },
 ];
 
 const LATEST_VERSION = migrations[migrations.length - 1]!.version;
@@ -191,6 +214,41 @@ export function initDatabase(dbPath: string): Database.Database {
 
   log.info("database initialized", { path: dbPath, schemaVersion: getSchemaVersion(db) });
   return db;
+}
+
+export function getBotRuntimeBackend(db: Database.Database, botName: string): AgentBackendType | undefined {
+  const row = db.prepare(
+    "SELECT backend_type FROM bot_runtime_state WHERE bot_name = ?",
+  ).get(botName) as { backend_type: string } | undefined;
+
+  if (!row) return undefined;
+  if (!VALID_BACKENDS.has(row.backend_type as AgentBackendType)) return undefined;
+  return row.backend_type as AgentBackendType;
+}
+
+export function setBotRuntimeBackend(
+  db: Database.Database,
+  botName: string,
+  backendType: AgentBackendType,
+): void {
+  db.prepare(`
+    INSERT INTO bot_runtime_state (bot_name, backend_type, updated_at)
+    VALUES (?, ?, datetime('now'))
+    ON CONFLICT(bot_name) DO UPDATE SET
+      backend_type = excluded.backend_type,
+      updated_at = excluded.updated_at
+  `).run(botName, backendType);
+}
+
+export function loadPersistedBotBackend(dbPath: string, botName: string): AgentBackendType | undefined {
+  if (!existsSync(dbPath)) return undefined;
+
+  const db = initDatabase(dbPath);
+  try {
+    return getBotRuntimeBackend(db, botName);
+  } finally {
+    db.close();
+  }
 }
 
 function getSchemaVersion(db: Database.Database): number {

@@ -5,6 +5,7 @@ import { ClaudeCliBackend } from "./agent/claude-cli/backend.js";
 import { CodexCliBackend } from "./agent/codex/backend.js";
 import type { AgentBackend } from "./agent/types.js";
 import { createBotInstance, type BotInstance } from "./bot-instance.js";
+import { loadPersistedBotBackend } from "./database/schema.js";
 import { createLogger, setLogLevel } from "./logger.js";
 
 const log = createLogger("main");
@@ -58,11 +59,18 @@ async function main(): Promise<void> {
   const bots: BotInstance[] = [];
   for (const botConfig of config.bots) {
     try {
-      const backendType = botConfig.backend ?? config.agent.backend;
+      const configuredBackendType = botConfig.backend ?? config.agent.backend;
+      const persistedBackendType = loadPersistedBotBackend(botConfig.dbPath, botConfig.name);
+      const backendType = persistedBackendType ?? configuredBackendType;
       const agent = await getOrCreateBackend(backendType);
       const instance = await createBotInstance(botConfig, agent, config.queue, backendType, getOrCreateBackend);
       bots.push(instance);
-      log.info("bot backend assigned", { bot: botConfig.name, backend: backendType });
+      log.info("bot backend assigned", {
+        bot: botConfig.name,
+        backend: backendType,
+        source: persistedBackendType ? "runtime-state" : "config",
+        configuredBackend: configuredBackendType,
+      });
     } catch (err) {
       log.error("failed to create bot instance", { bot: botConfig.name, error: String(err) });
     }

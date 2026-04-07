@@ -11,6 +11,7 @@ import { MessageQueue } from "./queue.js";
 import {
   ensureUser, ensureChat, storeMessage, updateChatName,
   getUserShortLabel, getChatShortLabel, getMessageByPlatformId, updateMessageContent, updateMessagePlatformId,
+  setBotRuntimeBackend,
 } from "../database/schema.js";
 import { buildImportantContext, buildNormalContext, type SceneInfo } from "../memory/inject.js";
 import { loadPersona } from "../persona.js";
@@ -29,6 +30,12 @@ const STALE_MESSAGE_THRESHOLD_MS = 2 * 60 * 1000;
 
 /** 短词打断关键词 */
 const INTERRUPT_WORDS = new Set(["停", "算了", "取消", "stop", "cancel", "abort"]);
+const AGENT_BACKEND_ALIASES: Record<string, AgentBackendType> = {
+  claude: "claude-code",
+  "claude-code": "claude-code",
+  codex: "codex",
+};
+const AGENT_BACKEND_DISPLAY = ["claude", "codex"] as const;
 
 /** Bot 身份信息，由外部传入 */
 export interface BotIdentity {
@@ -254,7 +261,7 @@ export class Pipeline {
   /** 进程恢复：从 DB 恢复 active sessions，重建 backend session */
   async recover(): Promise<void> {
     const rows = this.db.prepare(`
-      SELECT s.id, s.chat_id, s.user_id, s.agent_session_id, c.platform_id, c.type
+      SELECT s.id, s.chat_id, s.user_id, s.agent_session_id, s.backend_type, c.platform_id, c.type
       FROM sessions s
       JOIN chats c ON s.chat_id = c.id
       WHERE s.status = 'active'
@@ -264,6 +271,7 @@ export class Pipeline {
       chat_id: string;
       user_id: string | null;
       agent_session_id: string | null;
+      backend_type: AgentBackendType | null;
       platform_id: string;
       type: string;
     }>;
@@ -282,6 +290,7 @@ export class Pipeline {
 
     for (const row of uniqueRows) {
       const chatType = (row.type ?? "p2p") as "p2p" | "group";
+      const canResumeRecoveredSession = row.backend_type !== null && row.backend_type === this.backendType;
 
       // 重建 important 上下文
       const userRow = row.user_id
@@ -318,7 +327,7 @@ export class Pipeline {
           botName: this.botIdentity.name,
           liteModel: this.botIdentity.liteModel,
           isAdmin,
-          agentSessionId: row.agent_session_id ?? undefined,
+          agentSessionId: canResumeRecoveredSession ? (row.agent_session_id ?? undefined) : undefined,
         });
 
         // fallback 模式下 recover 也需要注入 important context（agent session 是全新的）
@@ -336,7 +345,13 @@ export class Pipeline {
         this.platformChatIds.set(row.chat_id, row.platform_id);
         if (row.user_id) this.chatUserIds.set(row.chat_id, row.user_id);
 
-        this.log.info("session recovered", { chatId: row.chat_id, sessionKey: row.id });
+        this.log.info("session recovered", {
+          chatId: row.chat_id,
+          sessionKey: row.id,
+          resumed: canResumeRecoveredSession && !!row.agent_session_id,
+          storedBackendType: row.backend_type ?? "unknown",
+          activeBackendType: this.backendType,
+        });
       } catch (err) {
         this.log.error("failed to recover session", {
           chatId: row.chat_id,
@@ -723,20 +738,20 @@ export class Pipeline {
     if (args.length === 0) {
       // 显示当前 backend
       this.replyText(chatId, platformChatId, msgId,
-        `当前 Agent: **${this.backendType}**\n可选: ${[...VALID_BACKENDS].join(", ")}`);
+        `当前 Agent: **${displayBackendType(this.backendType)}**\n可选: ${AGENT_BACKEND_DISPLAY.join(", ")}`);
       return;
     }
 
-    const target = args[0].toLowerCase() as AgentBackendType;
+    const target = AGENT_BACKEND_ALIASES[args[0].toLowerCase()];
 
-    if (!VALID_BACKENDS.has(target)) {
+    if (!target || !VALID_BACKENDS.has(target)) {
       this.replyText(chatId, platformChatId, msgId,
-        `无效的 backend: "${args[0]}"\n可选: ${[...VALID_BACKENDS].join(", ")}`);
+        `无效的 backend: "${args[0]}"\n可选: ${AGENT_BACKEND_DISPLAY.join(", ")}`);
       return;
     }
 
     if (target === this.backendType) {
-      this.replyText(chatId, platformChatId, msgId, `已经是 ${target}，无需切换。`);
+      this.replyText(chatId, platformChatId, msgId, `已经是 ${displayBackendType(target)}，无需切换。`);
       return;
     }
 
@@ -762,8 +777,9 @@ export class Pipeline {
 
     doSwitch()
       .then(() => {
+        setBotRuntimeBackend(this.db, this.botIdentity.name, target);
         this.replyText(chatId, platformChatId, msgId,
-          `已切换到 **${target}**，上下文已重置。`);
+          `已切换到 **${displayBackendType(target)}**，上下文已重置。`);
         this.log.info("agent backend switched", { backend: target });
       })
       .catch((err) => {
@@ -914,9 +930,17 @@ export class Pipeline {
             cumulative_bytes = ?,
             last_active_at = datetime('now'),
             end_msg_id = ?,
-            agent_session_id = COALESCE(agent_session_id, ?)
+            agent_session_id = COALESCE(agent_session_id, ?),
+            backend_type = COALESCE(backend_type, ?)
         WHERE id = ?
-      `).run(chatSession.sessionKey, cumulativeBytes, replyMsgId, agentSessionId ?? null, chatSession.sessionKey);
+      `).run(
+        chatSession.sessionKey,
+        cumulativeBytes,
+        replyMsgId,
+        agentSessionId ?? null,
+        this.backendType,
+        chatSession.sessionKey,
+      );
 
       // 构建 footer（对齐 cc-connect：shortId · #turn · context · model）
       const stats = this.db.prepare(
@@ -1062,9 +1086,9 @@ export class Pipeline {
       const startMsgId = orphan?.startId ?? null;
 
       this.db.prepare(`
-        INSERT INTO sessions (id, chat_id, user_id, status, start_msg_id, started_at, last_active_at)
-        VALUES (?, ?, ?, 'active', ?, datetime('now'), datetime('now'))
-      `).run(sessionKey, chatId, userId ?? null, startMsgId);
+        INSERT INTO sessions (id, chat_id, user_id, status, start_msg_id, started_at, last_active_at, backend_type)
+        VALUES (?, ?, ?, 'active', ?, datetime('now'), datetime('now'), ?)
+      `).run(sessionKey, chatId, userId ?? null, startMsgId, this.backendType);
 
       this.db.prepare(
         "UPDATE messages SET session_key = ? WHERE chat_id = ? AND session_key IS NULL",
@@ -1254,4 +1278,8 @@ function formatUptime(ms: number): string {
   if (minutes > 0) parts.push(`${minutes}m`);
   parts.push(`${secs}s`);
   return parts.join(" ");
+}
+
+function displayBackendType(type: AgentBackendType): string {
+  return type === "claude-code" ? "claude" : type;
 }
