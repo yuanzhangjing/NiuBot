@@ -109,7 +109,8 @@ export function handleSendFile(
   }
 
   const socketPath = getSocketPath();
-  ipcRequest(socketPath, "/send-file", { chat_id: targetChatId, file_path: filePath })
+  const absPath = path.resolve(filePath);
+  ipcRequest(socketPath, "/send-file", { chat_id: targetChatId, file_path: absPath })
     .then(() => console.log("File sent."))
     .catch((err) => {
       console.error(`Error: ${err.message}`);

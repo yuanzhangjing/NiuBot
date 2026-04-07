@@ -3,7 +3,7 @@
  * 新增 CLI agent 只需继承并实现抽象方法。
  */
 
-import { execFile } from "node:child_process";
+import { spawn } from "node:child_process";
 import type { AgentBackend, AgentSession, AgentResponse, SessionConfig } from "./types.js";
 import { createLogger } from "../logger.js";
 
@@ -99,6 +99,7 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
         cwd: s.workingDirectory,
         timeout: this.promptTimeoutMs,
         env: { ...s.extraEnv, ...this.agentEnv() },
+        stdin: message,
       });
 
       s.cumulativeBytes += stdout.length;
@@ -145,22 +146,55 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
   protected exec(
     cmd: string,
     args: string[],
-    opts?: { cwd?: string; timeout?: number; env?: Record<string, string> },
+    opts?: { cwd?: string; timeout?: number; env?: Record<string, string>; stdin?: string },
   ): Promise<string> {
     return new Promise((resolve, reject) => {
-      execFile(cmd, args, {
+      const child = spawn(cmd, args, {
         cwd: opts?.cwd,
-        timeout: opts?.timeout,
-        maxBuffer: 10 * 1024 * 1024,
         env: { ...process.env, ...opts?.env },
-      }, (err, stdout, stderr) => {
-        if (err) {
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+
+      const chunks: Buffer[] = [];
+      const stderrChunks: Buffer[] = [];
+      child.stdout.on("data", (chunk: Buffer) => chunks.push(chunk));
+      child.stderr.on("data", (chunk: Buffer) => stderrChunks.push(chunk));
+
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      if (opts?.timeout) {
+        timer = setTimeout(() => {
+          child.kill();
+          const err = new Error(`Command timed out after ${opts.timeout}ms`);
+          (err as any).killed = true;
+          reject(err);
+        }, opts.timeout);
+      }
+
+      child.on("close", (code) => {
+        if (timer) clearTimeout(timer);
+        const stdout = Buffer.concat(chunks).toString();
+        const stderr = Buffer.concat(stderrChunks).toString();
+        if (code !== 0) {
+          const err = new Error(`Command failed: ${cmd} ${args.join(" ")}\n${stderr}`);
           (err as any).stderr = stderr;
+          (err as any).code = code;
           reject(err);
         } else {
           resolve(stdout);
         }
       });
+
+      child.on("error", (err) => {
+        if (timer) clearTimeout(timer);
+        reject(err);
+      });
+
+      if (opts?.stdin) {
+        child.stdin.write(opts.stdin);
+        child.stdin.end();
+      } else {
+        child.stdin.end();
+      }
     });
   }
 }

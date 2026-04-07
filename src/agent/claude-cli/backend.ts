@@ -56,9 +56,9 @@ export class ClaudeCliBackend extends CliAgentBackend<ClaudeSession> {
     };
   }
 
-  buildArgs(session: ClaudeSession, message: string): string[] {
+  buildArgs(session: ClaudeSession, _message: string): string[] {
     const args = [
-      "-p", message,
+      "-p", "-",
       "--output-format", "json",
       "--permission-mode", session.permissionMode,
     ];

@@ -104,6 +104,11 @@ export class ApiServer {
         res.end(JSON.stringify({ error: "Missing chat_id or file_path" }));
         return;
       }
+      if (!path.isAbsolute(filePath)) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: "file_path must be absolute" }));
+        return;
+      }
       const platformChatId = this.handler.resolveChatPlatformId(chatId);
       if (!platformChatId) {
         res.writeHead(404);
