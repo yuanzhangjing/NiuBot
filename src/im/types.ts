@@ -3,6 +3,16 @@
  * 新增平台只需实现 PlatformAdapter，不改 Core。
  */
 
+/** 统一消息节点（用于 merge_forward 解析和渲染） */
+export type MessageNode = {
+  id?: string;
+  sender: string;
+  contentType: string;        // "text" | "image" | "file" | ... | "forward"
+  content?: string;           // 叶子节点的文本内容
+  children?: MessageNode[];   // forward 时的子节点列表
+  quoted?: MessageNode;       // 引用的原始消息（完整内容）
+};
+
 export interface MentionInfo {
   /** 被 @ 的用户 platform ID */
   platformUserId: string;
@@ -34,8 +44,10 @@ export interface NormalizedMessage {
   platformTs?: number;
   timestamp: Date;
   platformMsgId?: string;
-  /** Image attachments (binary data) */
+  /** Image attachments (binary data) — @deprecated 资源已改为下载到本地路径 */
   images?: Array<{ mimeType: string; data: Buffer }>;
+  /** merge_forward 的结构化子消息树 */
+  children?: MessageNode[];
   raw: unknown;
 }
 

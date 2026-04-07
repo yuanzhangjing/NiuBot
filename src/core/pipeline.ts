@@ -455,7 +455,7 @@ export class Pipeline {
     // Prepare text to send to agent (with reply context and sender annotation)
     let agentText = displayText;
     if (replyContext) {
-      agentText = `${replyContext}\n\n${displayText}`;
+      agentText = `${replyContext}\n${displayText}`;
     }
 
     // Save trigger msg ID for reply-to-message（process() 会快照并清除）
@@ -544,16 +544,14 @@ export class Pipeline {
     return msg?.senderId === this.botUserId;
   }
 
-  /** Build reply context string from a parent message */
+  /** Build reply context string from a parent message using unified rendering */
   private buildReplyContext(platform: string, parentPlatformMsgId: string): string {
     // First try DB
     const dbMsg = getMessageByPlatformId(this.db, platform, parentPlatformMsgId);
     if (dbMsg?.contentText) {
       const label = getUserShortLabel(this.db, dbMsg.senderId);
-      const truncated = dbMsg.contentText.length > 200
-        ? dbMsg.contentText.slice(0, 200) + "..."
-        : dbMsg.contentText;
-      return `> 引用 ${label}：${truncated}`;
+      const escaped = dbMsg.contentText.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n");
+      return `quoted:\n  msg: "${label}: ${escaped}"`;
     }
 
     // Fallback: try API (async — cache result for next time)

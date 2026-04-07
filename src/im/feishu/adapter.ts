@@ -1,7 +1,7 @@
 import * as lark from "@larksuiteoapi/node-sdk";
 import fs from "node:fs";
 import path from "node:path";
-import type { NormalizedMessage, MessageHandler, PlatformAdapter, MentionInfo } from "../types.js";
+import type { NormalizedMessage, MessageHandler, PlatformAdapter, MentionInfo, MessageNode } from "../types.js";
 import { createLogger } from "../../logger.js";
 
 const log = createLogger("feishu");
@@ -34,6 +34,9 @@ export class FeishuAdapter implements PlatformAdapter {
   /** 可选：通过 platform msg ID 查询已缓存的消息内容（注入自 DB） */
   private contentResolver: ((platformMsgId: string) => string | undefined) | null = null;
 
+  /** 资源文件存储根目录（DB 同级，注入自 bot-instance） */
+  private storageDir: string | null = null;
+
   constructor(appId: string, appSecret: string) {
     this.appId = appId;
     this.appSecret = appSecret;
@@ -61,6 +64,60 @@ export class FeishuAdapter implements PlatformAdapter {
   /** 注入消息内容缓存查询（DB 查询），用于 merge_forward 等场景 */
   setContentResolver(fn: (platformMsgId: string) => string | undefined): void {
     this.contentResolver = fn;
+  }
+
+  /** 注入资源文件存储目录（DB 同级目录） */
+  setStorageDir(dir: string): void {
+    this.storageDir = dir;
+  }
+
+  /**
+   * 下载图片资源到本地，返回绝对路径。失败返回 null。
+   * 存储路径：{storageDir}/images/{imageKey}.{ext}
+   */
+  private async downloadImage(messageId: string, imageKey: string): Promise<string | null> {
+    if (!this.storageDir) return null;
+    const dir = path.join(this.storageDir, "images");
+    fs.mkdirSync(dir, { recursive: true });
+    try {
+      const resp = await this.client.im.messageResource.get({
+        params: { type: "image" },
+        path: { message_id: messageId, file_key: imageKey },
+      });
+      // 从 Content-Type header 推断扩展名
+      const contentType: string = resp?.headers?.["content-type"] ?? "";
+      const ext = mimeToExt(contentType);
+      const filePath = path.join(dir, `${imageKey}${ext}`);
+      await resp.writeFile(filePath);
+      return filePath;
+    } catch (err) {
+      log.warn("downloadImage failed", { messageId, imageKey, error: String(err) });
+      return null;
+    }
+  }
+
+  /**
+   * 下载文件资源到本地，返回绝对路径。失败返回 null。
+   * 存储路径：{storageDir}/files/{fileKey}_{fileName}
+   */
+  private async downloadFile(messageId: string, fileKey: string, fileName?: string): Promise<string | null> {
+    if (!this.storageDir) return null;
+    const dir = path.join(this.storageDir, "files");
+    fs.mkdirSync(dir, { recursive: true });
+    try {
+      const resp = await this.client.im.messageResource.get({
+        params: { type: "file" },
+        path: { message_id: messageId, file_key: fileKey },
+      });
+      // sanitize fileName to prevent path traversal
+      const safeName = (fileName || fileKey).replace(/[/\\]/g, "_");
+      const filePath = path.join(dir, `${fileKey}_${safeName}`);
+      await resp.writeFile(filePath);
+      return filePath;
+    } catch (err) {
+      log.warn("downloadFile failed", { messageId, fileKey, error: String(err) });
+      return null;
+    }
   }
 
   async start(): Promise<void> {
@@ -378,16 +435,19 @@ export class FeishuAdapter implements PlatformAdapter {
       }
     }
 
-    // Parse content based on message type
-    let { text, contentType, images } = this.parseContent(msgType, msg.content, mentions);
+    // Parse content based on message type (async: may download resources)
+    let { text, contentType } = await this.parseContent(msgType, msg.content, mentions, msg.message_id);
 
-    // For merge_forward, fetch actual content from API (event payload is empty)
+    // For merge_forward, parse into structured tree + render to text
+    let children: MessageNode[] | undefined;
     if (contentType === "merge_forward" && msg.message_id) {
-      text = await this.parseMergeForward(msg.message_id);
+      const { nodes, rendered } = await this.parseMergeForward(msg.message_id);
+      text = rendered;
+      children = nodes.length > 0 ? nodes : undefined;
     }
 
     // For non-text types with empty text, still store but mark appropriately
-    if (!text && !images?.length) {
+    if (!text) {
       log.debug("message has no extractable text", { type: msgType, chatId: msg.chat_id });
       return null;
     }
@@ -398,13 +458,13 @@ export class FeishuAdapter implements PlatformAdapter {
       chatType,
       contentText: text,
       contentType,
+      children,
       mentions: mentions.length > 0 ? mentions : undefined,
       botMentioned,
       parentPlatformMsgId: msg.parent_id ?? undefined,
       platformTs,
       timestamp: platformTs ? new Date(platformTs) : new Date(),
       platformMsgId: msg.message_id,
-      images,
       raw: data,
     };
   }
@@ -412,12 +472,14 @@ export class FeishuAdapter implements PlatformAdapter {
   /**
    * Parse message content based on type. Returns extracted text and content type.
    * Handles mention placeholder replacement in the text.
+   * For image/file types, downloads the resource and injects the local path.
    */
-  private parseContent(
+  private async parseContent(
     msgType: string,
     rawContent: string,
     mentions: MentionInfo[],
-  ): { text: string; contentType: NormalizedMessage["contentType"]; images?: Array<{ mimeType: string; data: Buffer }> } {
+    messageId?: string,
+  ): Promise<{ text: string; contentType: NormalizedMessage["contentType"] }> {
     // merge_forward: content 是纯文本占位符（非 JSON），须在 JSON.parse 前处理
     if (msgType === "merge_forward") {
       return { text: "[合并转发消息]", contentType: "merge_forward" };
@@ -441,9 +503,10 @@ export class FeishuAdapter implements PlatformAdapter {
       }
 
       case "post": {
-        // Rich text: extract text from nested structure
-        const text = this.extractPostText(parsed, mentions);
-        return { text, contentType: "post" };
+        // Rich text: extract text from nested structure, download embedded images
+        const text = await this.extractPostContent(parsed, mentions, messageId);
+        const hasImages = text.includes("[图片:");
+        return { text, contentType: hasImages ? "mixed" : "post" };
       }
 
       case "interactive": {
@@ -453,23 +516,37 @@ export class FeishuAdapter implements PlatformAdapter {
       }
 
       case "image": {
-        // Image: return placeholder text
+        const imageKey: string = parsed.image_key ?? "";
+        if (imageKey && messageId) {
+          const filePath = await this.downloadImage(messageId, imageKey);
+          if (filePath) {
+            return { text: `用户发送了一张图片，请查看：${filePath}`, contentType: "image" };
+          }
+        }
         return { text: "[图片]", contentType: "image" };
       }
 
       case "file": {
-        const fileName = parsed.file_name ?? "未知文件";
+        const fileKey: string = parsed.file_key ?? "";
+        const fileName: string = parsed.file_name ?? "未知文件";
+        if (fileKey && messageId) {
+          const filePath = await this.downloadFile(messageId, fileKey, fileName);
+          if (filePath) {
+            return { text: `用户发送了文件，请查看：${filePath}`, contentType: "file" };
+          }
+        }
         return { text: `[文件: ${fileName}]`, contentType: "file" };
       }
 
       case "audio": {
         const duration = parsed.duration ? `${Math.round(parsed.duration / 1000)}秒` : "";
-        return { text: `[语音${duration ? " " + duration : ""}]`, contentType: "audio" };
+        const durationText = duration ? `（${duration}）` : "";
+        return { text: `用户发送了一段语音${durationText}，当前不支持语音消息`, contentType: "audio" };
       }
 
       case "media": {
         const fileName = parsed.file_name ?? "视频";
-        return { text: `[视频: ${fileName}]`, contentType: "media" };
+        return { text: `用户发送了视频：${fileName}，当前不支持视频消息`, contentType: "media" };
       }
 
       default: {
@@ -496,7 +573,62 @@ export class FeishuAdapter implements PlatformAdapter {
     return text;
   }
 
-  /** Extract text from rich text (post) messages */
+  /**
+   * Extract text from rich text (post) messages, downloading embedded images.
+   * Used by parseContent (main flow) where image download is available.
+   */
+  private async extractPostContent(parsed: any, mentions: MentionInfo[], messageId?: string): Promise<string> {
+    const parts: string[] = [];
+    const title = parsed.title;
+    if (title) parts.push(title);
+
+    const content = parsed.content;
+    if (Array.isArray(content)) {
+      for (const paragraph of content) {
+        if (!Array.isArray(paragraph)) continue;
+        const lineTexts: string[] = [];
+        for (const element of paragraph) {
+          if (element.tag === "text") {
+            lineTexts.push(element.text ?? "");
+          } else if (element.tag === "a") {
+            lineTexts.push(element.text ?? element.href ?? "");
+          } else if (element.tag === "at") {
+            const userId = element.user_id;
+            if (userId === "@_all" || userId === "all") {
+              lineTexts.push("@所有人");
+            } else {
+              const mention = mentions.find((m) => m.platformUserId === userId);
+              if (mention?.isBot) {
+                // Skip bot mention
+              } else {
+                lineTexts.push(`@${mention?.name ?? element.user_name ?? "用户"}`);
+              }
+            }
+          } else if (element.tag === "img") {
+            const imageKey: string = element.image_key ?? "";
+            if (imageKey && messageId) {
+              const filePath = await this.downloadImage(messageId, imageKey);
+              if (filePath) {
+                lineTexts.push(`[图片: ${filePath}]`);
+                continue;
+              }
+            }
+            lineTexts.push("[图片]");
+          } else if (element.tag === "emotion") {
+            lineTexts.push(element.emoji_type ? `[${element.emoji_type}]` : "");
+          }
+        }
+        if (lineTexts.length > 0) parts.push(lineTexts.join(""));
+      }
+    }
+
+    return parts.join("\n");
+  }
+
+  /**
+   * Extract text from rich text (post) messages without downloading images.
+   * Used by extractChildMessageText (merge_forward) where image download is not supported.
+   */
   private extractPostText(parsed: any, mentions: MentionInfo[]): string {
     const parts: string[] = [];
     const title = parsed.title;
@@ -571,19 +703,20 @@ export class FeishuAdapter implements PlatformAdapter {
     return parts.join("\n") || "[卡片消息]";
   }
 
-  /** Fetch and format merge_forward message content via API (recursive) */
-  private async parseMergeForward(messageId: string): Promise<string> {
+  /** Fetch and render merge_forward message content via API (recursive) */
+  private async parseMergeForward(messageId: string): Promise<{ nodes: MessageNode[]; rendered: string }> {
     const visited = new Set<string>();
-    const lines = await this.parseMergeForwardInner(messageId, visited, 0);
-    if (lines.length === 0) return "[merge_forward]";
-    return "【合并转发消息】\n" + lines.join("\n");
+    const nodes = await this.parseForwardNodes(messageId, visited, 0);
+    if (nodes.length === 0) return { nodes, rendered: "[merge_forward]" };
+    return { nodes, rendered: "【合并转发消息】\n" + renderMessageNodes(nodes, 0) };
   }
 
-  private async parseMergeForwardInner(
+  /** Parse merge_forward into structured MessageNode tree */
+  private async parseForwardNodes(
     messageId: string,
     visited: Set<string>,
     depth: number,
-  ): Promise<string[]> {
+  ): Promise<MessageNode[]> {
     if (depth > 5 || visited.has(messageId)) return [];
     visited.add(messageId);
 
@@ -595,15 +728,13 @@ export class FeishuAdapter implements PlatformAdapter {
       items = (resp?.data as any)?.items ?? [];
       if (!Array.isArray(items) || items.length === 0) return [];
     } catch (err) {
-      log.warn("parseMergeForward fetch failed", { messageId, depth, error: String(err) });
+      log.warn("parseForwardNodes fetch failed", { messageId, depth, error: String(err) });
       return [];
     }
 
-    const indent = "  ".repeat(depth);
-    const lines: string[] = [];
-
-    // 记录已解析消息的内容和发送者，用于构建引用上下文
-    const resolvedMap = new Map<string, { sender: string; text: string }>();
+    const nodes: MessageNode[] = [];
+    // 已解析节点索引，用于解析 reply 引用
+    const nodeMap = new Map<string, MessageNode>();
 
     for (const item of items) {
       const msgType: string = item.msg_type ?? "";
@@ -614,40 +745,42 @@ export class FeishuAdapter implements PlatformAdapter {
 
       // Nested merge_forward: recurse
       if (msgType === "merge_forward") {
-        const inner = await this.parseMergeForwardInner(childId, visited, depth + 1);
-        if (inner.length > 0) {
-          lines.push(`${indent}${senderName} 转发了一组消息：`);
-          lines.push(`${indent}<forwarded>`);
-          lines.push(...inner);
-          lines.push(`${indent}</forwarded>`);
+        const children = await this.parseForwardNodes(childId, visited, depth + 1);
+        if (children.length > 0) {
+          const node: MessageNode = { sender: senderName, contentType: "forward", children };
+          nodes.push(node);
         }
         continue;
-      }
-
-      // Reply context: parent_id → 引用
-      const parentId: string | undefined = item.parent_id;
-      if (parentId) {
-        const parent = resolvedMap.get(parentId);
-        if (parent) {
-          const truncated = parent.text.length > 50 ? parent.text.slice(0, 50) + "..." : parent.text;
-          lines.push(`${indent}> 引用 ${parent.sender}：${truncated}`);
-        } else if (this.contentResolver) {
-          const cached = this.contentResolver(parentId);
-          if (cached) {
-            const truncated = cached.length > 50 ? cached.slice(0, 50) + "..." : cached;
-            lines.push(`${indent}> 引用：${truncated}`);
-          }
-        }
       }
 
       // Leaf message: extract content
       const text = this.extractChildMessageText(msgType, item);
       const content = text || `[${msgType || "unknown"}]`;
-      resolvedMap.set(childId, { sender: senderName, text: content });
-      lines.push(`${indent}${senderName}: ${content}`);
+      const contentType = msgType || "unknown";
+
+      const node: MessageNode = { id: childId, sender: senderName, contentType, content };
+
+      // Resolve quoted message for reply
+      const parentId: string | undefined = item.parent_id;
+      if (parentId) {
+        // 优先从当前转发组内查找
+        const quotedNode = nodeMap.get(parentId);
+        if (quotedNode) {
+          node.quoted = quotedNode;
+        } else if (this.contentResolver) {
+          // Fallback: 从 DB 查找（跨组引用）
+          const cachedText = this.contentResolver(parentId);
+          if (cachedText) {
+            node.quoted = { sender: "", contentType: "text", content: cachedText };
+          }
+        }
+      }
+
+      nodeMap.set(childId, node);
+      nodes.push(node);
     }
 
-    return lines;
+    return nodes;
   }
 
   /** Resolve sender display name (对齐 cc-connect resolveSenderName: lookup → bot → register) */
@@ -782,6 +915,73 @@ function parsePlatformTs(val?: string): number | undefined {
   if (!val) return undefined;
   const n = Number(val);
   return Number.isNaN(n) || n === 0 ? undefined : n;
+}
+
+/**
+ * 统一渲染 MessageNode 列表为 YAML 风格文本。
+ * 规则：
+ *   - 叶子消息 → - msg: "sender: content"
+ *   - 转发组   → - forward: sender + messages 列表
+ *   - 引用     → quoted 字段（同结构）
+ */
+export function renderMessageNodes(nodes: MessageNode[], depth: number): string {
+  const lines: string[] = [];
+  const indent = "  ".repeat(depth);
+
+  for (const node of nodes) {
+    if (lines.length > 0) lines.push("");
+
+    if (node.contentType === "forward" && node.children) {
+      // 转发组
+      lines.push(`${indent}- forward: ${node.sender}`);
+      if (node.quoted) {
+        renderQuoted(node.quoted, depth + 1, lines);
+      }
+      lines.push(`${indent}  messages:`);
+      lines.push(renderMessageNodes(node.children, depth + 2));
+    } else {
+      // 叶子消息
+      const content = node.content ?? `[${node.contentType}]`;
+      lines.push(`${indent}- msg: "${escapeContent(node.sender)}: ${escapeContent(content)}"`);
+      if (node.quoted) {
+        renderQuoted(node.quoted, depth + 1, lines);
+      }
+    }
+  }
+
+  return lines.join("\n");
+}
+
+/** 渲染 quoted 字段 */
+function renderQuoted(node: MessageNode, depth: number, lines: string[]): void {
+  const indent = "  ".repeat(depth);
+  if (node.contentType === "forward" && node.children) {
+    lines.push(`${indent}quoted:`);
+    lines.push(`${indent}  forward: ${node.sender}`);
+    lines.push(`${indent}  messages:`);
+    lines.push(renderMessageNodes(node.children, depth + 2));
+  } else {
+    const sender = node.sender ? `${escapeContent(node.sender)}: ` : "";
+    const content = escapeContent(node.content ?? `[${node.contentType}]`);
+    lines.push(`${indent}quoted:`);
+    lines.push(`${indent}  msg: "${sender}${content}"`);
+  }
+}
+
+/** 转义内容中的双引号和换行，保持 YAML 单行格式 */
+function escapeContent(s: string): string {
+  return s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n");
+}
+
+/** MIME type → file extension */
+function mimeToExt(mime: string): string {
+  if (mime.includes("jpeg")) return ".jpg";
+  if (mime.includes("png")) return ".png";
+  if (mime.includes("gif")) return ".gif";
+  if (mime.includes("webp")) return ".webp";
+  if (mime.includes("bmp")) return ".bmp";
+  if (mime.includes("pdf")) return ".pdf";
+  return ".bin";
 }
 
 /** 按自然段落边界分割超长消息 */

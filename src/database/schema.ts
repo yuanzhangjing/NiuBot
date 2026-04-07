@@ -472,10 +472,10 @@ export function getMessageByPlatformId(
   db: Database.Database,
   platform: string,
   platformMsgId: string,
-): { id: number; contentText: string | null; senderId: string } | undefined {
+): { id: number; contentText: string | null; contentType: string | null; senderId: string } | undefined {
   return db.prepare(
-    "SELECT id, content_text AS contentText, sender_id AS senderId FROM messages WHERE platform = ? AND platform_msg_id = ? LIMIT 1",
-  ).get(platform, platformMsgId) as { id: number; contentText: string | null; senderId: string } | undefined;
+    "SELECT id, content_text AS contentText, content_type AS contentType, sender_id AS senderId FROM messages WHERE platform = ? AND platform_msg_id = ? LIMIT 1",
+  ).get(platform, platformMsgId) as { id: number; contentText: string | null; contentType: string | null; senderId: string } | undefined;
 }
 
 /** Update content_text for an existing message (e.g., after fetching reply context from API) */

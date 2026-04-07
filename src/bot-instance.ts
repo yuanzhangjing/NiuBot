@@ -63,6 +63,7 @@ export async function createBotInstance(
     const msg = getMessageByPlatformId(db, "feishu", platformMsgId);
     return msg?.contentText ?? undefined;
   });
+  im.setStorageDir(path.dirname(botConfig.dbPath));
 
   // 5. 创建 Pipeline
   const botIdentity: BotIdentity = {
