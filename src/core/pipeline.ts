@@ -458,13 +458,10 @@ export class Pipeline {
       // 回复消息：- msg: "sender: content" + quoted
       const escaped = escapeYamlContent(msg.contentText);
       agentText = `- msg: "${escapeYamlContent(label)}: ${escaped}"\n${replyQuoted}`;
-    } else if (msg.chatType === "group") {
-      // 群聊独立消息：- msg: "sender: content"
+    } else {
+      // 独立消息：- msg: "sender: content"
       const escaped = escapeYamlContent(msg.contentText);
       agentText = `- msg: "${escapeYamlContent(label)}: ${escaped}"`;
-    } else {
-      // P2P 独立消息：纯文本
-      agentText = msg.contentText;
     }
 
     // Save trigger msg ID for reply-to-message（process() 会快照并清除）
