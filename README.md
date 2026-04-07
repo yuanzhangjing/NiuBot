@@ -17,7 +17,7 @@ MessageQueue           ← buffer, merge, cancel+requeue
     ↓
 AgentBackend           ← agent layer (swappable)
     ↓
-ClaudeCliBackend       ← claude -p (default, supports system prompt)
+ClaudeCliBackend       ← claude -p --input-format stream-json (default)
  or AcpBackend         ← ACP protocol (for other agents)
     ↓
 SQLite                 ← users, chats, sessions, messages (FTS)
@@ -81,30 +81,42 @@ All config lives in `~/.niubot/` (override via `NIUBOT_HOME` env var):
 src/
 ├── index.ts              # Entry point, lifecycle management
 ├── config.ts             # Config loading (yaml + env)
+├── persona.ts            # Persona file loading
 ├── logger.ts             # Structured JSON logger
 ├── core/
 │   ├── pipeline.ts       # Central orchestration hub
-│   └── queue.ts          # Per-chat message buffering
+│   ├── queue.ts          # Per-chat message buffering
+│   ├── routing.ts        # Session routing decisions
+│   ├── prompts.ts        # System prompt templates
+│   └── cron.ts           # Scheduled task execution
 ├── agent/
 │   ├── types.ts          # AgentBackend interface
-│   ├── claude-cli/
-│   │   └── backend.ts    # Claude Code CLI (-p mode)
-│   └── acp/
-│       └── backend.ts    # ACP protocol implementation
+│   ├── cli-base.ts       # Base class for CLI-based backends
+│   └── claude-cli/
+│       └── backend.ts    # Claude Code CLI (stream-json mode)
 ├── im/
 │   ├── types.ts          # PlatformAdapter interface
+│   ├── render.ts         # YAML message rendering
 │   └── feishu/
 │       └── adapter.ts    # Feishu (Lark) adapter
-└── database/
-    └── schema.ts         # SQLite schema + helpers
+├── memory/
+│   ├── inject.ts         # Context injection (static + important + normal)
+│   ├── chat-summary.ts   # Chat summary CRUD
+│   └── user-memory.ts    # User memory CRUD
+├── database/
+│   └── schema.ts         # SQLite schema + migrations
+├── cli/                  # niubot CLI tools (messages, contacts, task, cron, send)
+└── summarizer/
+    └── index.ts          # Auto chat summary generation
 ```
 
 ## Roadmap
 
-- **M1**: Scaffold + E2E (Feishu ↔ ACP ↔ Claude Code) ← current
-- **M2**: Memory system (user_memory + chat_memory)
-- **M3**: Context autonomy engine (core differentiator)
-- **M4**: Persona + polish → open source
+- **M1**: Scaffold + E2E (Feishu ↔ Claude Code) ✅
+- **M2**: Memory system (user_memory + chat_memory) ✅
+- **M3**: Context autonomy engine (routing, archive, recall) ✅
+- **M4**: Persona + polish + capability alignment ✅
+- **Next**: Multi-bot support, session-less cursor model
 
 ## License
 

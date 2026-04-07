@@ -7,11 +7,13 @@ NiuBot 是一个 AI 人格运行时：有记忆、有性格、能自主管理上
 
 ```
 src/
-├── core/        # 核心引擎（pipeline, routing, prompts）
-├── agent/       # Agent backend（claude-cli）
-├── im/          # IM 平台适配（feishu）
-├── memory/      # 记忆注入（context builder）
+├── core/        # 核心引擎（pipeline, queue, routing, cron）
+├── agent/       # Agent backend（claude-cli, stream-json 模式）
+├── im/          # IM 平台适配（feishu）+ 消息渲染（render.ts）
+├── memory/      # 上下文注入（inject）+ 记忆管理（user-memory, chat-summary）
 ├── database/    # SQLite schema + migrations
+├── cli/         # niubot CLI 工具（messages, contacts, task, cron, send）
+├── summarizer/  # 自动聊天摘要生成
 └── index.ts     # 入口
 ```
 
@@ -38,9 +40,11 @@ NIUBOT_BOT_NAME=NiuBot NIUBOT_HOME=~/.niubot bash restart.sh
 - 对齐 cc-connect 的实现风格（飞书卡片、footer 格式、命令输出格式等）
 
 ### 关键架构
-- **Pipeline**（`src/core/pipeline.ts`）：消息入口 → 队列 → 路由决策 → session 管理 → agent 调用 → IM 发送
+- **Pipeline**（`src/core/pipeline.ts`）：消息入口 → 存 DB → 队列缓冲（3s）→ flush（platformTs 排序 + YAML 合并）→ 路由决策 → session 管理 → agent 调用 → IM 发送
+- **消息渲染**（`src/im/render.ts`）：统一 YAML 格式 — 独立消息纯文本，回复 `- msg: + quoted:`，转发 `- forward: + messages:`，多条合并为 YAML 列表
 - **三层上下文注入**：Static（AGENTS.md）→ Important（system prompt: 场景+记忆）→ Normal（user prompt 前缀: 摘要+归档+recall）
 - **Session 生命周期**：new → active（每条消息 --resume）→ archive（归档摘要）；进程重启 recover（DB 读 agent_session_id → --resume）
+- **Claude CLI**（`src/agent/claude-cli/backend.ts`）：stream-json 模式（`--input-format stream-json --output-format stream-json --verbose`），支持斜杠命令
 - **内置命令**：三层分发 — builtin switch → shell exec（admin）→ forward to agent
 
 ### 对齐参考
