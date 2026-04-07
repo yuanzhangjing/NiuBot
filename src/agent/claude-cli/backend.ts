@@ -58,8 +58,10 @@ export class ClaudeCliBackend extends CliAgentBackend<ClaudeSession> {
 
   buildArgs(session: ClaudeSession, _message: string): string[] {
     const args = [
-      "-p", "-",
-      "--output-format", "json",
+      "-p",
+      "--input-format", "stream-json",
+      "--output-format", "stream-json",
+      "--verbose",
       "--permission-mode", session.permissionMode,
     ];
 
@@ -76,44 +78,61 @@ export class ClaudeCliBackend extends CliAgentBackend<ClaudeSession> {
     return args;
   }
 
+  /** 将纯文本消息包装为 stream-json 格式 */
+  buildStdin(message: string): string {
+    return JSON.stringify({
+      type: "user",
+      message: { role: "user", content: message },
+    }) + "\n";
+  }
+
   parseOutput(stdout: string): ParsedOutput {
-    try {
-      const parsed = JSON.parse(stdout) as {
-        result?: string;
-        session_id?: string;
-        is_error?: boolean;
-        usage?: {
-          input_tokens?: number;
-          cache_creation_input_tokens?: number;
-          cache_read_input_tokens?: number;
-          output_tokens?: number;
-        };
-        modelUsage?: Record<string, unknown>;
+    // stream-json 模式：stdout 是多行 JSONL 事件流，找 type=result 那行
+    let resultEvent: {
+      result?: string;
+      session_id?: string;
+      is_error?: boolean;
+      usage?: {
+        input_tokens?: number;
+        cache_creation_input_tokens?: number;
+        cache_read_input_tokens?: number;
+        output_tokens?: number;
       };
+      modelUsage?: Record<string, unknown>;
+    } | undefined;
 
-      // context tokens = input + cache_creation + cache_read + output
-      let contextTokens: number | undefined;
-      if (parsed.usage) {
-        const u = parsed.usage;
-        const total = (u.input_tokens ?? 0)
-          + (u.cache_creation_input_tokens ?? 0)
-          + (u.cache_read_input_tokens ?? 0)
-          + (u.output_tokens ?? 0);
-        if (total > 0) contextTokens = total;
-      }
+    for (const line of stdout.split("\n")) {
+      if (!line) continue;
+      try {
+        const event = JSON.parse(line) as { type?: string; [k: string]: unknown };
+        if (event.type === "result") {
+          resultEvent = event as typeof resultEvent;
+        }
+      } catch { /* skip non-JSON lines */ }
+    }
 
-      // model name from modelUsage keys
-      const model = parsed.modelUsage ? Object.keys(parsed.modelUsage)[0] : undefined;
-
-      return {
-        text: (parsed.result ?? stdout).trim(),
-        agentSessionId: parsed.session_id,
-        contextTokens,
-        model,
-      };
-    } catch {
+    if (!resultEvent) {
       return { text: stdout.trim() };
     }
+
+    let contextTokens: number | undefined;
+    if (resultEvent.usage) {
+      const u = resultEvent.usage;
+      const total = (u.input_tokens ?? 0)
+        + (u.cache_creation_input_tokens ?? 0)
+        + (u.cache_read_input_tokens ?? 0)
+        + (u.output_tokens ?? 0);
+      if (total > 0) contextTokens = total;
+    }
+
+    const model = resultEvent.modelUsage ? Object.keys(resultEvent.modelUsage)[0] : undefined;
+
+    return {
+      text: (resultEvent.result ?? "").trim(),
+      agentSessionId: resultEvent.session_id,
+      contextTokens,
+      model,
+    };
   }
 
   updateSession(session: ClaudeSession, parsed: ParsedOutput): void {

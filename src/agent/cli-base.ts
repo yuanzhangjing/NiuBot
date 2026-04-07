@@ -67,6 +67,11 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
     return {};
   }
 
+  /** 构建 stdin 内容，子类可覆盖（如 stream-json 格式包装） */
+  buildStdin(message: string): string {
+    return message;
+  }
+
   // ── 通用实现 ─────────────────────────────────────────────
 
   async start(): Promise<void> {
@@ -99,7 +104,7 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
         cwd: s.workingDirectory,
         timeout: this.promptTimeoutMs,
         env: { ...s.extraEnv, ...this.agentEnv() },
-        stdin: message,
+        stdin: this.buildStdin(message),
       });
 
       s.cumulativeBytes += stdout.length;
