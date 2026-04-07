@@ -13,13 +13,15 @@ dotenv.config({ path: path.join(NIUBOT_HOME, ".env") });
 export { NIUBOT_HOME };
 
 /** 支持的 agent backend */
-export type AgentBackendType = "claude-code";
+export type AgentBackendType = "claude-code" | "codex";
 
 /** 单个 Bot 的配置 */
 export interface BotConfig {
   name: string;
   appId: string;
   appSecret: string;
+  /** agent backend（可选，覆盖全局 agent.backend） */
+  backend?: AgentBackendType;
   /** agent 工作目录（默认 ~/.niubot/<name>/workspace/） */
   workingDirectory: string;
   /** 数据库路径（默认 ~/.niubot/<name>/niubot.db） */
@@ -45,7 +47,7 @@ export interface NiuBotConfig {
   };
 }
 
-const VALID_BACKENDS = new Set<AgentBackendType>(["claude-code"]);
+export const VALID_BACKENDS = new Set<AgentBackendType>(["claude-code", "codex"]);
 
 const DEFAULTS = {
   agent: {
@@ -165,10 +167,19 @@ function parseBotConfig(raw: Record<string, string>): BotConfig {
     ? adminUsersRaw.map(String)
     : undefined;
 
+  // per-bot backend（可选，不设则用全局 agent.backend）
+  const botBackend = raw["backend"] as string | undefined;
+  if (botBackend && !VALID_BACKENDS.has(botBackend as AgentBackendType)) {
+    throw new Error(
+      `Config error: bot '${name}' has invalid backend "${botBackend}". Valid options: ${[...VALID_BACKENDS].join(", ")}`,
+    );
+  }
+
   return {
     name,
     appId,
     appSecret,
+    backend: botBackend as AgentBackendType | undefined,
     workingDirectory: raw["workingDirectory"]
       ? path.resolve(raw["workingDirectory"])
       : path.join(botDir, "workspace"),

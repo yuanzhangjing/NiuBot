@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { AgentBackend } from "./agent/types.js";
-import type { BotConfig } from "./config.js";
+import type { BotConfig, AgentBackendType } from "./config.js";
 import { initDatabase, ensureUser, getUserShortLabel, getUserShortLabelByPlatformId, getMessageByPlatformId } from "./database/schema.js";
 import { FeishuAdapter } from "./im/feishu/adapter.js";
 import { Pipeline, type BotIdentity } from "./core/pipeline.js";
@@ -31,6 +31,8 @@ export async function createBotInstance(
   botConfig: BotConfig,
   agent: AgentBackend,
   queueConfig: { bufferMs: number; cancelThresholdMs: number },
+  backendType?: AgentBackendType,
+  backendResolver?: (type: AgentBackendType) => Promise<AgentBackend>,
 ): Promise<BotInstance> {
   const log = createLogger("bot-instance", botConfig.name);
 
@@ -84,6 +86,8 @@ export async function createBotInstance(
     botConfig.dbPath,
     queueConfig.bufferMs,
     queueConfig.cancelThresholdMs,
+    backendType,
+    backendResolver,
   );
 
   // 6. 创建 API Server

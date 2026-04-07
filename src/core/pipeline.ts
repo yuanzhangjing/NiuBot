@@ -6,6 +6,7 @@ import type Database from "better-sqlite3";
 import type { PlatformAdapter, NormalizedMessage } from "../im/types.js";
 import { escapeYamlContent, renderMessageNodes } from "../im/render.js";
 import type { AgentBackend, AgentSession } from "../agent/types.js";
+import { type AgentBackendType, VALID_BACKENDS } from "../config.js";
 import { MessageQueue } from "./queue.js";
 import {
   ensureUser, ensureChat, storeMessage, updateChatName,
@@ -59,6 +60,8 @@ export class Pipeline {
   private db: Database.Database;
   private im: PlatformAdapter;
   private agent: AgentBackend;
+  private backendType: AgentBackendType;
+  private backendResolver?: (type: AgentBackendType) => Promise<AgentBackend>;
   private queue: MessageQueue;
   private botIdentity: BotIdentity;
   private log: ReturnType<typeof createLogger>;
@@ -106,10 +109,14 @@ export class Pipeline {
     dbPath: string,
     bufferMs: number,
     cancelThresholdMs: number,
+    backendType: AgentBackendType = "claude-code",
+    backendResolver?: (type: AgentBackendType) => Promise<AgentBackend>,
   ) {
     this.db = db;
     this.im = im;
     this.agent = agent;
+    this.backendType = backendType;
+    this.backendResolver = backendResolver;
     this.botIdentity = botIdentity;
     this.workingDirectory = workingDirectory;
     this.dbPath = dbPath;
@@ -638,6 +645,14 @@ export class Pipeline {
         this.sendStatus(chatId, platformChatId, msgId);
         return true;
       }
+      case "/agent": {
+        if (!isAdmin) {
+          this.replyText(chatId, platformChatId, msgId, "/agent 仅管理员可用。");
+          return true;
+        }
+        this.handleAgentCommand(parts.slice(1), chatId, platformChatId, msgId);
+        return true;
+      }
     }
 
     // 2. 管理员 shell 命令：检查首个 token 是否在 PATH 中，是则执行，否则转发 agent
@@ -696,6 +711,64 @@ export class Pipeline {
         this.log.info("status sent", { platformChatId });
       })
       .catch((err) => this.log.error("status send failed", { platformChatId, error: String(err) }));
+  }
+
+  /**
+   * /agent 命令：查看或切换 agent backend。
+   * - /agent        → 显示当前 backend
+   * - /agent <type> → 切换到指定 backend，归档当前 session
+   */
+  private handleAgentCommand(args: string[], chatId: string, platformChatId: string, msgId?: string): void {
+    if (args.length === 0) {
+      // 显示当前 backend
+      this.replyText(chatId, platformChatId, msgId,
+        `当前 Agent: **${this.backendType}**\n可选: ${[...VALID_BACKENDS].join(", ")}`);
+      return;
+    }
+
+    const target = args[0].toLowerCase() as AgentBackendType;
+
+    if (!VALID_BACKENDS.has(target)) {
+      this.replyText(chatId, platformChatId, msgId,
+        `无效的 backend: "${args[0]}"\n可选: ${[...VALID_BACKENDS].join(", ")}`);
+      return;
+    }
+
+    if (target === this.backendType) {
+      this.replyText(chatId, platformChatId, msgId, `已经是 ${target}，无需切换。`);
+      return;
+    }
+
+    if (!this.backendResolver) {
+      this.replyText(chatId, platformChatId, msgId, "backend resolver 未配置，无法切换。");
+      return;
+    }
+
+    this.log.info("switching agent backend", { from: this.backendType, to: target });
+
+    // 归档所有当前 session，获取新 backend（含 start），然后切换
+    const doSwitch = async () => {
+      const archivePromises: Promise<void>[] = [];
+      for (const [cid] of this.chatSessions) {
+        archivePromises.push(this.archiveSession(cid));
+      }
+      await Promise.all(archivePromises);
+
+      const newBackend = await this.backendResolver!(target);
+      this.agent = newBackend;
+      this.backendType = target;
+    };
+
+    doSwitch()
+      .then(() => {
+        this.replyText(chatId, platformChatId, msgId,
+          `已切换到 **${target}**，上下文已重置。`);
+        this.log.info("agent backend switched", { backend: target });
+      })
+      .catch((err) => {
+        this.log.error("failed to switch agent backend", { error: String(err) });
+        this.replyText(chatId, platformChatId, msgId, `切换失败: ${String(err)}`);
+      });
   }
 
   /**

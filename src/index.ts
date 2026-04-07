@@ -1,7 +1,8 @@
 import { writeFileSync, unlinkSync, mkdirSync } from "node:fs";
 import { resolve } from "node:path";
-import { loadConfig } from "./config.js";
+import { loadConfig, type AgentBackendType } from "./config.js";
 import { ClaudeCliBackend } from "./agent/claude-cli/backend.js";
+import { CodexCliBackend } from "./agent/codex/backend.js";
 import type { AgentBackend } from "./agent/types.js";
 import { createBotInstance, type BotInstance } from "./bot-instance.js";
 import { createLogger, setLogLevel } from "./logger.js";
@@ -27,21 +28,41 @@ async function main(): Promise<void> {
     bots: config.bots.map((b) => b.name).join(", "),
   });
 
-  // 2. 创建共享 agent backend
-  let agent: AgentBackend;
-  switch (config.agent.backend) {
-    case "claude-code":
-      agent = new ClaudeCliBackend("bypassPermissions");
-      break;
-  }
-  await agent.start();
+  // 2. 创建 agent backend（per-bot，相同 backend type 共享实例）
+  const backends = new Map<AgentBackendType, AgentBackend>();
+  const startedBackends = new Set<AgentBackendType>();
 
-  // 3. 创建所有 bot 实例
+  function createBackend(type: AgentBackendType): AgentBackend {
+    switch (type) {
+      case "claude-code":
+        return new ClaudeCliBackend("bypassPermissions");
+      case "codex":
+        return new CodexCliBackend();
+    }
+  }
+
+  /** 获取或创建 backend，确保已 start */
+  async function getOrCreateBackend(type: AgentBackendType): Promise<AgentBackend> {
+    let backend = backends.get(type);
+    if (!backend) {
+      backend = createBackend(type);
+      backends.set(type, backend);
+      await backend.start();
+      startedBackends.add(type);
+      log.info("backend started (lazy)", { type });
+    }
+    return backend;
+  }
+
+  // 3. 创建所有 bot 实例（getOrCreateBackend 确保 backend 已 start）
   const bots: BotInstance[] = [];
   for (const botConfig of config.bots) {
     try {
-      const instance = await createBotInstance(botConfig, agent, config.queue);
+      const backendType = botConfig.backend ?? config.agent.backend;
+      const agent = await getOrCreateBackend(backendType);
+      const instance = await createBotInstance(botConfig, agent, config.queue, backendType, getOrCreateBackend);
       bots.push(instance);
+      log.info("bot backend assigned", { bot: botConfig.name, backend: backendType });
     } catch (err) {
       log.error("failed to create bot instance", { bot: botConfig.name, error: String(err) });
     }
@@ -119,11 +140,13 @@ async function main(): Promise<void> {
       log.info("in-flight tasks completed");
     }
 
-    // 3. 关闭 agent backend
-    try {
-      await agent.stop();
-      log.info("agent backend stopped");
-    } catch (e) { log.error("agent.stop failed", { error: String(e) }); }
+    // 3. 关闭所有 agent backends
+    for (const [type, backend] of backends) {
+      try {
+        await backend.stop();
+        log.info("agent backend stopped", { type });
+      } catch (e) { log.error("agent.stop failed", { type, error: String(e) }); }
+    }
 
     // 4. 关闭所有数据库
     for (const bot of bots) {
