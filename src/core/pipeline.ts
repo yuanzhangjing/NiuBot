@@ -4,6 +4,7 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import type Database from "better-sqlite3";
 import type { PlatformAdapter, NormalizedMessage } from "../im/types.js";
+import { escapeYamlContent, renderMessageNodes } from "../im/render.js";
 import type { AgentBackend, AgentSession } from "../agent/types.js";
 import { MessageQueue } from "./queue.js";
 import {
@@ -26,11 +27,6 @@ const STALE_MESSAGE_THRESHOLD_MS = 2 * 60 * 1000;
 
 /** 短词打断关键词 */
 const INTERRUPT_WORDS = new Set(["停", "算了", "取消", "stop", "cancel", "abort"]);
-
-/** 转义 YAML msg 值中的特殊字符（双引号、换行、反斜杠） */
-function escapeYamlContent(s: string): string {
-  return s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n");
-}
 
 /** Bot 身份信息，由外部传入 */
 export interface BotIdentity {
@@ -413,14 +409,7 @@ export class Pipeline {
       }
     }
 
-    // Build display text with group sender annotation
-    let displayText = msg.contentText;
-    if (msg.chatType === "group") {
-      const label = getUserShortLabel(this.db, userId);
-      displayText = `[${label}]: ${msg.contentText}`;
-    }
-
-    // Build reply quoted block (sub-field of - msg:)
+    // Build reply quoted block (sub-field of - msg: / - forward:)
     let replyQuoted = "";
     if (msg.parentPlatformMsgId) {
       replyQuoted = this.buildReplyQuoted(platform, msg.parentPlatformMsgId);
@@ -457,14 +446,25 @@ export class Pipeline {
     this.platformChatIds.set(chatId, msg.chatPlatformId);
     this.chatUserIds.set(chatId, userId);
 
-    // Prepare text to send to agent (unified YAML format for replies)
+    // Prepare text to send to agent (unified YAML format)
     let agentText: string;
-    if (replyQuoted) {
-      const label = getUserShortLabel(this.db, userId);
+    const label = getUserShortLabel(this.db, userId);
+
+    if (msg.contentType === "merge_forward" && msg.children?.length) {
+      // 合并转发：- forward: sender + messages（复用 renderMessageNodes）
+      agentText = `- forward: ${label}\n  messages:\n${renderMessageNodes(msg.children, 2)}`;
+      if (replyQuoted) agentText += `\n${replyQuoted}`;
+    } else if (replyQuoted) {
+      // 回复消息：- msg: "sender: content" + quoted
       const escaped = escapeYamlContent(msg.contentText);
-      agentText = `- msg: "${label}: ${escaped}"\n${replyQuoted}`;
+      agentText = `- msg: "${escapeYamlContent(label)}: ${escaped}"\n${replyQuoted}`;
+    } else if (msg.chatType === "group") {
+      // 群聊独立消息：- msg: "sender: content"
+      const escaped = escapeYamlContent(msg.contentText);
+      agentText = `- msg: "${escapeYamlContent(label)}: ${escaped}"`;
     } else {
-      agentText = displayText;
+      // P2P 独立消息：纯文本
+      agentText = msg.contentText;
     }
 
     // Save trigger msg ID for reply-to-message（process() 会快照并清除）

@@ -2,6 +2,7 @@ import * as lark from "@larksuiteoapi/node-sdk";
 import fs from "node:fs";
 import path from "node:path";
 import type { NormalizedMessage, MessageHandler, PlatformAdapter, MentionInfo, MessageNode } from "../types.js";
+import { renderMessageNodes } from "../render.js";
 import { createLogger } from "../../logger.js";
 
 const log = createLogger("feishu");
@@ -915,62 +916,6 @@ function parsePlatformTs(val?: string): number | undefined {
   if (!val) return undefined;
   const n = Number(val);
   return Number.isNaN(n) || n === 0 ? undefined : n;
-}
-
-/**
- * 统一渲染 MessageNode 列表为 YAML 风格文本。
- * 规则：
- *   - 叶子消息 → - msg: "sender: content"
- *   - 转发组   → - forward: sender + messages 列表
- *   - 引用     → quoted 字段（同结构）
- */
-export function renderMessageNodes(nodes: MessageNode[], depth: number): string {
-  const lines: string[] = [];
-  const indent = "  ".repeat(depth);
-
-  for (const node of nodes) {
-    if (lines.length > 0) lines.push("");
-
-    if (node.contentType === "forward" && node.children) {
-      // 转发组
-      lines.push(`${indent}- forward: ${node.sender}`);
-      if (node.quoted) {
-        renderQuoted(node.quoted, depth + 1, lines);
-      }
-      lines.push(`${indent}  messages:`);
-      lines.push(renderMessageNodes(node.children, depth + 2));
-    } else {
-      // 叶子消息
-      const content = node.content ?? `[${node.contentType}]`;
-      lines.push(`${indent}- msg: "${escapeContent(node.sender)}: ${escapeContent(content)}"`);
-      if (node.quoted) {
-        renderQuoted(node.quoted, depth + 1, lines);
-      }
-    }
-  }
-
-  return lines.join("\n");
-}
-
-/** 渲染 quoted 字段 */
-function renderQuoted(node: MessageNode, depth: number, lines: string[]): void {
-  const indent = "  ".repeat(depth);
-  if (node.contentType === "forward" && node.children) {
-    lines.push(`${indent}quoted:`);
-    lines.push(`${indent}  forward: ${node.sender}`);
-    lines.push(`${indent}  messages:`);
-    lines.push(renderMessageNodes(node.children, depth + 2));
-  } else {
-    const sender = node.sender ? `${escapeContent(node.sender)}: ` : "";
-    const content = escapeContent(node.content ?? `[${node.contentType}]`);
-    lines.push(`${indent}quoted:`);
-    lines.push(`${indent}  msg: "${sender}${content}"`);
-  }
-}
-
-/** 转义内容中的双引号和换行，保持 YAML 单行格式 */
-function escapeContent(s: string): string {
-  return s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n");
 }
 
 /** MIME type → file extension */
