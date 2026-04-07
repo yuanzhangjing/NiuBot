@@ -446,12 +446,14 @@ export class Pipeline {
     this.platformChatIds.set(chatId, msg.chatPlatformId);
     this.chatUserIds.set(chatId, userId);
 
-    // Prepare text to send to agent (unified YAML format)
+    // Prepare text to send to agent
+    // 独立消息：纯文本（保持 skill 等模式匹配可用）
+    // 结构化消息（reply / forward）：YAML 格式表达嵌套关系
     let agentText: string;
     const label = getUserShortLabel(this.db, userId);
 
     if (msg.contentType === "merge_forward" && msg.children?.length) {
-      // 合并转发：- forward: sender + messages（复用 renderMessageNodes）
+      // 合并转发：- forward: sender + messages
       agentText = `- forward: ${label}\n  messages:\n${renderMessageNodes(msg.children, 2)}`;
       if (replyQuoted) agentText += `\n${replyQuoted}`;
     } else if (replyQuoted) {
@@ -459,9 +461,8 @@ export class Pipeline {
       const escaped = escapeYamlContent(msg.contentText);
       agentText = `- msg: "${escapeYamlContent(label)}: ${escaped}"\n${replyQuoted}`;
     } else {
-      // 独立消息：- msg: "sender: content"
-      const escaped = escapeYamlContent(msg.contentText);
-      agentText = `- msg: "${escapeYamlContent(label)}: ${escaped}"`;
+      // 独立消息：纯文本
+      agentText = msg.contentText;
     }
 
     // Save trigger msg ID for reply-to-message（process() 会快照并清除）
