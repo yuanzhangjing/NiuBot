@@ -117,11 +117,7 @@ export class ClaudeCliBackend extends CliAgentBackend<ClaudeSession> {
 
     let contextTokens: number | undefined;
     if (resultEvent.usage) {
-      const u = resultEvent.usage;
-      const total = (u.input_tokens ?? 0)
-        + (u.cache_creation_input_tokens ?? 0)
-        + (u.cache_read_input_tokens ?? 0)
-        + (u.output_tokens ?? 0);
+      const total = estimateVisibleContextTokens(resultEvent.usage);
       if (total > 0) contextTokens = total;
     }
 
@@ -202,11 +198,7 @@ export class ClaudeCliBackend extends CliAgentBackend<ClaudeSession> {
                 model = entry.message.model;
               }
               if (entry.message?.usage) {
-                const u = entry.message.usage;
-                const total = (u.input_tokens ?? 0)
-                  + (u.cache_creation_input_tokens ?? 0)
-                  + (u.cache_read_input_tokens ?? 0)
-                  + (u.output_tokens ?? 0);
+                const total = estimateVisibleContextTokens(entry.message.usage);
                 if (total > 0) contextTokens = total;
               }
             }
@@ -239,4 +231,13 @@ export class ClaudeCliBackend extends CliAgentBackend<ClaudeSession> {
   protected agentEnv(): Record<string, string> {
     return { CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1" };
   }
+}
+
+function estimateVisibleContextTokens(usage: {
+  input_tokens?: number;
+  cache_creation_input_tokens?: number;
+  cache_read_input_tokens?: number;
+  output_tokens?: number;
+}): number {
+  return (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0);
 }
