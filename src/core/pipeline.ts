@@ -551,15 +551,17 @@ export class Pipeline {
       return;
     }
 
-    // Reaction 策略：入队先 Pin，开始处理补 Get，两者都保留
-    this.markQueuedMessage(msg.chatPlatformId, msg.platformMsgId);
-    this.queue.push({
+    // Reaction 策略：只有 pending 才加 Pin；真正开始处理时补 Get；两者都保留
+    const isPending = this.queue.push({
       chatId,
       text: agentText,
       senderLabel: label,
       timestamp: Date.now(),
       platformMsgId: msg.platformMsgId,
     });
+    if (isPending) {
+      this.markQueuedMessage(msg.chatPlatformId, msg.platformMsgId);
+    }
   }
 
   /** Store a bot-sent message in DB */

@@ -509,7 +509,7 @@ describe("Pipeline.recover", () => {
     expect(agent.sendMessageCalls).toEqual(["hi"]);
   });
 
-  test("keeps pin and get after processing starts", async () => {
+  test("adds pin only for pending messages while get marks processed ones", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
@@ -535,9 +535,8 @@ describe("Pipeline.recover", () => {
     }));
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(reactions).toContainEqual({ chatId: "chat-open-id", msgId: "m1", emoji: "Pin" });
     expect(reactions).toContainEqual({ chatId: "chat-open-id", msgId: "m1", emoji: "Get" });
-    expect(removedReactions).not.toContainEqual({ chatId: "chat-open-id", msgId: "m1", emoji: "Pin" });
+    expect(reactions).not.toContainEqual({ chatId: "chat-open-id", msgId: "m1", emoji: "Pin" });
 
     (pipeline as any).handleMessage(createMessage({
       contentText: "second",
