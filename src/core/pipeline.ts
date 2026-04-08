@@ -497,7 +497,7 @@ export class Pipeline {
       agentText = `- msg: "${escapeYamlContent(label)}: ${escaped}"\n${replyQuoted}`;
     } else {
       // 独立消息：纯文本
-      agentText = msg.contentText;
+      agentText = this.normalizeUserTextForAgent(msg.contentText);
     }
 
     // Save trigger msg ID for reply-to-message（process() 会快照并清除）
@@ -642,15 +642,16 @@ export class Pipeline {
 
   /**
    * 内置命令拦截：匹配 /xxx 格式的消息，命中则直接处理并返回 true。
+   * //xxx 视为强制透传给 agent，本地不拦截。
    * 未命中返回 false，消息继续走 agent 流程。
    *
    * 分发顺序（对齐 cc-connect）：
-   *   1. 内置命令 switch（/restart, /status）
+   *   1. 内置命令 switch（/restart, /status, /new, /clear）
    *   2. 管理员 shell 命令（tryShellCommand）
    *   3. return false → 转发给 agent
    */
   private handleBuiltinCommand(text: string, userId: string, chatId: string, platformChatId: string, msgId?: string): boolean {
-    if (!text.startsWith("/")) return false;
+    if (!text.startsWith("/") || text.startsWith("//")) return false;
 
     const parts = text.split(/\s+/);
     const cmd = parts[0].toLowerCase();
@@ -671,6 +672,12 @@ export class Pipeline {
       case "/status": {
         this.log.info("builtin command: status", { userId });
         this.sendStatus(chatId, platformChatId, msgId);
+        return true;
+      }
+      case "/new":
+      case "/clear": {
+        this.log.info("builtin command: reset-session", { userId, cmd, chatId });
+        this.resetSession(chatId, platformChatId, msgId);
         return true;
       }
       case "/agent": {
@@ -695,6 +702,11 @@ export class Pipeline {
 
     // 3. 未识别的 / 命令，交给 agent 处理
     return false;
+  }
+
+  /** //xxx 表示强制透传给 agent，实际发送时去掉一个前缀 / */
+  private normalizeUserTextForAgent(text: string): string {
+    return text.startsWith("//") ? text.slice(1) : text;
   }
 
   /** 回复文本：有 msgId 时引用回复，否则直接发送，并存入 DB */
@@ -741,6 +753,21 @@ export class Pipeline {
       .catch((err) => this.log.error("status send failed", { platformChatId, error: String(err) }));
   }
 
+  /** /new 和 /clear：归档当前 session，让下一条消息自然创建新 session。 */
+  private resetSession(chatId: string, platformChatId: string, msgId?: string): void {
+    this.archiveSession(chatId)
+      .then((archived) => {
+        const text = archived
+          ? "已开始新会话，当前上下文已清空。"
+          : "当前没有进行中的会话；下一条消息会新建会话。";
+        this.replyText(chatId, platformChatId, msgId, text);
+      })
+      .catch((err) => {
+        this.log.error("reset session failed", { chatId, error: String(err) });
+        this.replyText(chatId, platformChatId, msgId, `新建会话失败: ${String(err)}`);
+      });
+  }
+
   /**
    * /agent 命令：查看或切换 agent backend。
    * - /agent        → 显示当前 backend
@@ -781,7 +808,7 @@ export class Pipeline {
 
     // 归档所有当前 session，获取新 backend（含 start），然后切换
     const doSwitch = async () => {
-      const archivePromises: Promise<void>[] = [];
+      const archivePromises: Promise<boolean>[] = [];
       for (const [cid] of this.chatSessions) {
         archivePromises.push(this.archiveSession(cid));
       }
@@ -1184,9 +1211,20 @@ export class Pipeline {
 
   private static readonly ARCHIVE_SUMMARY_MIN_TURNS = 5;
 
-  private async archiveSession(chatId: string): Promise<void> {
+  private async archiveSession(chatId: string): Promise<boolean> {
     const session = this.chatSessions.get(chatId);
-    if (!session) return;
+    if (!session) {
+      const result = this.db.prepare(`
+        UPDATE sessions
+        SET status = 'archived',
+            ended_at = datetime('now'),
+            last_active_at = datetime('now'),
+            agent_session_id = NULL
+        WHERE chat_id = ? AND status = 'active'
+      `).run(chatId);
+
+      return result.changes > 0;
+    }
 
     const { agentSession, sessionKey } = session;
 
@@ -1233,6 +1271,7 @@ export class Pipeline {
     });
 
     this.log.info("session archived", { chatId, sessionKey, turnCount });
+    return true;
   }
 
   private async cancelChat(chatId: string): Promise<void> {

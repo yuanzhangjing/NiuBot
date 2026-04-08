@@ -10,6 +10,8 @@ import { Pipeline, type BotIdentity } from "./pipeline.js";
 class RecordingAgent implements AgentBackend {
   supportsSystemPrompt = true;
   readonly createSessionCalls: SessionConfig[] = [];
+  readonly sendMessageCalls: string[] = [];
+  readonly closeSessionCalls: string[] = [];
 
   async start(): Promise<void> {}
   async stop(): Promise<void> {}
@@ -19,12 +21,15 @@ class RecordingAgent implements AgentBackend {
     return { id: `agent_${this.createSessionCalls.length}` };
   }
 
-  async sendMessage(): Promise<AgentResponse> {
+  async sendMessage(_session: AgentSession, message: string): Promise<AgentResponse> {
+    this.sendMessageCalls.push(message);
     return { text: "" };
   }
 
   async cancelSession(): Promise<void> {}
-  async closeSession(): Promise<void> {}
+  async closeSession(session: AgentSession): Promise<void> {
+    this.closeSessionCalls.push(session.id);
+  }
 }
 
 function createImStub(): PlatformAdapter {
@@ -47,6 +52,39 @@ function createImStub(): PlatformAdapter {
     async getMessageContent() { return undefined; },
     async getAppCreatorId() { return undefined; },
   };
+}
+
+function createRecordingImStub() {
+  const sentTexts: string[] = [];
+  const sentCards: Array<{ header: string; content: string; footer?: string }> = [];
+
+  const im: PlatformAdapter = {
+    onMessage() {},
+    async start() {},
+    async stop() {},
+    async sendText(_chatId, text) { sentTexts.push(text); return "pmid"; },
+    async sendReply(_chatId, text) { sentTexts.push(text); return "pmid"; },
+    async sendMarkdownCard() { return "pmid"; },
+    async sendCard(_chatId, header, content, footer) {
+      sentCards.push({ header, content, footer });
+      return "pmid";
+    },
+    async replyCard(_msgId, header, content, footer) {
+      sentCards.push({ header, content, footer });
+      return "pmid";
+    },
+    async editMessage() {},
+    async addReaction() {},
+    async removeReaction() {},
+    async sendFile() { return "pmid"; },
+    async getBotOpenId() { return "bot-open-id"; },
+    async getBotName() { return "NiuBot"; },
+    async getChatName() { return "Admin"; },
+    async getMessageContent() { return undefined; },
+    async getAppCreatorId() { return undefined; },
+  };
+
+  return { im, sentTexts, sentCards };
 }
 
 function createBotIdentity(): BotIdentity {
@@ -259,5 +297,178 @@ describe("Pipeline.recover", () => {
     ).get("NiuBot") as { backend_type: string } | undefined;
 
     expect(row?.backend_type).toBe("claude");
+  });
+
+  test("handles single-slash status as a local builtin command", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const agent = new RecordingAgent();
+    const { im, sentCards } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db,
+      im,
+      agent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      0,
+      "codex",
+    );
+
+    const handled = (pipeline as any).handleBuiltinCommand("/status", "u2", "c1", "chat-open-id");
+
+    expect(handled).toBe(true);
+    expect(sentCards).toHaveLength(1);
+    expect(sentCards[0]?.header).toBe("Status");
+  });
+
+  test("leaves double-slash status for agent passthrough", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const agent = new RecordingAgent();
+    const { im, sentCards } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db,
+      im,
+      agent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      0,
+      "codex",
+    );
+
+    const handled = (pipeline as any).handleBuiltinCommand("//status", "u2", "c1", "chat-open-id");
+
+    expect(handled).toBe(false);
+    expect(sentCards).toHaveLength(0);
+  });
+
+  test("normalizes double-slash commands before forwarding to agent", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const pipeline = new Pipeline(
+      db,
+      createImStub(),
+      new RecordingAgent(),
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      0,
+      "codex",
+    );
+
+    expect((pipeline as any).normalizeUserTextForAgent("//status")).toBe("/status");
+    expect((pipeline as any).normalizeUserTextForAgent("hello")).toBe("hello");
+  });
+
+  test("archives the current session on /new", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare(`
+      INSERT INTO sessions (id, chat_id, user_id, status, turn_count, backend_type, last_active_at)
+      VALUES ('s1', 'c1', 'u2', 'active', 0, 'codex', datetime('now'))
+    `).run();
+
+    const agent = new RecordingAgent();
+    const { im, sentTexts } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db,
+      im,
+      agent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      0,
+      "codex",
+    );
+    (pipeline as any).chatSessions.set("c1", {
+      agentSession: { id: "agent_1" },
+      sessionKey: "s1",
+      platformChatId: "chat-open-id",
+      userId: "u2",
+      hasReplied: false,
+    });
+
+    const handled = (pipeline as any).handleBuiltinCommand("/new", "u2", "c1", "chat-open-id");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const row = db.prepare("SELECT status FROM sessions WHERE id = 's1'").get() as { status: string };
+
+    expect(handled).toBe(true);
+    expect(row.status).toBe("archived");
+    expect(agent.closeSessionCalls).toEqual(["agent_1"]);
+    expect(sentTexts).toContain("已开始新会话，当前上下文已清空。");
+    expect((pipeline as any).chatSessions.has("c1")).toBe(false);
+  });
+
+  test("replies safely on /clear when no active session exists", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const { im, sentTexts } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db,
+      im,
+      new RecordingAgent(),
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      0,
+      "codex",
+    );
+
+    const handled = (pipeline as any).handleBuiltinCommand("/clear", "u2", "c1", "chat-open-id");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(handled).toBe(true);
+    expect(sentTexts).toContain("当前没有进行中的会话；下一条消息会新建会话。");
+  });
+
+  test("archives db-only active session on /clear", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare(`
+      INSERT INTO sessions (id, chat_id, user_id, status, turn_count, backend_type, last_active_at)
+      VALUES ('s1', 'c1', 'u2', 'active', 0, 'codex', datetime('now'))
+    `).run();
+
+    const { im, sentTexts } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db,
+      im,
+      new RecordingAgent(),
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      0,
+      "codex",
+    );
+
+    const handled = (pipeline as any).handleBuiltinCommand("/clear", "u2", "c1", "chat-open-id");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const row = db.prepare("SELECT status FROM sessions WHERE id = 's1'").get() as { status: string };
+
+    expect(handled).toBe(true);
+    expect(row.status).toBe("archived");
+    expect(sentTexts).toContain("已开始新会话，当前上下文已清空。");
   });
 });
