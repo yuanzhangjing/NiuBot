@@ -13,6 +13,6 @@ describe("footer formatting", () => {
       contextTokens: 20523,
       compactCount: 2,
       model: "gpt-5.4",
-    })).toBe("abcd1234 · #3 · 20.5k · compact×2 · GPT-5.4");
+    })).toBe("abcd1234 · #3 · 20.5k · 📦×2 · GPT-5.4");
   });
 });

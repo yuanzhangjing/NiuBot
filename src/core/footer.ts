@@ -14,7 +14,7 @@ export function buildResponseFooter(input: ResponseFooterInput): string {
   }
 
   if (input.compactCount && input.compactCount > 0) {
-    footerParts.push(`compact×${input.compactCount}`);
+    footerParts.push(`📦×${input.compactCount}`);
   }
 
   if (input.model) {
