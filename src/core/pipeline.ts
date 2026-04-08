@@ -57,6 +57,10 @@ interface ChatSession {
   hasReplied: boolean;
 }
 
+interface PendingTransitionMessage {
+  msg: NormalizedMessage;
+}
+
 export class Pipeline {
   private db: Database.Database;
   private im: PlatformAdapter;
@@ -100,6 +104,12 @@ export class Pipeline {
 
   /** chatId → triggerPlatformMsgId，暂存触发消息 ID */
   private triggerMsgIds = new Map<string, string>();
+
+  /** chatId → transition promise，session 切换期间后续消息先挂起 */
+  private sessionTransitionLocks = new Map<string, Promise<void>>();
+
+  /** chatId → transition 期间暂存的后续消息 */
+  private pendingTransitionMessages = new Map<string, PendingTransitionMessage[]>();
 
   constructor(
     db: Database.Database,
@@ -434,6 +444,16 @@ export class Pipeline {
     const chatUserId = msg.chatType === "p2p" ? msg.senderPlatformId : undefined;
     const chatId = ensureChat(this.db, platform, msg.chatPlatformId, msg.chatType, msg.chatName, chatUserId);
 
+    if (this.sessionTransitionLocks.has(chatId)) {
+      this.log.info("message deferred during session transition", {
+        chatId,
+        msgId: msg.platformMsgId,
+        type: msg.contentType,
+      });
+      this.enqueuePendingTransitionMessage(chatId, msg);
+      return;
+    }
+
     // Fetch group chat name if not known
     if (msg.chatType === "group") {
       const chatRow = this.db.prepare("SELECT name FROM chats WHERE id = ?").get(chatId) as { name: string | null } | undefined;
@@ -677,7 +697,7 @@ export class Pipeline {
       case "/new":
       case "/clear": {
         this.log.info("builtin command: reset-session", { userId, cmd, chatId });
-        this.resetSession(chatId, platformChatId, msgId);
+        this.startSessionTransition(chatId, () => this.resetSession(chatId, platformChatId, msgId));
         return true;
       }
       case "/agent": {
@@ -754,8 +774,8 @@ export class Pipeline {
   }
 
   /** /new 和 /clear：归档当前 session，让下一条消息自然创建新 session。 */
-  private resetSession(chatId: string, platformChatId: string, msgId?: string): void {
-    this.archiveSession(chatId)
+  private async resetSession(chatId: string, platformChatId: string, msgId?: string): Promise<void> {
+    await this.archiveSession(chatId)
       .then((archived) => {
         const text = archived
           ? "已开始新会话，当前上下文已清空。"
@@ -766,6 +786,43 @@ export class Pipeline {
         this.log.error("reset session failed", { chatId, error: String(err) });
         this.replyText(chatId, platformChatId, msgId, `新建会话失败: ${String(err)}`);
       });
+  }
+
+  private startSessionTransition(chatId: string, task: () => Promise<void>): void {
+    if (this.sessionTransitionLocks.has(chatId)) return;
+
+    const transitionPromise = task()
+      .finally(() => {
+        if (this.sessionTransitionLocks.get(chatId) === transitionPromise) {
+          this.sessionTransitionLocks.delete(chatId);
+        }
+        this.drainPendingTransitionMessages(chatId);
+      });
+
+    this.sessionTransitionLocks.set(chatId, transitionPromise);
+  }
+
+  private enqueuePendingTransitionMessage(chatId: string, msg: NormalizedMessage): void {
+    const pending = this.pendingTransitionMessages.get(chatId) ?? [];
+    pending.push({ msg });
+    this.pendingTransitionMessages.set(chatId, pending);
+
+    if (msg.platformMsgId) {
+      this.im.addReaction(msg.chatPlatformId, msg.platformMsgId, MERGED_EMOJI).catch(() => {});
+    }
+  }
+
+  private drainPendingTransitionMessages(chatId: string): void {
+    const pending = this.pendingTransitionMessages.get(chatId);
+    if (!pending || pending.length === 0) return;
+
+    this.pendingTransitionMessages.delete(chatId);
+    for (const entry of pending) {
+      if (entry.msg.platformMsgId) {
+        this.processedMsgIds.delete(entry.msg.platformMsgId);
+      }
+      this.handleMessage(entry.msg);
+    }
   }
 
   /**

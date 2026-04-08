@@ -4,7 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 import type { AgentBackend, AgentResponse, AgentSession, SessionConfig } from "../agent/types.js";
 import { initDatabase, loadPersistedBotBackend, setBotRuntimeBackend } from "../database/schema.js";
-import type { PlatformAdapter } from "../im/types.js";
+import type { NormalizedMessage, PlatformAdapter } from "../im/types.js";
 import { Pipeline, type BotIdentity } from "./pipeline.js";
 
 class RecordingAgent implements AgentBackend {
@@ -57,6 +57,7 @@ function createImStub(): PlatformAdapter {
 function createRecordingImStub() {
   const sentTexts: string[] = [];
   const sentCards: Array<{ header: string; content: string; footer?: string }> = [];
+  const reactions: Array<{ chatId: string; msgId: string; emoji: string }> = [];
 
   const im: PlatformAdapter = {
     onMessage() {},
@@ -74,7 +75,7 @@ function createRecordingImStub() {
       return "pmid";
     },
     async editMessage() {},
-    async addReaction() {},
+    async addReaction(chatId, msgId, emoji) { reactions.push({ chatId, msgId, emoji }); },
     async removeReaction() {},
     async sendFile() { return "pmid"; },
     async getBotOpenId() { return "bot-open-id"; },
@@ -84,7 +85,7 @@ function createRecordingImStub() {
     async getAppCreatorId() { return undefined; },
   };
 
-  return { im, sentTexts, sentCards };
+  return { im, sentTexts, sentCards, reactions };
 }
 
 function createBotIdentity(): BotIdentity {
@@ -92,6 +93,20 @@ function createBotIdentity(): BotIdentity {
     name: "NiuBot",
     platform: "feishu",
     platformBotId: "bot-open-id",
+  };
+}
+
+function createMessage(overrides: Partial<NormalizedMessage>): NormalizedMessage {
+  return {
+    senderPlatformId: "user-open-id",
+    senderName: "admin",
+    chatPlatformId: "chat-open-id",
+    chatType: "p2p",
+    contentText: "hello",
+    contentType: "text",
+    timestamp: new Date(),
+    raw: {},
+    ...overrides,
   };
 }
 
@@ -412,6 +427,67 @@ describe("Pipeline.recover", () => {
     expect(agent.closeSessionCalls).toEqual(["agent_1"]);
     expect(sentTexts).toContain("已开始新会话，当前上下文已清空。");
     expect((pipeline as any).chatSessions.has("c1")).toBe(false);
+  });
+
+  test("defers later messages until /new reset finishes", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare(`
+      INSERT INTO sessions (id, chat_id, user_id, status, turn_count, backend_type, last_active_at)
+      VALUES ('s1', 'c1', 'u2', 'active', 0, 'codex', datetime('now'))
+    `).run();
+
+    const agent = new RecordingAgent();
+    const { im, sentTexts, reactions } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db,
+      im,
+      agent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      0,
+      "codex",
+    );
+    await pipeline.start();
+    (pipeline as any).chatSessions.set("c1", {
+      agentSession: { id: "agent_1" },
+      sessionKey: "s1",
+      platformChatId: "chat-open-id",
+      userId: "u2",
+      hasReplied: false,
+    });
+
+    let releaseArchive!: () => void;
+    const archiveDeferred = new Promise<boolean>((resolve) => {
+      releaseArchive = () => resolve(true);
+    });
+    (pipeline as any).archiveSession = () => archiveDeferred;
+
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "/new",
+      platformMsgId: "m1",
+    }));
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "hi",
+      platformMsgId: "m2",
+    }));
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(agent.sendMessageCalls).toHaveLength(0);
+    expect(sentTexts).toHaveLength(0);
+    expect(reactions).toContainEqual({ chatId: "chat-open-id", msgId: "m2", emoji: "Pin" });
+
+    releaseArchive();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(sentTexts).toContain("已开始新会话，当前上下文已清空。");
+    expect(agent.sendMessageCalls).toEqual(["hi"]);
   });
 
   test("replies safely on /clear when no active session exists", async () => {
