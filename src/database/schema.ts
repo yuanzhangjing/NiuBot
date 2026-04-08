@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import Database from "better-sqlite3";
 import type { AgentBackendType } from "../config.js";
-import { VALID_BACKENDS } from "../config.js";
+import { normalizeBackend } from "../config.js";
 import { createLogger } from "../logger.js";
 
 const log = createLogger("database");
@@ -222,8 +222,7 @@ export function getBotRuntimeBackend(db: Database.Database, botName: string): Ag
   ).get(botName) as { backend_type: string } | undefined;
 
   if (!row) return undefined;
-  if (!VALID_BACKENDS.has(row.backend_type as AgentBackendType)) return undefined;
-  return row.backend_type as AgentBackendType;
+  return normalizeBackend(row.backend_type);
 }
 
 export function setBotRuntimeBackend(

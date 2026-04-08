@@ -9,18 +9,17 @@ import { join, resolve } from "node:path";
 import { CliAgentBackend, buildNiubotEnv, type BaseCliSession, type ParsedOutput } from "../cli-base.js";
 import type { SessionConfig } from "../types.js";
 
-const DEFAULT_LITE_MODEL = "gpt-4.1-mini";
-
 interface CodexSession extends BaseCliSession {
   /** Codex 的 thread ID（首次调用后由 CLI 返回，用于 resume） */
   codexThreadId?: string;
   sessionLogPath?: string;
   sandboxMode: string;
+  modelTier: SessionConfig["modelTier"];
 }
 
 export class CodexCliBackend extends CliAgentBackend<CodexSession> {
   private sandboxMode: string;
-  private liteModel: string;
+  private liteModel?: string;
 
   /** Codex 不支持 system prompt 注入 */
   readonly supportsSystemPrompt = false;
@@ -28,7 +27,7 @@ export class CodexCliBackend extends CliAgentBackend<CodexSession> {
   constructor(sandboxMode = "danger-full-access", liteModel?: string) {
     super("codex");
     this.sandboxMode = sandboxMode;
-    this.liteModel = liteModel ?? DEFAULT_LITE_MODEL;
+    this.liteModel = liteModel;
   }
 
   command(): string {
@@ -55,6 +54,7 @@ export class CodexCliBackend extends CliAgentBackend<CodexSession> {
       compactCount: 0,
       jsonlOffset: 0,
       sandboxMode: this.sandboxMode,
+      modelTier: config.modelTier,
     };
   }
 
@@ -99,8 +99,6 @@ export class CodexCliBackend extends CliAgentBackend<CodexSession> {
   parseOutput(stdout: string): ParsedOutput {
     let threadId: string | undefined;
     let lastAgentText = "";
-    let inputTokens = 0;
-    let outputTokens = 0;
 
     for (const line of stdout.split("\n")) {
       if (!line) continue;
@@ -127,21 +125,12 @@ export class CodexCliBackend extends CliAgentBackend<CodexSession> {
         if (event.type === "item.completed" && event.item?.type === "agent_message" && event.item.text) {
           lastAgentText = event.item.text;
         }
-
-        // usage 在 turn.completed 事件中
-        if (event.type === "turn.completed" && event.usage) {
-          inputTokens += event.usage.input_tokens ?? 0;
-          outputTokens += event.usage.output_tokens ?? 0;
-        }
       } catch { /* skip non-JSON lines */ }
     }
-
-    const totalTokens = inputTokens + outputTokens;
 
     return {
       text: lastAgentText.trim(),
       agentSessionId: threadId,
-      contextTokens: totalTokens > 0 ? totalTokens : undefined,
     };
   }
 
@@ -152,6 +141,7 @@ export class CodexCliBackend extends CliAgentBackend<CodexSession> {
     if (session.codexThreadId) {
       const meta = this.scanJsonl(session);
       if (meta.model) parsed.model = meta.model;
+      if (meta.contextTokens) parsed.contextTokens = meta.contextTokens;
       if (meta.contextWindow) parsed.contextWindow = meta.contextWindow;
     }
   }
@@ -160,11 +150,12 @@ export class CodexCliBackend extends CliAgentBackend<CodexSession> {
     return this.sessions.get(sessionId)?.codexThreadId;
   }
 
-  private scanJsonl(session: CodexSession): { model?: string; contextWindow?: number } {
+  private scanJsonl(session: CodexSession): { model?: string; contextTokens?: number; contextWindow?: number } {
     const jsonlPath = this.getJsonlPath(session);
     if (!jsonlPath) return {};
 
     let model: string | undefined;
+    let contextTokens: number | undefined;
     let contextWindow: number | undefined;
 
     try {
@@ -193,6 +184,10 @@ export class CodexCliBackend extends CliAgentBackend<CodexSession> {
                 };
                 type?: string;
                 info?: {
+                  last_token_usage?: {
+                    input_tokens?: number;
+                    output_tokens?: number;
+                  };
                   model_context_window?: number;
                 };
               };
@@ -201,6 +196,11 @@ export class CodexCliBackend extends CliAgentBackend<CodexSession> {
             if (entry.type === "turn_context") {
               model = entry.payload?.model ?? entry.payload?.collaboration_mode?.settings?.model ?? model;
             } else if (entry.type === "event_msg" && entry.payload?.type === "token_count") {
+              const lastUsage = entry.payload.info?.last_token_usage;
+              const visibleTokens = (lastUsage?.input_tokens ?? 0) + (lastUsage?.output_tokens ?? 0);
+              if (visibleTokens > 0) {
+                contextTokens = visibleTokens;
+              }
               contextWindow = entry.payload.info?.model_context_window ?? contextWindow;
             }
           } catch { /* skip malformed lines */ }
@@ -212,7 +212,7 @@ export class CodexCliBackend extends CliAgentBackend<CodexSession> {
       return {};
     }
 
-    return { model, contextWindow };
+    return { model, contextTokens, contextWindow };
   }
 
   private getJsonlPath(session: CodexSession): string | null {

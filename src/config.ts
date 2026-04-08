@@ -12,15 +12,31 @@ dotenv.config({ path: path.join(NIUBOT_HOME, ".env") });
 
 export { NIUBOT_HOME };
 
+export const AGENT_REGISTRY = {
+  claude: {
+    aliases: ["claude", "claude-code"],
+    defaultLiteModel: "haiku",
+  },
+  codex: {
+    aliases: ["codex"],
+    defaultLiteModel: "gpt-5.4-mini",
+  },
+} as const;
+
 /** 支持的 agent backend */
-export type AgentBackendType = "claude-code" | "codex";
+export type AgentBackendType = keyof typeof AGENT_REGISTRY;
+
+export interface DefaultConfig {
+  backend: AgentBackendType;
+  liteModel: Record<AgentBackendType, string>;
+}
 
 /** 单个 Bot 的配置 */
 export interface BotConfig {
   name: string;
   appId: string;
   appSecret: string;
-  /** agent backend（可选，覆盖全局 agent.backend） */
+  /** agent backend（可选，覆盖全局 default_config.backend） */
   backend?: AgentBackendType;
   /** agent 工作目录（默认 ~/.niubot/<name>/workspace/） */
   workingDirectory: string;
@@ -28,7 +44,7 @@ export interface BotConfig {
   dbPath: string;
   /** 人格文件路径（默认 ~/.niubot/<name>/persona.md） */
   personaPath: string;
-  /** 轻量模型（可选，不配则用 backend 内置默认值） */
+  /** 轻量模型（可选，覆盖 backend 默认值） */
   liteModel?: string;
   /** Admin user platform IDs（配置文件中指定的管理员） */
   adminUsers?: string[];
@@ -36,9 +52,7 @@ export interface BotConfig {
 
 export interface NiuBotConfig {
   bots: BotConfig[];
-  agent: {
-    backend: AgentBackendType;
-  };
+  defaultConfig: DefaultConfig;
   queue: {
     /** 消息缓冲合并窗口（ms），默认 3000 */
     bufferMs: number;
@@ -47,17 +61,48 @@ export interface NiuBotConfig {
   };
 }
 
-export const VALID_BACKENDS = new Set<AgentBackendType>(["claude-code", "codex"]);
+export const VALID_BACKENDS = new Set<AgentBackendType>(Object.keys(AGENT_REGISTRY) as AgentBackendType[]);
+export const AGENT_BACKEND_DISPLAY = Object.keys(AGENT_REGISTRY) as AgentBackendType[];
+
+const BACKEND_ALIAS_MAP = new Map<string, AgentBackendType>(
+  Object.entries(AGENT_REGISTRY).flatMap(([backend, meta]) =>
+    meta.aliases.map((alias) => [alias, backend as AgentBackendType] as const),
+  ),
+);
 
 const DEFAULTS = {
-  agent: {
-    backend: "claude-code" as AgentBackendType,
+  defaultConfig: {
+    backend: "claude" as AgentBackendType,
+    liteModel: Object.fromEntries(
+      Object.entries(AGENT_REGISTRY).map(([backend, meta]) => [backend, meta.defaultLiteModel]),
+    ) as Record<AgentBackendType, string>,
   },
   queue: {
     bufferMs: 3000,
     cancelThresholdMs: 10000,
   },
 };
+
+export function normalizeBackend(raw: string | undefined, fieldName = "backend"): AgentBackendType | undefined {
+  if (!raw) return undefined;
+  const normalized = BACKEND_ALIAS_MAP.get(raw.toLowerCase());
+  if (!normalized) {
+    throw new Error(`Invalid ${fieldName}: "${raw}". Valid options: ${[...VALID_BACKENDS].join(", ")}`);
+  }
+  return normalized;
+}
+
+export function getDefaultLiteModel(config: NiuBotConfig, backend: AgentBackendType): string {
+  return config.defaultConfig.liteModel[backend];
+}
+
+export function getConfiguredBackend(config: NiuBotConfig, bot: BotConfig): AgentBackendType {
+  return bot.backend ?? config.defaultConfig.backend;
+}
+
+export function getBotLiteModel(config: NiuBotConfig, bot: BotConfig, backend: AgentBackendType): string {
+  return bot.liteModel ?? getDefaultLiteModel(config, backend);
+}
 
 export function loadConfig(configPath?: string): NiuBotConfig {
   // 1. 尝试从配置文件加载
@@ -69,17 +114,10 @@ export function loadConfig(configPath?: string): NiuBotConfig {
   }
 
   // 2. 共享配置
-  const agentFile = (fileConfig["agent"] as Record<string, string>) ?? {};
+  const defaultConfigFile = (fileConfig["default_config"] as Record<string, unknown>) ?? {};
+  const legacyAgentFile = (fileConfig["agent"] as Record<string, unknown>) ?? {};
   const queueFile = (fileConfig["queue"] as Record<string, number>) ?? {};
-
-  // backend 校验
-  const backendRaw = process.env["NIUBOT_BACKEND"] ?? agentFile["backend"] ?? DEFAULTS.agent.backend;
-  if (!VALID_BACKENDS.has(backendRaw as AgentBackendType)) {
-    throw new Error(
-      `Invalid agent.backend: "${backendRaw}". Valid options: ${[...VALID_BACKENDS].join(", ")}`,
-    );
-  }
-  const backend = backendRaw as AgentBackendType;
+  const defaultConfig = parseDefaultConfig(defaultConfigFile, legacyAgentFile);
 
   const queueConfig = {
     bufferMs: parseNumEnv(process.env["NIUBOT_BUFFER_MS"]) ?? queueFile["bufferMs"] ?? DEFAULTS.queue.bufferMs,
@@ -90,14 +128,12 @@ export function loadConfig(configPath?: string): NiuBotConfig {
   let bots: BotConfig[];
 
   if (Array.isArray(fileConfig["bots"])) {
-    // 新格式：bots 数组
     const rawBots = fileConfig["bots"] as Array<Record<string, string>>;
     if (rawBots.length === 0) {
       throw new Error("Config error: bots array is empty");
     }
     bots = rawBots.map((b) => parseBotConfig(b));
 
-    // 校验 bot name 唯一性
     const names = new Set<string>();
     for (const bot of bots) {
       if (names.has(bot.name)) {
@@ -106,7 +142,6 @@ export function loadConfig(configPath?: string): NiuBotConfig {
       names.add(bot.name);
     }
   } else {
-    // 旧格式兼容：feishu.appId + feishu.appSecret → 单 bot
     const feishuFile = (fileConfig["feishu"] as Record<string, string>) ?? {};
     const appId = process.env["FEISHU_APP_ID"] ?? feishuFile["appId"];
     const appSecret = process.env["FEISHU_APP_SECRET"] ?? feishuFile["appSecret"];
@@ -118,8 +153,7 @@ export function loadConfig(configPath?: string): NiuBotConfig {
       );
     }
 
-    // 旧格式的 workingDirectory 和 dbPath 沿用原位置
-    const legacyWorkDir = process.env["NIUBOT_WORK_DIR"] ?? agentFile["workingDirectory"];
+    const legacyWorkDir = process.env["NIUBOT_WORK_DIR"] ?? (legacyAgentFile["workingDirectory"] as string | undefined);
     if (!legacyWorkDir) {
       throw new Error(
         "Missing agent.workingDirectory. Set NIUBOT_WORK_DIR environment variable, " +
@@ -138,15 +172,40 @@ export function loadConfig(configPath?: string): NiuBotConfig {
       workingDirectory: path.resolve(legacyWorkDir),
       dbPath: legacyDbPath,
       personaPath: path.join(NIUBOT_HOME, "persona.md"),
-      liteModel: process.env["NIUBOT_LITE_MODEL"] ?? agentFile["liteModel"] ?? undefined,
+      liteModel: process.env["NIUBOT_LITE_MODEL"] ?? (legacyAgentFile["liteModel"] as string | undefined) ?? undefined,
     }];
   }
 
   return {
     bots,
-    agent: { backend },
+    defaultConfig,
     queue: queueConfig,
   };
+}
+
+function parseDefaultConfig(
+  defaultConfigFile: Record<string, unknown>,
+  legacyAgentFile: Record<string, unknown>,
+): DefaultConfig {
+  const backend = normalizeBackend(
+    process.env["NIUBOT_BACKEND"]
+      ?? (defaultConfigFile["backend"] as string | undefined)
+      ?? (legacyAgentFile["backend"] as string | undefined)
+      ?? DEFAULTS.defaultConfig.backend,
+    "default_config.backend",
+  )!;
+
+  const liteModelFile = (defaultConfigFile["liteModel"] as Record<string, string> | undefined) ?? {};
+  const liteModel = {} as Record<AgentBackendType, string>;
+
+  for (const backendKey of AGENT_BACKEND_DISPLAY) {
+    liteModel[backendKey] =
+      liteModelFile[backendKey]
+      ?? (backendKey === backend ? process.env["NIUBOT_LITE_MODEL"] : undefined)
+      ?? DEFAULTS.defaultConfig.liteModel[backendKey];
+  }
+
+  return { backend, liteModel };
 }
 
 /** 解析单个 bot 配置，填充默认路径 */
@@ -167,19 +226,13 @@ function parseBotConfig(raw: Record<string, string>): BotConfig {
     ? adminUsersRaw.map(String)
     : undefined;
 
-  // per-bot backend（可选，不设则用全局 agent.backend）
-  const botBackend = raw["backend"] as string | undefined;
-  if (botBackend && !VALID_BACKENDS.has(botBackend as AgentBackendType)) {
-    throw new Error(
-      `Config error: bot '${name}' has invalid backend "${botBackend}". Valid options: ${[...VALID_BACKENDS].join(", ")}`,
-    );
-  }
+  const backend = normalizeBackend(raw["backend"], `bot '${name}'.backend`);
 
   return {
     name,
     appId,
     appSecret,
-    backend: botBackend as AgentBackendType | undefined,
+    backend,
     workingDirectory: raw["workingDirectory"]
       ? path.resolve(raw["workingDirectory"])
       : path.join(botDir, "workspace"),

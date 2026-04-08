@@ -6,7 +6,7 @@ import type Database from "better-sqlite3";
 import type { PlatformAdapter, NormalizedMessage } from "../im/types.js";
 import { escapeYamlContent, renderMessageNodes } from "../im/render.js";
 import type { AgentBackend, AgentSession } from "../agent/types.js";
-import { type AgentBackendType, VALID_BACKENDS } from "../config.js";
+import { AGENT_BACKEND_DISPLAY, normalizeBackend, type AgentBackendType, VALID_BACKENDS } from "../config.js";
 import { MessageQueue } from "./queue.js";
 import {
   ensureUser, ensureChat, storeMessage, updateChatName,
@@ -30,13 +30,6 @@ const STALE_MESSAGE_THRESHOLD_MS = 2 * 60 * 1000;
 
 /** 短词打断关键词 */
 const INTERRUPT_WORDS = new Set(["停", "算了", "取消", "stop", "cancel", "abort"]);
-const AGENT_BACKEND_ALIASES: Record<string, AgentBackendType> = {
-  claude: "claude-code",
-  "claude-code": "claude-code",
-  codex: "codex",
-};
-const AGENT_BACKEND_DISPLAY = ["claude", "codex"] as const;
-
 /** Bot 身份信息，由外部传入 */
 export interface BotIdentity {
   /** Bot 显示名称（如 "CowBot"，从平台 API 获取或 config 指定） */
@@ -117,7 +110,7 @@ export class Pipeline {
     dbPath: string,
     bufferMs: number,
     cancelThresholdMs: number,
-    backendType: AgentBackendType = "claude-code",
+    backendType: AgentBackendType = "claude",
     backendResolver?: (type: AgentBackendType) => Promise<AgentBackend>,
   ) {
     this.db = db;
@@ -290,7 +283,26 @@ export class Pipeline {
 
     for (const row of uniqueRows) {
       const chatType = (row.type ?? "p2p") as "p2p" | "group";
-      const canResumeRecoveredSession = row.backend_type !== null && row.backend_type === this.backendType;
+      const storedBackendType = normalizeBackend(row.backend_type ?? undefined);
+      const canResumeRecoveredSession = storedBackendType !== undefined && storedBackendType === this.backendType;
+
+      if (!canResumeRecoveredSession && storedBackendType !== this.backendType) {
+        this.db.prepare(`
+          UPDATE sessions
+          SET status = 'archived',
+              ended_at = datetime('now'),
+              last_active_at = datetime('now'),
+              agent_session_id = NULL
+          WHERE id = ?
+        `).run(row.id);
+        this.log.warn("resetting unrecoverable active session during startup", {
+          chatId: row.chat_id,
+          sessionKey: row.id,
+          storedBackendType: storedBackendType ?? "unknown",
+          activeBackendType: this.backendType,
+        });
+        continue;
+      }
 
       // 重建 important 上下文
       const userRow = row.user_id
@@ -349,7 +361,7 @@ export class Pipeline {
           chatId: row.chat_id,
           sessionKey: row.id,
           resumed: canResumeRecoveredSession && !!row.agent_session_id,
-          storedBackendType: row.backend_type ?? "unknown",
+          storedBackendType: storedBackendType ?? "unknown",
           activeBackendType: this.backendType,
         });
       } catch (err) {
@@ -742,7 +754,12 @@ export class Pipeline {
       return;
     }
 
-    const target = AGENT_BACKEND_ALIASES[args[0].toLowerCase()];
+    let target: AgentBackendType | undefined;
+    try {
+      target = normalizeBackend(args[0]);
+    } catch {
+      target = undefined;
+    }
 
     if (!target || !VALID_BACKENDS.has(target)) {
       this.replyText(chatId, platformChatId, msgId,
@@ -1281,5 +1298,5 @@ function formatUptime(ms: number): string {
 }
 
 function displayBackendType(type: AgentBackendType): string {
-  return type === "claude-code" ? "claude" : type;
+  return type;
 }

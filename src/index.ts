@@ -1,12 +1,18 @@
 import { writeFileSync, unlinkSync, mkdirSync } from "node:fs";
 import { resolve } from "node:path";
-import { loadConfig, type AgentBackendType } from "./config.js";
+import {
+  getConfiguredBackend,
+  getDefaultLiteModel,
+  loadConfig,
+  type AgentBackendType,
+} from "./config.js";
 import { ClaudeCliBackend } from "./agent/claude-cli/backend.js";
 import { CodexCliBackend } from "./agent/codex/backend.js";
 import type { AgentBackend } from "./agent/types.js";
 import { createBotInstance, type BotInstance } from "./bot-instance.js";
 import { loadPersistedBotBackend } from "./database/schema.js";
 import { createLogger, setLogLevel } from "./logger.js";
+import { prependNiubotBinToPath } from "./niubot-cli.js";
 
 const log = createLogger("main");
 
@@ -20,11 +26,12 @@ async function main(): Promise<void> {
   }
 
   log.info("NiuBot starting...");
+  process.env["PATH"] = prependNiubotBinToPath();
 
   // 1. 加载配置
   const config = loadConfig();
   log.info("config loaded", {
-    backend: config.agent.backend,
+    backend: config.defaultConfig.backend,
     botCount: config.bots.length,
     bots: config.bots.map((b) => b.name).join(", "),
   });
@@ -35,10 +42,10 @@ async function main(): Promise<void> {
 
   function createBackend(type: AgentBackendType): AgentBackend {
     switch (type) {
-      case "claude-code":
-        return new ClaudeCliBackend("bypassPermissions");
+      case "claude":
+        return new ClaudeCliBackend("bypassPermissions", getDefaultLiteModel(config, type));
       case "codex":
-        return new CodexCliBackend();
+        return new CodexCliBackend("danger-full-access", getDefaultLiteModel(config, type));
     }
   }
 
@@ -59,7 +66,7 @@ async function main(): Promise<void> {
   const bots: BotInstance[] = [];
   for (const botConfig of config.bots) {
     try {
-      const configuredBackendType = botConfig.backend ?? config.agent.backend;
+      const configuredBackendType = getConfiguredBackend(config, botConfig);
       const persistedBackendType = loadPersistedBotBackend(botConfig.dbPath, botConfig.name);
       const backendType = persistedBackendType ?? configuredBackendType;
       const agent = await getOrCreateBackend(backendType);

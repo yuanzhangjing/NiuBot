@@ -6,6 +6,7 @@
 import { spawn } from "node:child_process";
 import type { AgentBackend, AgentSession, AgentResponse, SessionConfig } from "./types.js";
 import { createLogger } from "../logger.js";
+import { prependNiubotBinToPath } from "../niubot-cli.js";
 
 /** 子类 session 的基础字段 */
 export interface BaseCliSession {
@@ -210,6 +211,7 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
 /** 从 SessionConfig 构造 NiuBot CLI 工具需要的环境变量 */
 export function buildNiubotEnv(config: SessionConfig): Record<string, string> {
   const env: Record<string, string> = {};
+  env["PATH"] = prependNiubotBinToPath();
   if (config.userId) env["NIUBOT_USER_ID"] = config.userId;
   if (config.chatId) env["NIUBOT_CHAT_ID"] = config.chatId;
   if (config.chatType) env["NIUBOT_CHAT_TYPE"] = config.chatType;

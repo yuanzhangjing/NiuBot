@@ -18,8 +18,8 @@ import path from "node:path";
 import os from "node:os";
 import dotenv from "dotenv";
 import Database from "better-sqlite3";
+import { loadConfig } from "./config.js";
 import { runSummarize } from "./summarizer/index.js";
-import { ClaudeCliBackend } from "./agent/claude-cli/backend.js";
 import {
   addUserMemory,
   listUserMemory,
@@ -47,6 +47,7 @@ import { handleContacts } from "./cli/contacts.js";
 import { handleSend, handleSendFile, handleRestart } from "./cli/send.js";
 import { handleCron } from "./cli/cron.js";
 import { handleTask } from "./cli/task.js";
+import { createSummarizerBackend, resolveSummarizerBackend } from "./cli/summarize.js";
 
 // ─── Context ───────────────────────────────────────────────
 
@@ -186,7 +187,9 @@ async function main(): Promise<void> {
 
 async function handleSummarize(): Promise<void> {
   const db = openDb();
-  const agent = new ClaudeCliBackend("bypassPermissions", process.env["NIUBOT_LITE_MODEL"]);
+  const config = loadConfig();
+  const selection = resolveSummarizerBackend(config, BOT_NAME);
+  const agent = createSummarizerBackend(selection);
   try {
     await agent.start();
     await runSummarize(db, agent);

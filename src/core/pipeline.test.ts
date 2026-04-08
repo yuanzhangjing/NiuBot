@@ -66,7 +66,52 @@ afterEach(() => {
 });
 
 describe("Pipeline.recover", () => {
-  test("does not reuse agent session ids from a different backend", async () => {
+  test("does not recover active sessions when the stored backend is missing", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare(`
+      INSERT INTO users (id, name, platform, platform_id)
+      VALUES ('u2', 'admin', 'feishu', 'user-open-id')
+    `).run();
+    db.prepare(`
+      INSERT INTO chats (id, type, platform, platform_id, user_id)
+      VALUES ('c1', 'p2p', 'feishu', 'chat-open-id', 'user-open-id')
+    `).run();
+    db.prepare(`
+      INSERT INTO sessions (id, chat_id, user_id, status, agent_session_id, backend_type, last_active_at)
+      VALUES ('s1', 'c1', 'u2', 'active', 'legacy-session-id', NULL, datetime('now'))
+    `).run();
+
+    const agent = new RecordingAgent();
+    const pipeline = new Pipeline(
+      db,
+      createImStub(),
+      agent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      0,
+      "claude",
+    );
+
+    await pipeline.recover();
+
+    const row = db.prepare(
+      "SELECT status, agent_session_id, backend_type FROM sessions WHERE id = 's1'",
+    ).get() as { status: string; agent_session_id: string | null; backend_type: string | null };
+
+    expect(agent.createSessionCalls).toHaveLength(0);
+    expect(row).toEqual({
+      status: "archived",
+      agent_session_id: null,
+      backend_type: null,
+    });
+  });
+
+  test("does not recover active sessions from a different backend", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
@@ -94,13 +139,21 @@ describe("Pipeline.recover", () => {
       path.join(dir, "niubot.db"),
       0,
       0,
-      "claude-code",
+      "claude",
     );
 
     await pipeline.recover();
 
-    expect(agent.createSessionCalls).toHaveLength(1);
-    expect(agent.createSessionCalls[0]?.agentSessionId).toBeUndefined();
+    const row = db.prepare(
+      "SELECT status, agent_session_id, backend_type FROM sessions WHERE id = 's1'",
+    ).get() as { status: string; agent_session_id: string | null; backend_type: string | null };
+
+    expect(agent.createSessionCalls).toHaveLength(0);
+    expect(row).toEqual({
+      status: "archived",
+      agent_session_id: null,
+      backend_type: "codex",
+    });
   });
 
   test("reuses agent session ids when the stored backend matches", async () => {
@@ -118,7 +171,7 @@ describe("Pipeline.recover", () => {
     `).run();
     db.prepare(`
       INSERT INTO sessions (id, chat_id, user_id, status, agent_session_id, backend_type, last_active_at)
-      VALUES ('s1', 'c1', 'u2', 'active', 'claude-session-id', 'claude-code', datetime('now'))
+      VALUES ('s1', 'c1', 'u2', 'active', 'claude-session-id', 'claude', datetime('now'))
     `).run();
 
     const agent = new RecordingAgent();
@@ -131,7 +184,7 @@ describe("Pipeline.recover", () => {
       path.join(dir, "niubot.db"),
       0,
       0,
-      "claude-code",
+      "claude",
     );
 
     await pipeline.recover();
@@ -154,7 +207,7 @@ describe("Pipeline.recover", () => {
       path.join(dir, "niubot.db"),
       0,
       0,
-      "claude-code",
+      "claude",
       async () => new RecordingAgent(),
     );
 
@@ -180,7 +233,7 @@ describe("Pipeline.recover", () => {
     expect(loadPersistedBotBackend(dbPath, "NiuBot")).toBe("codex");
   });
 
-  test("accepts claude as an alias for claude-code when switching backends", async () => {
+  test("persists claude when switching to the claude backend", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
@@ -205,6 +258,6 @@ describe("Pipeline.recover", () => {
       "SELECT backend_type FROM bot_runtime_state WHERE bot_name = ?",
     ).get("NiuBot") as { backend_type: string } | undefined;
 
-    expect(row?.backend_type).toBe("claude-code");
+    expect(row?.backend_type).toBe("claude");
   });
 });

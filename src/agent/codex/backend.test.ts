@@ -15,7 +15,7 @@ describe("CodexCliBackend session metadata", () => {
     }
   });
 
-  it("hydrates model and context window from the Codex session log", () => {
+  it("hydrates model and visible turn usage from the Codex session log", () => {
     const threadId = "019d688f-4db1-7871-981e-09b47ad4f84b";
     const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-home-"));
     process.env["HOME"] = tempHome;
@@ -38,7 +38,19 @@ describe("CodexCliBackend session metadata", () => {
           type: "event_msg",
           payload: {
             type: "token_count",
-            info: { model_context_window: 258400 },
+            info: {
+              model_context_window: 258400,
+              total_token_usage: {
+                input_tokens: 2050400,
+                cached_input_tokens: 2048000,
+                output_tokens: 1900,
+              },
+              last_token_usage: {
+                input_tokens: 20504,
+                cached_input_tokens: 10624,
+                output_tokens: 19,
+              },
+            },
           },
         }),
       ].join("\n"),
@@ -63,5 +75,51 @@ describe("CodexCliBackend session metadata", () => {
     expect(parsed.model).toBe("gpt-5.4");
     expect(parsed.contextWindow).toBe(258400);
     expect(parsed.contextTokens).toBe(20523);
+  });
+
+  it("does not fall back to cumulative turn usage when session log metadata is unavailable", () => {
+    const backend = new CodexCliBackend();
+
+    const parsed = backend.parseOutput([
+      JSON.stringify({
+        type: "item.completed",
+        item: { type: "agent_message", text: "ok" },
+      }),
+      JSON.stringify({
+        type: "turn.completed",
+        usage: { input_tokens: 2050400, cached_input_tokens: 2048000, output_tokens: 1900 },
+      }),
+    ].join("\n"));
+
+    expect(parsed.contextTokens).toBeUndefined();
+  });
+
+  it("requires the caller to provide the default lite model", () => {
+    const backend = new CodexCliBackend();
+    const session = backend.buildSession({
+      workingDirectory: "/tmp",
+      modelTier: "lite",
+    });
+
+    expect(session.model).toBeUndefined();
+  });
+
+  it("passes the explicit lite model flag for lite tier sessions", () => {
+    const backend = new CodexCliBackend("danger-full-access", "gpt-5.4-mini");
+    const session = backend.buildSession({
+      workingDirectory: "/tmp/project",
+      modelTier: "lite",
+    });
+
+    expect(backend.buildArgs(session, "ping")).toEqual([
+      "exec",
+      "--json",
+      "--dangerously-bypass-approvals-and-sandbox",
+      "--skip-git-repo-check",
+      "-C",
+      "/tmp/project",
+      "-m",
+      "gpt-5.4-mini",
+    ]);
   });
 });
