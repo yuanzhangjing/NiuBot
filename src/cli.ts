@@ -53,7 +53,7 @@ import { createSummarizerBackend, resolveSummarizerBackend } from "./cli/summari
 
 const NIUBOT_HOME = process.env["NIUBOT_HOME"] ?? path.join(os.homedir(), ".niubot");
 // Load global defaults from NIUBOT_HOME/.env
-dotenv.config({ path: path.join(NIUBOT_HOME, ".env") });
+dotenv.config({ path: path.join(NIUBOT_HOME, ".env"), quiet: true });
 
 // 命令行参数解析（全局 flags 优先于环境变量）
 const cliArgs = process.argv.slice(2);
@@ -591,7 +591,6 @@ function handleWhoami(): void {
     userName = row?.name ?? undefined;
   }
 
-  // 复用 buildImportantContext，输出和 session 注入完全一致
   const scene: SceneInfo = {
     botName: botLabel ?? botName,
     botLabel,

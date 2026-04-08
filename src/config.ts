@@ -8,7 +8,7 @@ import yaml from "yaml";
 const NIUBOT_HOME = process.env["NIUBOT_HOME"] ?? path.join(os.homedir(), ".niubot");
 
 // 从 NIUBOT_HOME 加载 .env
-dotenv.config({ path: path.join(NIUBOT_HOME, ".env") });
+dotenv.config({ path: path.join(NIUBOT_HOME, ".env"), quiet: true });
 
 export { NIUBOT_HOME };
 

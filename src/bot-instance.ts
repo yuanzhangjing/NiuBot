@@ -16,7 +16,7 @@ import { ApiServer, type ApiHandler } from "./core/api.js";
 import { CronScheduler } from "./core/cron.js";
 import { startSummarizer } from "./summarizer/index.js";
 import { ensurePersonaFile } from "./persona.js";
-import { buildStaticContext } from "./memory/inject.js";
+import { loadStaticContextTemplate } from "./static-context.js";
 import { createLogger } from "./logger.js";
 import type Database from "better-sqlite3";
 
@@ -161,7 +161,7 @@ function generateAgentFiles(
   const agentsPath = path.join(botConfig.workingDirectory, "AGENTS.md");
   const claudePath = path.join(botConfig.workingDirectory, "CLAUDE.md");
 
-  const content = buildStaticContext();
+  const content = loadStaticContextTemplate();
   fs.writeFileSync(agentsPath, content, "utf-8");
 
   try { fs.unlinkSync(claudePath); } catch { /* 不存在就忽略 */ }

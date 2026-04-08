@@ -21,6 +21,33 @@ interface TaskIndex {
   tasks: TaskEntry[];
 }
 
+function buildTaskReadme(name: string, description: string): string {
+  return `# ${name}
+
+${description || "Task description here."}
+
+## In Progress
+
+（无）
+
+## Todo
+
+（无）
+
+## Bug
+
+（无）
+
+## Idea
+
+（无）
+
+## Done
+
+（无）
+`;
+}
+
 export function handleTask(
   args: string[],
   workingDirectory: string,
@@ -110,8 +137,7 @@ function taskCreate(
 
   // Create directory and README
   fs.mkdirSync(taskDir, { recursive: true });
-  const readmeContent = `# ${name}\n\n${description || "Task description here."}\n\n## In Progress\n\n（无）\n\n## Todo\n\n## Done\n`;
-  fs.writeFileSync(path.join(taskDir, "README.md"), readmeContent, "utf-8");
+  fs.writeFileSync(path.join(taskDir, "README.md"), buildTaskReadme(name, description), "utf-8");
 
   // Update index
   const entry: TaskEntry = {
