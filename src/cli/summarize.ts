@@ -8,7 +8,6 @@ import {
   getBotLiteModel,
   getConfiguredBackend,
 } from "../config.js";
-import { loadPersistedBotBackend } from "../database/schema.js";
 
 export interface SummarizerBackendSelection {
   backendType: AgentBackendType;
@@ -28,9 +27,7 @@ export function resolveSummarizerBackend(
   botName?: string,
 ): SummarizerBackendSelection {
   const bot = resolveBot(config, botName);
-  const configuredBackend = getConfiguredBackend(config, bot);
-  const persistedBackend = loadPersistedBotBackend(bot.dbPath, bot.name);
-  const backendType = persistedBackend ?? configuredBackend;
+  const backendType = getConfiguredBackend(config, bot);
 
   return {
     backendType,

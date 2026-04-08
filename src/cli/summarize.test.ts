@@ -14,7 +14,7 @@ afterEach(() => {
 });
 
 describe("resolveSummarizerBackend", () => {
-  it("prefers the persisted runtime backend over config", () => {
+  it("prefers config over the persisted runtime backend", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-summarize-cli-test-"));
     tempDirs.push(dir);
 
@@ -43,8 +43,8 @@ describe("resolveSummarizerBackend", () => {
     };
 
     expect(resolveSummarizerBackend(config, "NiuBot")).toMatchObject({
-      backendType: "codex",
-      liteModel: "gpt-5.4-mini",
+      backendType: "claude",
+      liteModel: "haiku",
     });
   });
 

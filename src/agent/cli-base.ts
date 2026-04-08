@@ -32,6 +32,8 @@ export interface ParsedOutput {
   contextWindow?: number;
   /** 本次调用使用的模型 */
   model?: string;
+  /** 累计 compact 次数 */
+  compactCount?: number;
 }
 
 export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession> implements AgentBackend {

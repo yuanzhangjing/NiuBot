@@ -143,6 +143,7 @@ export class CodexCliBackend extends CliAgentBackend<CodexSession> {
       if (meta.model) parsed.model = meta.model;
       if (meta.contextTokens) parsed.contextTokens = meta.contextTokens;
       if (meta.contextWindow) parsed.contextWindow = meta.contextWindow;
+      if (meta.compactCount) parsed.compactCount = meta.compactCount;
     }
   }
 
@@ -150,7 +151,12 @@ export class CodexCliBackend extends CliAgentBackend<CodexSession> {
     return this.sessions.get(sessionId)?.codexThreadId;
   }
 
-  private scanJsonl(session: CodexSession): { model?: string; contextTokens?: number; contextWindow?: number } {
+  private scanJsonl(session: CodexSession): {
+    model?: string;
+    contextTokens?: number;
+    contextWindow?: number;
+    compactCount?: number;
+  } {
     const jsonlPath = this.getJsonlPath(session);
     if (!jsonlPath) return {};
 
@@ -195,6 +201,8 @@ export class CodexCliBackend extends CliAgentBackend<CodexSession> {
 
             if (entry.type === "turn_context") {
               model = entry.payload?.model ?? entry.payload?.collaboration_mode?.settings?.model ?? model;
+            } else if (entry.type === "compacted") {
+              session.compactCount++;
             } else if (entry.type === "event_msg" && entry.payload?.type === "token_count") {
               const lastUsage = entry.payload.info?.last_token_usage;
               const visibleTokens = (lastUsage?.input_tokens ?? 0) + (lastUsage?.output_tokens ?? 0);
@@ -212,7 +220,12 @@ export class CodexCliBackend extends CliAgentBackend<CodexSession> {
       return {};
     }
 
-    return { model, contextTokens, contextWindow };
+    return {
+      model,
+      contextTokens,
+      contextWindow,
+      compactCount: session.compactCount > 0 ? session.compactCount : undefined,
+    };
   }
 
   private getJsonlPath(session: CodexSession): string | null {

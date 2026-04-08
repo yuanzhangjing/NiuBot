@@ -77,6 +77,36 @@ describe("CodexCliBackend session metadata", () => {
     expect(parsed.contextTokens).toBe(20523);
   });
 
+  it("counts compacted events from the Codex session log", () => {
+    const threadId = "019d6c46-7d53-7e22-9767-0e837ba20ebf";
+    const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-home-"));
+    process.env["HOME"] = tempHome;
+
+    const logDir = path.join(tempHome, ".codex", "sessions", "2026", "04", "08");
+    fs.mkdirSync(logDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(logDir, `rollout-2026-04-08T16-47-32-${threadId}.jsonl`),
+      [
+        JSON.stringify({ type: "compacted", payload: { message: "" } }),
+        JSON.stringify({ type: "compacted", payload: { message: "" } }),
+      ].join("\n"),
+    );
+
+    const backend = new CodexCliBackend();
+    const session = backend.buildSession({ workingDirectory: tempHome });
+    const parsed = backend.parseOutput([
+      JSON.stringify({ type: "thread.started", thread_id: threadId }),
+      JSON.stringify({
+        type: "item.completed",
+        item: { type: "agent_message", text: "ok" },
+      }),
+    ].join("\n"));
+
+    backend.updateSession(session, parsed);
+
+    expect(parsed.compactCount).toBe(2);
+  });
+
   it("does not fall back to cumulative turn usage when session log metadata is unavailable", () => {
     const backend = new CodexCliBackend();
 
