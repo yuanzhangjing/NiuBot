@@ -124,7 +124,7 @@ Schedule recurring or one-time automated tasks.
 | List | `niubot cron list` |
 | Delete | `niubot cron del <job-id>` |
 
-### Task management
+## Task management
 Manage tasks and projects with visibility control. Tasks are organized in the `tasks/` directory.
 - Always use CLI to create tasks, do NOT manually create directories under `tasks/`.
 - Do not access other users' private tasks.

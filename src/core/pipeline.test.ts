@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 import type { AgentBackend, AgentResponse, AgentSession, SessionConfig } from "../agent/types.js";
-import { initDatabase, loadPersistedBotBackend, setBotRuntimeBackend } from "../database/schema.js";
+import { initDatabase } from "../database/schema.js";
 import type { NormalizedMessage, PlatformAdapter } from "../im/types.js";
 import { Pipeline, type BotIdentity } from "./pipeline.js";
 
@@ -263,74 +263,6 @@ describe("Pipeline.recover", () => {
 
     expect(agent.createSessionCalls).toHaveLength(1);
     expect(agent.createSessionCalls[0]?.agentSessionId).toBe("claude-session-id");
-  });
-
-  test("persists the current backend after a successful switch", async () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
-    tempDirs.push(dir);
-
-    const db = initDatabase(path.join(dir, "niubot.db"));
-    const pipeline = new Pipeline(
-      db,
-      createImStub(),
-      new RecordingAgent(),
-      createBotIdentity(),
-      dir,
-      path.join(dir, "niubot.db"),
-      0,
-      0,
-      "claude",
-      async () => new RecordingAgent(),
-    );
-
-    (pipeline as any).handleAgentCommand(["codex"], "c1", "chat-open-id");
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    const row = db.prepare(
-      "SELECT backend_type FROM bot_runtime_state WHERE bot_name = ?",
-    ).get("NiuBot") as { backend_type: string } | undefined;
-
-    expect(row?.backend_type).toBe("codex");
-  });
-
-  test("loads the persisted backend for startup recovery", async () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
-    tempDirs.push(dir);
-
-    const dbPath = path.join(dir, "niubot.db");
-    const db = initDatabase(dbPath);
-    setBotRuntimeBackend(db, "NiuBot", "codex");
-    db.close();
-
-    expect(loadPersistedBotBackend(dbPath, "NiuBot")).toBe("codex");
-  });
-
-  test("persists claude when switching to the claude backend", async () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
-    tempDirs.push(dir);
-
-    const db = initDatabase(path.join(dir, "niubot.db"));
-    const pipeline = new Pipeline(
-      db,
-      createImStub(),
-      new RecordingAgent(),
-      createBotIdentity(),
-      dir,
-      path.join(dir, "niubot.db"),
-      0,
-      0,
-      "codex",
-      async () => new RecordingAgent(),
-    );
-
-    (pipeline as any).handleAgentCommand(["claude"], "c1", "chat-open-id");
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    const row = db.prepare(
-      "SELECT backend_type FROM bot_runtime_state WHERE bot_name = ?",
-    ).get("NiuBot") as { backend_type: string } | undefined;
-
-    expect(row?.backend_type).toBe("claude");
   });
 
   test("handles single-slash status as a local builtin command", () => {

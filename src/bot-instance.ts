@@ -8,7 +8,6 @@ import {
   getUserShortLabel,
   getUserShortLabelByPlatformId,
   getMessageByPlatformId,
-  setBotRuntimeBackend,
 } from "./database/schema.js";
 import { FeishuAdapter } from "./im/feishu/adapter.js";
 import { Pipeline, type BotIdentity } from "./core/pipeline.js";
@@ -50,9 +49,6 @@ export async function createBotInstance(
 
   // 2. 初始化数据库
   const db = initDatabase(botConfig.dbPath);
-  if (backendType) {
-    setBotRuntimeBackend(db, botConfig.name, backendType);
-  }
   log.info("database initialized", { dbPath: botConfig.dbPath });
 
   // 3. 生成 AGENTS.md + CLAUDE.md symlink

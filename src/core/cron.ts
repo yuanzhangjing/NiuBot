@@ -112,7 +112,7 @@ export class CronScheduler {
         log.info("cron job completed (max times)", { id: job.id });
         continue;
       }
-      if (job.untilTime && nowStr > job.untilTime) {
+      if (job.untilTime && nowStr > normalizeDatetime(job.untilTime)) {
         this.db.prepare("UPDATE cron_jobs SET status = 'completed' WHERE id = ?").run(job.id);
         log.info("cron job completed (until time)", { id: job.id });
         continue;
@@ -122,7 +122,7 @@ export class CronScheduler {
 
       if (job.runAt) {
         // One-time job
-        if (nowStr >= job.runAt && job.runCount === 0) {
+        if (nowStr >= normalizeDatetime(job.runAt) && job.runCount === 0) {
           shouldRun = true;
         }
       } else if (job.cronExpr) {
@@ -130,7 +130,7 @@ export class CronScheduler {
         shouldRun = matchesCron(job.cronExpr, now);
         // Don't run if already ran in this minute
         if (shouldRun && job.lastRunAt) {
-          const lastMinute = job.lastRunAt.slice(0, 16);
+          const lastMinute = normalizeDatetime(job.lastRunAt).slice(0, 16);
           const currentMinute = nowStr.slice(0, 16);
           if (lastMinute === currentMinute) shouldRun = false;
         }
@@ -268,4 +268,9 @@ function matchesCronField(field: string, value: number): boolean {
 function formatLocalDateTime(d: Date): string {
   const pad = (n: number) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+/** Normalize datetime string: replace 'T' separator with space for consistent comparison */
+function normalizeDatetime(s: string): string {
+  return s.replace("T", " ");
 }

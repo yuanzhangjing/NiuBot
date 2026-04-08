@@ -11,7 +11,6 @@ import { MessageQueue } from "./queue.js";
 import {
   ensureUser, ensureChat, storeMessage, updateChatName,
   getUserShortLabel, getChatShortLabel, getMessageByPlatformId, updateMessageContent, updateMessagePlatformId,
-  setBotRuntimeBackend,
 } from "../database/schema.js";
 import { buildImportantContext, buildNormalContext, type SceneInfo } from "../memory/inject.js";
 import { loadPersona } from "../persona.js";
@@ -899,10 +898,9 @@ export class Pipeline {
 
     doSwitch()
       .then(() => {
-        setBotRuntimeBackend(this.db, this.botIdentity.name, target);
         this.replyText(chatId, platformChatId, msgId,
-          `已切换到 **${displayBackendType(target)}**，上下文已重置。`);
-        this.log.info("agent backend switched", { backend: target });
+          `已切换到 **${displayBackendType(target)}**，上下文已重置。重启后恢复为配置值。`);
+        this.log.info("agent backend switched (runtime only)", { backend: target });
       })
       .catch((err) => {
         this.log.error("failed to switch agent backend", { error: String(err) });

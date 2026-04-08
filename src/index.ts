@@ -72,7 +72,6 @@ async function main(): Promise<void> {
       log.info("bot backend assigned", {
         bot: botConfig.name,
         backend: backendType,
-        source: "config",
       });
     } catch (err) {
       log.error("failed to create bot instance", { bot: botConfig.name, error: String(err) });
