@@ -114,6 +114,9 @@ export class Pipeline {
   /** 已加过 Pin 的消息，避免重复加 reaction */
   private pinnedMsgIds = new Set<string>();
 
+  /** 已加过 Get 的消息，避免重复加 reaction */
+  private processingMsgIds = new Set<string>();
+
   constructor(
     db: Database.Database,
     im: PlatformAdapter,
@@ -245,6 +248,8 @@ export class Pipeline {
   private moveMessageToProcessing(chatPlatformId: string, msgId?: string): void {
     if (!msgId) return;
     this.pinnedMsgIds.delete(msgId);
+    if (this.processingMsgIds.has(msgId)) return;
+    this.processingMsgIds.add(msgId);
     this.im.addReaction(chatPlatformId, msgId, PROCESSING_EMOJI).catch(() => {});
   }
 
@@ -551,7 +556,7 @@ export class Pipeline {
       return;
     }
 
-    // Reaction 策略：只有 pending 才加 Pin；真正开始处理时补 Get；两者都保留
+    // Reaction 策略：收到即二选一；pending 先 Pin，非 pending 先 Get；pending 开始处理后再补 Get
     const isPending = this.queue.push({
       chatId,
       text: agentText,
@@ -561,6 +566,8 @@ export class Pipeline {
     });
     if (isPending) {
       this.markQueuedMessage(msg.chatPlatformId, msg.platformMsgId);
+    } else {
+      this.moveMessageToProcessing(msg.chatPlatformId, msg.platformMsgId);
     }
   }
 
@@ -981,6 +988,9 @@ export class Pipeline {
     if (platformChatId) {
       for (const msgId of reactionMsgIds) {
         this.moveMessageToProcessing(platformChatId, msgId);
+      }
+      for (const msgId of reactionMsgIds) {
+        this.processingMsgIds.delete(msgId);
       }
     }
 

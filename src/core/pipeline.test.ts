@@ -509,7 +509,7 @@ describe("Pipeline.recover", () => {
     expect(agent.sendMessageCalls).toEqual(["hi"]);
   });
 
-  test("adds pin only for pending messages while get marks processed ones", async () => {
+  test("adds pin for pending messages and get for non-pending ones on receipt", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
