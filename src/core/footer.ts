@@ -2,6 +2,7 @@ interface ResponseFooterInput {
   sessionKey: string;
   turnCount?: number;
   contextTokens?: number;
+  compactCount?: number;
   model?: string;
 }
 
@@ -10,6 +11,10 @@ export function buildResponseFooter(input: ResponseFooterInput): string {
 
   if (input.contextTokens && input.contextTokens > 0) {
     footerParts.push(formatTokenCount(input.contextTokens));
+  }
+
+  if (input.compactCount && input.compactCount > 0) {
+    footerParts.push(`compact×${input.compactCount}`);
   }
 
   if (input.model) {

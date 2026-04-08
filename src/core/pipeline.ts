@@ -967,6 +967,7 @@ export class Pipeline {
         sessionKey: chatSession.sessionKey,
         turnCount: stats?.turn_count,
         contextTokens: response.contextTokens,
+        compactCount: response.compactCount,
         model: response.model,
       });
 

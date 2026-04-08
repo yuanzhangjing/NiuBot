@@ -11,7 +11,8 @@ describe("footer formatting", () => {
       sessionKey: "session_abcd1234",
       turnCount: 3,
       contextTokens: 20523,
+      compactCount: 2,
       model: "gpt-5.4",
-    })).toBe("abcd1234 · #3 · 20.5k · GPT-5.4");
+    })).toBe("abcd1234 · #3 · 20.5k · compact×2 · GPT-5.4");
   });
 });
