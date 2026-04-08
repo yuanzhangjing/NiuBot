@@ -239,5 +239,8 @@ function estimateVisibleContextTokens(usage: {
   cache_read_input_tokens?: number;
   output_tokens?: number;
 }): number {
-  return (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0);
+  return (usage.input_tokens ?? 0)
+    + (usage.cache_creation_input_tokens ?? 0)
+    + (usage.cache_read_input_tokens ?? 0)
+    + (usage.output_tokens ?? 0);
 }

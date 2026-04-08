@@ -15,7 +15,7 @@ describe("ClaudeCliBackend session metadata", () => {
     }
   });
 
-  it("ignores cache-read tokens when estimating visible context size", () => {
+  it("includes all token types when estimating context size", () => {
     const sessionId = "019d6888-07e1-7c91-8439-ef53ce51f973";
     const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "claude-home-"));
     const workingDirectory = path.join(tempHome, "workspace");
@@ -67,6 +67,6 @@ describe("ClaudeCliBackend session metadata", () => {
     backend.updateSession(session, parsed);
 
     expect(parsed.model).toBe("claude-sonnet-4-5-20250929");
-    expect(parsed.contextTokens).toBe(20523);
+    expect(parsed.contextTokens).toBe(5662187);
   });
 });

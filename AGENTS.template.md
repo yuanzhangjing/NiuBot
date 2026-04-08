@@ -125,13 +125,10 @@ Schedule recurring or one-time automated tasks.
 | Delete | `niubot cron del <job-id>` |
 
 ### Task management
-Manage tasks/projects with visibility control. Use for tracking work items.
-- Private chat defaults to `--private`, group chat defaults to `--public`.
-- Do NOT manually create directories under `tasks/`.
+Manage tasks and projects with visibility control. Tasks are organized in the `tasks/` directory.
+- Always use CLI to create tasks, do NOT manually create directories under `tasks/`.
 - Do not access other users' private tasks.
-- Each task directory must use `README.md` as the single entrypoint.
-- `README.md` sections: `In Progress / Todo / Bug / Idea / Done`.
-- When task items are completed, update the corresponding `README.md` promptly.
+- In group chat, private tasks are completely hidden (cannot list, update, or delete). Use private chat instead.
 
 | Action | Command |
 |--------|---------|
@@ -139,6 +136,22 @@ Manage tasks/projects with visibility control. Use for tracking work items.
 | List | `niubot task list [<name>]` |
 | Update | `niubot task update <name> [--name <new>] [--desc "..."] [--private] [--public]` |
 | Delete | `niubot task delete <name>` |
+
+Visibility: private chat defaults to `--private`, group chat defaults to `--public`.
+
+List options: `<name>` filters by substring match (case-insensitive).
+
+List output format (one entry per task, separated by `---`):
+  name / description / path / owner / visibility / created_at
+
+Delete archives the task to `tasks/.archive/` (not permanent deletion).
+
+Task directory structure:
+- Each task is a directory `tasks/<name>/` with `README.md` as the single entrypoint.
+- README.md uses fixed sections: `## In Progress` / `## Todo` / `## Bug` / `## Idea` / `## Done`.
+- When items are completed, move them to Done promptly.
+- Additional files (design docs, references) may be placed in the task directory.
+- Task metadata is tracked in `tasks/index.yaml` (managed by CLI, do not edit manually).
 
 ### Current scene
 Show current session context (bot, chat, user, memories). Same as `niubot whoami` in Context recovery.
