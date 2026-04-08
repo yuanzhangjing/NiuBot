@@ -111,6 +111,9 @@ export class Pipeline {
   /** chatId → transition 期间暂存的后续消息 */
   private pendingTransitionMessages = new Map<string, PendingTransitionMessage[]>();
 
+  /** 已加过 Pin 的消息，避免重复加 reaction */
+  private pinnedMsgIds = new Set<string>();
+
   constructor(
     db: Database.Database,
     im: PlatformAdapter,
@@ -136,12 +139,6 @@ export class Pipeline {
 
     this.queue.onProcess((chatId, mergedText, messages) => this.process(chatId, mergedText, messages));
     this.queue.onCancel((chatId) => this.cancelChat(chatId));
-    this.queue.onPending((msg) => {
-      const platformChatId = this.platformChatIds.get(msg.chatId);
-      if (platformChatId && msg.platformMsgId) {
-        this.im.addReaction(platformChatId, msg.platformMsgId, MERGED_EMOJI).catch(() => {});
-      }
-    });
   }
 
   /** 启动管道：注册 IM 消息回调 */
@@ -237,6 +234,18 @@ export class Pipeline {
     if (chatRow) {
       this.storeBotResponse(chatRow.id, `[文件] ${filePath}`, platformMsgId, "file");
     }
+  }
+
+  private markQueuedMessage(chatPlatformId: string, msgId?: string): void {
+    if (!msgId || this.pinnedMsgIds.has(msgId)) return;
+    this.pinnedMsgIds.add(msgId);
+    this.im.addReaction(chatPlatformId, msgId, MERGED_EMOJI).catch(() => {});
+  }
+
+  private moveMessageToProcessing(chatPlatformId: string, msgId?: string): void {
+    if (!msgId) return;
+    this.pinnedMsgIds.delete(msgId);
+    this.im.addReaction(chatPlatformId, msgId, PROCESSING_EMOJI).catch(() => {});
   }
 
   /**
@@ -542,17 +551,15 @@ export class Pipeline {
       return;
     }
 
-    // Reaction 策略：Get = 正在处理，Pin = 排队等待，互斥
-    const isPending = this.queue.push({
+    // Reaction 策略：入队先 Pin，开始处理补 Get，两者都保留
+    this.markQueuedMessage(msg.chatPlatformId, msg.platformMsgId);
+    this.queue.push({
       chatId,
       text: agentText,
       senderLabel: label,
       timestamp: Date.now(),
       platformMsgId: msg.platformMsgId,
     });
-    if (!isPending && msg.platformMsgId) {
-      this.im.addReaction(msg.chatPlatformId, msg.platformMsgId, PROCESSING_EMOJI).catch(() => {});
-    }
   }
 
   /** Store a bot-sent message in DB */
@@ -806,10 +813,7 @@ export class Pipeline {
     const pending = this.pendingTransitionMessages.get(chatId) ?? [];
     pending.push({ msg });
     this.pendingTransitionMessages.set(chatId, pending);
-
-    if (msg.platformMsgId) {
-      this.im.addReaction(msg.chatPlatformId, msg.platformMsgId, MERGED_EMOJI).catch(() => {});
-    }
+    this.markQueuedMessage(msg.chatPlatformId, msg.platformMsgId);
   }
 
   private drainPendingTransitionMessages(chatId: string): void {
@@ -968,6 +972,15 @@ export class Pipeline {
     this.triggerMsgIds.delete(chatId);
 
     const isMerged = messages.length > 1;
+    const reactionMsgIds = messages
+      .map((message) => message.platformMsgId)
+      .filter((msgId): msgId is string => !!msgId);
+
+    if (platformChatId) {
+      for (const msgId of reactionMsgIds) {
+        this.moveMessageToProcessing(platformChatId, msgId);
+      }
+    }
 
     try {
       // M3: 路由决策 — 判断是否需要切换 session

@@ -58,6 +58,7 @@ function createRecordingImStub() {
   const sentTexts: string[] = [];
   const sentCards: Array<{ header: string; content: string; footer?: string }> = [];
   const reactions: Array<{ chatId: string; msgId: string; emoji: string }> = [];
+  const removedReactions: Array<{ chatId: string; msgId: string; emoji: string }> = [];
 
   const im: PlatformAdapter = {
     onMessage() {},
@@ -76,7 +77,7 @@ function createRecordingImStub() {
     },
     async editMessage() {},
     async addReaction(chatId, msgId, emoji) { reactions.push({ chatId, msgId, emoji }); },
-    async removeReaction() {},
+    async removeReaction(chatId, msgId, emoji) { removedReactions.push({ chatId, msgId, emoji }); },
     async sendFile() { return "pmid"; },
     async getBotOpenId() { return "bot-open-id"; },
     async getBotName() { return "NiuBot"; },
@@ -85,7 +86,25 @@ function createRecordingImStub() {
     async getAppCreatorId() { return undefined; },
   };
 
-  return { im, sentTexts, sentCards, reactions };
+  return { im, sentTexts, sentCards, reactions, removedReactions };
+}
+
+class DeferredAgent extends RecordingAgent {
+  private readonly pendingResolvers: Array<() => void> = [];
+
+  override async sendMessage(_session: AgentSession, message: string): Promise<AgentResponse> {
+    this.sendMessageCalls.push(message);
+    await new Promise<void>((resolve) => {
+      this.pendingResolvers.push(resolve);
+    });
+    return { text: `reply:${message}` };
+  }
+
+  resolveNext(): void {
+    const resolve = this.pendingResolvers.shift();
+    if (!resolve) throw new Error("no pending sendMessage to resolve");
+    resolve();
+  }
 }
 
 function createBotIdentity(): BotIdentity {
@@ -488,6 +507,60 @@ describe("Pipeline.recover", () => {
 
     expect(sentTexts).toContain("已开始新会话，当前上下文已清空。");
     expect(agent.sendMessageCalls).toEqual(["hi"]);
+  });
+
+  test("keeps pin and get after processing starts", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const agent = new DeferredAgent();
+    const { im, reactions, removedReactions } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db,
+      im,
+      agent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      0,
+      "codex",
+    );
+    await pipeline.start();
+
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "first",
+      platformMsgId: "m1",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(reactions).toContainEqual({ chatId: "chat-open-id", msgId: "m1", emoji: "Pin" });
+    expect(reactions).toContainEqual({ chatId: "chat-open-id", msgId: "m1", emoji: "Get" });
+    expect(removedReactions).not.toContainEqual({ chatId: "chat-open-id", msgId: "m1", emoji: "Pin" });
+
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "second",
+      platformMsgId: "m2",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(reactions).toContainEqual({ chatId: "chat-open-id", msgId: "m2", emoji: "Pin" });
+    expect(reactions).not.toContainEqual({ chatId: "chat-open-id", msgId: "m2", emoji: "Get" });
+
+    agent.resolveNext();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(removedReactions).not.toContainEqual({ chatId: "chat-open-id", msgId: "m1", emoji: "Get" });
+    expect(removedReactions).not.toContainEqual({ chatId: "chat-open-id", msgId: "m2", emoji: "Pin" });
+    expect(reactions).toContainEqual({ chatId: "chat-open-id", msgId: "m2", emoji: "Get" });
+
+    agent.resolveNext();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(removedReactions).not.toContainEqual({ chatId: "chat-open-id", msgId: "m2", emoji: "Get" });
   });
 
   test("replies safely on /clear when no active session exists", async () => {
