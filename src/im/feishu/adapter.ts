@@ -226,6 +226,7 @@ export class FeishuAdapter implements PlatformAdapter {
   }
 
   async addReaction(chatId: string, msgId: string, emoji: string): Promise<void> {
+    const startedAt = Date.now();
     try {
       await this.client.im.messageReaction.create({
         path: { message_id: msgId },
@@ -233,8 +234,15 @@ export class FeishuAdapter implements PlatformAdapter {
           reaction_type: { emoji_type: emoji },
         },
       });
+      log.info("reaction added", { chatId, msgId, emoji, durationMs: Date.now() - startedAt });
     } catch (err) {
-      log.warn("addReaction failed", { chatId, msgId, emoji, error: String(err) });
+      log.warn("addReaction failed", {
+        chatId,
+        msgId,
+        emoji,
+        durationMs: Date.now() - startedAt,
+        error: String(err),
+      });
     }
   }
 

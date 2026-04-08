@@ -242,6 +242,7 @@ export class Pipeline {
   private markQueuedMessage(chatPlatformId: string, msgId?: string): void {
     if (!msgId || this.pinnedMsgIds.has(msgId)) return;
     this.pinnedMsgIds.add(msgId);
+    this.log.info("reaction request", { chatPlatformId, msgId, emoji: MERGED_EMOJI, phase: "queued" });
     this.im.addReaction(chatPlatformId, msgId, MERGED_EMOJI).catch(() => {});
   }
 
@@ -250,6 +251,7 @@ export class Pipeline {
     this.pinnedMsgIds.delete(msgId);
     if (this.processingMsgIds.has(msgId)) return;
     this.processingMsgIds.add(msgId);
+    this.log.info("reaction request", { chatPlatformId, msgId, emoji: PROCESSING_EMOJI, phase: "processing" });
     this.im.addReaction(chatPlatformId, msgId, PROCESSING_EMOJI).catch(() => {});
   }
 
@@ -563,6 +565,12 @@ export class Pipeline {
       senderLabel: label,
       timestamp: Date.now(),
       platformMsgId: msg.platformMsgId,
+    });
+    this.log.info("reaction decision", {
+      chatId,
+      msgId: msg.platformMsgId,
+      isPending,
+      initialEmoji: isPending ? MERGED_EMOJI : PROCESSING_EMOJI,
     });
     if (isPending) {
       this.markQueuedMessage(msg.chatPlatformId, msg.platformMsgId);
