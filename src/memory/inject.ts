@@ -1,6 +1,5 @@
 import type Database from "better-sqlite3";
 import { listUserMemory } from "./user-memory.js";
-import { utcToLocalHHMM } from "../tz.js";
 import { loadStaticContextTemplate } from "../static-context.js";
 
 /** 冷启动注入最近 session summary 的个数 */
@@ -96,9 +95,7 @@ export function buildNormalContext(
     try {
       const state = JSON.parse(chatRow.state_summary) as {
         summary?: string;
-        topics?: Array<{ title: string; summary: string }>;
-        open_items?: string[];
-        recent_changes?: string[];
+        topics?: Array<{ title: string; status?: string; summary: string }>;
       };
       const lines: string[] = [];
       if (state.summary) {
@@ -107,14 +104,9 @@ export function buildNormalContext(
       if (state.topics?.length) {
         lines.push("话题索引：");
         for (const t of state.topics) {
-          lines.push(`  - ${t.title}：${t.summary}`);
+          const status = t.status ? `[${t.status}]` : "";
+          lines.push(`  - ${t.title}${status}：${t.summary}`);
         }
-      }
-      if (state.open_items?.length) {
-        lines.push(`待办：${state.open_items.join("；")}`);
-      }
-      if (state.recent_changes?.length) {
-        lines.push(`近期变更：${state.recent_changes.join("；")}`);
       }
       parts.push(`[对话全局状态]\n${lines.join("\n")}`);
     } catch {
@@ -125,21 +117,9 @@ export function buildNormalContext(
   // 2. 最近 N 个归档 session 的结构化摘要（短期记忆）
   const recentSessions = getRecentArchivedSessions(db, chatId, RECENT_SESSION_SUMMARY_COUNT);
   if (recentSessions.length > 0) {
-    const sessionBlocks = recentSessions.map((s) => {
-      const time = utcToLocalHHMM(s.ended_at);
-      const lines: string[] = [];
-      lines.push(`[${time}] ${s.parsed.summary ?? "(无摘要)"}`);
-      if (s.parsed.decisions?.length) {
-        lines.push(`  决策：${s.parsed.decisions.join("；")}`);
-      }
-      if (s.parsed.open_items?.length) {
-        lines.push(`  待办：${s.parsed.open_items.join("；")}`);
-      }
-      if (s.parsed.key_data?.length) {
-        lines.push(`  关键数据：${s.parsed.key_data.join("；")}`);
-      }
-      return lines.join("\n");
-    });
+    const sessionBlocks = recentSessions.map((s) =>
+      s.parsed.summary ?? "(无摘要)",
+    );
     parts.push(`[最近对话]\n${sessionBlocks.join("\n")}`);
   }
 
@@ -159,10 +139,7 @@ export function buildStaticContext(): string {
 
 interface ParsedSessionSummary {
   summary?: string;
-  decisions?: string[];
-  open_items?: string[];
   topics?: string[];
-  key_data?: string[];
 }
 
 function getRecentArchivedSessions(
@@ -190,7 +167,5 @@ function getRecentArchivedSessions(
     } catch { /* skip malformed */ }
   }
 
-  // 查出来是倒序（最新在前），反转为正序（最旧在前），注入时按时间顺序阅读更自然
-  results.reverse();
   return results;
 }

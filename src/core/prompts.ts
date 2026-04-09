@@ -5,11 +5,8 @@
 /** Session 归档摘要 prompt — 发送给当前 agent session 做自我总结 */
 export const ARCHIVE_SUMMARY_PROMPT = `请用以下 JSON 格式总结这次对话的要点：
 {
-  "summary": "一两句话概括讨论内容和结论",
-  "decisions": ["做出的关键决策"],
-  "open_items": ["未完成的事项"],
-  "topics": ["话题标签"],
-  "key_data": ["关键数据/数字"]
+  "summary": "概括这次聊了什么、做了什么决定、还剩什么没搞定",
+  "topics": ["话题标签"]
 }
 如果对话内容太少或没有实质内容（如简单寒暄），返回 null。
 只输出 JSON 或 null，不要其他内容。`;
@@ -26,15 +23,12 @@ ${sessionSummary}
 请${currentState ? "更新" : "生成"}对话全局摘要，输出 JSON 格式：
 {
   "summary": "一句话概括对话整体方向和当前焦点",
-  "topics": [{"title": "话题名", "summary": "当前状态"}],
-  "open_items": ["待办事项"],
-  "recent_changes": ["最近的重要变更"]
+  "topics": [{"title": "话题名", "status": "进行中|已完成|搁置", "summary": "当前状态，包括未完成事项"}]
 }
 
 规则：
-- topics 按最近活跃倒序，上限 10 条。已完结的话题可移除
-- open_items 上限 5 条，已完成的移除
-- recent_changes 上限 3 条，只保留最新的
+- topics 按最近活跃倒序，上限 10 条。已完结且不再相关的话题可移除
+- 未完成事项写进对应 topic 的 summary 里，不要单独列
 - 这是滚动更新，不是追加。合并、替换、精简
 
 只输出 JSON，不要其他内容。`;
