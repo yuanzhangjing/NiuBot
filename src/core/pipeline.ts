@@ -493,7 +493,7 @@ export class Pipeline {
       : undefined;
 
     const sessionKey = this.chatSessions.get(chatId)?.sessionKey;
-    storeMessage(this.db, {
+    const incomingMsgId = storeMessage(this.db, {
       chatId,
       senderId: userId,
       sessionKey,
@@ -547,6 +547,8 @@ export class Pipeline {
     const trimmedText = msg.contentText.trim().toLowerCase();
     if (INTERRUPT_WORDS.has(trimmedText) && this.chatSessions.has(chatId)) {
       this.log.info("interrupt word detected", { chatId, word: trimmedText });
+      // agent 没见过打断消息和回复
+      this.db.prepare("UPDATE messages SET agent_seen = 0 WHERE id = ?").run(incomingMsgId);
       this.cancelChat(chatId).catch(() => {});
       const interruptText = "好的，已停止。";
       this.im.sendText(msg.chatPlatformId, interruptText).then((pmid) => {
@@ -557,6 +559,8 @@ export class Pipeline {
 
     // 内置命令拦截：/xxx 开头的消息先匹配内置命令，命中则不传给 agent
     if (this.handleBuiltinCommand(msg.contentText.trim(), userId, chatId, msg.chatPlatformId, msg.platformMsgId)) {
+      // agent 没见过这条消息，撤回 agentSeen 标记
+      this.db.prepare("UPDATE messages SET agent_seen = 0 WHERE id = ?").run(incomingMsgId);
       return;
     }
 
