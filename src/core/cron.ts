@@ -176,6 +176,14 @@ export function addCronJob(
     untilTime?: string;
   },
 ): number {
+  // Validate: runAt must be in the future（对齐 cc-connect AddJob）
+  if (opts.runAt) {
+    const runAtTime = new Date(opts.runAt.replace(" ", "T"));
+    if (runAtTime.getTime() <= Date.now()) {
+      throw new Error("run_at must be in the future");
+    }
+  }
+
   const result = db.prepare(`
     INSERT INTO cron_jobs (chat_id, creator_user_id, cron_expr, run_at, prompt, description, max_times, until_time)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
