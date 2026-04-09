@@ -1000,8 +1000,11 @@ export class Pipeline {
         platform: this.botIdentity.platform,
       });
 
-      // Update session stats
+      // Update session stats + synthetic summary（让 [今日对话] 能显示 cron 结果摘要）
       const agentSessionId = this.agent.getAgentSessionId?.(agentSession.id);
+      const label = description || prompt.slice(0, 40);
+      const brief = response.text.length > 200 ? response.text.slice(0, 200) + "…" : response.text;
+      const syntheticSummary = JSON.stringify({ summary: `⏰ ${label}: ${brief}` });
       this.db.prepare(`
         UPDATE sessions
         SET message_count = 2,
@@ -1009,9 +1012,10 @@ export class Pipeline {
             last_active_at = datetime('now'),
             end_msg_id = ?,
             agent_session_id = ?,
-            backend_type = ?
+            backend_type = ?,
+            summary = ?
         WHERE id = ?
-      `).run(replyMsgId, agentSessionId ?? null, this.backendType, sessionKey);
+      `).run(replyMsgId, agentSessionId ?? null, this.backendType, syntheticSummary, sessionKey);
 
       // Build footer
       const footer = buildResponseFooter({
