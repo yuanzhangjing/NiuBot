@@ -75,6 +75,9 @@ export class ClaudeCliBackend extends CliAgentBackend<ClaudeSession> {
       args.push("--resume", session.claudeSessionId);
     }
 
+    // 禁用 Claude Code 云端定时任务，避免与 niubot cron 冲突
+    args.push("--disallowedTools", "RemoteTrigger");
+
     return args;
   }
 
@@ -229,7 +232,10 @@ export class ClaudeCliBackend extends CliAgentBackend<ClaudeSession> {
   }
 
   protected agentEnv(): Record<string, string> {
-    return { CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1" };
+    return {
+      CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1",
+      CLAUDE_CODE_DISABLE_CRON: "1",
+    };
   }
 }
 
