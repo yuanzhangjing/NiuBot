@@ -493,7 +493,7 @@ export class Pipeline {
       : undefined;
 
     const sessionKey = this.chatSessions.get(chatId)?.sessionKey;
-    storeMessage(this.db, {
+    const incomingMsgId = storeMessage(this.db, {
       chatId,
       senderId: userId,
       sessionKey,
@@ -564,6 +564,7 @@ export class Pipeline {
       chatId,
       text: agentText,
       senderLabel: label,
+      dbMsgId: incomingMsgId,
       timestamp: Date.now(),
       platformMsgId: msg.platformMsgId,
     });
@@ -1285,6 +1286,11 @@ export class Pipeline {
       if ((chatTypeRow?.type ?? "p2p") === "p2p") {
         const sessionRow = this.db.prepare("SELECT start_msg_id FROM sessions WHERE id = ?").get(chatSession.sessionKey) as { start_msg_id: number | null } | undefined;
         const baseline = sessionRow?.start_msg_id ?? 0;
+        // 先把走 agent 的用户消息标为已见，再查 unseen 时就不会查到它们
+        const agentMsgIds = messages.map((m) => m.dbMsgId).filter((id): id is number => id != null);
+        if (agentMsgIds.length > 0) {
+          markMessagesSeen(this.db, agentMsgIds);
+        }
         const unseen = getUnseenMessages(this.db, chatId, baseline);
         if (unseen.length > 0) {
           const lines = unseen.map((m) => {
@@ -1311,7 +1317,7 @@ export class Pipeline {
         return;
       }
 
-      // 存储 agent 回复
+      // 存储 agent 回复并标记已见
       const replyMsgId = storeMessage(this.db, {
         chatId,
         senderId: this.botUserId!,
@@ -1321,11 +1327,6 @@ export class Pipeline {
         platform: this.botIdentity.platform,
         agentSeen: true,
       });
-
-      // 标记本轮用户消息为 agent 已见（发给 agent 的消息默认 agent_seen=0，此处统一标记）
-      this.db.prepare(
-        "UPDATE messages SET agent_seen = 1 WHERE session_key = ? AND agent_seen = 0",
-      ).run(chatSession.sessionKey);
 
       // 更新 session 统计（COALESCE 保证 agent_session_id 只写一次，后续不覆盖）
       const cumulativeBytes = this.agent.getCumulativeBytes?.(chatSession.agentSession.id) ?? 0;

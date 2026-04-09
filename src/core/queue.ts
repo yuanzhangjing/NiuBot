@@ -10,6 +10,8 @@ export interface QueuedMessage {
   platformMsgId?: string;
   /** 发送者短标签（如 "U2"），用于多条消息合并时生成 YAML 格式 */
   senderLabel?: string;
+  /** 消息在 DB 中的 ID，用于 process() 标记 agent_seen */
+  dbMsgId?: number;
 }
 
 interface ChatQueue {
