@@ -11,6 +11,7 @@ import { MessageQueue } from "./queue.js";
 import {
   ensureUser, ensureChat, storeMessage, updateChatName,
   getUserShortLabel, getChatShortLabel, getMessageByPlatformId, updateMessageContent, updateMessagePlatformId,
+  getUnseenMessages, markMessagesSeen,
 } from "../database/schema.js";
 import { buildImportantContext, buildNormalContext, type SceneInfo } from "../memory/inject.js";
 import { loadPersona } from "../persona.js";
@@ -107,9 +108,6 @@ export class Pipeline {
 
   /** chatId → transition promise，session 切换期间后续消息先挂起 */
   private sessionTransitionLocks = new Map<string, Promise<void>>();
-
-  /** chatId → 待注入的 cron 完成提示（下一条用户消息时消费） */
-  private pendingCronHints = new Map<string, string[]>();
 
   /** chatId → transition 期间暂存的后续消息 */
   private pendingTransitionMessages = new Map<string, PendingTransitionMessage[]>();
@@ -506,6 +504,7 @@ export class Pipeline {
       platformMsgId: msg.platformMsgId,
       platformTs: platformTsStr,
       platformRaw: JSON.stringify(msg.raw),
+      agentSeen: true,
     });
 
     this.log.info("message received", {
@@ -1033,13 +1032,6 @@ export class Pipeline {
         updateMessagePlatformId(this.db, replyMsgId, sentPlatformMsgId);
       }
 
-      // Store hint for active session（下一条用户消息时注入）
-      const hintLabel = description || prompt.slice(0, 40);
-      const hintBrief = response.text.length > 100 ? response.text.slice(0, 100) + "…" : response.text;
-      const hints = this.pendingCronHints.get(chatId) ?? [];
-      hints.push(`⏰ ${hintLabel}: ${hintBrief}`);
-      this.pendingCronHints.set(chatId, hints);
-
       this.log.info("cron job completed", { chatId, sessionKey, responseLength: response.text.length });
     } catch (err) {
       this.log.error("cron job execution failed", { chatId, sessionKey, error: String(err) });
@@ -1288,12 +1280,22 @@ export class Pipeline {
         messageToSend = `${parts.join("\n\n")}\n\n${mergedText}`;
       }
 
-      // Inject pending cron hints（定时任务完成提示，让 active session 感知）
-      const cronHints = this.pendingCronHints.get(chatId);
-      if (cronHints && cronHints.length > 0) {
-        const hintBlock = cronHints.join("\n");
-        messageToSend = `<system-hint>\n[定时任务已触发]\n${hintBlock}\n完整结果已通过卡片发送给用户。仅在用户主动提及时回应，不要打断当前话题。\n</system-hint>\n\n${messageToSend}`;
-        this.pendingCronHints.delete(chatId);
+      // Inject unseen messages（agent 没见过的消息：内置命令回复、cron 结果等）
+      // 只对 p2p 生效，群聊不注入
+      const chatTypeRow = this.db.prepare("SELECT type FROM chats WHERE id = ?").get(chatId) as { type: string } | undefined;
+      if ((chatTypeRow?.type ?? "p2p") === "p2p") {
+        const sessionRow = this.db.prepare("SELECT start_msg_id FROM sessions WHERE id = ?").get(chatSession.sessionKey) as { start_msg_id: number | null } | undefined;
+        const baseline = sessionRow?.start_msg_id ?? 0;
+        const unseen = getUnseenMessages(this.db, chatId, baseline);
+        if (unseen.length > 0) {
+          const lines = unseen.map((m) => {
+            const sender = m.role === "assistant" ? "bot" : (m.senderName ?? "user");
+            return `[${sender}] ${m.contentText ?? ""}`;
+          });
+          messageToSend = `<system-hint>\n[对话流中你未看到的消息]\n${lines.join("\n")}\n以上消息已发送给用户。仅在用户主动提及时回应，不要打断当前话题。\n</system-hint>\n\n${messageToSend}`;
+          markMessagesSeen(this.db, unseen.map((m) => m.id));
+          this.log.info("injected unseen messages", { chatId, count: unseen.length });
+        }
       }
 
       this.log.info("sending to agent", {
@@ -1318,6 +1320,7 @@ export class Pipeline {
         role: "assistant",
         contentText: response.text,
         platform: this.botIdentity.platform,
+        agentSeen: true,
       });
 
       // 更新 session 统计（COALESCE 保证 agent_session_id 只写一次，后续不覆盖）

@@ -205,6 +205,15 @@ const migrations: Migration[] = [
       db.exec("ALTER TABLE chats ADD COLUMN state_summary TEXT");
     },
   },
+  {
+    version: 7,
+    description: "Add agent_seen to messages for foreign message injection",
+    up: (db) => {
+      db.exec("ALTER TABLE messages ADD COLUMN agent_seen INTEGER DEFAULT 0");
+      // 历史消息全部标记为已见，只关心新消息
+      db.exec("UPDATE messages SET agent_seen = 1");
+    },
+  },
 ];
 
 const LATEST_VERSION = migrations[migrations.length - 1]!.version;
@@ -497,12 +506,13 @@ export function storeMessage(
     platformMsgId?: string;
     platformTs?: string;
     platformRaw?: string;
+    agentSeen?: boolean;
   },
 ): number {
   const tx = db.transaction(() => {
     const result = db.prepare(`
-      INSERT INTO messages (chat_id, sender_id, session_key, role, content_text, content_type, reply_to, platform, platform_msg_id, platform_ts, platform_raw)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO messages (chat_id, sender_id, session_key, role, content_text, content_type, reply_to, platform, platform_msg_id, platform_ts, platform_raw, agent_seen)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       msg.chatId,
       msg.senderId,
@@ -515,6 +525,7 @@ export function storeMessage(
       msg.platformMsgId ?? null,
       msg.platformTs ?? null,
       msg.platformRaw ?? null,
+      msg.agentSeen ? 1 : 0,
     );
 
     const msgId = Number(result.lastInsertRowid);
@@ -540,6 +551,30 @@ export function getMessageByPlatformId(
   return db.prepare(
     "SELECT id, content_text AS contentText, content_type AS contentType, sender_id AS senderId FROM messages WHERE platform = ? AND platform_msg_id = ? LIMIT 1",
   ).get(platform, platformMsgId) as { id: number; contentText: string | null; contentType: string | null; senderId: string } | undefined;
+}
+
+/** Query messages the agent hasn't seen yet (for foreign message injection) */
+export function getUnseenMessages(
+  db: Database.Database,
+  chatId: string,
+  afterMsgId: number,
+): Array<{ id: number; role: string; senderName: string | null; contentText: string | null; createdAt: string }> {
+  return db.prepare(`
+    SELECT m.id, m.role, u.name AS senderName, m.content_text AS contentText, m.created_at AS createdAt
+    FROM messages m
+    LEFT JOIN users u ON m.sender_id = u.id
+    WHERE m.chat_id = ? AND m.agent_seen = 0 AND m.id > ?
+    ORDER BY m.id ASC
+  `).all(chatId, afterMsgId) as Array<{
+    id: number; role: string; senderName: string | null; contentText: string | null; createdAt: string;
+  }>;
+}
+
+/** Mark messages as seen by agent */
+export function markMessagesSeen(db: Database.Database, msgIds: number[]): void {
+  if (msgIds.length === 0) return;
+  const placeholders = msgIds.map(() => "?").join(",");
+  db.prepare(`UPDATE messages SET agent_seen = 1 WHERE id IN (${placeholders})`).run(...msgIds);
 }
 
 /** Update content_text for an existing message (e.g., after fetching reply context from API) */
