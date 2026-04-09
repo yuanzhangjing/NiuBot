@@ -558,6 +558,7 @@ export function getUnseenMessages(
   db: Database.Database,
   chatId: string,
   afterMsgId: number,
+  limit = 20,
 ): Array<{ id: number; role: string; senderName: string | null; contentText: string | null; createdAt: string }> {
   return db.prepare(`
     SELECT m.id, m.role, u.name AS senderName, m.content_text AS contentText, m.created_at AS createdAt
@@ -565,7 +566,8 @@ export function getUnseenMessages(
     LEFT JOIN users u ON m.sender_id = u.id
     WHERE m.chat_id = ? AND m.agent_seen = 0 AND m.id > ?
     ORDER BY m.id ASC
-  `).all(chatId, afterMsgId) as Array<{
+    LIMIT ?
+  `).all(chatId, afterMsgId, limit) as Array<{
     id: number; role: string; senderName: string | null; contentText: string | null; createdAt: string;
   }>;
 }
