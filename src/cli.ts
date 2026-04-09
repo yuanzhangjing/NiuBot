@@ -18,8 +18,6 @@ import path from "node:path";
 import os from "node:os";
 import dotenv from "dotenv";
 import Database from "better-sqlite3";
-import { loadConfig } from "./config.js";
-import { runSummarize } from "./summarizer/index.js";
 import {
   addUserMemory,
   listUserMemory,
@@ -27,18 +25,6 @@ import {
   updateUserMemory,
   deleteUserMemory,
 } from "./memory/user-memory.js";
-import {
-  getOverview,
-  upsertOverview,
-  listDailies,
-  upsertDaily,
-  listWeeklies,
-  upsertWeekly,
-  getChatSummary,
-  deleteChatSummary,
-  toMonday,
-  toSunday,
-} from "./memory/chat-summary.js";
 import { getUserShortLabel, getChatShortLabel } from "./database/schema.js";
 import { buildImportantContext, type SceneInfo } from "./memory/inject.js";
 import { loadPersona } from "./persona.js";
@@ -47,7 +33,6 @@ import { handleContacts } from "./cli/contacts.js";
 import { handleSend, handleSendFile, handleRestart } from "./cli/send.js";
 import { handleCron } from "./cli/cron.js";
 import { handleTask } from "./cli/task.js";
-import { createSummarizerBackend, resolveSummarizerBackend } from "./cli/summarize.js";
 
 // ─── Context ───────────────────────────────────────────────
 
@@ -149,12 +134,6 @@ async function main(): Promise<void> {
     case "user-memory":
       handleUserMemory(args.slice(1));
       break;
-    case "chat-summary":
-      handleChatSummary(args.slice(1));
-      break;
-    case "summarize":
-      await handleSummarize();
-      break;
     case "messages":
       handleMessages(openDb(), args.slice(1), CHAT_ID, CHAT_TYPE, USER_ID, checkChatAccess, parseArgs);
       break;
@@ -182,23 +161,6 @@ async function main(): Promise<void> {
     default:
       printUsage();
       break;
-  }
-}
-
-async function handleSummarize(): Promise<void> {
-  const db = openDb();
-  const config = loadConfig();
-  const selection = resolveSummarizerBackend(config, BOT_NAME);
-  const agent = createSummarizerBackend(selection);
-  try {
-    await agent.start();
-    await runSummarize(db, agent);
-  } catch (err: any) {
-    console.error(`Error: ${err.message}`);
-    process.exit(1);
-  } finally {
-    await agent.stop();
-    db.close();
   }
 }
 
@@ -359,203 +321,6 @@ function userMemoryDel(db: Database.Database, userId: string, args: string[]): v
   console.log(`Deleted memory #${id}`);
 }
 
-// ─── chat-summary ──────────────────────────────────────────
-
-function handleChatSummary(args: string[]): void {
-  const sub = args[0];
-  const rest = args.slice(1);
-  const db = openDb();
-
-  switch (sub) {
-    case "overview":
-      chatSummaryOverview(db, rest);
-      break;
-    case "daily":
-      chatSummaryDaily(db, rest);
-      break;
-    case "weekly":
-      chatSummaryWeekly(db, rest);
-      break;
-    case "get":
-      chatSummaryGet(db, rest);
-      break;
-    case "del":
-    case "delete":
-    case "rm":
-      chatSummaryDel(db, rest);
-      break;
-    default:
-      console.log("Usage: niubot chat-summary <overview|daily|weekly|get|del>");
-      break;
-  }
-  db.close();
-}
-
-function resolveChatId(flags: Record<string, string>): string {
-  const explicit = flags["chat-id"] ?? flags["chat"];
-  const chatId = explicit ?? CHAT_ID;
-  if (!chatId) { console.error("Error: NIUBOT_CHAT_ID not set and --chat-id not provided"); process.exit(1); }
-  if (explicit && explicit !== CHAT_ID) checkChatAccess(explicit);
-  return chatId;
-}
-
-function chatSummaryOverview(db: Database.Database, args: string[]): void {
-  if (args[0] === "upsert") {
-    const { flags } = parseArgs(args.slice(1));
-    const chatId = resolveChatId(flags);
-    const summary = flags["summary"];
-    if (!summary) {
-      console.error("Usage: niubot chat-summary overview upsert --summary \"...\" [--detail \"...\"]");
-      process.exit(1);
-    }
-    const id = upsertOverview(db, chatId, summary, flags["detail"] ?? "", flags["date"]);
-    console.log(`Upserted overview #${id}`);
-    return;
-  }
-
-  const { flags } = parseArgs(args);
-  const chatId = resolveChatId(flags);
-  const o = getOverview(db, chatId);
-  if (!o) {
-    console.log("No overview yet.");
-  } else {
-    console.log(`Summary: ${o.summary}`);
-    if (o.detail) console.log(`Detail:\n${o.detail}`);
-  }
-}
-
-function chatSummaryDaily(db: Database.Database, args: string[]): void {
-  if (args[0] === "get") {
-    const { positional } = parseArgs(args.slice(1));
-    const id = Number(positional[0]);
-    if (!id) { console.error("Usage: niubot chat-summary daily get <id>"); process.exit(1); }
-    const s = getChatSummary(db, id);
-    if (!s || s.level !== "daily") { console.error(`Daily summary #${id} not found`); process.exit(1); }
-    checkChatAccess(s.chatId);
-    console.log(`#${s.id}  [${s.period}]`);
-    console.log(`Summary: ${s.summary}`);
-    if (s.detail) console.log(`Detail:\n${s.detail}`);
-    return;
-  }
-
-  if (args[0] === "upsert") {
-    const { flags } = parseArgs(args.slice(1));
-    const chatId = resolveChatId(flags);
-    const date = flags["date"];
-    const summary = flags["summary"];
-    if (!date || !summary) {
-      console.error("Usage: niubot chat-summary daily upsert --date <YYYY-MM-DD> --summary \"...\" [--detail \"...\"]");
-      process.exit(1);
-    }
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-      console.error("Error: date must be YYYY-MM-DD format");
-      process.exit(1);
-    }
-    const startMsgId = flags["start-msg-id"] ? Number(flags["start-msg-id"]) : undefined;
-    const endMsgId = flags["end-msg-id"] ? Number(flags["end-msg-id"]) : undefined;
-    const id = upsertDaily(db, chatId, date, summary, flags["detail"] ?? "", startMsgId, endMsgId);
-    console.log(`Upserted daily #${id}`);
-    return;
-  }
-
-  const { flags } = parseArgs(args);
-  const chatId = resolveChatId(flags);
-  const limit = flags["limit"] ?? flags["n"];
-  const dailies = listDailies(db, chatId, {
-    since: flags["since"],
-    before: flags["before"],
-    limit: limit ? Number(limit) : 7,
-  });
-
-  if (dailies.length === 0) {
-    console.log("No daily summaries.");
-  } else {
-    for (const d of dailies) {
-      console.log(`  #${d.id}  [${d.period}] ${d.summary}`);
-    }
-  }
-}
-
-function chatSummaryWeekly(db: Database.Database, args: string[]): void {
-  if (args[0] === "get") {
-    const { positional } = parseArgs(args.slice(1));
-    const id = Number(positional[0]);
-    if (!id) { console.error("Usage: niubot chat-summary weekly get <id>"); process.exit(1); }
-    const s = getChatSummary(db, id);
-    if (!s || s.level !== "weekly") { console.error(`Weekly summary #${id} not found`); process.exit(1); }
-    checkChatAccess(s.chatId);
-    const sunday = toSunday(s.period!);
-    console.log(`#${s.id}  [${s.period} ~ ${sunday}]`);
-    console.log(`Summary: ${s.summary}`);
-    if (s.detail) console.log(`Detail:\n${s.detail}`);
-    return;
-  }
-
-  if (args[0] === "upsert") {
-    const { flags } = parseArgs(args.slice(1));
-    const chatId = resolveChatId(flags);
-    const week = flags["week"];
-    const summary = flags["summary"];
-    if (!week || !summary) {
-      console.error("Usage: niubot chat-summary weekly upsert --week <Monday-date> --summary \"...\" [--detail \"...\"]");
-      process.exit(1);
-    }
-    const monday = toMonday(week);
-    const id = upsertWeekly(db, chatId, monday, summary, flags["detail"] ?? "");
-    console.log(`Upserted weekly #${id}`);
-    return;
-  }
-
-  const { flags } = parseArgs(args);
-  const chatId = resolveChatId(flags);
-  const limit = flags["limit"] ?? flags["n"];
-  const weeklies = listWeeklies(db, chatId, {
-    since: flags["since"],
-    before: flags["before"],
-    limit: limit ? Number(limit) : 4,
-  });
-
-  if (weeklies.length === 0) {
-    console.log("No weekly summaries.");
-  } else {
-    for (const w of weeklies) {
-      const sunday = toSunday(w.period!);
-      console.log(`  #${w.id}  [${w.period} ~ ${sunday}] ${w.summary}`);
-    }
-  }
-}
-
-function chatSummaryGet(db: Database.Database, args: string[]): void {
-  const { positional } = parseArgs(args);
-  const id = Number(positional[0]);
-  if (!id) { console.error("Usage: niubot chat-summary get <id>"); process.exit(1); }
-
-  const s = getChatSummary(db, id);
-  if (!s) { console.error(`Summary #${id} not found`); process.exit(1); }
-  checkChatAccess(s.chatId);
-
-  const periodLabel = s.level === "weekly" && s.period
-    ? `${s.period} ~ ${toSunday(s.period)}`
-    : s.period ?? "";
-
-  console.log(`#${s.id}  [${s.level}] ${periodLabel}`);
-  console.log(`Summary: ${s.summary}`);
-  if (s.detail) console.log(`Detail:\n${s.detail}`);
-}
-
-function chatSummaryDel(db: Database.Database, args: string[]): void {
-  const { positional } = parseArgs(args);
-  const id = Number(positional[0]);
-  if (!id) { console.error("Usage: niubot chat-summary del <id>"); process.exit(1); }
-
-  const s = getChatSummary(db, id);
-  if (!s) { console.error(`Summary #${id} not found`); process.exit(1); }
-  checkChatAccess(s.chatId);
-
-  deleteChatSummary(db, id);
-  console.log(`Deleted chat summary #${id} [${s.level}] ${s.summary}`);
-}
-
 // ─── whoami ───────────────────────────────────────────────
 
 function handleWhoami(): void {
@@ -619,7 +384,6 @@ Usage: niubot <command> <subcommand> [options]
 
 Commands:
   user-memory   add|list|get|update|del     Manage user memories
-  chat-summary  overview|daily|weekly|get|del  View/manage chat summaries
   messages      list|search                 Query message history
   contacts      list-users|list-chats|get-user|get-chat|set-name
   send          <text>                      Send message via IPC
@@ -628,7 +392,6 @@ Commands:
   task          create|list|update|delete   Manage task projects
   restart                                   Restart bot (admin, via IPC)
   whoami                                    Show current scene info
-  summarize                                 Run summarizer
 
 Global flags (apply to all commands):
   --user-id <id>     Override NIUBOT_USER_ID

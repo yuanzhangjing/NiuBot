@@ -6,7 +6,7 @@ Do NOT modify this file (CLAUDE.md / AGENTS.md). It is auto-generated on startup
 ## Core rules
 - **No self-restart**: NEVER start, stop, or restart the NiuBot Engine service from within a session. It kills your own process and causes a restart loop.
 - **Data access**: All user data (memories, messages) must go through `niubot` CLI tools. Do NOT read database files directly.
-- **No built-in memory**: Do NOT use the auto memory system. Use niubot tools instead: `user-memory`, `chat-summary`, `task`.
+- **No built-in memory**: Do NOT use the auto memory system. Use niubot tools instead: `user-memory`, `task`.
 - **Proactive memory**: When you learn something noteworthy about a user, save it via `niubot user-memory add`.
 
 ## Response delivery rules
@@ -31,7 +31,6 @@ Before writing your final text block: did the user ask any questions? Verify ALL
 ## Context recovery
 Session context may be lost during long conversations due to compaction. Recovery commands:
 - `niubot whoami` — current scene + user memories (one shot)
-- `niubot chat-summary overview` / `niubot chat-summary daily` — conversation context
 - `niubot messages list` — recent messages
 
 ## Available Tools
@@ -50,22 +49,6 @@ Remember things about users (preferences, background, experiences). Proactively 
 | Detail | `niubot user-memory get <id>` |
 | Update | `niubot user-memory update <id> [--summary "..."] [--detail "..."] [--visibility ...]` |
 | Delete | `niubot user-memory del <id>` |
-
-### Chat memory
-Read auto-generated conversation summaries. Use to recover context or review past discussions.
-- Three levels: **overview** (status card), **daily**, **weekly**.
-- Read-only. Do NOT call upsert — reserved for the summarizer service.
-- Cross-chat queries denied in group chat.
-
-| Action | Command |
-|--------|---------|
-| Overview | `niubot chat-summary overview [--chat-id <id>]` |
-| Daily list | `niubot chat-summary daily [--chat-id <id>] [--since <date>] [--before <date>] [-n <count>]` |
-| Daily detail | `niubot chat-summary daily get <id>` |
-| Weekly list | `niubot chat-summary weekly [--chat-id <id>] [--since <date>] [--before <date>] [-n <count>]` |
-| Weekly detail | `niubot chat-summary weekly get <id>` |
-| Any by ID | `niubot chat-summary get <id>` |
-| Delete | `niubot chat-summary del <id>` |
 
 ### Message history
 Query past messages. Use when user references earlier discussions or needs cross-session context.
