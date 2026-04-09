@@ -102,10 +102,11 @@ export function buildNormalContext(
         lines.push(state.summary);
       }
       if (state.topics?.length) {
-        lines.push("话题索引：");
+        lines.push("");
         for (const t of state.topics) {
           const status = t.status ? `[${t.status}]` : "";
-          lines.push(`  - ${t.title}${status}：${t.summary}`);
+          lines.push(`- ${t.title}${status}`);
+          lines.push(`  ${t.summary}`);
         }
       }
       parts.push(`[对话全局状态]\n${lines.join("\n")}`);
@@ -117,9 +118,14 @@ export function buildNormalContext(
   // 2. 最近 N 个归档 session 的结构化摘要（短期记忆）
   const recentSessions = getRecentArchivedSessions(db, chatId, RECENT_SESSION_SUMMARY_COUNT);
   if (recentSessions.length > 0) {
-    const sessionBlocks = recentSessions.map((s) =>
-      s.parsed.summary ?? "(无摘要)",
-    );
+    const sessionBlocks = recentSessions.map((s, i) => {
+      const lines: string[] = [];
+      lines.push(`${i + 1}. ${s.parsed.summary ?? "(无摘要)"}`);
+      if (s.parsed.topics?.length) {
+        lines.push(`   话题：${s.parsed.topics.join("、")}`);
+      }
+      return lines.join("\n");
+    });
     parts.push(`[最近对话]\n${sessionBlocks.join("\n")}`);
   }
 
