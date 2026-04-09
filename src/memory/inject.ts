@@ -173,7 +173,7 @@ function getRecentArchivedSessions(
   const rows = db.prepare(`
     SELECT id, summary, ended_at
     FROM sessions
-    WHERE chat_id = ? AND status = 'archived' AND summary IS NOT NULL
+    WHERE chat_id = ? AND status = 'archived' AND summary IS NOT NULL AND source = 'user'
     ORDER BY ended_at DESC
     LIMIT ?
   `).all(chatId, limit) as Array<{

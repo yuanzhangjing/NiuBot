@@ -1003,11 +1003,8 @@ export class Pipeline {
         platform: this.botIdentity.platform,
       });
 
-      // Update session stats + synthetic summary（让 [今日对话] 能显示 cron 结果摘要）
+      // Update session stats
       const agentSessionId = this.agent.getAgentSessionId?.(agentSession.id);
-      const label = description || prompt.slice(0, 40);
-      const brief = response.text.length > 200 ? response.text.slice(0, 200) + "…" : response.text;
-      const syntheticSummary = JSON.stringify({ summary: `[定时任务] ⏰ ${label}: ${brief}` });
       this.db.prepare(`
         UPDATE sessions
         SET message_count = 2,
@@ -1015,10 +1012,9 @@ export class Pipeline {
             last_active_at = datetime('now'),
             end_msg_id = ?,
             agent_session_id = ?,
-            backend_type = ?,
-            summary = ?
+            backend_type = ?
         WHERE id = ?
-      `).run(replyMsgId, agentSessionId ?? null, this.backendType, syntheticSummary, sessionKey);
+      `).run(replyMsgId, agentSessionId ?? null, this.backendType, sessionKey);
 
       // Build footer
       const footer = buildResponseFooter({
@@ -1566,8 +1562,6 @@ export class Pipeline {
     this.pendingRouteDecisions.set(chatId, decision);
   }
 
-  private static readonly ARCHIVE_SUMMARY_MIN_TURNS = 5;
-
   private async archiveSession(chatId: string): Promise<boolean> {
     const session = this.chatSessions.get(chatId);
     if (!session) {
@@ -1586,30 +1580,35 @@ export class Pipeline {
     const { agentSession, sessionKey } = session;
 
     const sessionRow = this.db.prepare(
-      "SELECT turn_count FROM sessions WHERE id = ?",
-    ).get(sessionKey) as { turn_count: number } | undefined;
+      "SELECT source FROM sessions WHERE id = ?",
+    ).get(sessionKey) as { source: string | null } | undefined;
 
-    const turnCount = sessionRow?.turn_count ?? 0;
+    const isUserSession = (sessionRow?.source ?? "user") === "user";
 
-    if (turnCount >= Pipeline.ARCHIVE_SUMMARY_MIN_TURNS) {
+    if (isUserSession) {
       this.archivingChats.add(chatId);
       try {
-        // Step 1: 生成 session summary
         const response = await this.agent.sendMessage(agentSession, ARCHIVE_SUMMARY_PROMPT);
 
         if (!response.cancelled) {
-          const jsonMatch = response.text.match(/\{[\s\S]*\}/);
-          if (jsonMatch) {
-            const parsed = JSON.parse(jsonMatch[0]);
-            this.db.prepare(
-              "UPDATE sessions SET summary = ?, topics = ? WHERE id = ?",
-            ).run(JSON.stringify(parsed), JSON.stringify(parsed.topics ?? []), sessionKey);
-            this.log.info("archive summary generated", { chatId, sessionKey });
-
-            // Step 2: 更新全局摘要
-            await this.updateStateSummary(chatId, jsonMatch[0]);
+          const text = response.text.trim();
+          // LLM 返回 null 表示无实质内容，跳过
+          if (text === "null") {
+            this.log.info("archive summary skipped (null)", { chatId, sessionKey });
           } else {
-            this.log.warn("archive summary response has no JSON", { chatId, sessionKey });
+            const jsonMatch = text.match(/\{[\s\S]*\}/);
+            if (jsonMatch) {
+              const parsed = JSON.parse(jsonMatch[0]);
+              this.db.prepare(
+                "UPDATE sessions SET summary = ?, topics = ? WHERE id = ?",
+              ).run(JSON.stringify(parsed), JSON.stringify(parsed.topics ?? []), sessionKey);
+              this.log.info("archive summary generated", { chatId, sessionKey });
+
+              // 更新全局摘要
+              await this.updateStateSummary(chatId, jsonMatch[0]);
+            } else {
+              this.log.warn("archive summary response has no JSON", { chatId, sessionKey });
+            }
           }
         }
       } catch (err) {
@@ -1617,8 +1616,6 @@ export class Pipeline {
       } finally {
         this.archivingChats.delete(chatId);
       }
-    } else {
-      this.log.info("skipping archive summary for short session", { chatId, sessionKey, turnCount });
     }
 
     this.db.prepare(`
@@ -1631,7 +1628,7 @@ export class Pipeline {
       this.log.warn("failed to close backend session during archive", { chatId, sessionKey, error: String(err) });
     });
 
-    this.log.info("session archived", { chatId, sessionKey, turnCount });
+    this.log.info("session archived", { chatId, sessionKey });
     return true;
   }
 
