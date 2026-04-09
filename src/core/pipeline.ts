@@ -1294,7 +1294,7 @@ export class Pipeline {
         const unseen = getUnseenMessages(this.db, chatId, baseline);
         if (unseen.length > 0) {
           const lines = unseen.map((m) => {
-            const sender = m.role === "assistant" ? "bot" : (m.senderName ?? "user");
+            const sender = m.role === "assistant" ? "bot" : (m.senderName || "user");
             return `[${sender}] ${m.contentText ?? ""}`;
           });
           messageToSend = `<system-hint>\n[对话流中你未看到的消息]\n${lines.join("\n")}\n以上消息已发送给用户。仅在用户主动提及时回应，不要打断当前话题。\n</system-hint>\n\n${messageToSend}`;
