@@ -127,7 +127,6 @@ async function main(): Promise<void> {
     for (const bot of bots) {
       try { await bot.im.stop(); } catch (e) { log.error("im.stop failed", { bot: bot.name, error: String(e) }); }
       bot.cronScheduler.stop();
-      bot.summarizer.stop();
       bot.pipeline.stop();
       bot.apiServer.stop();
     }

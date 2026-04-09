@@ -13,7 +13,6 @@ import { FeishuAdapter } from "./im/feishu/adapter.js";
 import { Pipeline, type BotIdentity } from "./core/pipeline.js";
 import { ApiServer, type ApiHandler } from "./core/api.js";
 import { CronScheduler } from "./core/cron.js";
-import { startSummarizer } from "./summarizer/index.js";
 import { ensurePersonaFile } from "./persona.js";
 import { loadStaticContextTemplate } from "./static-context.js";
 import { createLogger } from "./logger.js";
@@ -27,7 +26,6 @@ export interface BotInstance {
   pipeline: Pipeline;
   apiServer: ApiServer;
   cronScheduler: CronScheduler;
-  summarizer: { stop: () => void };
 }
 
 /**
@@ -125,9 +123,6 @@ export async function createBotInstance(
     await pipeline.processCronJob(chatId, userId, prompt, description);
   });
 
-  // 8. 创建 Summarizer
-  const summarizer = startSummarizer(db, agent);
-
   log.info("bot instance created", {
     workDir: botConfig.workingDirectory,
     persona: botConfig.personaPath,
@@ -142,7 +137,6 @@ export async function createBotInstance(
     pipeline,
     apiServer,
     cronScheduler,
-    summarizer,
   };
 }
 

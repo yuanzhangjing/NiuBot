@@ -14,7 +14,7 @@ import {
 } from "../database/schema.js";
 import { buildImportantContext, buildNormalContext, type SceneInfo } from "../memory/inject.js";
 import { loadPersona } from "../persona.js";
-import { ARCHIVE_SUMMARY_PROMPT } from "./prompts.js";
+import { ARCHIVE_SUMMARY_PROMPT, buildStateSummaryPrompt } from "./prompts.js";
 import { decideRoute, type RouteDecision } from "./routing.js";
 import { listCronJobs, deleteCronJob, getCronJob } from "./cron.js";
 import { createLogger } from "../logger.js";
@@ -930,8 +930,8 @@ export class Pipeline {
         })
       : undefined;
 
-    // Build normal context（摘要 + 今日归档）
-    const normalContext = buildNormalContext(this.db, chatId, chatType);
+    // Build normal context（全局摘要 + 最近 session summaries）
+    const normalContext = buildNormalContext(this.db, chatId);
 
     // Create independent agent session
     const supportsSystemPrompt = this.agent.supportsSystemPrompt !== false;
@@ -1431,9 +1431,7 @@ export class Pipeline {
     const chatType = (chatRow?.type ?? "p2p") as "p2p" | "group";
 
     // 消费路由决策（如有）
-    const routeDecision = this.pendingRouteDecisions.get(chatId);
     this.pendingRouteDecisions.delete(chatId);
-    const recallSessionId = routeDecision?.action === "recall" ? routeDecision.recallSessionId : undefined;
 
     // 构建 important 上下文（当前场景 + 用户记忆）
     const userRow = userId
@@ -1456,8 +1454,8 @@ export class Pipeline {
         })
       : undefined;
 
-    // 构建 normal 上下文（摘要 + 今日归档 + recall）— 后续拼到首条消息前缀
-    const normalContext = buildNormalContext(this.db, chatId, chatType, recallSessionId);
+    // 构建 normal 上下文（全局摘要 + 最近 session summaries）— 后续拼到首条消息前缀
+    const normalContext = buildNormalContext(this.db, chatId);
     if (normalContext) {
       this.pendingNormalContext.set(chatId, normalContext);
     }
@@ -1555,7 +1553,6 @@ export class Pipeline {
       chatId,
       action: decision.action,
       reason: decision.reason,
-      recallSessionId: decision.recallSessionId,
     });
 
     await this.archiveSession(chatId);
@@ -1597,6 +1594,7 @@ export class Pipeline {
     if (turnCount >= Pipeline.ARCHIVE_SUMMARY_MIN_TURNS) {
       this.archivingChats.add(chatId);
       try {
+        // Step 1: 生成 session summary
         const response = await this.agent.sendMessage(agentSession, ARCHIVE_SUMMARY_PROMPT);
 
         if (!response.cancelled) {
@@ -1607,6 +1605,9 @@ export class Pipeline {
               "UPDATE sessions SET summary = ?, topics = ? WHERE id = ?",
             ).run(JSON.stringify(parsed), JSON.stringify(parsed.topics ?? []), sessionKey);
             this.log.info("archive summary generated", { chatId, sessionKey });
+
+            // Step 2: 更新全局摘要
+            await this.updateStateSummary(chatId, jsonMatch[0]);
           } else {
             this.log.warn("archive summary response has no JSON", { chatId, sessionKey });
           }
@@ -1632,6 +1633,40 @@ export class Pipeline {
 
     this.log.info("session archived", { chatId, sessionKey, turnCount });
     return true;
+  }
+
+  /** 用 lite model 滚动更新全局摘要 */
+  private async updateStateSummary(chatId: string, sessionSummaryJson: string): Promise<void> {
+    const chatRow = this.db.prepare(
+      "SELECT state_summary FROM chats WHERE id = ?",
+    ).get(chatId) as { state_summary: string | null } | undefined;
+
+    const currentState = chatRow?.state_summary ?? null;
+    const prompt = buildStateSummaryPrompt(currentState, sessionSummaryJson);
+
+    let session;
+    try {
+      session = await this.agent.createSession({ modelTier: "lite" });
+    } catch (err) {
+      this.log.warn("failed to create state summary session", { chatId, error: String(err) });
+      return;
+    }
+
+    try {
+      const response = await this.agent.sendMessage(session, prompt);
+      const jsonMatch = response.text.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        this.db.prepare("UPDATE chats SET state_summary = ? WHERE id = ?")
+          .run(jsonMatch[0], chatId);
+        this.log.info("state summary updated", { chatId });
+      } else {
+        this.log.warn("state summary response has no JSON", { chatId });
+      }
+    } catch (err) {
+      this.log.warn("failed to update state summary", { chatId, error: String(err) });
+    } finally {
+      await this.agent.closeSession(session).catch(() => {});
+    }
   }
 
   private async cancelChat(chatId: string): Promise<void> {

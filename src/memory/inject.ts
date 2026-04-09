@@ -1,12 +1,10 @@
 import type Database from "better-sqlite3";
 import { listUserMemory } from "./user-memory.js";
-import { getOverview, listDailies, listWeeklies } from "./chat-summary.js";
-import { toSunday } from "./chat-summary.js";
-import { createLogger } from "../logger.js";
-import { localToday, localDateStartUTC, nextDay, utcToLocalHHMM, utcToLocalDateTime } from "../tz.js";
+import { utcToLocalHHMM } from "../tz.js";
 import { loadStaticContextTemplate } from "../static-context.js";
 
-const log = createLogger("inject");
+/** 冷启动注入最近 session summary 的个数 */
+const RECENT_SESSION_SUMMARY_COUNT = 3;
 
 // ── Important context (不能被 compact 丢失) ──────────────────
 
@@ -80,121 +78,69 @@ export function buildImportantContext(
 // ── Normal context (可以接受 compact 压缩) ───────────────────
 
 /**
- * 构建 normal 上下文：chat 摘要 + 今日归档 session + recall。
+ * 构建 normal 上下文：全局摘要 + 最近 session summaries。
  * 注入 user prompt 前缀。
  */
 export function buildNormalContext(
   db: Database.Database,
   chatId: string,
-  chatType: "p2p" | "group",
-  recallSessionId?: string,
 ): string {
   const parts: string[] = [];
 
-  // 1. Chat summary: overview + dailies + weeklies
-  const overview = getOverview(db, chatId);
-  const dailies = listDailies(db, chatId, { limit: 30 });
-  const weeklies = listWeeklies(db, chatId, { limit: 8 });
+  // 1. 全局摘要（长期记忆）
+  const chatRow = db.prepare(
+    "SELECT state_summary FROM chats WHERE id = ?",
+  ).get(chatId) as { state_summary: string | null } | undefined;
 
-  const today = localToday();
-  const todayStartUTC = localDateStartUTC(today);
-  const todayCount = db.prepare(
-    "SELECT COUNT(*) as n FROM messages WHERE chat_id = ? AND created_at >= ?",
-  ).get(chatId, todayStartUTC) as { n: number };
-
-  const todayFullyCovered = isTodayDailyFullyCovering(db, chatId, today, dailies);
-
-  if (overview || dailies.length > 0 || weeklies.length > 0 || todayCount.n > 0) {
-    const lines: string[] = [];
-
-    if (todayCount.n > 0) {
-      lines.push(`  [今日] ${todayCount.n} 条消息（可能不在当前上下文中，可按需查看）`);
-    }
-
-    if (overview) {
-      if (overview.period) {
-        lines.push(`  [总览]（截至 ${overview.period}）${overview.summary}`);
-      } else {
-        lines.push(`  [总览] ${overview.summary}`);
+  if (chatRow?.state_summary) {
+    try {
+      const state = JSON.parse(chatRow.state_summary) as {
+        summary?: string;
+        topics?: Array<{ title: string; summary: string }>;
+        open_items?: string[];
+        recent_changes?: string[];
+      };
+      const lines: string[] = [];
+      if (state.summary) {
+        lines.push(state.summary);
       }
-    }
-
-    // 合并 dailies + weeklies，按时间倒序，取 top 10
-    const entries: Array<{ sortKey: string; line: string }> = [];
-
-    const weeklyPeriods = new Set(weeklies.map((w) => w.period!));
-    for (const d of dailies) {
-      if (d.period === today) {
-        entries.push({ sortKey: d.period!, line: `  #${d.id}  [${d.period}] ${d.summary}` });
-        continue;
+      if (state.topics?.length) {
+        lines.push("话题索引：");
+        for (const t of state.topics) {
+          lines.push(`  - ${t.title}：${t.summary}`);
+        }
       }
-      const covered = [...weeklyPeriods].some((monday) => {
-        const sunday = toSunday(monday);
-        return d.period! >= monday && d.period! <= sunday;
-      });
-      if (!covered) {
-        entries.push({ sortKey: d.period!, line: `  #${d.id}  [${d.period}] ${d.summary}` });
+      if (state.open_items?.length) {
+        lines.push(`待办：${state.open_items.join("；")}`);
       }
-    }
-
-    for (const w of weeklies) {
-      const sunday = toSunday(w.period!);
-      entries.push({ sortKey: sunday, line: `  #${w.id}  [${w.period}~${sunday}] ${w.summary}` });
-    }
-
-    entries.sort((a, b) => b.sortKey.localeCompare(a.sortKey));
-    const top = entries.slice(0, 10);
-
-    for (const e of top) {
-      lines.push(e.line);
-    }
-
-    lines.push("用 niubot chat-summary get <id> 查看详情。");
-    parts.push(`[对话上下文]\n${lines.join("\n")}`);
-  }
-
-  // 2. 今日归档 session 列表
-  if (!todayFullyCovered) {
-    const archivedSessions = getTodayArchivedSessions(db, chatId);
-    if (archivedSessions.length > 0) {
-      const lines = archivedSessions.map((s) => {
-        const time = utcToLocalHHMM(s.ended_at);
-        const summaryText = s.parsedSummary ?? "(无摘要)";
-        return `  [${time}] ${summaryText}`;
-      });
-      parts.push(`[今日对话]\n${lines.join("\n")}`);
+      if (state.recent_changes?.length) {
+        lines.push(`近期变更：${state.recent_changes.join("；")}`);
+      }
+      parts.push(`[对话全局状态]\n${lines.join("\n")}`);
+    } catch {
+      // state_summary 解析失败，跳过
     }
   }
 
-  // 3. Recall 上下文
-  if (recallSessionId) {
-    const recallSession = db.prepare(
-      "SELECT summary, ended_at FROM sessions WHERE id = ?",
-    ).get(recallSessionId) as { summary: string | null; ended_at: string | null } | undefined;
-
-    if (!recallSession?.summary) {
-      log.warn("recall session not found or has no summary", { recallSessionId });
-    } else {
-      try {
-        const parsed = JSON.parse(recallSession.summary) as {
-          summary?: string;
-          decisions?: string[];
-          open_items?: string[];
-        };
-        const recallLines: string[] = [];
-        const time = recallSession.ended_at ? utcToLocalDateTime(recallSession.ended_at) : "未知时间";
-        recallLines.push(`之前讨论（${time}）：${parsed.summary ?? ""}`);
-        if (parsed.decisions?.length) {
-          recallLines.push(`决策：${parsed.decisions.join("；")}`);
-        }
-        if (parsed.open_items?.length) {
-          recallLines.push(`待办：${parsed.open_items.join("；")}`);
-        }
-        parts.push(`[恢复的话题]\n${recallLines.join("\n")}`);
-      } catch {
-        // summary 解析失败，跳过
+  // 2. 最近 N 个归档 session 的结构化摘要（短期记忆）
+  const recentSessions = getRecentArchivedSessions(db, chatId, RECENT_SESSION_SUMMARY_COUNT);
+  if (recentSessions.length > 0) {
+    const sessionBlocks = recentSessions.map((s) => {
+      const time = utcToLocalHHMM(s.ended_at);
+      const lines: string[] = [];
+      lines.push(`[${time}] ${s.parsed.summary ?? "(无摘要)"}`);
+      if (s.parsed.decisions?.length) {
+        lines.push(`  决策：${s.parsed.decisions.join("；")}`);
       }
-    }
+      if (s.parsed.open_items?.length) {
+        lines.push(`  待办：${s.parsed.open_items.join("；")}`);
+      }
+      if (s.parsed.key_data?.length) {
+        lines.push(`  关键数据：${s.parsed.key_data.join("；")}`);
+      }
+      return lines.join("\n");
+    });
+    parts.push(`[最近对话]\n${sessionBlocks.join("\n")}`);
   }
 
   return parts.join("\n\n");
@@ -204,91 +150,47 @@ export function buildNormalContext(
 
 /**
  * 生成 AGENTS.md 的内容：行为规则 + 工具文档。
- * Bot 身份（名字）由场景信息注入，人格由 persona.md 注入，均在 per-session important context 中。
  */
 export function buildStaticContext(): string {
   return loadStaticContextTemplate();
 }
 
-// ── Backward compat: old buildSessionContext ─────────────────
-
-/**
- * @deprecated 使用 buildImportantContext + buildNormalContext 替代
- */
-export function buildSessionContext(
-  db: Database.Database,
-  userId: string,
-  chatId: string,
-  chatType: "p2p" | "group",
-  userName?: string,
-  recallSessionId?: string,
-  persona?: string,
-): string {
-  const parts: string[] = [];
-
-  if (persona) parts.push(persona);
-
-  const scene: SceneInfo = { botName: "NiuBot", userName, userId, chatId, chatType };
-  const important = buildImportantContext(db, scene);
-  if (important) parts.push(important);
-
-  const normal = buildNormalContext(db, chatId, chatType, recallSessionId);
-  if (normal) parts.push(normal);
-
-  return parts.join("\n\n");
-}
-
 // ── Internal helpers ────────────────────────────────────────
 
-function isTodayDailyFullyCovering(
-  db: Database.Database,
-  chatId: string,
-  today: string,
-  dailies: Array<{ period: string | null; endMsgId: number | null }>,
-): boolean {
-  const todayDaily = dailies.find((d) => d.period === today);
-  if (!todayDaily?.endMsgId) return false;
-
-  const todayStartUTC = localDateStartUTC(today);
-  const tomorrowStartUTC = localDateStartUTC(nextDay(today));
-  const maxSession = db.prepare(`
-    SELECT MAX(end_msg_id) as max_end
-    FROM sessions
-    WHERE chat_id = ? AND status = 'archived' AND ended_at >= ? AND ended_at < ?
-  `).get(chatId, todayStartUTC, tomorrowStartUTC) as { max_end: number | null } | undefined;
-
-  if (!maxSession?.max_end) return true;
-
-  return todayDaily.endMsgId >= maxSession.max_end;
+interface ParsedSessionSummary {
+  summary?: string;
+  decisions?: string[];
+  open_items?: string[];
+  topics?: string[];
+  key_data?: string[];
 }
 
-function getTodayArchivedSessions(
+function getRecentArchivedSessions(
   db: Database.Database,
   chatId: string,
-): Array<{ id: string; ended_at: string; parsedSummary: string | null }> {
-  const today = localToday();
-  const todayStartUTC = localDateStartUTC(today);
-  const tomorrowStartUTC = localDateStartUTC(nextDay(today));
-
+  limit: number,
+): Array<{ id: string; ended_at: string; parsed: ParsedSessionSummary }> {
   const rows = db.prepare(`
     SELECT id, summary, ended_at
     FROM sessions
-    WHERE chat_id = ? AND status = 'archived' AND ended_at >= ? AND ended_at < ?
-    ORDER BY ended_at ASC
-  `).all(chatId, todayStartUTC, tomorrowStartUTC) as Array<{
+    WHERE chat_id = ? AND status = 'archived' AND summary IS NOT NULL
+    ORDER BY ended_at DESC
+    LIMIT ?
+  `).all(chatId, limit) as Array<{
     id: string;
-    summary: string | null;
+    summary: string;
     ended_at: string;
   }>;
 
-  return rows.map((r) => {
-    let parsedSummary: string | null = null;
-    if (r.summary) {
-      try {
-        const obj = JSON.parse(r.summary);
-        parsedSummary = obj.summary ?? null;
-      } catch { /* ignore */ }
-    }
-    return { id: r.id, ended_at: r.ended_at, parsedSummary };
-  });
+  const results: Array<{ id: string; ended_at: string; parsed: ParsedSessionSummary }> = [];
+  for (const r of rows) {
+    try {
+      const parsed = JSON.parse(r.summary) as ParsedSessionSummary;
+      results.push({ id: r.id, ended_at: r.ended_at, parsed });
+    } catch { /* skip malformed */ }
+  }
+
+  // 查出来是倒序（最新在前），反转为正序（最旧在前），注入时按时间顺序阅读更自然
+  results.reverse();
+  return results;
 }

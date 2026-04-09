@@ -198,6 +198,13 @@ const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 6,
+    description: "Add state_summary to chats for rolling global summary",
+    up: (db) => {
+      db.exec("ALTER TABLE chats ADD COLUMN state_summary TEXT");
+    },
+  },
 ];
 
 const LATEST_VERSION = migrations[migrations.length - 1]!.version;

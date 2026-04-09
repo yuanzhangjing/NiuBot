@@ -1,6 +1,6 @@
 /**
- * M3 路由决策引擎。
- * 每条消息进来时判断：继续当前 session / 开新 session / 召回之前的 session。
+ * 路由决策引擎。
+ * 每条消息进来时判断：继续当前 session / 开新 session。
  *
  * 规则：
  * - 距上次消息 < 1小时 → continue（零成本，不调 LLM）
@@ -12,7 +12,7 @@ import type Database from "better-sqlite3";
 import type { AgentBackend } from "../agent/types.js";
 import { ROUTE_DECISION_PROMPT } from "./prompts.js";
 import { createLogger } from "../logger.js";
-import { utcToLocalHHMM, localToday, localDateStartUTC, nextDay } from "../tz.js";
+import { utcToLocalHHMM } from "../tz.js";
 
 const log = createLogger("routing");
 
@@ -26,20 +26,12 @@ const ROUTE_TIMEOUT_MS = 30 * 1000; // 30 秒
 const RECENT_MESSAGES_LIMIT = 20;
 
 export interface RouteDecision {
-  action: "continue" | "new" | "recall";
-  recallSessionId?: string;
+  action: "continue" | "new";
   reason?: string;
 }
 
 /**
  * 判断新消息应该继续当前 session 还是开新 session。
- *
- * @param agent - Agent 后端（用于创建临时 LLM session）
- * @param db - 数据库实例
- * @param chatId - 内部 chat ID
- * @param lastActiveAt - 当前 session 最后活跃时间（ISO string）
- * @param newMessage - 用户新消息文本
- * @param currentSessionKey - 当前 session key（用于查询最近消息）
  */
 export async function decideRoute(
   agent: AgentBackend,
@@ -50,7 +42,7 @@ export async function decideRoute(
   currentSessionKey: string,
 ): Promise<RouteDecision> {
   // 1. 计算时间间隔
-  const lastTime = new Date(lastActiveAt.replace(" ", "T") + "Z").getTime(); // SQLite datetime 转 ISO 8601
+  const lastTime = new Date(lastActiveAt.replace(" ", "T") + "Z").getTime();
   const intervalMs = Date.now() - lastTime;
 
   if (intervalMs < INTERVAL_THRESHOLD_MS) {
@@ -60,14 +52,11 @@ export async function decideRoute(
   const intervalMinutes = Math.round(intervalMs / 60000);
   log.info("interval exceeds threshold, invoking LLM", { chatId, intervalMinutes });
 
-  // 2. 构造 LLM 输入（只取间隔前的消息，避免新消息在 prompt 中重复出现）
+  // 2. 构造 LLM 输入
   const recentMessages = getRecentMessages(db, currentSessionKey, lastActiveAt);
-  const archivedSessions = getTodayArchivedSessions(db, chatId);
 
-  // 单次替换，避免跨占位符污染和 $ 特殊模式问题
   const replacements: Record<string, string> = {
     recentMessages: recentMessages || "（无最近消息）",
-    archivedSessions: archivedSessions || "（今日无已归档对话）",
     newMessage: newMessage,
     intervalMinutes: String(intervalMinutes),
   };
@@ -86,7 +75,6 @@ export async function decideRoute(
   }
 
   try {
-    // 带超时的 LLM 调用
     let timer: ReturnType<typeof setTimeout>;
     const timeoutPromise = new Promise<never>((_, reject) => {
       timer = setTimeout(() => reject(new Error("route decision timed out")), ROUTE_TIMEOUT_MS);
@@ -112,28 +100,17 @@ export async function decideRoute(
 
     const parsed = JSON.parse(jsonMatch[0]) as {
       action?: string;
-      recall_session_id?: string;
       reason?: string;
     };
 
     const action = parsed.action;
-    if (action !== "continue" && action !== "new" && action !== "recall") {
+    if (action !== "continue" && action !== "new") {
       log.warn("route LLM returned invalid action, fallback to continue", { chatId, action });
       return { action: "continue" };
     }
 
-    // recall 需要 session_id
-    if (action === "recall" && !parsed.recall_session_id) {
-      log.warn("route LLM returned recall without session_id, fallback to new", { chatId });
-      return { action: "new", reason: parsed.reason };
-    }
-
     log.info("route decision", { chatId, action, reason: parsed.reason });
-    return {
-      action,
-      recallSessionId: parsed.recall_session_id,
-      reason: parsed.reason,
-    };
+    return { action, reason: parsed.reason };
   } catch (err) {
     log.warn("route decision failed, fallback to continue", { chatId, error: String(err) });
     return { action: "continue" };
@@ -162,7 +139,6 @@ function getRecentMessages(db: Database.Database, sessionKey: string, beforeTime
 
   if (rows.length === 0) return "";
 
-  // 倒序查出来的，反转为正序
   rows.reverse();
 
   return rows.map((r) => {
@@ -171,42 +147,4 @@ function getRecentMessages(db: Database.Database, sessionKey: string, beforeTime
     const text = r.content_text.length > 200 ? r.content_text.slice(0, 200) + "..." : r.content_text;
     return `[${time}] ${sender}: ${text}`;
   }).join("\n");
-}
-
-/** 查询今日已归档的 session 列表，格式化为文本 */
-function getTodayArchivedSessions(db: Database.Database, chatId: string): string {
-  const today = localToday();
-  const todayStartUTC = localDateStartUTC(today);
-  const tomorrowStartUTC = localDateStartUTC(nextDay(today));
-
-  const rows = db.prepare(`
-    SELECT id, summary, topics, ended_at
-    FROM sessions
-    WHERE chat_id = ? AND status = 'archived' AND ended_at >= ? AND ended_at < ?
-    ORDER BY ended_at ASC
-  `).all(chatId, todayStartUTC, tomorrowStartUTC) as Array<{
-    id: string;
-    summary: string | null;
-    topics: string | null;
-    ended_at: string;
-  }>;
-
-  if (rows.length === 0) return "";
-
-  return rows.map((r) => {
-    const time = utcToLocalHHMM(r.ended_at);
-    const summaryObj = r.summary ? tryParseJson(r.summary) : null;
-    const summaryText = summaryObj?.summary ?? "(无摘要)";
-    const topics = r.topics ? tryParseJson(r.topics) : [];
-    const topicStr = Array.isArray(topics) && topics.length > 0 ? ` [${topics.join(", ")}]` : "";
-    return `[${time}] (id: ${r.id}) ${summaryText}${topicStr}`;
-  }).join("\n");
-}
-
-function tryParseJson(text: string): any {
-  try {
-    return JSON.parse(text);
-  } catch {
-    return null;
-  }
 }
