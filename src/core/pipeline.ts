@@ -16,6 +16,7 @@ import { buildImportantContext, buildNormalContext, type SceneInfo } from "../me
 import { loadPersona } from "../persona.js";
 import { ARCHIVE_SUMMARY_PROMPT } from "./prompts.js";
 import { decideRoute, type RouteDecision } from "./routing.js";
+import { listCronJobs, deleteCronJob, getCronJob } from "./cron.js";
 import { createLogger } from "../logger.js";
 import { buildResponseFooter } from "./footer.js";
 
@@ -689,7 +690,7 @@ export class Pipeline {
    * 未命中返回 false，消息继续走 agent 流程。
    *
    * 分发顺序（对齐 cc-connect）：
-   *   1. 内置命令 switch（/restart, /status, /new, /clear）
+   *   1. 内置命令 switch（/restart, /status, /new, /clear, /cron）
    *   2. 管理员 shell 命令（tryShellCommand）
    *   3. return false → 转发给 agent
    */
@@ -721,6 +722,10 @@ export class Pipeline {
       case "/clear": {
         this.log.info("builtin command: reset-session", { userId, cmd, chatId });
         this.startSessionTransition(chatId, () => this.resetSession(chatId, platformChatId, msgId));
+        return true;
+      }
+      case "/cron": {
+        this.handleCronCommand(parts.slice(1), chatId, platformChatId, msgId);
         return true;
       }
       case "/agent": {
@@ -794,6 +799,251 @@ export class Pipeline {
         this.log.info("status sent", { platformChatId });
       })
       .catch((err) => this.log.error("status send failed", { platformChatId, error: String(err) }));
+  }
+
+  // ── /cron command ─────────────────────────────────────────────
+
+  private handleCronCommand(args: string[], chatId: string, platformChatId: string, msgId?: string): void {
+    const sub = (args[0] ?? "list").toLowerCase();
+
+    switch (sub) {
+      case "list": {
+        this.sendCronList(chatId, platformChatId, msgId);
+        break;
+      }
+      case "del":
+      case "delete":
+      case "rm": {
+        const idStr = args[1];
+        if (!idStr) {
+          this.replyText(chatId, platformChatId, msgId, "用法: /cron del <id>");
+          return;
+        }
+        const id = Number(idStr);
+        if (Number.isNaN(id)) {
+          this.replyText(chatId, platformChatId, msgId, `无效 ID: ${idStr}`);
+          return;
+        }
+        const job = getCronJob(this.db, id);
+        if (!job || job.chatId !== chatId) {
+          this.replyText(chatId, platformChatId, msgId, `未找到定时任务 #${id}`);
+          return;
+        }
+        deleteCronJob(this.db, id);
+        this.replyText(chatId, platformChatId, msgId, `已删除定时任务 #${id}`);
+        break;
+      }
+      case "help":
+      default: {
+        this.replyText(chatId, platformChatId, msgId, "用法: /cron [list | del <id>]");
+        break;
+      }
+    }
+  }
+
+  private sendCronList(chatId: string, platformChatId: string, msgId?: string): void {
+    const jobs = listCronJobs(this.db, chatId);
+    if (jobs.length === 0) {
+      this.replyText(chatId, platformChatId, msgId, "当前没有定时任务。");
+      return;
+    }
+
+    const lines: string[] = [];
+    for (const job of jobs) {
+      if (job.description) {
+        lines.push(`✅ **${job.description}**`);
+      }
+      lines.push(`Prompt: ${job.prompt}`);
+      lines.push(`ID: ${job.id}`);
+      if (job.runAt) {
+        lines.push(`Schedule: ${job.runAt} (一次性)`);
+      } else if (job.cronExpr) {
+        lines.push(`Schedule: \`${job.cronExpr}\``);
+      }
+      if (job.maxTimes) {
+        lines.push(`Progress: ${job.runCount}/${job.maxTimes}`);
+      }
+      if (job.untilTime) {
+        lines.push(`Until: ${job.untilTime}`);
+      }
+      if (job.lastRunAt) {
+        lines.push(`Last run: ${job.lastRunAt}`);
+      }
+      lines.push(""); // blank separator
+    }
+
+    const content = lines.join("\n");
+    const send = msgId
+      ? this.im.replyCard(msgId, "Cron", content)
+      : this.im.sendCard(platformChatId, "Cron", content);
+    send
+      .then((pmid) => {
+        this.storeBotResponse(chatId, content, pmid);
+      })
+      .catch((err) => this.log.error("cron list send failed", { platformChatId, error: String(err) }));
+  }
+
+  // ── Cron job execution（独立 session，对齐 cc-connect BackgroundSession） ──
+
+  /**
+   * 执行定时任务：创建独立 session，发送 prompt，结果用 ⏰ header 卡片发送，完成后归档。
+   * 不走用户消息队列，不干扰当前对话 session。
+   */
+  async processCronJob(chatId: string, userId: string, prompt: string, description: string): Promise<void> {
+    // Resolve platform chat ID
+    let platformChatId = this.platformChatIds.get(chatId);
+    if (!platformChatId) {
+      const row = this.db.prepare("SELECT platform_id FROM chats WHERE id = ?")
+        .get(chatId) as { platform_id: string } | undefined;
+      if (!row) {
+        this.log.warn("processCronJob: chat not found", { chatId });
+        return;
+      }
+      platformChatId = row.platform_id;
+      this.platformChatIds.set(chatId, platformChatId);
+    }
+
+    const chatRow = this.db.prepare("SELECT type FROM chats WHERE id = ?").get(chatId) as { type: string } | undefined;
+    const chatType = (chatRow?.type ?? "p2p") as "p2p" | "group";
+
+    // Build important context（场景 + 用户记忆）
+    const userRow = userId
+      ? this.db.prepare("SELECT name FROM users WHERE id = ?").get(userId) as { name: string | null } | undefined
+      : undefined;
+    const isAdmin = userId ? this.adminUserIds.has(userId) : false;
+    const persona = this.botIdentity.personaPath ? loadPersona(this.botIdentity.personaPath) : undefined;
+    const importantContext = userId
+      ? buildImportantContext(this.db, {
+          botName: this.botIdentity.name,
+          botLabel: this.botUserId ? getUserShortLabel(this.db, this.botUserId) : undefined,
+          userName: userRow?.name ?? undefined,
+          userId,
+          chatId,
+          chatLabel: getChatShortLabel(this.db, chatId),
+          chatType,
+          isAdmin,
+          personaPath: isAdmin ? this.botIdentity.personaPath : undefined,
+          personaContent: persona,
+        })
+      : undefined;
+
+    // Build normal context（摘要 + 今日归档）
+    const normalContext = buildNormalContext(this.db, chatId, chatType);
+
+    // Create independent agent session
+    const supportsSystemPrompt = this.agent.supportsSystemPrompt !== false;
+    const agentSession = await this.agent.createSession({
+      workingDirectory: this.workingDirectory,
+      importantContext: supportsSystemPrompt ? (importantContext || undefined) : undefined,
+      userId: userId ?? undefined,
+      chatId,
+      chatType,
+      dbPath: this.dbPath,
+      botId: this.botIdentity.platformBotId,
+      botName: this.botIdentity.name,
+      liteModel: this.botIdentity.liteModel,
+      isAdmin,
+    });
+
+    // Create session record with source='cron'
+    const sessionKey = `s_${Date.now()}_${crypto.randomUUID().slice(0, 8)}`;
+    this.db.prepare(`
+      INSERT INTO sessions (id, chat_id, user_id, source, status, started_at, last_active_at, backend_type)
+      VALUES (?, ?, ?, 'cron', 'active', datetime('now'), datetime('now'), ?)
+    `).run(sessionKey, chatId, userId, this.backendType);
+
+    // Store cron prompt as user message
+    storeMessage(this.db, {
+      chatId,
+      senderId: userId,
+      sessionKey,
+      role: "user",
+      contentText: prompt,
+      platform: this.botIdentity.platform,
+    });
+
+    // Inject context prefix
+    let messageToSend = prompt;
+    const contextParts: string[] = [];
+    if (!supportsSystemPrompt && importantContext) {
+      contextParts.push(
+        `<important-context preserve="true">\n` +
+        `以下是关键场景信息，上下文压缩时必须保留。如果丢失，用 niubot whoami 重建。\n\n` +
+        `${importantContext}\n` +
+        `</important-context>`,
+      );
+    }
+    if (normalContext) {
+      contextParts.push(`<context>\n${normalContext}\n</context>`);
+    }
+    if (contextParts.length > 0) {
+      messageToSend = `${contextParts.join("\n\n")}\n\n${prompt}`;
+    }
+
+    this.log.info("executing cron job", { chatId, sessionKey, userId, description });
+
+    try {
+      const response = await this.agent.sendMessage(agentSession, messageToSend);
+
+      if (response.cancelled) {
+        this.log.warn("cron job was cancelled", { chatId, sessionKey });
+        return;
+      }
+
+      // Store response
+      const replyMsgId = storeMessage(this.db, {
+        chatId,
+        senderId: this.botUserId!,
+        sessionKey,
+        role: "assistant",
+        contentText: response.text,
+        platform: this.botIdentity.platform,
+      });
+
+      // Update session stats
+      const agentSessionId = this.agent.getAgentSessionId?.(agentSession.id);
+      this.db.prepare(`
+        UPDATE sessions
+        SET message_count = 2,
+            turn_count = 1,
+            last_active_at = datetime('now'),
+            end_msg_id = ?,
+            agent_session_id = ?,
+            backend_type = ?
+        WHERE id = ?
+      `).run(replyMsgId, agentSessionId ?? null, this.backendType, sessionKey);
+
+      // Build footer
+      const footer = buildResponseFooter({
+        sessionKey,
+        turnCount: 1,
+        contextTokens: response.contextTokens,
+        compactCount: response.compactCount,
+        model: response.model,
+      });
+
+      // Send card with ⏰ header（对齐 cc-connect: ⏰ + description）
+      const header = `⏰ ${description || prompt.slice(0, 40)}`;
+      const sentPlatformMsgId = await this.im.sendCard(platformChatId, header, response.text, footer);
+
+      if (sentPlatformMsgId) {
+        updateMessagePlatformId(this.db, replyMsgId, sentPlatformMsgId);
+      }
+
+      this.log.info("cron job completed", { chatId, sessionKey, responseLength: response.text.length });
+    } catch (err) {
+      this.log.error("cron job execution failed", { chatId, sessionKey, error: String(err) });
+    } finally {
+      // Archive session（turn=1，不触发 archive summary）
+      this.db.prepare(`
+        UPDATE sessions SET status = 'archived', ended_at = datetime('now'), last_active_at = datetime('now')
+        WHERE id = ?
+      `).run(sessionKey);
+
+      await this.agent.closeSession(agentSession).catch((closeErr) => {
+        this.log.warn("failed to close cron session", { chatId, sessionKey, error: String(closeErr) });
+      });
+    }
   }
 
   /** /new 和 /clear：归档当前 session，让下一条消息自然创建新 session。 */

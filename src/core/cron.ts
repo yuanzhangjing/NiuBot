@@ -60,7 +60,7 @@ function toJob(r: RawCronRow): CronJob {
   };
 }
 
-export type CronExecutor = (chatId: string, userId: string, prompt: string) => Promise<void>;
+export type CronExecutor = (chatId: string, userId: string, prompt: string, description: string) => Promise<void>;
 
 export class CronScheduler {
   private db: Database.Database;
@@ -139,7 +139,7 @@ export class CronScheduler {
       if (shouldRun) {
         log.info("executing cron job", { id: job.id, desc: job.description });
         try {
-          await this.executor(job.chatId, job.creatorUserId, job.prompt);
+          await this.executor(job.chatId, job.creatorUserId, job.prompt, job.description);
 
           this.db.prepare(
             "UPDATE cron_jobs SET run_count = run_count + 1, last_run_at = ? WHERE id = ?",

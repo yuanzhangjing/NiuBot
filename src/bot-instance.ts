@@ -120,10 +120,9 @@ export async function createBotInstance(
   };
   const apiServer = new ApiServer(socketPath, apiHandler);
 
-  // 7. 创建 Cron Scheduler
-  const cronScheduler = new CronScheduler(db, async (chatId, userId, prompt) => {
-    // Route cron prompt through the agent pipeline (same path as user messages)
-    pipeline.injectPrompt(chatId, userId, `[定时任务] ${prompt}`);
+  // 7. 创建 Cron Scheduler（独立 session，不走用户消息队列）
+  const cronScheduler = new CronScheduler(db, async (chatId, userId, prompt, description) => {
+    await pipeline.processCronJob(chatId, userId, prompt, description);
   });
 
   // 8. 创建 Summarizer
