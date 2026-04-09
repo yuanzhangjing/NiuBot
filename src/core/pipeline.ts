@@ -493,7 +493,7 @@ export class Pipeline {
       : undefined;
 
     const sessionKey = this.chatSessions.get(chatId)?.sessionKey;
-    const incomingMsgId = storeMessage(this.db, {
+    storeMessage(this.db, {
       chatId,
       senderId: userId,
       sessionKey,
@@ -504,7 +504,6 @@ export class Pipeline {
       platformMsgId: msg.platformMsgId,
       platformTs: platformTsStr,
       platformRaw: JSON.stringify(msg.raw),
-      agentSeen: true,
     });
 
     this.log.info("message received", {
@@ -547,8 +546,6 @@ export class Pipeline {
     const trimmedText = msg.contentText.trim().toLowerCase();
     if (INTERRUPT_WORDS.has(trimmedText) && this.chatSessions.has(chatId)) {
       this.log.info("interrupt word detected", { chatId, word: trimmedText });
-      // agent 没见过打断消息和回复
-      this.db.prepare("UPDATE messages SET agent_seen = 0 WHERE id = ?").run(incomingMsgId);
       this.cancelChat(chatId).catch(() => {});
       const interruptText = "好的，已停止。";
       this.im.sendText(msg.chatPlatformId, interruptText).then((pmid) => {
@@ -559,8 +556,6 @@ export class Pipeline {
 
     // 内置命令拦截：/xxx 开头的消息先匹配内置命令，命中则不传给 agent
     if (this.handleBuiltinCommand(msg.contentText.trim(), userId, chatId, msg.chatPlatformId, msg.platformMsgId)) {
-      // agent 没见过这条消息，撤回 agentSeen 标记
-      this.db.prepare("UPDATE messages SET agent_seen = 0 WHERE id = ?").run(incomingMsgId);
       return;
     }
 
@@ -1326,6 +1321,11 @@ export class Pipeline {
         platform: this.botIdentity.platform,
         agentSeen: true,
       });
+
+      // 标记本轮用户消息为 agent 已见（发给 agent 的消息默认 agent_seen=0，此处统一标记）
+      this.db.prepare(
+        "UPDATE messages SET agent_seen = 1 WHERE session_key = ? AND agent_seen = 0",
+      ).run(chatSession.sessionKey);
 
       // 更新 session 统计（COALESCE 保证 agent_session_id 只写一次，后续不覆盖）
       const cumulativeBytes = this.agent.getCumulativeBytes?.(chatSession.agentSession.id) ?? 0;
