@@ -147,6 +147,6 @@ function getRecentMessages(db: Database.Database, sessionId: string, beforeTime:
     const sender = formatSenderLabel(r.sender_id, r.sender_name, r.role);
     const time = utcToLocalHHMM(r.created_at);
     const text = r.content_text.length > 200 ? r.content_text.slice(0, 200) + "..." : r.content_text;
-    return `[${time}] ${sender}: ${text}`;
+    return `[${time}] ${sender} ${text}`;
   }).join("\n");
 }

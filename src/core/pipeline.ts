@@ -1300,7 +1300,7 @@ export class Pipeline {
             const sender = formatSenderLabel(m.senderId, m.senderName, m.role);
             const text = m.contentText ?? "";
             const truncated = text.length > 200 ? text.slice(0, 200) + "…" : text;
-            return `[${sender}] ${truncated}`;
+            return `${sender} ${truncated}`;
           });
           messageToSend = `<system-hint>\n[对话流中你未看到的消息]\n${lines.join("\n")}\n以上消息已发送给用户。不必主动复述，但应将其作为上下文纳入后续回复。\n</system-hint>\n\n${messageToSend}`;
           markMessagesSeen(this.db, unseen.map((m) => m.id));
@@ -1648,7 +1648,7 @@ export class Pipeline {
     const lines = rows.map((r) => {
       const sender = formatSenderLabel(r.sender_id, r.sender_name, r.role);
       const text = r.content_text.length > 500 ? r.content_text.slice(0, 500) + "..." : r.content_text;
-      return `[${sender}] ${text}`;
+      return `${sender} ${text}`;
     });
 
     // 总长度限制 ~150K 字符，超了砍头部保留最近的消息

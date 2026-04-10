@@ -418,12 +418,12 @@ export function formatShortLabel(id: string, name: string | null | undefined): s
 }
 
 /**
- * 统一的 sender 显示名称入口。
+ * 统一的 sender 显示名称入口，输出 "[U2(Zen)]" 格式。
  * 所有 agent-facing 的消息格式化都应走这个函数，保证一致性。
  */
 export function formatSenderLabel(senderId: string | null, senderName: string | null, role: string): string {
-  if (senderId) return formatShortLabel(senderId, senderName);
-  return role === "assistant" ? "bot" : "user";
+  if (senderId) return `[${formatShortLabel(senderId, senderName)}]`;
+  return role === "assistant" ? "[bot]" : "[user]";
 }
 
 /** Get user short label: "U3(张三)" or "U3" */
