@@ -1642,12 +1642,11 @@ export class Pipeline {
       return `[${sender}] ${text}`;
     });
 
-    // 总长度限制 ~80K 字符，超了截中间保留首尾
-    const MAX_TOTAL_LEN = 80_000;
+    // 总长度限制 ~150K 字符，超了砍头部保留最近的消息
+    const MAX_TOTAL_LEN = 150_000;
     let conversationText = lines.join("\n");
     if (conversationText.length > MAX_TOTAL_LEN) {
-      const half = Math.floor(MAX_TOTAL_LEN / 2);
-      conversationText = conversationText.slice(0, half) + "\n\n...(中间部分省略)...\n\n" + conversationText.slice(-half);
+      conversationText = "...(早期对话省略)...\n\n" + conversationText.slice(-MAX_TOTAL_LEN);
     }
 
     const prompt = buildArchiveSummaryPrompt(conversationText);
