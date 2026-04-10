@@ -1302,7 +1302,7 @@ export class Pipeline {
             const truncated = text.length > 200 ? text.slice(0, 200) + "…" : text;
             return `[${sender}] ${truncated}`;
           });
-          messageToSend = `<system-hint>\n[对话流中你未看到的消息]\n${lines.join("\n")}\n以上消息已发送给用户。仅在用户主动提及时回应，不要打断当前话题。\n</system-hint>\n\n${messageToSend}`;
+          messageToSend = `<system-hint>\n[对话流中你未看到的消息]\n${lines.join("\n")}\n以上消息已发送给用户。不必主动复述，但应将其作为上下文纳入后续回复。\n</system-hint>\n\n${messageToSend}`;
           markMessagesSeen(this.db, unseen.map((m) => m.id));
           this.log.info("injected unseen messages", { chatId, count: unseen.length });
         }

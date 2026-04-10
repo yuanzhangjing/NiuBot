@@ -249,5 +249,5 @@ function buildContinuationContext(
     return `${sender}: ${text}`;
   });
 
-  return `[对话延续]\n上一个会话已归档，以下是最后几条消息：\n\n${lines.join("\n")}\n\n结合全局状态和会话摘要，你已具备完整上下文，自然延续即可。`;
+  return `[对话延续]\n上一个会话已归档，以下是最后几条消息：\n\n${lines.join("\n")}\n\n不必复述，结合全局状态自然延续即可。`;
 }
