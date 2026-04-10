@@ -102,6 +102,23 @@ export class MessageQueue {
     }
   }
 
+  /** 清空指定 chat 的等待队列（buffer + pending），返回丢弃的消息数 */
+  drain(chatId: string): number {
+    const q = this.queues.get(chatId);
+    if (!q) return 0;
+    const dropped = q.buffer.length + q.pending.length;
+    q.buffer = [];
+    q.pending = [];
+    if (q.bufferTimer) {
+      clearTimeout(q.bufferTimer);
+      q.bufferTimer = null;
+    }
+    if (dropped > 0) {
+      log.info("drain", { chatId, dropped });
+    }
+    return dropped;
+  }
+
   /** 是否有正在处理的任务 */
   hasBusyChats(): boolean {
     for (const [, q] of this.queues) {

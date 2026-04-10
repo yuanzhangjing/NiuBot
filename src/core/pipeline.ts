@@ -30,7 +30,11 @@ const MERGED_EMOJI = "Pin";
 const STALE_MESSAGE_THRESHOLD_MS = 2 * 60 * 1000;
 
 /** 短词打断关键词 */
-const INTERRUPT_WORDS = new Set(["停", "算了", "取消", "stop", "cancel", "abort"]);
+const INTERRUPT_WORDS = new Set([
+  "停", "停下", "停止", "打住", "够了", "算了", "算了吧", "取消",
+  "等等", "等一下", "稍等",
+  "stop", "cancel", "abort",
+]);
 /** Bot 身份信息，由外部传入 */
 export interface BotIdentity {
   /** Bot 显示名称（如 "CowBot"，从平台 API 获取或 config 指定） */
@@ -546,6 +550,7 @@ export class Pipeline {
     const trimmedText = msg.contentText.trim().toLowerCase();
     if (INTERRUPT_WORDS.has(trimmedText) && this.chatSessions.has(chatId)) {
       this.log.info("interrupt word detected", { chatId, word: trimmedText });
+      this.queue.drain(chatId);
       this.cancelChat(chatId).catch(() => {});
       const interruptText = "好的，已停止。";
       this.im.sendText(msg.chatPlatformId, interruptText).then((pmid) => {
@@ -692,7 +697,7 @@ export class Pipeline {
    * 未命中返回 false，消息继续走 agent 流程。
    *
    * 分发顺序（对齐 cc-connect）：
-   *   1. 内置命令 switch（/restart, /status, /new, /clear, /cron）
+   *   1. 内置命令 switch（/restart, /status, /new, /clear, /cron, /stop）
    *   2. 管理员 shell 命令（tryShellCommand）
    *   3. return false → 转发给 agent
    */
@@ -736,6 +741,20 @@ export class Pipeline {
           return true;
         }
         this.handleAgentCommand(parts.slice(1), chatId, platformChatId, msgId);
+        return true;
+      }
+      case "/stop": {
+        this.log.info("builtin command: stop", { userId, chatId });
+        const dropped = this.queue.drain(chatId);
+        if (this.chatSessions.has(chatId)) {
+          this.cancelChat(chatId).catch(() => {});
+          const hint = dropped > 0 ? `好的，已停止（丢弃 ${dropped} 条排队消息）。` : "好的，已停止。";
+          this.replyText(chatId, platformChatId, msgId, hint);
+        } else if (dropped > 0) {
+          this.replyText(chatId, platformChatId, msgId, `已清空 ${dropped} 条排队消息。`);
+        } else {
+          this.replyText(chatId, platformChatId, msgId, "当前没有正在执行的任务。");
+        }
         return true;
       }
     }

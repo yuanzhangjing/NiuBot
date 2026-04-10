@@ -3,7 +3,7 @@
  * 新增 CLI agent 只需继承并实现抽象方法。
  */
 
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import type { AgentBackend, AgentSession, AgentResponse, SessionConfig } from "./types.js";
 import { createLogger } from "../logger.js";
 import { prependNiubotBinToPath } from "../niubot-cli.js";
@@ -38,6 +38,8 @@ export interface ParsedOutput {
 
 export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession> implements AgentBackend {
   protected sessions = new Map<string, S>();
+  private activeProcesses = new Map<string, ChildProcess>();
+  private cancelledSessions = new Set<string>();
   protected log;
 
   /** 默认超时 10 分钟 */
@@ -110,7 +112,7 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
         timeout: this.promptTimeoutMs,
         env: { ...s.extraEnv, ...this.agentEnv() },
         stdin: this.buildStdin(message),
-      });
+      }, agentSession.id);
 
       s.cumulativeBytes += stdout.length;
 
@@ -131,16 +133,21 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
         compactCount: s.compactCount || undefined,
       };
     } catch (err: any) {
-      if (err.killed) {
-        this.log.warn("prompt timed out", { sessionId: agentSession.id });
+      if (err.killed || this.cancelledSessions.delete(agentSession.id)) {
+        this.log.warn(err.killed ? "prompt timed out" : "prompt cancelled", { sessionId: agentSession.id });
         return { text: "", cancelled: true };
       }
       throw err;
     }
   }
 
-  async cancelSession(_session: AgentSession): Promise<void> {
-    this.log.debug("cancel requested (no-op for CLI mode)", { sessionId: _session.id });
+  async cancelSession(session: AgentSession): Promise<void> {
+    const child = this.activeProcesses.get(session.id);
+    if (child) {
+      this.cancelledSessions.add(session.id);
+      child.kill("SIGINT");
+      this.log.info("cancel: killing child process", { sessionId: session.id });
+    }
   }
 
   async closeSession(session: AgentSession): Promise<void> {
@@ -158,6 +165,7 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
     cmd: string,
     args: string[],
     opts?: { cwd?: string; timeout?: number; env?: Record<string, string>; stdin?: string },
+    sessionId?: string,
   ): Promise<string> {
     return new Promise((resolve, reject) => {
       const child = spawn(cmd, args, {
@@ -165,6 +173,8 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
         env: { ...process.env, ...opts?.env },
         stdio: ["pipe", "pipe", "pipe"],
       });
+
+      if (sessionId) this.activeProcesses.set(sessionId, child);
 
       const chunks: Buffer[] = [];
       const stderrChunks: Buffer[] = [];
@@ -182,6 +192,7 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
       }
 
       child.on("close", (code) => {
+        if (sessionId) this.activeProcesses.delete(sessionId);
         if (timer) clearTimeout(timer);
         const stdout = Buffer.concat(chunks).toString();
         const stderr = Buffer.concat(stderrChunks).toString();
@@ -196,6 +207,7 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
       });
 
       child.on("error", (err) => {
+        if (sessionId) this.activeProcesses.delete(sessionId);
         if (timer) clearTimeout(timer);
         reject(err);
       });
