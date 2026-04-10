@@ -122,7 +122,7 @@ export function buildNormalContext(
           if (!t.progress && !t.next && t.summary) lines.push(`- ${t.summary}`);
         }
       }
-      parts.push(`[对话全局状态]\n${lines.join("\n")}`);
+      parts.push(`<global-state>\n${lines.join("\n")}\n</global-state>`);
     } catch {
       // state_summary 解析失败，跳过
     }
@@ -142,7 +142,7 @@ export function buildNormalContext(
         sessionBlocks.push(`- ${header}\n  [总结] ${s.parsed.summary ?? "(无摘要)"}`);
       }
     }
-    parts.push(`[最近对话]\n${sessionBlocks.join("\n")}`);
+    parts.push(`<recent-sessions>\n${sessionBlocks.join("\n")}\n</recent-sessions>`);
   }
 
   return parts.join("\n\n");
@@ -318,8 +318,8 @@ function buildContinuationContext(
     if (text.length > CONTINUATION_MSG_MAX_LEN) {
       text = text.slice(0, CONTINUATION_MSG_MAX_LEN) + "…";
     }
-    return `${sender} ${text}`;
+    return `${sender}: ${text}`;
   });
 
-  return `[对话延续]\n以下是最近的对话记录：\n\n${lines.join("\n")}\n\n不必复述，结合全局状态自然延续即可。`;
+  return `<recent-messages>\n以下是最近的对话记录：\n\n${lines.join("\n")}\n\n不必复述，结合全局状态自然延续即可。\n</recent-messages>`;
 }
