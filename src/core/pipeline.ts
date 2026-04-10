@@ -10,7 +10,7 @@ import { AGENT_BACKEND_DISPLAY, normalizeBackend, type AgentBackendType, VALID_B
 import { MessageQueue } from "./queue.js";
 import {
   ensureUser, ensureChat, storeMessage, updateChatName,
-  getUserShortLabel, getChatShortLabel, getMessageByPlatformId, updateMessageContent, updateMessagePlatformId,
+  getUserShortLabel, getChatShortLabel, formatSenderLabel, getMessageByPlatformId, updateMessageContent, updateMessagePlatformId,
   getUnseenMessages, markMessagesSeen,
 } from "../database/schema.js";
 import { buildImportantContext, buildNormalContext, type SceneInfo } from "../memory/inject.js";
@@ -1297,7 +1297,7 @@ export class Pipeline {
         const unseen = getUnseenMessages(this.db, chatId, baseline);
         if (unseen.length > 0) {
           const lines = unseen.map((m) => {
-            const sender = m.role === "assistant" ? "bot" : (m.senderName || "user");
+            const sender = formatSenderLabel(m.senderId, m.senderName, m.role);
             const text = m.contentText ?? "";
             const truncated = text.length > 200 ? text.slice(0, 200) + "…" : text;
             return `[${sender}] ${truncated}`;
@@ -1628,13 +1628,14 @@ export class Pipeline {
   private async generateArchiveSummary(chatId: string, sessionId: string, startMsgId: number, endMsgId: number): Promise<void> {
     // 从 DB 捞消息，拼成对话文本
     const rows = this.db.prepare(`
-      SELECT m.role, m.content_text, u.name as sender_name
+      SELECT m.role, m.sender_id, m.content_text, u.name as sender_name
       FROM messages m
       LEFT JOIN users u ON m.sender_id = u.id
       WHERE m.id BETWEEN ? AND ? AND m.chat_id = ? AND m.content_text IS NOT NULL
       ORDER BY m.id ASC
     `).all(startMsgId, endMsgId, chatId) as Array<{
       role: string;
+      sender_id: string | null;
       content_text: string;
       sender_name: string | null;
     }>;
@@ -1645,7 +1646,7 @@ export class Pipeline {
     }
 
     const lines = rows.map((r) => {
-      const sender = r.role === "assistant" ? "Bot" : (r.sender_name ?? "User");
+      const sender = formatSenderLabel(r.sender_id, r.sender_name, r.role);
       const text = r.content_text.length > 500 ? r.content_text.slice(0, 500) + "..." : r.content_text;
       return `[${sender}] ${text}`;
     });

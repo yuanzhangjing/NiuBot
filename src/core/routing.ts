@@ -13,6 +13,7 @@ import type { AgentBackend } from "../agent/types.js";
 import { ROUTE_DECISION_PROMPT } from "./prompts.js";
 import { createLogger } from "../logger.js";
 import { utcToLocalHHMM } from "../tz.js";
+import { formatSenderLabel } from "../database/schema.js";
 
 const log = createLogger("routing");
 
@@ -124,7 +125,7 @@ export async function decideRoute(
 /** 查询当前 session 最近 N 条消息（截止到 beforeTime），格式化为文本 */
 function getRecentMessages(db: Database.Database, sessionId: string, beforeTime: string): string {
   const rows = db.prepare(`
-    SELECT m.role, m.content_text, m.created_at, u.name as sender_name
+    SELECT m.role, m.sender_id, m.content_text, m.created_at, u.name as sender_name
     FROM messages m
     LEFT JOIN users u ON m.sender_id = u.id
     WHERE m.session_key = ? AND m.content_text IS NOT NULL AND m.created_at <= ?
@@ -132,6 +133,7 @@ function getRecentMessages(db: Database.Database, sessionId: string, beforeTime:
     LIMIT ?
   `).all(sessionId, beforeTime, RECENT_MESSAGES_LIMIT) as Array<{
     role: string;
+    sender_id: string | null;
     content_text: string;
     created_at: string;
     sender_name: string | null;
@@ -142,7 +144,7 @@ function getRecentMessages(db: Database.Database, sessionId: string, beforeTime:
   rows.reverse();
 
   return rows.map((r) => {
-    const sender = r.role === "assistant" ? "Bot" : (r.sender_name ?? "User");
+    const sender = formatSenderLabel(r.sender_id, r.sender_name, r.role);
     const time = utcToLocalHHMM(r.created_at);
     const text = r.content_text.length > 200 ? r.content_text.slice(0, 200) + "..." : r.content_text;
     return `[${time}] ${sender}: ${text}`;

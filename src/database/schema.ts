@@ -411,6 +411,21 @@ export function updateUserName(
   }
 }
 
+/** Format short label from id + name: "U3(张三)" or "U3" */
+export function formatShortLabel(id: string, name: string | null | undefined): string {
+  const shortId = id.toUpperCase();
+  return name ? `${shortId}(${name})` : shortId;
+}
+
+/**
+ * 统一的 sender 显示名称入口。
+ * 所有 agent-facing 的消息格式化都应走这个函数，保证一致性。
+ */
+export function formatSenderLabel(senderId: string | null, senderName: string | null, role: string): string {
+  if (senderId) return formatShortLabel(senderId, senderName);
+  return role === "assistant" ? "bot" : "user";
+}
+
 /** Get user short label: "U3(张三)" or "U3" */
 export function getUserShortLabel(
   db: Database.Database,
@@ -420,8 +435,7 @@ export function getUserShortLabel(
     "SELECT id, name FROM users WHERE id = ?",
   ).get(userId) as { id: string; name: string | null } | undefined;
   if (!row) return userId;
-  const shortId = row.id.toUpperCase();
-  return row.name ? `${shortId}(${row.name})` : shortId;
+  return formatShortLabel(row.id, row.name);
 }
 
 /** Get user short label by platform ID */
@@ -434,8 +448,7 @@ export function getUserShortLabelByPlatformId(
     "SELECT id, name FROM users WHERE platform = ? AND platform_id = ?",
   ).get(platform, platformId) as { id: string; name: string | null } | undefined;
   if (!row) return platformId;
-  const shortId = row.id.toUpperCase();
-  return row.name ? `${shortId}(${row.name})` : shortId;
+  return formatShortLabel(row.id, row.name);
 }
 
 /** Get chat short label, e.g. "C1(U1(Zen))" for p2p or "C2(GroupName)" for group */
@@ -577,16 +590,16 @@ export function getUnseenMessages(
   chatId: string,
   afterMsgId: number,
   limit = 20,
-): Array<{ id: number; role: string; senderName: string | null; contentText: string | null; createdAt: string }> {
+): Array<{ id: number; role: string; senderId: string | null; senderName: string | null; contentText: string | null; createdAt: string }> {
   return db.prepare(`
-    SELECT m.id, m.role, u.name AS senderName, m.content_text AS contentText, m.created_at AS createdAt
+    SELECT m.id, m.role, m.sender_id AS senderId, u.name AS senderName, m.content_text AS contentText, m.created_at AS createdAt
     FROM messages m
     LEFT JOIN users u ON m.sender_id = u.id
     WHERE m.chat_id = ? AND m.agent_seen = 0 AND m.id > ?
     ORDER BY m.id ASC
     LIMIT ?
   `).all(chatId, afterMsgId, limit) as Array<{
-    id: number; role: string; senderName: string | null; contentText: string | null; createdAt: string;
+    id: number; role: string; senderId: string | null; senderName: string | null; contentText: string | null; createdAt: string;
   }>;
 }
 

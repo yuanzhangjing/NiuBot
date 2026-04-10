@@ -1,9 +1,14 @@
 import type Database from "better-sqlite3";
 import { listUserMemory } from "./user-memory.js";
+import { formatShortLabel, formatSenderLabel } from "../database/schema.js";
 import { loadStaticContextTemplate } from "../static-context.js";
 
 /** 冷启动注入最近 session summary 的个数 */
 const RECENT_SESSION_SUMMARY_COUNT = 3;
+/** 续接上下文：注入上一个 session 尾部消息条数 */
+const CONTINUATION_TAIL_COUNT = 5;
+/** 续接上下文：每条消息最大长度 */
+const CONTINUATION_MSG_MAX_LEN = 200;
 
 // ── Important context (不能被 compact 丢失) ──────────────────
 
@@ -46,9 +51,7 @@ export function buildImportantContext(
   sceneLines.push(`Bot：${botDisplay}（即你自己，消息历史中显示为 assistant 角色。${botDisplay} 是你的平台注册标识）`);
   const chatDisplay = scene.chatLabel ?? scene.chatId;
   sceneLines.push(`会话：${chatDisplay}（${isGroup ? "群聊" : "私聊"}）`);
-  const userDisplay = scene.userName
-    ? `${scene.userId.toUpperCase()}(${scene.userName})`
-    : scene.userId.toUpperCase();
+  const userDisplay = formatShortLabel(scene.userId, scene.userName);
   if (scene.isAdmin) {
     sceneLines.push(`用户：${userDisplay}（admin）`);
   } else {
@@ -85,6 +88,12 @@ export function buildNormalContext(
   chatId: string,
 ): string {
   const parts: string[] = [];
+
+  // 0. 续接上下文：上一个 session 的尾部消息
+  const continuation = buildContinuationContext(db, chatId);
+  if (continuation) {
+    parts.push(continuation);
+  }
 
   // 1. 全局摘要（长期记忆）
   const chatRow = db.prepare(
@@ -193,4 +202,52 @@ function getRecentArchivedSessions(
   }
 
   return results;
+}
+
+/**
+ * 构建续接上下文：上一个 session 的尾部消息 + 引导提示。
+ * 让模型意识到自己是在延续一个对话流，而不是从零开始。
+ */
+function buildContinuationContext(
+  db: Database.Database,
+  chatId: string,
+): string | null {
+  // 找到该 chat 最近一个已归档的 user session
+  const lastSession = db.prepare(`
+    SELECT id FROM sessions
+    WHERE chat_id = ? AND status = 'archived' AND source = 'user'
+    ORDER BY ended_at DESC
+    LIMIT 1
+  `).get(chatId) as { id: string } | undefined;
+
+  if (!lastSession) return null;
+
+  // 捞该 session 的最后 N 条消息
+  const rows = db.prepare(`
+    SELECT m.sender_id, m.role, u.name AS sender_name, m.content_text
+    FROM messages m
+    LEFT JOIN users u ON m.sender_id = u.id
+    WHERE m.session_key = ? AND m.content_text IS NOT NULL
+    ORDER BY m.id DESC
+    LIMIT ?
+  `).all(lastSession.id, CONTINUATION_TAIL_COUNT) as Array<{
+    sender_id: string | null;
+    role: string;
+    sender_name: string | null;
+    content_text: string;
+  }>;
+
+  if (rows.length === 0) return null;
+
+  rows.reverse();
+
+  const lines = rows.map((r) => {
+    const sender = formatSenderLabel(r.sender_id, r.sender_name, r.role);
+    const text = r.content_text.length > CONTINUATION_MSG_MAX_LEN
+      ? r.content_text.slice(0, CONTINUATION_MSG_MAX_LEN) + "…"
+      : r.content_text;
+    return `${sender}: ${text}`;
+  });
+
+  return `[对话延续]\n上一个会话已归档，以下是最后几条消息：\n\n${lines.join("\n")}\n\n结合全局状态和会话摘要，你已具备完整上下文，自然延续即可。`;
 }
