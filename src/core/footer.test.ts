@@ -8,7 +8,7 @@ describe("footer formatting", () => {
 
   it("shows the chosen context size approximation and model name", () => {
     expect(buildResponseFooter({
-      sessionKey: "session_abcd1234",
+      sessionId: "abcd1234",
       turnCount: 3,
       contextTokens: 20523,
       compactCount: 2,

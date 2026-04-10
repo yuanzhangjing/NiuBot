@@ -3,13 +3,25 @@
  */
 
 /** Session 归档摘要 prompt — 发送给当前 agent session 做自我总结 */
-export const ARCHIVE_SUMMARY_PROMPT = `请用以下 JSON 格式总结这次对话的要点：
+export const ARCHIVE_SUMMARY_PROMPT = `请总结这次对话，输出 JSON 格式：
 {
-  "summary": "概括这次聊了什么、做了什么决定、还剩什么没搞定",
-  "topics": ["话题标签"]
+  "summary": "一句话概括这次对话的整体内容",
+  "topics": [
+    {
+      "title": "话题名称",
+      "summary": "这个话题讨论了什么、过程是怎样的、最终结论或产出是什么。写充分，让没参与对话的人也能看懂。",
+      "decisions": ["相关的关键决策，说清楚决定了什么、为什么"],
+      "open_items": ["这个话题下的遗留问题或待跟进事项"]
+    }
+  ]
 }
-如果对话内容太少或没有实质内容（如简单寒暄），返回 null。
-只输出 JSON 或 null，不要其他内容。`;
+
+要求：
+- 按话题组织，每个话题独立描述，不要把所有内容堆在 summary 里
+- 话题的 summary 是核心，要有来龙去脉，不要只写结论
+- decisions 和 open_items 归到对应话题下，没有则留空数组或省略
+- 对话内容太少或没有实质内容（如简单寒暄），返回 null
+- 只输出 JSON 或 null，不要其他内容`;
 
 /** 全局摘要滚动更新 prompt — 用 lite model 基于旧摘要 + 新 session summary 合并 */
 export function buildStateSummaryPrompt(currentState: string | null, sessionSummary: string): string {

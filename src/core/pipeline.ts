@@ -49,7 +49,7 @@ export interface BotIdentity {
 
 interface ChatSession {
   agentSession: AgentSession;
-  sessionKey: string;
+  sessionId: string;
   platformChatId: string;
   userId: string;
   /** 触发消息的 platform msg ID（用于首条回复时引用） */
@@ -195,7 +195,7 @@ export class Pipeline {
       try {
         // 更新 DB 最后活跃时间
         this.db.prepare("UPDATE sessions SET last_active_at = datetime('now') WHERE id = ?")
-          .run(session.sessionKey);
+          .run(session.sessionId);
         await this.agent.cancelSession(session.agentSession);
         await this.agent.closeSession(session.agentSession);
       } catch (err) {
@@ -324,7 +324,7 @@ export class Pipeline {
         `).run(row.id);
         this.log.warn("resetting unrecoverable active session during startup", {
           chatId: row.chat_id,
-          sessionKey: row.id,
+          sessionId: row.id,
           storedBackendType: storedBackendType ?? "unknown",
           activeBackendType: this.backendType,
         });
@@ -376,7 +376,7 @@ export class Pipeline {
 
         this.chatSessions.set(row.chat_id, {
           agentSession,
-          sessionKey: row.id,
+          sessionId: row.id,
           platformChatId: row.platform_id,
           userId: row.user_id ?? "",
           hasReplied: true, // recovered sessions skip reply-to
@@ -386,7 +386,7 @@ export class Pipeline {
 
         this.log.info("session recovered", {
           chatId: row.chat_id,
-          sessionKey: row.id,
+          sessionId: row.id,
           resumed: canResumeRecoveredSession && !!row.agent_session_id,
           storedBackendType: storedBackendType ?? "unknown",
           activeBackendType: this.backendType,
@@ -394,7 +394,7 @@ export class Pipeline {
       } catch (err) {
         this.log.error("failed to recover session", {
           chatId: row.chat_id,
-          sessionKey: row.id,
+          sessionId: row.id,
           error: String(err),
         });
       }
@@ -492,11 +492,11 @@ export class Pipeline {
       ? new Date(msg.platformTs).toISOString().slice(0, 19).replace("T", " ")
       : undefined;
 
-    const sessionKey = this.chatSessions.get(chatId)?.sessionKey;
+    const sessionId = this.chatSessions.get(chatId)?.sessionId;
     const incomingMsgId = storeMessage(this.db, {
       chatId,
       senderId: userId,
-      sessionKey,
+      sessionId,
       role: "user",
       contentText: msg.contentText,
       contentType: msg.contentType,
@@ -587,7 +587,7 @@ export class Pipeline {
     storeMessage(this.db, {
       chatId,
       senderId: this.botUserId,
-      sessionKey: this.chatSessions.get(chatId)?.sessionKey,
+      sessionId: this.chatSessions.get(chatId)?.sessionId,
       role: "assistant",
       contentText: text,
       contentType,
@@ -948,17 +948,17 @@ export class Pipeline {
     });
 
     // Create session record with source='cron'
-    const sessionKey = `s_${Date.now()}_${crypto.randomUUID().slice(0, 8)}`;
+    const sessionId = crypto.randomUUID().slice(0, 8);
     this.db.prepare(`
       INSERT INTO sessions (id, chat_id, user_id, source, status, started_at, last_active_at, backend_type)
       VALUES (?, ?, ?, 'cron', 'active', datetime('now'), datetime('now'), ?)
-    `).run(sessionKey, chatId, userId, this.backendType);
+    `).run(sessionId, chatId, userId, this.backendType);
 
     // Store cron prompt as user message
     storeMessage(this.db, {
       chatId,
       senderId: userId,
-      sessionKey,
+      sessionId,
       role: "user",
       contentText: prompt,
       platform: this.botIdentity.platform,
@@ -982,13 +982,13 @@ export class Pipeline {
       messageToSend = `${contextParts.join("\n\n")}\n\n${prompt}`;
     }
 
-    this.log.info("executing cron job", { chatId, sessionKey, userId, description });
+    this.log.info("executing cron job", { chatId, sessionId, userId, description });
 
     try {
       const response = await this.agent.sendMessage(agentSession, messageToSend);
 
       if (response.cancelled) {
-        this.log.warn("cron job was cancelled", { chatId, sessionKey });
+        this.log.warn("cron job was cancelled", { chatId, sessionId });
         return;
       }
 
@@ -996,7 +996,7 @@ export class Pipeline {
       const replyMsgId = storeMessage(this.db, {
         chatId,
         senderId: this.botUserId!,
-        sessionKey,
+        sessionId,
         role: "assistant",
         contentText: response.text,
         platform: this.botIdentity.platform,
@@ -1013,11 +1013,11 @@ export class Pipeline {
             agent_session_id = ?,
             backend_type = ?
         WHERE id = ?
-      `).run(replyMsgId, agentSessionId ?? null, this.backendType, sessionKey);
+      `).run(replyMsgId, agentSessionId ?? null, this.backendType, sessionId);
 
       // Build footer
       const footer = buildResponseFooter({
-        sessionKey,
+        sessionId,
         turnCount: 1,
         contextTokens: response.contextTokens,
         compactCount: response.compactCount,
@@ -1032,18 +1032,18 @@ export class Pipeline {
         updateMessagePlatformId(this.db, replyMsgId, sentPlatformMsgId);
       }
 
-      this.log.info("cron job completed", { chatId, sessionKey, responseLength: response.text.length });
+      this.log.info("cron job completed", { chatId, sessionId, responseLength: response.text.length });
     } catch (err) {
-      this.log.error("cron job execution failed", { chatId, sessionKey, error: String(err) });
+      this.log.error("cron job execution failed", { chatId, sessionId, error: String(err) });
     } finally {
       // Archive session（turn=1，不触发 archive summary）
       this.db.prepare(`
         UPDATE sessions SET status = 'archived', ended_at = datetime('now'), last_active_at = datetime('now')
         WHERE id = ?
-      `).run(sessionKey);
+      `).run(sessionId);
 
       await this.agent.closeSession(agentSession).catch((closeErr) => {
-        this.log.warn("failed to close cron session", { chatId, sessionKey, error: String(closeErr) });
+        this.log.warn("failed to close cron session", { chatId, sessionId, error: String(closeErr) });
       });
     }
   }
@@ -1284,7 +1284,7 @@ export class Pipeline {
       // 只对 p2p 生效，群聊不注入
       const chatTypeRow = this.db.prepare("SELECT type FROM chats WHERE id = ?").get(chatId) as { type: string } | undefined;
       if ((chatTypeRow?.type ?? "p2p") === "p2p") {
-        const sessionRow = this.db.prepare("SELECT start_msg_id FROM sessions WHERE id = ?").get(chatSession.sessionKey) as { start_msg_id: number | null } | undefined;
+        const sessionRow = this.db.prepare("SELECT start_msg_id FROM sessions WHERE id = ?").get(chatSession.sessionId) as { start_msg_id: number | null } | undefined;
         const baseline = sessionRow?.start_msg_id ?? 0;
         // 先把走 agent 的用户消息标为已见，再查 unseen 时就不会查到它们
         const agentMsgIds = messages.map((m) => m.dbMsgId).filter((id): id is number => id != null);
@@ -1307,7 +1307,7 @@ export class Pipeline {
 
       this.log.info("sending to agent", {
         chatId,
-        sessionKey: chatSession.sessionKey,
+        sessionId: chatSession.sessionId,
         textLength: messageToSend.length,
       });
 
@@ -1323,7 +1323,7 @@ export class Pipeline {
       const replyMsgId = storeMessage(this.db, {
         chatId,
         senderId: this.botUserId!,
-        sessionKey: chatSession.sessionKey,
+        sessionId: chatSession.sessionId,
         role: "assistant",
         contentText: response.text,
         platform: this.botIdentity.platform,
@@ -1344,20 +1344,20 @@ export class Pipeline {
             backend_type = COALESCE(backend_type, ?)
         WHERE id = ?
       `).run(
-        chatSession.sessionKey,
+        chatSession.sessionId,
         cumulativeBytes,
         replyMsgId,
         agentSessionId ?? null,
         this.backendType,
-        chatSession.sessionKey,
+        chatSession.sessionId,
       );
 
       // 构建 footer（对齐 cc-connect：shortId · #turn · context · model）
       const stats = this.db.prepare(
         "SELECT turn_count FROM sessions WHERE id = ?",
-      ).get(chatSession.sessionKey) as { turn_count: number } | undefined;
+      ).get(chatSession.sessionId) as { turn_count: number } | undefined;
       const footer = buildResponseFooter({
-        sessionKey: chatSession.sessionKey,
+        sessionId: chatSession.sessionId,
         turnCount: stats?.turn_count,
         contextTokens: response.contextTokens,
         compactCount: response.compactCount,
@@ -1486,7 +1486,7 @@ export class Pipeline {
       this.pendingImportantContext.set(chatId, importantContext);
     }
 
-    const sessionKey = `s_${Date.now()}_${crypto.randomUUID().slice(0, 8)}`;
+    const sessionId = crypto.randomUUID().slice(0, 8);
 
     try {
       const orphan = this.db.prepare(
@@ -1497,11 +1497,11 @@ export class Pipeline {
       this.db.prepare(`
         INSERT INTO sessions (id, chat_id, user_id, status, start_msg_id, started_at, last_active_at, backend_type)
         VALUES (?, ?, ?, 'active', ?, datetime('now'), datetime('now'), ?)
-      `).run(sessionKey, chatId, userId ?? null, startMsgId, this.backendType);
+      `).run(sessionId, chatId, userId ?? null, startMsgId, this.backendType);
 
       this.db.prepare(
         "UPDATE messages SET session_key = ? WHERE chat_id = ? AND session_key IS NULL",
-      ).run(sessionKey, chatId);
+      ).run(sessionId, chatId);
     } catch (dbErr) {
       await this.agent.closeSession(agentSession).catch(() => {});
       throw dbErr;
@@ -1509,7 +1509,7 @@ export class Pipeline {
 
     const chatSession: ChatSession = {
       agentSession,
-      sessionKey,
+      sessionId,
       platformChatId,
       userId: userId ?? "",
       triggerPlatformMsgId: this.triggerMsgIds.get(chatId),
@@ -1517,7 +1517,7 @@ export class Pipeline {
     };
     this.chatSessions.set(chatId, chatSession);
 
-    this.log.info("session created", { chatId, sessionKey, userId, agentSessionId: agentSession.id });
+    this.log.info("session created", { chatId, sessionId, userId, agentSessionId: agentSession.id });
     return chatSession;
   }
 
@@ -1539,7 +1539,7 @@ export class Pipeline {
 
     const sessionRow = this.db.prepare(
       "SELECT last_active_at, turn_count FROM sessions WHERE id = ?",
-    ).get(existing.sessionKey) as { last_active_at: string | null; turn_count: number } | undefined;
+    ).get(existing.sessionId) as { last_active_at: string | null; turn_count: number } | undefined;
 
     if (!sessionRow?.last_active_at) return;
     if (sessionRow.turn_count < Pipeline.ROUTE_MIN_TURNS) return;
@@ -1550,7 +1550,7 @@ export class Pipeline {
       chatId,
       sessionRow.last_active_at,
       newMessage,
-      existing.sessionKey,
+      existing.sessionId,
     );
 
     if (decision.action === "continue") return;
@@ -1567,7 +1567,7 @@ export class Pipeline {
       UPDATE messages SET session_key = NULL
       WHERE chat_id = ? AND session_key = ?
         AND id > COALESCE((SELECT end_msg_id FROM sessions WHERE id = ?), 0)
-    `).run(chatId, existing.sessionKey, existing.sessionKey);
+    `).run(chatId, existing.sessionId, existing.sessionId);
 
     this.pendingRouteDecisions.set(chatId, decision);
   }
@@ -1587,11 +1587,11 @@ export class Pipeline {
       return result.changes > 0;
     }
 
-    const { agentSession, sessionKey } = session;
+    const { agentSession, sessionId } = session;
 
     const sessionRow = this.db.prepare(
       "SELECT source FROM sessions WHERE id = ?",
-    ).get(sessionKey) as { source: string | null } | undefined;
+    ).get(sessionId) as { source: string | null } | undefined;
 
     const isUserSession = (sessionRow?.source ?? "user") === "user";
 
@@ -1604,25 +1604,28 @@ export class Pipeline {
           const text = response.text.trim();
           // LLM 返回 null 表示无实质内容，跳过
           if (text === "null") {
-            this.log.info("archive summary skipped (null)", { chatId, sessionKey });
+            this.log.info("archive summary skipped (null)", { chatId, sessionId });
           } else {
             const jsonMatch = text.match(/\{[\s\S]*\}/);
             if (jsonMatch) {
               const parsed = JSON.parse(jsonMatch[0]);
+              const topicTitles = Array.isArray(parsed.topics)
+                ? parsed.topics.map((t: any) => typeof t === "string" ? t : t.title).filter(Boolean)
+                : [];
               this.db.prepare(
                 "UPDATE sessions SET summary = ?, topics = ? WHERE id = ?",
-              ).run(JSON.stringify(parsed), JSON.stringify(parsed.topics ?? []), sessionKey);
-              this.log.info("archive summary generated", { chatId, sessionKey });
+              ).run(JSON.stringify(parsed), JSON.stringify(topicTitles), sessionId);
+              this.log.info("archive summary generated", { chatId, sessionId });
 
               // 更新全局摘要
               await this.updateStateSummary(chatId, jsonMatch[0]);
             } else {
-              this.log.warn("archive summary response has no JSON", { chatId, sessionKey });
+              this.log.warn("archive summary response has no JSON", { chatId, sessionId });
             }
           }
         }
       } catch (err) {
-        this.log.warn("failed to generate archive summary", { chatId, sessionKey, error: String(err) });
+        this.log.warn("failed to generate archive summary", { chatId, sessionId, error: String(err) });
       } finally {
         this.archivingChats.delete(chatId);
       }
@@ -1631,14 +1634,14 @@ export class Pipeline {
     this.db.prepare(`
       UPDATE sessions SET status = 'archived', ended_at = datetime('now'), last_active_at = datetime('now')
       WHERE id = ?
-    `).run(sessionKey);
+    `).run(sessionId);
 
     this.chatSessions.delete(chatId);
     await this.agent.closeSession(agentSession).catch((err) => {
-      this.log.warn("failed to close backend session during archive", { chatId, sessionKey, error: String(err) });
+      this.log.warn("failed to close backend session during archive", { chatId, sessionId, error: String(err) });
     });
 
-    this.log.info("session archived", { chatId, sessionKey });
+    this.log.info("session archived", { chatId, sessionId });
     return true;
   }
 

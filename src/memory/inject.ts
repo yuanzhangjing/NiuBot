@@ -122,7 +122,15 @@ export function buildNormalContext(
       const lines: string[] = [];
       lines.push(`${i + 1}. ${s.parsed.summary ?? "(无摘要)"}`);
       if (s.parsed.topics?.length) {
-        lines.push(`   话题：${s.parsed.topics.join("、")}`);
+        const topicTitles = s.parsed.topics.map((t) => typeof t === "string" ? t : t.title);
+        lines.push(`   话题：${topicTitles.join("、")}`);
+      }
+      // 旧格式：顶层 decisions/open_items
+      if (s.parsed.decisions?.length) {
+        lines.push(`   决策：${s.parsed.decisions.join("；")}`);
+      }
+      if (s.parsed.open_items?.length) {
+        lines.push(`   遗留：${s.parsed.open_items.join("；")}`);
       }
       return lines.join("\n");
     });
@@ -143,9 +151,20 @@ export function buildStaticContext(): string {
 
 // ── Internal helpers ────────────────────────────────────────
 
+interface TopicDetail {
+  title: string;
+  summary?: string;
+  decisions?: string[];
+  open_items?: string[];
+}
+
 interface ParsedSessionSummary {
   summary?: string;
-  topics?: string[];
+  /** 新格式: TopicDetail[]; 旧格式: string[] */
+  topics?: (string | TopicDetail)[];
+  /** 旧格式顶层 decisions，新格式在 topics 内部 */
+  decisions?: string[];
+  open_items?: string[];
 }
 
 function getRecentArchivedSessions(

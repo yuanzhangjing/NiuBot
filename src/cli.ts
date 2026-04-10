@@ -33,6 +33,7 @@ import { handleContacts } from "./cli/contacts.js";
 import { handleSend, handleSendFile, handleRestart } from "./cli/send.js";
 import { handleCron } from "./cli/cron.js";
 import { handleTask } from "./cli/task.js";
+import { handleSession, handleStateSummary } from "./cli/session.js";
 
 // ─── Context ───────────────────────────────────────────────
 
@@ -151,6 +152,12 @@ async function main(): Promise<void> {
       break;
     case "task":
       handleTask(args.slice(1), WORK_DIR, CHAT_ID, CHAT_TYPE, USER_ID, parseArgs);
+      break;
+    case "session-summary":
+      handleSession(openDb(), args.slice(1), CHAT_ID, parseArgs);
+      break;
+    case "state-summary":
+      handleStateSummary(openDb(), CHAT_ID);
       break;
     case "restart":
       handleRestart();

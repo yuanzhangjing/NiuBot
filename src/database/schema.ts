@@ -214,6 +214,24 @@ const migrations: Migration[] = [
       db.exec("UPDATE messages SET agent_seen = 1");
     },
   },
+  {
+    version: 8,
+    description: "Shorten session key to session id (last segment after _)",
+    up: (db) => {
+      // sessions.id: "s_1775738291552_5fb0090a" → "5fb0090a"
+      db.exec(`
+        UPDATE sessions
+        SET id = SUBSTR(id, INSTR(SUBSTR(id, 3), '_') + 3)
+        WHERE id LIKE 's_%_%'
+      `);
+      // messages.session_key: same transform
+      db.exec(`
+        UPDATE messages
+        SET session_key = SUBSTR(session_key, INSTR(SUBSTR(session_key, 3), '_') + 3)
+        WHERE session_key LIKE 's_%_%'
+      `);
+    },
+  },
 ];
 
 const LATEST_VERSION = migrations[migrations.length - 1]!.version;
@@ -497,7 +515,7 @@ export function storeMessage(
   msg: {
     chatId: string;
     senderId: string;
-    sessionKey?: string;
+    sessionId?: string;
     role: string;
     contentText?: string;
     contentType?: string;
@@ -516,7 +534,7 @@ export function storeMessage(
     `).run(
       msg.chatId,
       msg.senderId,
-      msg.sessionKey ?? null,
+      msg.sessionId ?? null,
       msg.role,
       msg.contentText ?? null,
       msg.contentType ?? "text",

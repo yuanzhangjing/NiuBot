@@ -362,7 +362,7 @@ describe("Pipeline.recover", () => {
     );
     (pipeline as any).chatSessions.set("c1", {
       agentSession: { id: "agent_1" },
-      sessionKey: "s1",
+      sessionId: "s1",
       platformChatId: "chat-open-id",
       userId: "u2",
       hasReplied: false,
@@ -406,7 +406,7 @@ describe("Pipeline.recover", () => {
     await pipeline.start();
     (pipeline as any).chatSessions.set("c1", {
       agentSession: { id: "agent_1" },
-      sessionKey: "s1",
+      sessionId: "s1",
       platformChatId: "chat-open-id",
       userId: "u2",
       hasReplied: false,
@@ -438,7 +438,8 @@ describe("Pipeline.recover", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(sentTexts).toContain("已开始新会话，当前上下文已清空。");
-    expect(agent.sendMessageCalls).toEqual(["hi"]);
+    expect(agent.sendMessageCalls).toHaveLength(1);
+    expect(agent.sendMessageCalls[0]).toContain("hi");
   });
 
   test("adds pin for pending messages and get for non-pending ones on receipt", async () => {

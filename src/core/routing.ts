@@ -122,7 +122,7 @@ export async function decideRoute(
 }
 
 /** 查询当前 session 最近 N 条消息（截止到 beforeTime），格式化为文本 */
-function getRecentMessages(db: Database.Database, sessionKey: string, beforeTime: string): string {
+function getRecentMessages(db: Database.Database, sessionId: string, beforeTime: string): string {
   const rows = db.prepare(`
     SELECT m.role, m.content_text, m.created_at, u.name as sender_name
     FROM messages m
@@ -130,7 +130,7 @@ function getRecentMessages(db: Database.Database, sessionKey: string, beforeTime
     WHERE m.session_key = ? AND m.content_text IS NOT NULL AND m.created_at <= ?
     ORDER BY m.id DESC
     LIMIT ?
-  `).all(sessionKey, beforeTime, RECENT_MESSAGES_LIMIT) as Array<{
+  `).all(sessionId, beforeTime, RECENT_MESSAGES_LIMIT) as Array<{
     role: string;
     content_text: string;
     created_at: string;

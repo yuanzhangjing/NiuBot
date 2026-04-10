@@ -67,6 +67,16 @@ Options:
 - `--user-id <id>` / `--content-type <t>` / `--chat-id <id>` — filters
 - Search-only: `-C <count>` (context), `--all` (all chats), `--chat-type p2p|group`
 
+### Session & state summary
+Query session summaries and global conversation state. Useful for reviewing what happened in past sessions.
+- `list` shows summary + topics; use `get` for full details (decisions, open items).
+
+| Action | Command |
+|--------|---------|
+| List sessions | `niubot session-summary list [--since <date>] [--before <date>] [-n <count>]` |
+| Get session | `niubot session-summary get <id>` |
+| Global state | `niubot state-summary` |
+
 ### Contacts
 Look up or manage user/chat information.
 

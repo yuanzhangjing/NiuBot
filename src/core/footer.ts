@@ -1,5 +1,5 @@
 interface ResponseFooterInput {
-  sessionKey: string;
+  sessionId: string;
   turnCount?: number;
   contextTokens?: number;
   compactCount?: number;
@@ -7,7 +7,7 @@ interface ResponseFooterInput {
 }
 
 export function buildResponseFooter(input: ResponseFooterInput): string {
-  const footerParts = [`${input.sessionKey.slice(-8)} · #${input.turnCount ?? "?"}`];
+  const footerParts = [`${input.sessionId} · #${input.turnCount ?? "?"}`];
 
   if (input.contextTokens && input.contextTokens > 0) {
     footerParts.push(formatTokenCount(input.contextTokens));
