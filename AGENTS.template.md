@@ -52,7 +52,9 @@ Remember things about users (preferences, background, experiences). Proactively 
 | Delete | `niubot user-memory del <id>` |
 
 ### Message history
-Query past messages. Use when user references earlier discussions or needs cross-session context.
+每条聊天消息的完整记录（发送者、时间、原文）。这是最底层的数据，保留了实际说过的话。
+- 当需要查找具体说过什么、确认原话、回溯某次讨论的细节时使用。
+- 和 session summary 的区别：summary 是归档时生成的结构化摘要，messages 是原始记录。
 
 | Action | Command |
 |--------|---------|
@@ -68,8 +70,9 @@ Options:
 - Search-only: `-C <count>` (context), `--all` (all chats), `--chat-type p2p|group`
 
 ### Session & state summary
-Query session summaries and global conversation state. Useful for reviewing what happened in past sessions.
-- `list` shows summary + topics; use `get` for full details (decisions, open items).
+两种不同层级的对话摘要：
+- **Session summary**：每次会话归档时自动生成的结构化摘要。按话题组织，每个话题包含描述、决策、遗留项。`list` 显示概要，`get` 展开全部细节。
+- **State summary**：全局滚动摘要，跟踪所有话题及其状态。每次会话归档时自动更新。
 
 | Action | Command |
 |--------|---------|
@@ -78,7 +81,7 @@ Query session summaries and global conversation state. Useful for reviewing what
 | Global state | `niubot state-summary` |
 
 ### Contacts
-Look up or manage user/chat information.
+用户和会话的基本信息（名称、平台、类型等）。当需要查找某个用户是谁、确认会话信息、或设置显示名称时使用。
 
 | Action | Command |
 |--------|---------|
@@ -148,6 +151,6 @@ Task directory structure:
 - Task metadata is tracked in `tasks/index.yaml` (managed by CLI, do not edit manually).
 
 ### Current scene
-Show current session context (bot, chat, user, memories). Same as `niubot whoami` in Context recovery.
+当前会话的完整上下文快照（bot 身份、会话信息、用户信息、记忆）。上下文丢失或不确定当前状态时使用，等同于 Context recovery 中的 `niubot whoami`。
 
     niubot whoami
