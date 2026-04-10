@@ -3,6 +3,7 @@
  */
 
 import type Database from "better-sqlite3";
+import { utcToLocalDateTime } from "../tz.js";
 
 interface MessageRow {
   id: number;
@@ -248,7 +249,7 @@ function messagesGet(
     ? `${row.sender_id.toUpperCase()}(${row.sender_name})`
     : row.sender_id.toUpperCase();
   const roleLabel = row.role === "assistant" ? "assistant" : "user";
-  const ts = row.created_at.replace("T", " ").slice(0, 19);
+  const ts = utcToLocalDateTime(row.created_at);
 
   console.log(`[#${row.id}] [${ts}] ${senderLabel} (${roleLabel}):`);
   console.log(row.content_text ?? "");
@@ -259,7 +260,7 @@ function formatMessage(r: MessageRow, prefix = ""): void {
     ? `${r.sender_id.toUpperCase()}(${r.sender_name})`
     : r.sender_id.toUpperCase();
   const roleLabel = r.role === "assistant" ? "assistant" : "user";
-  const ts = r.created_at.replace("T", " ").slice(0, 19);
+  const ts = utcToLocalDateTime(r.created_at);
   const content = (r.content_text ?? "").replaceAll("\n", " ");
   const text = truncate(content, 200);
 

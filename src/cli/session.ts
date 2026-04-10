@@ -3,6 +3,7 @@
  */
 
 import type Database from "better-sqlite3";
+import { utcToLocalDateTime } from "../tz.js";
 
 interface SessionRow {
   id: string;
@@ -154,8 +155,8 @@ function sessionGet(
 
 function printMeta(row: SessionRow): void {
   const sid = row.id;
-  const startTime = row.started_at?.replace("T", " ") ?? "?";
-  const endTime = row.ended_at?.replace("T", " ") ?? "ongoing";
+  const startTime = row.started_at ? utcToLocalDateTime(row.started_at) : "?";
+  const endTime = row.ended_at ? utcToLocalDateTime(row.ended_at) : "ongoing";
   const msgRange = row.start_msg_id != null && row.end_msg_id != null
     ? `, #${row.start_msg_id}~#${row.end_msg_id}`
     : "";
