@@ -100,9 +100,6 @@ export class Pipeline {
   private processedMsgIds = new Set<string>();
   private static readonly MAX_PROCESSED_IDS = 10000;
 
-  /** 正在归档的 chatId 集合，期间 cancel 不发送到 agent（保护摘要 prompt） */
-  private archivingChats = new Set<string>();
-
   /** chatId → triggerPlatformMsgId，暂存触发消息 ID */
   private triggerMsgIds = new Map<string, string>();
 
@@ -1659,7 +1656,6 @@ export class Pipeline {
       return;
     }
 
-    this.archivingChats.add(chatId);
     try {
       const response = await this.agent.sendMessage(session, prompt);
       const text = response.text.trim();
@@ -1686,7 +1682,6 @@ export class Pipeline {
     } catch (err) {
       this.log.warn("failed to generate archive summary", { chatId, sessionId, error: String(err) });
     } finally {
-      this.archivingChats.delete(chatId);
       await this.agent.closeSession(session).catch(() => {});
     }
   }
@@ -1728,11 +1723,6 @@ export class Pipeline {
   private async cancelChat(chatId: string): Promise<void> {
     const session = this.chatSessions.get(chatId);
     if (!session) return;
-
-    if (this.archivingChats.has(chatId)) {
-      this.log.debug("cancel suppressed during archive", { chatId });
-      return;
-    }
 
     await this.agent.cancelSession(session.agentSession);
   }
