@@ -1605,10 +1605,9 @@ export class Pipeline {
 
     this.log.info("session archived", { chatId, sessionId });
 
-    // 用 lite model 异步生成归档摘要
+    // 用 lite model 生成归档摘要（await 确保新 session 能拿到最新 summary）
     if (isUserSession && sessionRow?.start_msg_id != null && sessionRow?.end_msg_id != null) {
-      this.generateArchiveSummary(chatId, sessionId, sessionRow.start_msg_id, sessionRow.end_msg_id)
-        .catch((err) => this.log.warn("failed to generate archive summary", { chatId, sessionId, error: String(err) }));
+      await this.generateArchiveSummary(chatId, sessionId, sessionRow.start_msg_id, sessionRow.end_msg_id);
     }
     return true;
   }
