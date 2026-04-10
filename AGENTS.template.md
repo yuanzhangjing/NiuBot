@@ -52,9 +52,9 @@ Remember things about users (preferences, background, experiences). Proactively 
 | Delete | `niubot user-memory del <id>` |
 
 ### Message history
-每条聊天消息的完整记录（发送者、时间、原文）。这是最底层的数据，保留了实际说过的话。
-- 当需要查找具体说过什么、确认原话、回溯某次讨论的细节时使用。
-- 和 session summary 的区别：summary 是归档时生成的结构化摘要，messages 是原始记录。
+Complete record of every chat message (sender, timestamp, original text). This is the raw data — the actual words that were said.
+- Use when you need to look up what was specifically said, verify exact wording, or trace details of a past discussion.
+- Differs from session summary: summaries are structured digests generated at archive time; messages are the raw records.
 
 | Action | Command |
 |--------|---------|
@@ -70,9 +70,9 @@ Options:
 - Search-only: `-C <count>` (context), `--all` (all chats), `--chat-type p2p|group`
 
 ### Session & state summary
-两种不同层级的对话摘要：
-- **Session summary**：每次会话归档时自动生成的结构化摘要。按话题组织，每个话题包含描述、决策、遗留项。`list` 显示概要，`get` 展开全部细节。
-- **State summary**：全局滚动摘要，跟踪所有话题及其状态。每次会话归档时自动更新。
+Two levels of conversation summaries:
+- **Session summary**: Structured summary auto-generated when a session is archived. Organized by topics, each with description, decisions, and open items. `list` shows brief overview; `get` expands full details.
+- **State summary**: Rolling global summary tracking all topics and their status. Auto-updated each time a session is archived.
 
 | Action | Command |
 |--------|---------|
@@ -81,7 +81,7 @@ Options:
 | Global state | `niubot state-summary` |
 
 ### Contacts
-用户和会话的基本信息（名称、平台、类型等）。当需要查找某个用户是谁、确认会话信息、或设置显示名称时使用。
+Basic info about users and chats (name, platform, type, etc.). Use when you need to look up who a user is, check chat details, or set display names.
 
 | Action | Command |
 |--------|---------|
@@ -151,6 +151,6 @@ Task directory structure:
 - Task metadata is tracked in `tasks/index.yaml` (managed by CLI, do not edit manually).
 
 ### Current scene
-当前会话的完整上下文快照（bot 身份、会话信息、用户信息、记忆）。上下文丢失或不确定当前状态时使用，等同于 Context recovery 中的 `niubot whoami`。
+Full context snapshot of the current session (bot identity, chat info, user info, memories). Use when context is lost or uncertain. Same as `niubot whoami` in Context recovery.
 
     niubot whoami
