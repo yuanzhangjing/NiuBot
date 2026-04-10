@@ -1617,6 +1617,7 @@ export class Pipeline {
     // 用 lite model 异步生成归档摘要，promise 存起来供新 session 创建时 await
     if (isUserSession && sessionRow?.start_msg_id != null && sessionRow?.end_msg_id != null) {
       const summaryPromise = this.generateArchiveSummary(chatId, sessionId, sessionRow.start_msg_id, sessionRow.end_msg_id)
+        .catch((err) => this.log.warn("archive summary failed", { chatId, sessionId, error: String(err) }))
         .finally(() => this.pendingSummary.delete(chatId));
       this.pendingSummary.set(chatId, summaryPromise);
     }
