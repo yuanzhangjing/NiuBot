@@ -100,6 +100,9 @@ export class Pipeline {
   private processedMsgIds = new Set<string>();
   private static readonly MAX_PROCESSED_IDS = 10000;
 
+  /** chatId → 待完成的归档摘要 promise，新 session 创建前 await 确保 summary 就绪 */
+  private pendingSummary = new Map<string, Promise<void>>();
+
   /** chatId → triggerPlatformMsgId，暂存触发消息 ID */
   private triggerMsgIds = new Map<string, string>();
 
@@ -926,6 +929,9 @@ export class Pipeline {
         })
       : undefined;
 
+    // 等待上一个 session 的归档摘要完成，确保 context 注入拿到最新 summary
+    await this.pendingSummary.get(chatId);
+
     // Build normal context（全局摘要 + 最近 session summaries）
     const normalContext = buildNormalContext(this.db, chatId);
 
@@ -1457,6 +1463,9 @@ export class Pipeline {
         })
       : undefined;
 
+    // 等待上一个 session 的归档摘要完成，确保 context 注入拿到最新 summary
+    await this.pendingSummary.get(chatId);
+
     // 构建 normal 上下文（全局摘要 + 最近 session summaries）— 后续拼到首条消息前缀
     const normalContext = buildNormalContext(this.db, chatId);
     if (normalContext) {
@@ -1605,9 +1614,11 @@ export class Pipeline {
 
     this.log.info("session archived", { chatId, sessionId });
 
-    // 用 lite model 生成归档摘要（await 确保新 session 能拿到最新 summary）
+    // 用 lite model 异步生成归档摘要，promise 存起来供新 session 创建时 await
     if (isUserSession && sessionRow?.start_msg_id != null && sessionRow?.end_msg_id != null) {
-      await this.generateArchiveSummary(chatId, sessionId, sessionRow.start_msg_id, sessionRow.end_msg_id);
+      const summaryPromise = this.generateArchiveSummary(chatId, sessionId, sessionRow.start_msg_id, sessionRow.end_msg_id)
+        .finally(() => this.pendingSummary.delete(chatId));
+      this.pendingSummary.set(chatId, summaryPromise);
     }
     return true;
   }
