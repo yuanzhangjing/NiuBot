@@ -5,7 +5,7 @@ import { loadStaticContextTemplate } from "../static-context.js";
 import { utcToLocalDateTime } from "../tz.js";
 
 /** 冷启动注入最近 session summary 的个数 */
-const RECENT_SESSION_SUMMARY_COUNT = 3;
+const RECENT_SESSION_SUMMARY_COUNT = 1;
 /** 续接上下文：注入该 chat 最近消息条数 */
 const CONTINUATION_TAIL_COUNT = 10;
 /** 续接上下文：每条消息最大长度 */
@@ -123,21 +123,13 @@ export function buildNormalContext(
     }
   }
 
-  // 2. 最近 N 个归档 session 的结构化摘要（短期记忆）— 中观脉络
-  // 最近一个 session 展开写（话题详情、决策、遗留），其余只保留 summary
+  // 2. 最近一个归档 session 的摘要（短期记忆）— 中观脉络
   const recentSessions = getRecentArchivedSessions(db, chatId, RECENT_SESSION_SUMMARY_COUNT);
   if (recentSessions.length > 0) {
-    const sessionBlocks: string[] = [];
-    for (let i = 0; i < recentSessions.length; i++) {
-      const s = recentSessions[i];
-      const header = formatSessionHeader(s);
-      if (i === 0) {
-        sessionBlocks.push(formatSessionExpanded(header, s.parsed));
-      } else {
-        sessionBlocks.push(`- ${header}\n  [总结] ${s.parsed.summary ?? "(无摘要)"}`);
-      }
-    }
-    parts.push(`<recent-sessions>\n${sessionBlocks.join("\n")}\n</recent-sessions>`);
+    const s = recentSessions[0];
+    const header = formatSessionHeader(s);
+    const block = formatSessionExpanded(header, s.parsed);
+    parts.push(`<recent-session>\n${block}\n</recent-session>`);
   }
 
   // 3. 续接上下文：最近对话尾部消息 — 最微观，紧接用户新消息
@@ -165,15 +157,19 @@ interface TopicDetail {
   summary?: string;
   progress?: string;
   next?: string;
+  /** 未闭合的线头：提出但未落地的意图、待验证项 */
+  open?: string;
   decisions?: string[];
   open_items?: string[];
 }
 
 interface ParsedSessionSummary {
   summary?: string;
-  /** 新格式: TopicDetail[]; 旧格式: string[] */
+  /** 新格式（平铺）：details + open */
+  details?: string;
+  open?: string;
+  /** 旧格式（topics）：兼容已有归档数据 */
   topics?: (string | TopicDetail)[];
-  /** 旧格式顶层 decisions，新格式在 topics 内部 */
   decisions?: string[];
   open_items?: string[];
 }
@@ -189,13 +185,18 @@ function formatSessionHeader(s: ArchivedSessionInfo): string {
   return `[${shortId}] ${start} ~ ${endDisplay}${meta}`;
 }
 
-/** 展开格式化最近一个 session */
+/** 格式化最近一个 session 的摘要 */
 function formatSessionExpanded(header: string, parsed: ParsedSessionSummary): string {
   const lines: string[] = [];
   lines.push(`- ${header}`);
   lines.push(`  [总结] ${parsed.summary ?? "(无摘要)"}`);
 
-  if (parsed.topics?.length) {
+  // 新格式（平铺）：details + open
+  if (parsed.details) lines.push(`  ${parsed.details}`);
+  if (parsed.open) lines.push(`  [未完成] ${parsed.open}`);
+
+  // 兼容旧格式（topics）
+  if (!parsed.details && parsed.topics?.length) {
     for (const t of parsed.topics) {
       if (typeof t === "string") {
         lines.push(`  **${t}**`);
@@ -203,7 +204,7 @@ function formatSessionExpanded(header: string, parsed: ParsedSessionSummary): st
       }
       lines.push(`  **${t.title}**`);
       if (t.summary) lines.push(`  - ${t.summary}`);
-      // 兼容旧格式：decisions / open_items
+      if (t.open) lines.push(`  - 未完成: ${t.open}`);
       if (t.decisions?.length) {
         for (const d of t.decisions) lines.push(`  - 决策: ${d}`);
       }
@@ -212,12 +213,10 @@ function formatSessionExpanded(header: string, parsed: ParsedSessionSummary): st
       }
     }
   }
-
-  // 兼容旧格式：顶层 decisions/open_items
-  if (parsed.decisions?.length) {
+  if (!parsed.details && parsed.decisions?.length) {
     for (const d of parsed.decisions) lines.push(`  - 决策: ${d}`);
   }
-  if (parsed.open_items?.length) {
+  if (!parsed.details && parsed.open_items?.length) {
     for (const o of parsed.open_items) lines.push(`  - 待办: ${o}`);
   }
 

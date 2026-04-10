@@ -185,13 +185,20 @@ function printSessionBrief(row: SessionRow): void {
   try {
     const parsed = JSON.parse(row.summary) as {
       summary?: string;
+      details?: string;
+      open?: string;
       topics?: (string | TopicDetail)[];
     };
 
     if (parsed.summary) {
       console.log(`  ${parsed.summary}`);
     }
-    if (parsed.topics?.length) {
+    // 新格式（平铺）：显示 open
+    if (parsed.open) {
+      console.log(`  未完成：${parsed.open}`);
+    }
+    // 旧格式（topics）：显示话题标题
+    if (!parsed.details && parsed.topics?.length) {
       const titles = parsed.topics.map((t) => typeof t === "string" ? t : t.title);
       console.log(`  话题：${titles.join("、")}`);
     }
@@ -200,7 +207,7 @@ function printSessionBrief(row: SessionRow): void {
   }
 }
 
-/** get 用：按话题展开全部细节 */
+/** get 用：展开全部细节 */
 function printSessionFull(row: SessionRow): void {
   printMeta(row);
 
@@ -212,8 +219,9 @@ function printSessionFull(row: SessionRow): void {
   try {
     const parsed = JSON.parse(row.summary) as {
       summary?: string;
+      details?: string;
+      open?: string;
       topics?: (string | TopicDetail)[];
-      // 旧格式顶层字段
       decisions?: string[];
       open_items?: string[];
     };
@@ -222,43 +230,39 @@ function printSessionFull(row: SessionRow): void {
       console.log(`  ${parsed.summary}`);
     }
 
-    if (parsed.topics?.length) {
+    // 新格式（平铺）
+    if (parsed.details) {
+      console.log("");
+      console.log(`  ${parsed.details}`);
+    }
+    if (parsed.open) {
+      console.log(`  未完成：${parsed.open}`);
+    }
+
+    // 旧格式（topics）
+    if (!parsed.details && parsed.topics?.length) {
       console.log("");
       for (const t of parsed.topics) {
         if (typeof t === "string") {
-          // 旧格式：纯标签
           console.log(`  [${t}]`);
         } else {
-          // 新格式：话题对象
           console.log(`  [${t.title}]`);
-          if (t.summary) {
-            console.log(`    ${t.summary}`);
-          }
+          if (t.summary) console.log(`    ${t.summary}`);
           if (t.decisions?.length) {
-            for (const d of t.decisions) {
-              console.log(`    决策：${d}`);
-            }
+            for (const d of t.decisions) console.log(`    决策：${d}`);
           }
           if (t.open_items?.length) {
-            for (const o of t.open_items) {
-              console.log(`    遗留：${o}`);
-            }
+            for (const o of t.open_items) console.log(`    遗留：${o}`);
           }
         }
       }
     }
-
-    // 旧格式兼容：顶层 decisions/open_items
-    if (parsed.decisions?.length) {
+    if (!parsed.details && parsed.decisions?.length) {
       console.log("");
-      for (const d of parsed.decisions) {
-        console.log(`  决策：${d}`);
-      }
+      for (const d of parsed.decisions) console.log(`  决策：${d}`);
     }
-    if (parsed.open_items?.length) {
-      for (const o of parsed.open_items) {
-        console.log(`  遗留：${o}`);
-      }
+    if (!parsed.details && parsed.open_items?.length) {
+      for (const o of parsed.open_items) console.log(`  遗留：${o}`);
     }
   } catch {
     console.log(`  ${row.summary}`);
