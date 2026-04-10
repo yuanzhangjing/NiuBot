@@ -1259,7 +1259,9 @@ export class Pipeline {
       // M3: 路由决策 — 判断是否需要切换 session
       await this.maybeRouteSession(chatId, mergedText);
 
-      const chatSession = await this.getOrCreateSession(chatId);
+      const msgIds = messages.map((m) => m.dbMsgId).filter((id): id is number => id != null);
+      const firstMsgId = msgIds.length > 0 ? Math.min(...msgIds) : undefined;
+      const chatSession = await this.getOrCreateSession(chatId, firstMsgId);
 
       // 拼接上下文前缀（新 session 的首条消息）
       let messageToSend = mergedText;
@@ -1424,7 +1426,7 @@ export class Pipeline {
     }
   }
 
-  private async getOrCreateSession(chatId: string): Promise<ChatSession> {
+  private async getOrCreateSession(chatId: string, beforeMsgId?: number): Promise<ChatSession> {
     const existing = this.chatSessions.get(chatId);
     if (existing) return existing;
 
@@ -1467,7 +1469,7 @@ export class Pipeline {
     await this.pendingSummary.get(chatId);
 
     // 构建 normal 上下文（全局摘要 + 最近 session summaries）— 后续拼到首条消息前缀
-    const normalContext = buildNormalContext(this.db, chatId);
+    const normalContext = buildNormalContext(this.db, chatId, beforeMsgId);
     if (normalContext) {
       this.pendingNormalContext.set(chatId, normalContext);
     }

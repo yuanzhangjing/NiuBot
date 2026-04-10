@@ -87,16 +87,11 @@ export function buildImportantContext(
 export function buildNormalContext(
   db: Database.Database,
   chatId: string,
+  beforeMsgId?: number,
 ): string {
   const parts: string[] = [];
 
-  // 0. 续接上下文：上一个 session 的尾部消息
-  const continuation = buildContinuationContext(db, chatId);
-  if (continuation) {
-    parts.push(continuation);
-  }
-
-  // 1. 全局摘要（长期记忆）
+  // 1. 全局摘要（长期记忆）— 最宏观的大图
   const chatRow = db.prepare(
     "SELECT state_summary FROM chats WHERE id = ?",
   ).get(chatId) as { state_summary: string | null } | undefined;
@@ -128,7 +123,7 @@ export function buildNormalContext(
     }
   }
 
-  // 2. 最近 N 个归档 session 的结构化摘要（短期记忆）
+  // 2. 最近 N 个归档 session 的结构化摘要（短期记忆）— 中观脉络
   // 最近一个 session 展开写（话题详情、决策、遗留），其余只保留 summary
   const recentSessions = getRecentArchivedSessions(db, chatId, RECENT_SESSION_SUMMARY_COUNT);
   if (recentSessions.length > 0) {
@@ -143,6 +138,12 @@ export function buildNormalContext(
       }
     }
     parts.push(`<recent-sessions>\n${sessionBlocks.join("\n")}\n</recent-sessions>`);
+  }
+
+  // 3. 续接上下文：最近对话尾部消息 — 最微观，紧接用户新消息
+  const continuation = buildContinuationContext(db, chatId, beforeMsgId);
+  if (continuation) {
+    parts.push(continuation);
   }
 
   return parts.join("\n\n");
@@ -283,6 +284,7 @@ function getRecentArchivedSessions(
 function buildContinuationContext(
   db: Database.Database,
   chatId: string,
+  beforeMsgId?: number,
 ): string | null {
   // 确认该 chat 存在已归档的 session（没有历史 session 则不需要续接）
   const hasArchived = db.prepare(`
@@ -293,15 +295,19 @@ function buildContinuationContext(
 
   if (!hasArchived) return null;
 
-  // 捞该 chat 最近 N 条消息
+  // 捞该 chat 最近 N 条消息（截止到当前消息之前，避免把用户刚发的消息当历史注入）
+  const cutoff = beforeMsgId != null ? `AND m.id < ?` : "";
+  const params: (string | number)[] = [chatId];
+  if (beforeMsgId != null) params.push(beforeMsgId);
+  params.push(CONTINUATION_TAIL_COUNT);
   const rows = db.prepare(`
     SELECT m.sender_id, m.role, u.name AS sender_name, m.content_text
     FROM messages m
     LEFT JOIN users u ON m.sender_id = u.id
-    WHERE m.chat_id = ? AND m.content_text IS NOT NULL
+    WHERE m.chat_id = ? AND m.content_text IS NOT NULL ${cutoff}
     ORDER BY m.id DESC
     LIMIT ?
-  `).all(chatId, CONTINUATION_TAIL_COUNT) as Array<{
+  `).all(...params) as Array<{
     sender_id: string | null;
     role: string;
     sender_name: string | null;
