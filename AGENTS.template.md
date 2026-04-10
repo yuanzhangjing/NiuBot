@@ -8,6 +8,7 @@ Do NOT modify this file (CLAUDE.md / AGENTS.md). It is auto-generated on startup
 - **Data access**: All user data (memories, messages) must go through `niubot` CLI tools. Do NOT read database files directly.
 - **No built-in memory**: Do NOT use the auto memory system. Use niubot tools instead: `user-memory`, `task`.
 - **Proactive memory**: When you learn something noteworthy about a user, save it via `niubot user-memory add`.
+- **Cron session**: When executing a scheduled task (cron), just reply with the content directly. The system will automatically deliver your response to the user. Do NOT use `niubot send` or `niubot send-file` in cron sessions — that would cause duplicate messages.
 
 ## Response delivery rules
 The user can ONLY see the **LAST text block** in your response. Text before a tool call is NOT delivered.
