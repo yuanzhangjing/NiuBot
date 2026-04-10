@@ -15,7 +15,7 @@ import {
 } from "../database/schema.js";
 import { buildImportantContext, buildNormalContext, type SceneInfo } from "../memory/inject.js";
 import { loadPersona } from "../persona.js";
-import { ARCHIVE_SUMMARY_PROMPT, buildStateSummaryPrompt } from "./prompts.js";
+import { buildArchiveSummaryPrompt, buildStateSummaryPrompt } from "./prompts.js";
 import { decideRoute, type RouteDecision } from "./routing.js";
 import { listCronJobs, deleteCronJob, getCronJob } from "./cron.js";
 import { createLogger } from "../logger.js";
@@ -1590,47 +1590,12 @@ export class Pipeline {
     const { agentSession, sessionId } = session;
 
     const sessionRow = this.db.prepare(
-      "SELECT source FROM sessions WHERE id = ?",
-    ).get(sessionId) as { source: string | null } | undefined;
+      "SELECT source, start_msg_id, end_msg_id FROM sessions WHERE id = ?",
+    ).get(sessionId) as { source: string | null; start_msg_id: number | null; end_msg_id: number | null } | undefined;
 
     const isUserSession = (sessionRow?.source ?? "user") === "user";
 
-    if (isUserSession) {
-      this.archivingChats.add(chatId);
-      try {
-        const response = await this.agent.sendMessage(agentSession, ARCHIVE_SUMMARY_PROMPT);
-
-        if (!response.cancelled) {
-          const text = response.text.trim();
-          // LLM 返回 null 表示无实质内容，跳过
-          if (text === "null") {
-            this.log.info("archive summary skipped (null)", { chatId, sessionId });
-          } else {
-            const jsonMatch = text.match(/\{[\s\S]*\}/);
-            if (jsonMatch) {
-              const parsed = JSON.parse(jsonMatch[0]);
-              const topicTitles = Array.isArray(parsed.topics)
-                ? parsed.topics.map((t: any) => typeof t === "string" ? t : t.title).filter(Boolean)
-                : [];
-              this.db.prepare(
-                "UPDATE sessions SET summary = ?, topics = ? WHERE id = ?",
-              ).run(JSON.stringify(parsed), JSON.stringify(topicTitles), sessionId);
-              this.log.info("archive summary generated", { chatId, sessionId });
-
-              // 更新全局摘要
-              await this.updateStateSummary(chatId, jsonMatch[0]);
-            } else {
-              this.log.warn("archive summary response has no JSON", { chatId, sessionId });
-            }
-          }
-        }
-      } catch (err) {
-        this.log.warn("failed to generate archive summary", { chatId, sessionId, error: String(err) });
-      } finally {
-        this.archivingChats.delete(chatId);
-      }
-    }
-
+    // 先关闭 agent session，不阻塞摘要生成
     this.db.prepare(`
       UPDATE sessions SET status = 'archived', ended_at = datetime('now'), last_active_at = datetime('now')
       WHERE id = ?
@@ -1642,7 +1607,89 @@ export class Pipeline {
     });
 
     this.log.info("session archived", { chatId, sessionId });
+
+    // 用 lite model 异步生成归档摘要
+    if (isUserSession && sessionRow?.start_msg_id != null && sessionRow?.end_msg_id != null) {
+      this.generateArchiveSummary(chatId, sessionId, sessionRow.start_msg_id, sessionRow.end_msg_id)
+        .catch((err) => this.log.warn("failed to generate archive summary", { chatId, sessionId, error: String(err) }));
+    }
     return true;
+  }
+
+  /** 用 lite model 从 DB 消息生成归档摘要 */
+  private async generateArchiveSummary(chatId: string, sessionId: string, startMsgId: number, endMsgId: number): Promise<void> {
+    // 从 DB 捞消息，拼成对话文本
+    const rows = this.db.prepare(`
+      SELECT m.role, m.content_text, u.name as sender_name
+      FROM messages m
+      LEFT JOIN users u ON m.sender_id = u.id
+      WHERE m.id BETWEEN ? AND ? AND m.chat_id = ? AND m.content_text IS NOT NULL
+      ORDER BY m.id ASC
+    `).all(startMsgId, endMsgId, chatId) as Array<{
+      role: string;
+      content_text: string;
+      sender_name: string | null;
+    }>;
+
+    if (rows.length === 0) {
+      this.log.info("archive summary skipped (no messages)", { chatId, sessionId });
+      return;
+    }
+
+    const lines = rows.map((r) => {
+      const sender = r.role === "assistant" ? "Bot" : (r.sender_name ?? "User");
+      const text = r.content_text.length > 500 ? r.content_text.slice(0, 500) + "..." : r.content_text;
+      return `[${sender}] ${text}`;
+    });
+
+    // 总长度限制 ~80K 字符，超了截中间保留首尾
+    const MAX_TOTAL_LEN = 80_000;
+    let conversationText = lines.join("\n");
+    if (conversationText.length > MAX_TOTAL_LEN) {
+      const half = Math.floor(MAX_TOTAL_LEN / 2);
+      conversationText = conversationText.slice(0, half) + "\n\n...(中间部分省略)...\n\n" + conversationText.slice(-half);
+    }
+
+    const prompt = buildArchiveSummaryPrompt(conversationText);
+
+    let session;
+    try {
+      session = await this.agent.createSession({ modelTier: "lite" });
+    } catch (err) {
+      this.log.warn("failed to create archive summary session", { chatId, sessionId, error: String(err) });
+      return;
+    }
+
+    this.archivingChats.add(chatId);
+    try {
+      const response = await this.agent.sendMessage(session, prompt);
+      const text = response.text.trim();
+
+      if (text === "null") {
+        this.log.info("archive summary skipped (null)", { chatId, sessionId });
+      } else {
+        const jsonMatch = text.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          const parsed = JSON.parse(jsonMatch[0]);
+          const topicTitles = Array.isArray(parsed.topics)
+            ? parsed.topics.map((t: any) => typeof t === "string" ? t : t.title).filter(Boolean)
+            : [];
+          this.db.prepare(
+            "UPDATE sessions SET summary = ?, topics = ? WHERE id = ?",
+          ).run(JSON.stringify(parsed), JSON.stringify(topicTitles), sessionId);
+          this.log.info("archive summary generated", { chatId, sessionId });
+
+          await this.updateStateSummary(chatId, jsonMatch[0]);
+        } else {
+          this.log.warn("archive summary response has no JSON", { chatId, sessionId });
+        }
+      }
+    } catch (err) {
+      this.log.warn("failed to generate archive summary", { chatId, sessionId, error: String(err) });
+    } finally {
+      this.archivingChats.delete(chatId);
+      await this.agent.closeSession(session).catch(() => {});
+    }
   }
 
   /** 用 lite model 滚动更新全局摘要 */
