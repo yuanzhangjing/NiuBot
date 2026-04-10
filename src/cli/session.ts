@@ -60,7 +60,7 @@ export function handleStateSummary(
   try {
     const state = JSON.parse(row.state_summary) as {
       summary?: string;
-      topics?: Array<{ title: string; status?: string; summary: string }>;
+      topics?: Array<{ title: string; status?: string; summary?: string; progress?: string; next?: string }>;
     };
 
     if (state.summary) {
@@ -71,7 +71,9 @@ export function handleStateSummary(
       for (const t of state.topics) {
         const status = t.status ? ` [${t.status}]` : "";
         console.log(`- ${t.title}${status}`);
-        console.log(`  ${t.summary}`);
+        if (t.progress) console.log(`  进展: ${t.progress}`);
+        if (t.next) console.log(`  计划: ${t.next}`);
+        if (!t.progress && !t.next && t.summary) console.log(`  ${t.summary}`);
       }
     }
   } catch {
