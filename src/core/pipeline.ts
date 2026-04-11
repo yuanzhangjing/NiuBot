@@ -1337,10 +1337,20 @@ export class Pipeline {
 
       const response = await this.agent.sendMessage(chatSession.agentSession, messageToSend);
 
-      // 被 cancel 的 prompt 不存储不发送（cancelled 后会有新的合并消息进来）
+      // cancelled：有内容就发（中间结果），没内容就静默（用户已收到"已停止"）
       if (response.cancelled) {
-        this.log.info("prompt was cancelled, skipping response", { chatId });
-        return;
+        if (response.text.trim()) {
+          this.log.info("cancelled with content, delivering result", { chatId, responseLength: response.text.length });
+        } else {
+          this.log.info("prompt cancelled, no response to send", { chatId });
+          return;
+        }
+      }
+
+      // 非 cancel 的空响应：发兜底提示，防止用户等半天没反应
+      if (!response.text.trim()) {
+        this.log.warn("empty response from agent", { chatId });
+        response.text = "（处理完成，但未生成回复。如果没收到预期结果，请重试）";
       }
 
       // 存储 agent 回复并标记已见

@@ -114,6 +114,12 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
         stdin: this.buildStdin(message),
       }, agentSession.id);
 
+      // 进程可能收到 SIGTERM 后仍以 code 0 退出，检查 cancel 标记
+      if (this.cancelledSessions.delete(agentSession.id)) {
+        this.log.info("prompt cancelled (process exited gracefully)", { sessionId: agentSession.id });
+        return { text: "", cancelled: true };
+      }
+
       s.cumulativeBytes += stdout.length;
 
       const parsed = this.parseOutput(stdout);
@@ -145,8 +151,10 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
     const child = this.activeProcesses.get(session.id);
     if (child) {
       this.cancelledSessions.add(session.id);
-      child.kill("SIGINT");
-      this.log.info("cancel: killing child process", { sessionId: session.id });
+      child.kill("SIGTERM");
+      this.log.info("cancel: sent SIGTERM to child process", { sessionId: session.id, pid: child.pid });
+    } else {
+      this.log.info("cancel: no active process to kill", { sessionId: session.id });
     }
   }
 
