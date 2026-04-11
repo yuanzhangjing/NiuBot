@@ -130,7 +130,6 @@ export class Pipeline {
     workingDirectory: string,
     dbPath: string,
     bufferMs: number,
-    cancelThresholdMs: number,
     backendType: AgentBackendType = "claude",
     backendResolver?: (type: AgentBackendType) => Promise<AgentBackend>,
   ) {
@@ -143,10 +142,9 @@ export class Pipeline {
     this.workingDirectory = workingDirectory;
     this.dbPath = dbPath;
     this.log = createLogger("pipeline", botIdentity.name);
-    this.queue = new MessageQueue(bufferMs, cancelThresholdMs);
+    this.queue = new MessageQueue(bufferMs);
 
     this.queue.onProcess((chatId, mergedText, messages) => this.process(chatId, mergedText, messages));
-    this.queue.onCancel((chatId) => this.cancelChat(chatId));
   }
 
   /** 启动管道：注册 IM 消息回调 */

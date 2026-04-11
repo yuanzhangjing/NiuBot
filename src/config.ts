@@ -54,10 +54,8 @@ export interface NiuBotConfig {
   bots: BotConfig[];
   defaultConfig: DefaultConfig;
   queue: {
-    /** 消息缓冲合并窗口（ms），默认 3000 */
+    /** 消息缓冲合并窗口（ms），默认 1500 */
     bufferMs: number;
-    /** cancel+合并阈值（ms），默认 10000 */
-    cancelThresholdMs: number;
   };
 }
 
@@ -78,8 +76,7 @@ const DEFAULTS = {
     ) as Record<AgentBackendType, string>,
   },
   queue: {
-    bufferMs: 3000,
-    cancelThresholdMs: 10000,
+    bufferMs: 1500,
   },
 };
 
@@ -121,7 +118,6 @@ export function loadConfig(configPath?: string): NiuBotConfig {
 
   const queueConfig = {
     bufferMs: parseNumEnv(process.env["NIUBOT_BUFFER_MS"]) ?? queueFile["bufferMs"] ?? DEFAULTS.queue.bufferMs,
-    cancelThresholdMs: parseNumEnv(process.env["NIUBOT_CANCEL_MS"]) ?? queueFile["cancelThresholdMs"] ?? DEFAULTS.queue.cancelThresholdMs,
   };
 
   // 3. 解析 bots 配置

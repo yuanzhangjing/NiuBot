@@ -34,7 +34,7 @@ export interface BotInstance {
 export async function createBotInstance(
   botConfig: BotConfig,
   agent: AgentBackend,
-  queueConfig: { bufferMs: number; cancelThresholdMs: number },
+  queueConfig: { bufferMs: number },
   backendType?: AgentBackendType,
   backendResolver?: (type: AgentBackendType) => Promise<AgentBackend>,
 ): Promise<BotInstance> {
@@ -89,7 +89,6 @@ export async function createBotInstance(
     botConfig.workingDirectory,
     botConfig.dbPath,
     queueConfig.bufferMs,
-    queueConfig.cancelThresholdMs,
     backendType,
     backendResolver,
   );

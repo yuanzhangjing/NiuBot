@@ -23,12 +23,6 @@ interface ChatQueue {
   pending: QueuedMessage[];
   /** agent 是否正在处理 */
   busy: boolean;
-  /** 当前处理开始时间 */
-  busySince: number | null;
-  /** cancel 已请求，抑制 flush 中的错误日志 */
-  cancelRequested: boolean;
-  /** cancel 正在进行中，防止重复 cancel */
-  cancelInFlight: boolean;
 }
 
 type ProcessFn = (chatId: string, mergedText: string, messages: QueuedMessage[]) => Promise<void>;
@@ -37,14 +31,11 @@ export class MessageQueue {
   private queues = new Map<string, ChatQueue>();
   private processFn: ProcessFn | null = null;
   private bufferMs: number;
-  private cancelThresholdMs: number;
-  private cancelFn: ((chatId: string) => Promise<void>) | null = null;
-  private mergeFn: ((msg: QueuedMessage) => void) | null = null;
+  private pendingFn: ((msg: QueuedMessage) => void) | null = null;
   private stopped = false;
 
-  constructor(bufferMs = 3000, cancelThresholdMs = 10000) {
+  constructor(bufferMs = 1500) {
     this.bufferMs = bufferMs;
-    this.cancelThresholdMs = cancelThresholdMs;
   }
 
   /** 注册消息处理函数 */
@@ -52,14 +43,9 @@ export class MessageQueue {
     this.processFn = fn;
   }
 
-  /** 注册 cancel 函数（用于 cancel+合并） */
-  onCancel(fn: (chatId: string) => Promise<void>): void {
-    this.cancelFn = fn;
-  }
-
   /** 注册 pending 通知函数（消息进入等待队列时立即回调） */
   onPending(fn: (msg: QueuedMessage) => void): void {
-    this.mergeFn = fn;
+    this.pendingFn = fn;
   }
 
   /** 推入一条新消息，返回是否进入 pending 队列 */
@@ -69,16 +55,9 @@ export class MessageQueue {
     const q = this.getQueue(msg.chatId);
 
     if (q.busy) {
-      const elapsed = q.busySince ? Date.now() - q.busySince : Infinity;
-
-      if (elapsed < this.cancelThresholdMs && this.cancelFn && !q.cancelInFlight) {
-        log.info("cancel+merge", { chatId: msg.chatId, elapsed });
-        void this.cancelAndMerge(q, msg);
-      } else {
-        log.info("message queued", { chatId: msg.chatId, pending: q.pending.length + 1 });
-        q.pending.push(msg);
-      }
-      this.mergeFn?.(msg);
+      log.info("message queued", { chatId: msg.chatId, pending: q.pending.length + 1 });
+      q.pending.push(msg);
+      this.pendingFn?.(msg);
       return true;
     }
 
@@ -132,8 +111,7 @@ export class MessageQueue {
     if (!q) {
       q = {
         buffer: [], bufferTimer: null, pending: [],
-        busy: false, busySince: null,
-        cancelRequested: false, cancelInFlight: false,
+        busy: false,
       };
       this.queues.set(chatId, q);
     }
@@ -150,8 +128,6 @@ export class MessageQueue {
   /** 标记某 chat 处理完成，检查后续队列 */
   private processNext(q: ChatQueue, chatId: string): void {
     q.busy = false;
-    q.busySince = null;
-    q.cancelInFlight = false;
 
     // 已停止，不再启动新的处理
     if (this.stopped) return;
@@ -171,8 +147,6 @@ export class MessageQueue {
     q.buffer = [];
     q.bufferTimer = null;
     q.busy = true;
-    q.busySince = Date.now();
-    q.cancelRequested = false;
 
     const mergedText = messages.length === 1
       ? messages[0].text
@@ -189,32 +163,10 @@ export class MessageQueue {
     try {
       await this.processFn?.(chatId, mergedText, messages);
     } catch (err) {
-      if (!q.cancelRequested) {
-        log.error("process error", { chatId, error: String(err) });
-      }
+      log.error("process error", { chatId, error: String(err) });
     } finally {
-      // flush 始终负责推进队列，无论是否被 cancel
-      // cancelAndMerge 只往 pending 里放消息，不管状态转换
-      q.cancelRequested = false;
       this.processNext(q, chatId);
     }
   }
 
-  private async cancelAndMerge(q: ChatQueue, newMsg: QueuedMessage): Promise<void> {
-    q.cancelRequested = true;
-    q.cancelInFlight = true;
-
-    try {
-      await this.cancelFn?.(newMsg.chatId);
-    } catch (err) {
-      log.warn("cancel failed, queuing instead", { chatId: newMsg.chatId, error: String(err) });
-    }
-
-    // 无论 cancel 成功或失败，新消息都排入 pending
-    // cancel 成功：session 保持存活，原始消息已在 agent 上下文中，只需发新消息
-    // cancel 失败：flush 正常完成后，processNext 处理新消息
-    // cancelInFlight 由 processNext 重置
-    // 注意：mergeFn 已在 push() 中调用，此处不重复调用
-    q.pending.push(newMsg);
-  }
 }
