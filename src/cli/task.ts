@@ -198,6 +198,7 @@ function taskList(
     console.log(`path: ${absPath}`);
     console.log(`owner: ${t.owner}`);
     console.log(`visibility: ${t.visibility}`);
+    console.log(`status: ${t.status ?? "active"}`);
     console.log(`created_at: "${t.created_at}"`);
     console.log("---");
   }
@@ -212,7 +213,7 @@ function taskUpdate(
   const { positional, flags } = parseArgs(args);
   const name = positional[0];
   if (!name) {
-    console.error("Usage: niubot task update <name> [--name <new>] [--desc \"...\"] [--private|--public]");
+    console.error("Usage: niubot task update <name> [--name <new>] [--desc \"...\"] [--private|--public] [--active|--inactive]");
     process.exit(1);
   }
 
@@ -245,6 +246,8 @@ function taskUpdate(
   }
   if (flags["private"] === "true") task.visibility = "private";
   if (flags["public"] === "true") task.visibility = "public";
+  if (flags["active"] === "true") delete task.status;
+  if (flags["inactive"] === "true") task.status = "inactive";
 
   saveIndex(workingDirectory, index);
   console.log(`Updated task "${task.name}"`);

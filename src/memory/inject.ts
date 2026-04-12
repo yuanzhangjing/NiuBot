@@ -1,4 +1,7 @@
+import fs from "node:fs";
+import path from "node:path";
 import type Database from "better-sqlite3";
+import yaml from "yaml";
 import { listUserMemory } from "./user-memory.js";
 import { formatShortLabel, formatSenderLabel } from "../database/schema.js";
 import { loadStaticContextTemplate } from "../static-context.js";
@@ -81,46 +84,22 @@ export function buildImportantContext(
 // ── Normal context (可以接受 compact 压缩) ───────────────────
 
 /**
- * 构建 normal 上下文：全局摘要 + 最近 session summaries。
+ * 构建 normal 上下文：task 索引 + 最近 session summary + 续接消息。
  * 注入 user prompt 前缀。
  */
 export function buildNormalContext(
   db: Database.Database,
   chatId: string,
+  workingDirectory: string,
   beforeMsgId?: number,
 ): string {
   const parts: string[] = [];
 
-  // 1. 全局摘要（长期记忆）— 最宏观的大图
-  const chatRow = db.prepare(
-    "SELECT state_summary FROM chats WHERE id = ?",
-  ).get(chatId) as { state_summary: string | null } | undefined;
-
-  if (chatRow?.state_summary) {
-    try {
-      const state = JSON.parse(chatRow.state_summary) as {
-        summary?: string;
-        topics?: Array<{ title: string; status?: string; summary?: string; progress?: string; next?: string }>;
-      };
-      const lines: string[] = [];
-      if (state.summary) {
-        lines.push(`[总结] ${state.summary}`);
-      }
-      if (state.topics?.length) {
-        for (const t of state.topics) {
-          const status = t.status ? ` [${t.status}]` : "";
-          lines.push(`**${t.title}**${status}`);
-          // 新格式：progress + next
-          if (t.progress) lines.push(`- 进展: ${t.progress}`);
-          if (t.next) lines.push(`- 计划: ${t.next}`);
-          // 兼容旧格式：summary
-          if (!t.progress && !t.next && t.summary) lines.push(`- ${t.summary}`);
-        }
-      }
-      parts.push(`<global-state>\n${lines.join("\n")}\n</global-state>`);
-    } catch {
-      // state_summary 解析失败，跳过
-    }
+  // 1. 活跃任务索引（实时从 tasks/index.yaml 读取）
+  const taskBriefs = buildTaskIndex(workingDirectory);
+  if (taskBriefs.length > 0) {
+    const lines = ["[活跃任务]", ...taskBriefs];
+    parts.push(`<global-state>\n${lines.join("\n")}\n</global-state>`);
   }
 
   // 2. 最近一个归档 session 的摘要（短期记忆）— 中观脉络
@@ -327,4 +306,41 @@ function buildContinuationContext(
   });
 
   return `<recent-messages>\n以下是最近的对话记录：\n\n${lines.join("\n")}\n\n不必复述，结合全局状态自然延续即可。\n</recent-messages>`;
+}
+
+// ── Task index ─────────────────────────────────────────────
+
+interface TaskEntry {
+  name: string;
+  description: string;
+  path: string;
+  owner: string;
+  visibility: "public" | "private";
+  status?: string;
+}
+
+/**
+ * 从 tasks/index.yaml 实时读取活跃任务列表，生成简要索引。
+ * 只展示非 archived、非 inactive 的任务（名称 + 描述）。
+ */
+function buildTaskIndex(workingDirectory: string): string[] {
+  const indexPath = path.join(workingDirectory, "tasks", "index.yaml");
+  try {
+    if (!fs.existsSync(indexPath)) return [];
+    const content = fs.readFileSync(indexPath, "utf-8");
+    const parsed = yaml.parse(content) as { tasks?: TaskEntry[] } | null;
+    if (!parsed?.tasks?.length) return [];
+
+    const active = parsed.tasks.filter((t) => !t.status || t.status === "active");
+    if (active.length === 0) return [];
+
+    return active.map((t) => {
+      const desc = t.description
+        ? ` — ${t.description.length > 60 ? t.description.slice(0, 60) + "…" : t.description}`
+        : "";
+      return `- ${t.name}${desc}`;
+    });
+  } catch {
+    return [];
+  }
 }

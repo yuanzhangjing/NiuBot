@@ -69,16 +69,13 @@ Options:
 - `--user-id <id>` / `--content-type <t>` / `--chat-id <id>` — filters
 - Search-only: `-C <count>` (context), `--all` (all chats), `--chat-type p2p|group`
 
-### Session & state summary
-Two levels of conversation summaries:
-- **Session summary**: Structured summary auto-generated when a session is archived. Organized by topics, each with description, decisions, and open items. `list` shows brief overview; `get` expands full details.
-- **State summary**: Rolling global summary tracking all topics and their status. Auto-updated each time a session is archived.
+### Session summary
+Structured summary auto-generated when a session is archived. Each summary contains a brief overview, details, and open items. `list` shows brief overview; `get` expands full details.
 
 | Action | Command |
 |--------|---------|
 | List sessions | `niubot session-summary list [--since <date>] [--before <date>] [-n <count>]` |
 | Get session | `niubot session-summary get <id>` |
-| Global state | `niubot state-summary` |
 
 ### Contacts
 Basic info about users and chats (name, platform, type, etc.). Use when you need to look up who a user is, check chat details, or set display names.
@@ -131,15 +128,17 @@ Manage tasks and projects with visibility control. Tasks are organized in the `t
 |--------|---------|
 | Create | `niubot task create <name> [--private] [--public] [--desc "..."]` |
 | List | `niubot task list [<name>]` |
-| Update | `niubot task update <name> [--name <new>] [--desc "..."] [--private] [--public]` |
+| Update | `niubot task update <name> [--name <new>] [--desc "..."] [--private] [--public] [--active] [--inactive]` |
 | Delete | `niubot task delete <name>` |
 
 Visibility: private chat defaults to `--private`, group chat defaults to `--public`.
 
+Status: `active` (default) | `inactive` | `archived`. Only active tasks are injected into session context. Mark a task `--inactive` when the user explicitly says to pause/shelve it; `--active` to resume.
+
 List options: `<name>` filters by substring match (case-insensitive).
 
 List output format (one entry per task, separated by `---`):
-  name / description / path / owner / visibility / created_at
+  name / description / path / owner / visibility / status / created_at
 
 Delete archives the task to `tasks/.archive/` (not permanent deletion).
 
@@ -149,6 +148,8 @@ Task directory structure:
 - When items are completed, move them to Done promptly.
 - Additional files (design docs, references) may be placed in the task directory.
 - Task metadata is tracked in `tasks/index.yaml` (managed by CLI, do not edit manually).
+
+**Task status is the source of truth.** Active task names are injected into every session context. When you complete work related to a task, update its README.md immediately (move items to Done, clear In Progress, etc.). Do not defer task updates to a later time.
 
 ### Current scene
 Full context snapshot of the current session (bot identity, chat info, user info, memories). Use when context is lost or uncertain. Same as `niubot whoami` in Context recovery.

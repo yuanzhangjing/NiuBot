@@ -22,36 +22,6 @@ ${conversationText}
 - 只输出 JSON 或 null，不要其他内容`;
 }
 
-/** 全局摘要滚动更新 prompt — 用 lite model 基于旧摘要 + 新 session summary 合并 */
-export function buildStateSummaryPrompt(currentState: string | null, sessionSummary: string): string {
-  const existing = currentState
-    ? `当前全局摘要：\n${currentState}\n\n`
-    : "";
-
-  return `${existing}一个新的对话 session 已结束，以下是它的摘要：
-${sessionSummary}
-
-请${currentState ? "更新" : "生成"}对话全局摘要，输出 JSON 格式：
-{
-  "summary": "一句话概括对话整体方向和当前焦点",
-  "topics": [{
-    "title": "话题名",
-    "status": "进行中|已完成|搁置",
-    "progress": "已完成的进展，一两句话",
-    "next": "下一步计划或待办（已完成的话题可省略）"
-  }]
-}
-
-规则：
-- 相关话题合并，topics 上限 7 条，按最近活跃倒序
-- 已完结且不再相关的话题直接移除
-- progress 写结论和产出，不写实现细节
-- next 只写进行中话题的下一步，已完成的省略该字段
-- 这是滚动更新，不是追加。合并、替换、精简
-
-只输出 JSON，不要其他内容。`;
-}
-
 /** 路由决策 prompt — 用 lite model 判断新消息应该继续还是新建 session */
 export const ROUTE_DECISION_PROMPT = `你是一个对话路由助手。根据以下信息判断用户新消息应该：
 - continue: 继续当前对话（话题相关）

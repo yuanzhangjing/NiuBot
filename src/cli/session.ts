@@ -1,5 +1,5 @@
 /**
- * CLI: session-summary list/get + state-summary — query session summaries and global state.
+ * CLI: session-summary list/get — query session summaries.
  */
 
 import type Database from "better-sqlite3";
@@ -36,49 +36,6 @@ export function handleSession(
     sessionGet(db, args.slice(1), parseArgs);
   } else {
     console.log("Usage: niubot session-summary <list|get>");
-  }
-}
-
-export function handleStateSummary(
-  db: Database.Database,
-  chatId: string | undefined,
-): void {
-  if (!chatId) {
-    console.error("Error: NIUBOT_CHAT_ID not set");
-    process.exit(1);
-  }
-
-  const row = db.prepare(
-    "SELECT state_summary FROM chats WHERE id = ?",
-  ).get(chatId) as { state_summary: string | null } | undefined;
-
-  if (!row?.state_summary) {
-    console.log("(无全局摘要)");
-    return;
-  }
-
-  try {
-    const state = JSON.parse(row.state_summary) as {
-      summary?: string;
-      topics?: Array<{ title: string; status?: string; summary?: string; progress?: string; next?: string }>;
-    };
-
-    if (state.summary) {
-      console.log(state.summary);
-    }
-    if (state.topics?.length) {
-      console.log("");
-      for (const t of state.topics) {
-        const status = t.status ? ` [${t.status}]` : "";
-        console.log(`- ${t.title}${status}`);
-        if (t.progress) console.log(`  进展: ${t.progress}`);
-        if (t.next) console.log(`  计划: ${t.next}`);
-        if (!t.progress && !t.next && t.summary) console.log(`  ${t.summary}`);
-      }
-    }
-  } catch {
-    // Fallback: print raw
-    console.log(row.state_summary);
   }
 }
 

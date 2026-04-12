@@ -15,7 +15,7 @@ import {
 } from "../database/schema.js";
 import { buildImportantContext, buildNormalContext, type SceneInfo } from "../memory/inject.js";
 import { loadPersona } from "../persona.js";
-import { buildArchiveSummaryPrompt, buildStateSummaryPrompt } from "./prompts.js";
+import { buildArchiveSummaryPrompt } from "./prompts.js";
 import { decideRoute, type RouteDecision } from "./routing.js";
 import { listCronJobs, deleteCronJob, getCronJob } from "./cron.js";
 import { createLogger } from "../logger.js";
@@ -949,8 +949,8 @@ export class Pipeline {
     // 等待上一个 session 的归档摘要完成，确保 context 注入拿到最新 summary
     await this.pendingSummary.get(chatId);
 
-    // Build normal context（全局摘要 + 最近 session summaries）
-    const normalContext = buildNormalContext(this.db, chatId);
+    // Build normal context（会话定位 + task 索引 + 最近 session summaries）
+    const normalContext = buildNormalContext(this.db, chatId, this.workingDirectory);
 
     // Create independent agent session
     const supportsSystemPrompt = this.agent.supportsSystemPrompt !== false;
@@ -1495,8 +1495,8 @@ export class Pipeline {
     // 等待上一个 session 的归档摘要完成，确保 context 注入拿到最新 summary
     await this.pendingSummary.get(chatId);
 
-    // 构建 normal 上下文（全局摘要 + 最近 session summaries）— 后续拼到首条消息前缀
-    const normalContext = buildNormalContext(this.db, chatId, beforeMsgId);
+    // 构建 normal 上下文（会话定位 + task 索引 + 最近 session summaries）— 后续拼到首条消息前缀
+    const normalContext = buildNormalContext(this.db, chatId, this.workingDirectory, beforeMsgId);
     if (normalContext) {
       this.pendingNormalContext.set(chatId, normalContext);
     }
@@ -1714,48 +1714,12 @@ export class Pipeline {
             "UPDATE sessions SET summary = ?, topics = ? WHERE id = ?",
           ).run(JSON.stringify(parsed), JSON.stringify(topicTitles), sessionId);
           this.log.info("archive summary generated", { chatId, sessionId });
-
-          await this.updateStateSummary(chatId, jsonMatch[0]);
         } else {
           this.log.warn("archive summary response has no JSON", { chatId, sessionId });
         }
       }
     } catch (err) {
       this.log.warn("failed to generate archive summary", { chatId, sessionId, error: String(err) });
-    } finally {
-      await this.agent.closeSession(session).catch(() => {});
-    }
-  }
-
-  /** 用 lite model 滚动更新全局摘要 */
-  private async updateStateSummary(chatId: string, sessionSummaryJson: string): Promise<void> {
-    const chatRow = this.db.prepare(
-      "SELECT state_summary FROM chats WHERE id = ?",
-    ).get(chatId) as { state_summary: string | null } | undefined;
-
-    const currentState = chatRow?.state_summary ?? null;
-    const prompt = buildStateSummaryPrompt(currentState, sessionSummaryJson);
-
-    let session;
-    try {
-      session = await this.agent.createSession({ modelTier: "lite" });
-    } catch (err) {
-      this.log.warn("failed to create state summary session", { chatId, error: String(err) });
-      return;
-    }
-
-    try {
-      const response = await this.agent.sendMessage(session, prompt);
-      const jsonMatch = response.text.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        this.db.prepare("UPDATE chats SET state_summary = ? WHERE id = ?")
-          .run(jsonMatch[0], chatId);
-        this.log.info("state summary updated", { chatId });
-      } else {
-        this.log.warn("state summary response has no JSON", { chatId });
-      }
-    } catch (err) {
-      this.log.warn("failed to update state summary", { chatId, error: String(err) });
     } finally {
       await this.agent.closeSession(session).catch(() => {});
     }
