@@ -1,5 +1,5 @@
 /**
- * CLI: session-summary list/get — query session summaries.
+ * CLI: sessions list/search/get — query session history.
  */
 
 import type Database from "better-sqlite3";
@@ -32,10 +32,12 @@ export function handleSession(
 
   if (sub === "list") {
     sessionList(db, args.slice(1), chatId, parseArgs);
+  } else if (sub === "search") {
+    sessionSearch(db, args.slice(1), chatId, parseArgs);
   } else if (sub === "get") {
     sessionGet(db, args.slice(1), parseArgs);
   } else {
-    console.log("Usage: niubot session-summary <list|get>");
+    console.log("Usage: niubot sessions <list|search|get>");
   }
 }
 
@@ -55,6 +57,7 @@ function sessionList(
   const limit = Number(flags["n"] ?? "10");
   const since = flags["since"];
   const before = flags["before"];
+  const offset = flags["offset"];
 
   const conditions = ["chat_id = ?", "summary IS NOT NULL"];
   const params: (string | number)[] = [chatId];
@@ -66,6 +69,14 @@ function sessionList(
   if (before) {
     conditions.push("ended_at < ?");
     params.push(before);
+  }
+  if (offset) {
+    // offset 是 session ID，找到其 ended_at 作为分页游标
+    const offsetRow = db.prepare("SELECT ended_at FROM sessions WHERE id = ?").get(offset) as { ended_at: string | null } | undefined;
+    if (offsetRow?.ended_at) {
+      conditions.push("ended_at < ?");
+      params.push(offsetRow.ended_at);
+    }
   }
 
   params.push(Math.abs(limit));
@@ -89,6 +100,75 @@ function sessionList(
   }
 }
 
+function sessionSearch(
+  db: Database.Database,
+  args: string[],
+  currentChatId: string | undefined,
+  parseArgs: (args: string[]) => { positional: string[]; flags: Record<string, string> },
+): void {
+  const { positional, flags } = parseArgs(args);
+  const query = positional[0];
+  if (!query) {
+    console.error("Usage: niubot sessions search <query> [--since <date>] [--before <date>] [-n <count>] [--offset <id>]");
+    process.exit(1);
+  }
+
+  const chatId = flags["chat-id"] ?? currentChatId;
+  if (!chatId) {
+    console.error("Error: NIUBOT_CHAT_ID not set and --chat-id not provided");
+    process.exit(1);
+  }
+
+  const limit = Number(flags["n"] ?? "5");
+  const since = flags["since"];
+  const before = flags["before"];
+  const offset = flags["offset"];
+
+  const conditions = ["chat_id = ?", "summary IS NOT NULL"];
+  const params: (string | number)[] = [chatId];
+
+  // LIKE 搜索 summary 和 topics 字段
+  const likePattern = `%${query}%`;
+  conditions.push("(summary LIKE ? OR topics LIKE ?)");
+  params.push(likePattern, likePattern);
+
+  if (since) {
+    conditions.push("ended_at >= ?");
+    params.push(since);
+  }
+  if (before) {
+    conditions.push("ended_at < ?");
+    params.push(before);
+  }
+  if (offset) {
+    const offsetRow = db.prepare("SELECT ended_at FROM sessions WHERE id = ?").get(offset) as { ended_at: string | null } | undefined;
+    if (offsetRow?.ended_at) {
+      conditions.push("ended_at < ?");
+      params.push(offsetRow.ended_at);
+    }
+  }
+
+  params.push(Math.abs(limit));
+
+  const rows = db.prepare(`
+    SELECT ${SESSION_COLUMNS}
+    FROM sessions
+    WHERE ${conditions.join(" AND ")}
+    ORDER BY ended_at DESC
+    LIMIT ?
+  `).all(...params) as SessionRow[];
+
+  if (rows.length === 0) {
+    console.log("(无匹配 session)");
+    return;
+  }
+
+  for (const row of rows) {
+    printSessionBrief(row);
+    console.log("---");
+  }
+}
+
 function sessionGet(
   db: Database.Database,
   args: string[],
@@ -97,7 +177,7 @@ function sessionGet(
   const { positional } = parseArgs(args);
   const idArg = positional[0];
   if (!idArg) {
-    console.error("Usage: niubot session-summary get <id>");
+    console.error("Usage: niubot sessions get <id>");
     process.exit(1);
   }
 
@@ -130,7 +210,7 @@ interface TopicDetail {
   open_items?: string[];
 }
 
-/** list 用：summary + 话题标题 */
+/** list/search 用：summary + tags + 未完成项 */
 function printSessionBrief(row: SessionRow): void {
   printMeta(row);
 
@@ -144,11 +224,15 @@ function printSessionBrief(row: SessionRow): void {
       summary?: string;
       details?: string;
       open?: string;
+      tags?: string[];
       topics?: (string | TopicDetail)[];
     };
 
     if (parsed.summary) {
       console.log(`  ${parsed.summary}`);
+    }
+    if (parsed.tags?.length) {
+      console.log(`  标签：${parsed.tags.join("、")}`);
     }
     // 新格式（平铺）：显示 open
     if (parsed.open) {
@@ -178,6 +262,7 @@ function printSessionFull(row: SessionRow): void {
       summary?: string;
       details?: string;
       open?: string;
+      tags?: string[];
       topics?: (string | TopicDetail)[];
       decisions?: string[];
       open_items?: string[];
@@ -185,6 +270,9 @@ function printSessionFull(row: SessionRow): void {
 
     if (parsed.summary) {
       console.log(`  ${parsed.summary}`);
+    }
+    if (parsed.tags?.length) {
+      console.log(`  标签：${parsed.tags.join("、")}`);
     }
 
     // 新格式（平铺）

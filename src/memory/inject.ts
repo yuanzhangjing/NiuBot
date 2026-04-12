@@ -14,6 +14,23 @@ const CONTINUATION_TAIL_COUNT = 10;
 /** 续接上下文：每条消息最大长度 */
 const CONTINUATION_MSG_MAX_LEN = 200;
 
+/** 新 session 首条消息：引导 agent 按需检索历史上下文 */
+const NEW_SESSION_SEARCH_REMINDER =
+`<system-reminder>
+这是一个全新的对话 session。你当前的上下文有限，仅包含活跃任务列表和最近一次会话摘要。
+
+如果用户的消息涉及之前讨论过的内容、历史决策、或你不确定的背景信息，请先使用工具检索再回答，不要凭记忆猜测。
+
+可用的检索工具：
+- \`niubot sessions list [--since <date>]\` — 查看历史会话列表
+- \`niubot sessions search <query>\` — 按关键词搜索历史会话
+- \`niubot messages search <query> [-C <n>]\` — 搜索历史消息（支持上下文）
+- \`niubot task list\` — 查看任务列表及状态
+- 读取 tasks/<name>/README.md — 查看具体任务详情
+
+不需要每次都检索。如果用户的意图清晰且不依赖历史上下文（如简单问答、新话题），直接回答即可。
+</system-reminder>`;
+
 // ── Important context (不能被 compact 丢失) ──────────────────
 
 export interface SceneInfo {
@@ -99,16 +116,16 @@ export function buildNormalContext(
   const taskBriefs = buildTaskIndex(workingDirectory);
   if (taskBriefs.length > 0) {
     const lines = ["[活跃任务]", ...taskBriefs];
-    parts.push(`<global-state>\n${lines.join("\n")}\n</global-state>`);
+    parts.push(`<active-tasks>\n${lines.join("\n")}\n</active-tasks>`);
   }
 
-  // 2. 最近一个归档 session 的摘要（短期记忆）— 中观脉络
+  // 2. 最近一个归档 session 的摘要（短期记忆）— 只取 summary + open，精炼续接
   const recentSessions = getRecentArchivedSessions(db, chatId, RECENT_SESSION_SUMMARY_COUNT);
   if (recentSessions.length > 0) {
     const s = recentSessions[0];
     const header = formatSessionHeader(s);
-    const block = formatSessionExpanded(header, s.parsed);
-    parts.push(`<recent-session>\n${block}\n</recent-session>`);
+    const block = formatSessionBrief(header, s.parsed);
+    parts.push(`<recent-sessions>\n${block}\n</recent-sessions>`);
   }
 
   // 3. 续接上下文：最近对话尾部消息 — 最微观，紧接用户新消息
@@ -116,6 +133,9 @@ export function buildNormalContext(
   if (continuation) {
     parts.push(continuation);
   }
+
+  // 4. 新 session 引导检索提示
+  parts.push(NEW_SESSION_SEARCH_REMINDER);
 
   return parts.join("\n\n");
 }
@@ -164,41 +184,12 @@ function formatSessionHeader(s: ArchivedSessionInfo): string {
   return `[${shortId}] ${start} ~ ${endDisplay}${meta}`;
 }
 
-/** 格式化最近一个 session 的摘要 */
-function formatSessionExpanded(header: string, parsed: ParsedSessionSummary): string {
+/** 注入用：只取 summary + open，精炼续接 */
+function formatSessionBrief(header: string, parsed: ParsedSessionSummary): string {
   const lines: string[] = [];
   lines.push(`- ${header}`);
-  lines.push(`  [总结] ${parsed.summary ?? "(无摘要)"}`);
-
-  // 新格式（平铺）：details + open
-  if (parsed.details) lines.push(`  ${parsed.details}`);
+  lines.push(`  ${parsed.summary ?? "(无摘要)"}`);
   if (parsed.open) lines.push(`  [未完成] ${parsed.open}`);
-
-  // 兼容旧格式（topics）
-  if (!parsed.details && parsed.topics?.length) {
-    for (const t of parsed.topics) {
-      if (typeof t === "string") {
-        lines.push(`  **${t}**`);
-        continue;
-      }
-      lines.push(`  **${t.title}**`);
-      if (t.summary) lines.push(`  - ${t.summary}`);
-      if (t.open) lines.push(`  - 未完成: ${t.open}`);
-      if (t.decisions?.length) {
-        for (const d of t.decisions) lines.push(`  - 决策: ${d}`);
-      }
-      if (t.open_items?.length) {
-        for (const o of t.open_items) lines.push(`  - 待办: ${o}`);
-      }
-    }
-  }
-  if (!parsed.details && parsed.decisions?.length) {
-    for (const d of parsed.decisions) lines.push(`  - 决策: ${d}`);
-  }
-  if (!parsed.details && parsed.open_items?.length) {
-    for (const o of parsed.open_items) lines.push(`  - 待办: ${o}`);
-  }
-
   return lines.join("\n");
 }
 

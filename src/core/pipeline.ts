@@ -1707,12 +1707,15 @@ export class Pipeline {
         const jsonMatch = text.match(/\{[\s\S]*\}/);
         if (jsonMatch) {
           const parsed = JSON.parse(jsonMatch[0]);
+          // topics 列存放搜索用关键词：旧格式的 topic titles + 新格式的 tags
           const topicTitles = Array.isArray(parsed.topics)
             ? parsed.topics.map((t: any) => typeof t === "string" ? t : t.title).filter(Boolean)
             : [];
+          const tags = Array.isArray(parsed.tags) ? parsed.tags.filter(Boolean) : [];
+          const searchTerms = [...new Set([...topicTitles, ...tags])];
           this.db.prepare(
             "UPDATE sessions SET summary = ?, topics = ? WHERE id = ?",
-          ).run(JSON.stringify(parsed), JSON.stringify(topicTitles), sessionId);
+          ).run(JSON.stringify(parsed), JSON.stringify(searchTerms), sessionId);
           this.log.info("archive summary generated", { chatId, sessionId });
         } else {
           this.log.warn("archive summary response has no JSON", { chatId, sessionId });

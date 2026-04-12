@@ -69,13 +69,14 @@ Options:
 - `--user-id <id>` / `--content-type <t>` / `--chat-id <id>` — filters
 - Search-only: `-C <count>` (context), `--all` (all chats), `--chat-type p2p|group`
 
-### Session summary
-Structured summary auto-generated when a session is archived. Each summary contains a brief overview, details, and open items. `list` shows brief overview; `get` expands full details.
+### Sessions
+Structured summary auto-generated when a session is archived. Each summary contains brief overview, details, open items, and tags. `list` shows brief overview; `search` finds by keyword; `get` expands full details.
 
 | Action | Command |
 |--------|---------|
-| List sessions | `niubot session-summary list [--since <date>] [--before <date>] [-n <count>]` |
-| Get session | `niubot session-summary get <id>` |
+| List sessions | `niubot sessions list [--since <date>] [--before <date>] [-n <count>] [--offset <id>]` |
+| Search sessions | `niubot sessions search <query> [--since <date>] [--before <date>] [-n <count>] [--offset <id>]` |
+| Get session | `niubot sessions get <id>` |
 
 ### Contacts
 Basic info about users and chats (name, platform, type, etc.). Use when you need to look up who a user is, check chat details, or set display names.

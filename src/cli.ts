@@ -153,7 +153,7 @@ async function main(): Promise<void> {
     case "task":
       handleTask(args.slice(1), WORK_DIR, CHAT_ID, CHAT_TYPE, USER_ID, parseArgs);
       break;
-    case "session-summary":
+    case "sessions":
       handleSession(openDb(), args.slice(1), CHAT_ID, parseArgs);
       break;
     case "restart":
@@ -389,6 +389,7 @@ Usage: niubot <command> <subcommand> [options]
 Commands:
   user-memory   add|list|get|update|del     Manage user memories
   messages      list|search                 Query message history
+  sessions      list|search|get             Query session history
   contacts      list-users|list-chats|get-user|get-chat|set-name
   send          <text>                      Send message via IPC
   send-file     <file-path>                 Send file via IPC
