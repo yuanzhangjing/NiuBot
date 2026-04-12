@@ -7,8 +7,10 @@ import { formatShortLabel, formatSenderLabel } from "../database/schema.js";
 import { loadStaticContextTemplate } from "../static-context.js";
 import { utcToLocalDateTime } from "../tz.js";
 
-/** 冷启动注入最近 session summary 的个数 */
-const RECENT_SESSION_SUMMARY_COUNT = 1;
+/** 冷启动注入最近 session 的时间窗口（小时） */
+const RECENT_SESSION_HOURS = 24;
+/** 冷启动注入最近 session 的最大条数 */
+const RECENT_SESSION_MAX_COUNT = 10;
 /** 续接上下文：注入该 chat 最近消息条数 */
 const CONTINUATION_TAIL_COUNT = 10;
 /** 续接上下文：每条消息最大长度 */
@@ -119,13 +121,16 @@ export function buildNormalContext(
     parts.push(`<active-tasks>\n${lines.join("\n")}\n</active-tasks>`);
   }
 
-  // 2. 最近一个归档 session 的摘要（短期记忆）— 只取 summary + open，精炼续接
-  const recentSessions = getRecentArchivedSessions(db, chatId, RECENT_SESSION_SUMMARY_COUNT);
+  // 2. 最近归档 session 的摘要（短期记忆）— 最近一条完整，其余精简
+  const recentSessions = getRecentArchivedSessions(db, chatId, RECENT_SESSION_HOURS, RECENT_SESSION_MAX_COUNT);
   if (recentSessions.length > 0) {
-    const s = recentSessions[0];
-    const header = formatSessionHeader(s);
-    const block = formatSessionBrief(header, s.parsed);
-    parts.push(`<recent-sessions>\n${block}\n</recent-sessions>`);
+    const blocks = recentSessions.map((s, i) => {
+      const header = formatSessionHeader(s);
+      return i === 0
+        ? formatSessionBrief(header, s.parsed)
+        : formatSessionMeta(header, s.parsed);
+    });
+    parts.push(`<recent-sessions>\n${blocks.join("\n")}\n</recent-sessions>`);
   }
 
   // 3. 续接上下文：最近对话尾部消息 — 最微观，紧接用户新消息
@@ -184,13 +189,19 @@ function formatSessionHeader(s: ArchivedSessionInfo): string {
   return `[${shortId}] ${start} ~ ${endDisplay}${meta}`;
 }
 
-/** 注入用：只取 summary + open，精炼续接 */
+/** 注入用（完整）：summary + details + open，用于最近一条 session */
 function formatSessionBrief(header: string, parsed: ParsedSessionSummary): string {
   const lines: string[] = [];
   lines.push(`- ${header}`);
   lines.push(`  ${parsed.summary ?? "(无摘要)"}`);
+  if (parsed.details) lines.push(`  ${parsed.details}`);
   if (parsed.open) lines.push(`  [未完成] ${parsed.open}`);
   return lines.join("\n");
+}
+
+/** 注入用（精简）：仅 meta + summary，用于较早的 session */
+function formatSessionMeta(header: string, parsed: ParsedSessionSummary): string {
+  return `- ${header}\n  ${parsed.summary ?? "(无摘要)"}`;
 }
 
 interface ArchivedSessionInfo {
@@ -206,15 +217,18 @@ interface ArchivedSessionInfo {
 function getRecentArchivedSessions(
   db: Database.Database,
   chatId: string,
-  limit: number,
+  hours: number,
+  maxCount: number,
 ): ArchivedSessionInfo[] {
+  const since = new Date(Date.now() - hours * 3600_000).toISOString();
   const rows = db.prepare(`
     SELECT id, summary, started_at, ended_at, start_msg_id, end_msg_id
     FROM sessions
     WHERE chat_id = ? AND status = 'archived' AND summary IS NOT NULL AND source = 'user'
+      AND ended_at >= ?
     ORDER BY ended_at DESC
     LIMIT ?
-  `).all(chatId, limit) as Array<{
+  `).all(chatId, since, maxCount) as Array<{
     id: string;
     summary: string;
     started_at: string;
@@ -327,7 +341,7 @@ function buildTaskIndex(workingDirectory: string): string[] {
 
     return active.map((t) => {
       const desc = t.description
-        ? ` — ${t.description.length > 60 ? t.description.slice(0, 60) + "…" : t.description}`
+        ? ` — ${t.description.length > 200 ? t.description.slice(0, 200) + "…" : t.description}`
         : "";
       return `- ${t.name} (${t.path})${desc}`;
     });
