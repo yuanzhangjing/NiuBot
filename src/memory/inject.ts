@@ -25,8 +25,8 @@ const NEW_SESSION_SEARCH_REMINDER =
 - \`niubot sessions list [--since <date>]\` — 查看历史会话列表
 - \`niubot sessions search <query>\` — 按关键词搜索历史会话
 - \`niubot messages search <query> [-C <n>]\` — 搜索历史消息（支持上下文）
-- \`niubot task list\` — 查看任务列表及状态
-- 读取 tasks/<name>/README.md — 查看具体任务详情
+- \`niubot task list\` — 查看全部任务（含 inactive），活跃任务已在上方注入
+- 读取 <path>/README.md — 查看具体任务进展（path 见活跃任务列表）
 
 不需要每次都检索。如果用户的意图清晰且不依赖历史上下文（如简单问答、新话题），直接回答即可。
 </system-reminder>`;
@@ -329,7 +329,7 @@ function buildTaskIndex(workingDirectory: string): string[] {
       const desc = t.description
         ? ` — ${t.description.length > 60 ? t.description.slice(0, 60) + "…" : t.description}`
         : "";
-      return `- ${t.name}${desc}`;
+      return `- ${t.name} (${t.path})${desc}`;
     });
   } catch {
     return [];
