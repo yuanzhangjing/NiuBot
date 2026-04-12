@@ -8,7 +8,7 @@ import { loadStaticContextTemplate } from "../static-context.js";
 import { utcToLocalDateTime } from "../tz.js";
 
 /** 冷启动注入最近 session 的时间窗口（小时） */
-const RECENT_SESSION_HOURS = 24;
+const RECENT_SESSION_HOURS = 168;
 /** 冷启动注入最近 session 的最大条数 */
 const RECENT_SESSION_MAX_COUNT = 10;
 /** 续接上下文：注入该 chat 最近消息条数 */
