@@ -4,11 +4,13 @@ import {
   getConfiguredBackend,
   getDefaultLiteModel,
   loadConfig,
-  type AgentBackendType,
+  NIUBOT_HOME,
+  BUILTIN_BACKENDS,
+  type NiuBotConfig,
+  type CustomBackendDef,
 } from "./config.js";
-import { ClaudeCliBackend } from "./agent/claude-cli/backend.js";
-import { CodexCliBackend } from "./agent/codex/backend.js";
 import type { AgentBackend } from "./agent/types.js";
+import type { CliAgentBackend } from "./agent/cli-base.js";
 import { createBotInstance, type BotInstance } from "./bot-instance.js";
 import { createLogger, setLogLevel } from "./logger.js";
 import { prependNiubotBinToPath } from "./niubot-cli.js";
@@ -16,6 +18,67 @@ import { prependNiubotBinToPath } from "./niubot-cli.js";
 const log = createLogger("main");
 
 const VALID_LOG_LEVELS = new Set(["debug", "info", "warn", "error"]);
+
+// ── 内置 backend 注册表 ─────────────────────────────────
+
+/** 内置 backend 的模块路径（相对于编译后的 dist/） */
+const BUILTIN_BACKEND_PATHS: Record<string, () => Promise<{ default: new (options: Record<string, unknown>) => CliAgentBackend }>> = {
+  claude: () => import("./backends/claude.js"),
+  codex: () => import("./backends/codex.js"),
+};
+
+// ── 插件加载 ────────────────────────────────────────────
+
+/** 已加载的 backend class 缓存 */
+const backendClassCache = new Map<string, new (options: Record<string, unknown>) => CliAgentBackend>();
+
+/** 校验插件类是否实现了必要方法 */
+function validatePluginClass(name: string, cls: unknown): void {
+  if (typeof cls !== "function") {
+    throw new Error(`Backend plugin '${name}': default export is not a class`);
+  }
+  const proto = (cls as { prototype?: Record<string, unknown> }).prototype;
+  const required = ["command", "checkAvailable", "buildSession", "buildArgs", "parseOutput", "updateSession"];
+  const missing = required.filter((m) => typeof proto?.[m] !== "function");
+  if (missing.length > 0) {
+    throw new Error(`Backend plugin '${name}': missing required methods: ${missing.join(", ")}`);
+  }
+}
+
+/** 加载 backend class（内置或自定义插件） */
+async function loadBackendClass(
+  type: string,
+  customBackends: Record<string, CustomBackendDef>,
+): Promise<new (options: Record<string, unknown>) => CliAgentBackend> {
+  const cached = backendClassCache.get(type);
+  if (cached) return cached;
+
+  let BackendClass: new (options: Record<string, unknown>) => CliAgentBackend;
+
+  if (type in BUILTIN_BACKEND_PATHS) {
+    // 内置 backend
+    const mod = await BUILTIN_BACKEND_PATHS[type]();
+    BackendClass = mod.default;
+  } else if (type in customBackends) {
+    // 自定义插件
+    const def = customBackends[type];
+    const pluginPath = resolve(NIUBOT_HOME, def.plugin);
+    log.info("loading custom backend plugin", { name: type, path: pluginPath });
+    const mod = await import(pluginPath);
+    BackendClass = mod.default;
+    validatePluginClass(type, BackendClass);
+  } else {
+    throw new Error(
+      `Unknown backend: "${type}". Built-in: ${[...BUILTIN_BACKENDS].join(", ")}. ` +
+      `Custom backends must be declared in config.yaml 'backends' section.`,
+    );
+  }
+
+  backendClassCache.set(type, BackendClass);
+  return BackendClass;
+}
+
+// ── Main ────────────────────────────────────────────────
 
 async function main(): Promise<void> {
   // 日志级别
@@ -33,29 +96,28 @@ async function main(): Promise<void> {
     backend: config.defaultConfig.backend,
     botCount: config.bots.length,
     bots: config.bots.map((b) => b.name).join(", "),
+    customBackends: Object.keys(config.backends).length > 0
+      ? Object.keys(config.backends).join(", ")
+      : undefined,
   });
 
   // 2. 创建 agent backend（per-bot，相同 backend type 共享实例）
-  const backends = new Map<AgentBackendType, AgentBackend>();
-  const startedBackends = new Set<AgentBackendType>();
+  const backends = new Map<string, AgentBackend>();
 
-  function createBackend(type: AgentBackendType): AgentBackend {
-    switch (type) {
-      case "claude":
-        return new ClaudeCliBackend("bypassPermissions", getDefaultLiteModel(config, type));
-      case "codex":
-        return new CodexCliBackend("danger-full-access", getDefaultLiteModel(config, type));
-    }
+  async function createBackend(type: string): Promise<AgentBackend> {
+    const BackendClass = await loadBackendClass(type, config.backends);
+    const liteModel = getDefaultLiteModel(config, type);
+    const customOptions = config.backends[type]?.options ?? {};
+    return new BackendClass({ liteModel, ...customOptions });
   }
 
   /** 获取或创建 backend，确保已 start */
-  async function getOrCreateBackend(type: AgentBackendType): Promise<AgentBackend> {
+  async function getOrCreateBackend(type: string): Promise<AgentBackend> {
     let backend = backends.get(type);
     if (!backend) {
-      backend = createBackend(type);
+      backend = await createBackend(type);
       backends.set(type, backend);
       await backend.start();
-      startedBackends.add(type);
       log.info("backend started (lazy)", { type });
     }
     return backend;
@@ -105,10 +167,9 @@ async function main(): Promise<void> {
   log.info("NiuBot is running", { activeBots: bots.length });
 
   // 写 PID 文件，供 restart.sh / start.sh 精确杀进程
-  const niubotHome = process.env["NIUBOT_HOME"] ?? resolve(process.env["HOME"] ?? "", ".niubot");
-  const pidFile = resolve(niubotHome, "niubot.pid");
+  const pidFile = resolve(NIUBOT_HOME, "niubot.pid");
   try {
-    mkdirSync(niubotHome, { recursive: true });
+    mkdirSync(NIUBOT_HOME, { recursive: true });
     writeFileSync(pidFile, String(process.pid));
     log.info("PID file written", { pidFile, pid: process.pid });
   } catch (e) {
@@ -172,8 +233,21 @@ async function main(): Promise<void> {
     process.exit(0);
   };
 
-  process.on("SIGINT", () => void shutdown());
-  process.on("SIGTERM", () => void shutdown());
+  for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+    process.on(sig, () => {
+      log.info("received signal", { signal: sig, pid: process.pid, ppid: process.ppid });
+      void shutdown();
+    });
+  }
+
+  process.on("uncaughtException", (err) => {
+    log.error("uncaught exception", { error: String(err), stack: err.stack });
+    void shutdown();
+  });
+
+  process.on("unhandledRejection", (reason) => {
+    log.error("unhandled rejection", { reason: String(reason) });
+  });
 }
 
 main().catch((err) => {

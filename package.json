@@ -4,12 +4,23 @@
   "description": "NiuBot Engine — AI Persona Runtime powering autonomous digital coworkers with memory and personality",
   "type": "module",
   "main": "dist/index.js",
-  "bin": {
-    "niubot": "dist/cli.js"
+  "exports": {
+    ".": "./dist/index.js",
+    "./plugin": "./dist/exports.js"
   },
+  "bin": {
+    "niubot": "dist/user-cli.js"
+  },
+  "files": [
+    "dist",
+    "bin",
+    "scripts",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "dev": "tsx src/index.ts",
-    "build": "tsc && chmod +x dist/cli.js",
+    "build": "tsc && chmod +x dist/cli.js dist/user-cli.js",
     "start": "node dist/index.js",
     "test": "vitest run",
     "test:watch": "vitest"

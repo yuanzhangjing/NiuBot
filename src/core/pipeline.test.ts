@@ -165,7 +165,6 @@ describe("Pipeline.recover", () => {
       dir,
       path.join(dir, "niubot.db"),
       0,
-      0,
       "claude",
     );
 
@@ -209,7 +208,6 @@ describe("Pipeline.recover", () => {
       createBotIdentity(),
       dir,
       path.join(dir, "niubot.db"),
-      0,
       0,
       "claude",
     );
@@ -255,7 +253,6 @@ describe("Pipeline.recover", () => {
       dir,
       path.join(dir, "niubot.db"),
       0,
-      0,
       "claude",
     );
 
@@ -279,7 +276,6 @@ describe("Pipeline.recover", () => {
       createBotIdentity(),
       dir,
       path.join(dir, "niubot.db"),
-      0,
       0,
       "codex",
     );
@@ -306,7 +302,6 @@ describe("Pipeline.recover", () => {
       dir,
       path.join(dir, "niubot.db"),
       0,
-      0,
       "codex",
     );
 
@@ -328,7 +323,6 @@ describe("Pipeline.recover", () => {
       createBotIdentity(),
       dir,
       path.join(dir, "niubot.db"),
-      0,
       0,
       "codex",
     );
@@ -356,7 +350,6 @@ describe("Pipeline.recover", () => {
       createBotIdentity(),
       dir,
       path.join(dir, "niubot.db"),
-      0,
       0,
       "codex",
     );
@@ -399,7 +392,6 @@ describe("Pipeline.recover", () => {
       createBotIdentity(),
       dir,
       path.join(dir, "niubot.db"),
-      0,
       0,
       "codex",
     );
@@ -457,7 +449,6 @@ describe("Pipeline.recover", () => {
       dir,
       path.join(dir, "niubot.db"),
       0,
-      0,
       "codex",
     );
     await pipeline.start();
@@ -509,7 +500,6 @@ describe("Pipeline.recover", () => {
       dir,
       path.join(dir, "niubot.db"),
       0,
-      0,
       "codex",
     );
 
@@ -538,7 +528,6 @@ describe("Pipeline.recover", () => {
       createBotIdentity(),
       dir,
       path.join(dir, "niubot.db"),
-      0,
       0,
       "codex",
     );

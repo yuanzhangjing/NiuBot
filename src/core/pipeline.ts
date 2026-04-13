@@ -6,7 +6,7 @@ import type Database from "better-sqlite3";
 import type { PlatformAdapter, NormalizedMessage } from "../im/types.js";
 import { escapeYamlContent, renderMessageNodes } from "../im/render.js";
 import type { AgentBackend, AgentSession } from "../agent/types.js";
-import { AGENT_BACKEND_DISPLAY, normalizeBackend, type AgentBackendType, VALID_BACKENDS } from "../config.js";
+import { BUILTIN_BACKEND_LIST, BUILTIN_BACKENDS, normalizeBackend, type AgentBackendType } from "../config.js";
 import { MessageQueue } from "./queue.js";
 import {
   ensureUser, ensureChat, storeMessage, updateChatName,
@@ -1128,7 +1128,7 @@ export class Pipeline {
     if (args.length === 0) {
       // 显示当前 backend
       this.replyText(chatId, platformChatId, msgId,
-        `当前 Agent: **${displayBackendType(this.backendType)}**\n可选: ${AGENT_BACKEND_DISPLAY.join(", ")}`);
+        `当前 Agent: **${displayBackendType(this.backendType)}**\n可选: ${BUILTIN_BACKEND_LIST.join(", ")}`);
       return;
     }
 
@@ -1139,9 +1139,9 @@ export class Pipeline {
       target = undefined;
     }
 
-    if (!target || !VALID_BACKENDS.has(target)) {
+    if (!target || !(BUILTIN_BACKENDS as Set<string>).has(target)) {
       this.replyText(chatId, platformChatId, msgId,
-        `无效的 backend: "${args[0]}"\n可选: ${AGENT_BACKEND_DISPLAY.join(", ")}`);
+        `无效的 backend: "${args[0]}"\n可选: ${BUILTIN_BACKEND_LIST.join(", ")}`);
       return;
     }
 

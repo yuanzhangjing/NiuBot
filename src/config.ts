@@ -23,12 +23,21 @@ export const AGENT_REGISTRY = {
   },
 } as const;
 
-/** 支持的 agent backend */
-export type AgentBackendType = keyof typeof AGENT_REGISTRY;
+/** 内置 agent backend 类型 */
+export type BuiltinBackendType = keyof typeof AGENT_REGISTRY;
+/** 任意 backend 类型（内置 + 自定义插件） */
+export type AgentBackendType = string;
+
+/** 自定义 backend 插件配置 */
+export interface CustomBackendDef {
+  plugin: string;
+  liteModel?: string;
+  options?: Record<string, unknown>;
+}
 
 export interface DefaultConfig {
   backend: AgentBackendType;
-  liteModel: Record<AgentBackendType, string>;
+  liteModel: Record<string, string>;
 }
 
 /** 单个 Bot 的配置 */
@@ -53,51 +62,52 @@ export interface BotConfig {
 export interface NiuBotConfig {
   bots: BotConfig[];
   defaultConfig: DefaultConfig;
+  /** 自定义 backend 插件注册 */
+  backends: Record<string, CustomBackendDef>;
   queue: {
     /** 消息缓冲合并窗口（ms），默认 1500 */
     bufferMs: number;
   };
 }
 
-export const VALID_BACKENDS = new Set<AgentBackendType>(Object.keys(AGENT_REGISTRY) as AgentBackendType[]);
-export const AGENT_BACKEND_DISPLAY = Object.keys(AGENT_REGISTRY) as AgentBackendType[];
+export const BUILTIN_BACKENDS = new Set<BuiltinBackendType>(Object.keys(AGENT_REGISTRY) as BuiltinBackendType[]);
+export const BUILTIN_BACKEND_LIST = Object.keys(AGENT_REGISTRY) as BuiltinBackendType[];
 
-const BACKEND_ALIAS_MAP = new Map<string, AgentBackendType>(
+const BACKEND_ALIAS_MAP = new Map<string, BuiltinBackendType>(
   Object.entries(AGENT_REGISTRY).flatMap(([backend, meta]) =>
-    meta.aliases.map((alias) => [alias, backend as AgentBackendType] as const),
+    meta.aliases.map((alias) => [alias, backend as BuiltinBackendType] as const),
   ),
 );
 
 const DEFAULTS = {
   defaultConfig: {
-    backend: "claude" as AgentBackendType,
+    backend: "claude" as BuiltinBackendType,
     liteModel: Object.fromEntries(
       Object.entries(AGENT_REGISTRY).map(([backend, meta]) => [backend, meta.defaultLiteModel]),
-    ) as Record<AgentBackendType, string>,
+    ) as Record<string, string>,
   },
   queue: {
     bufferMs: 1500,
   },
 };
 
-export function normalizeBackend(raw: string | undefined, fieldName = "backend"): AgentBackendType | undefined {
+/** 标准化 backend 名称：内置别名映射，自定义名称原样返回 */
+export function normalizeBackend(raw: string | undefined): string | undefined {
   if (!raw) return undefined;
-  const normalized = BACKEND_ALIAS_MAP.get(raw.toLowerCase());
-  if (!normalized) {
-    throw new Error(`Invalid ${fieldName}: "${raw}". Valid options: ${[...VALID_BACKENDS].join(", ")}`);
-  }
-  return normalized;
+  // 内置 backend 支持别名（如 "claude-code" → "claude"）
+  return BACKEND_ALIAS_MAP.get(raw.toLowerCase()) ?? raw;
 }
 
-export function getDefaultLiteModel(config: NiuBotConfig, backend: AgentBackendType): string {
-  return config.defaultConfig.liteModel[backend];
+export function getDefaultLiteModel(config: NiuBotConfig, backend: string): string | undefined {
+  return config.defaultConfig.liteModel[backend]
+    ?? config.backends[backend]?.liteModel;
 }
 
-export function getConfiguredBackend(config: NiuBotConfig, bot: BotConfig): AgentBackendType {
+export function getConfiguredBackend(config: NiuBotConfig, bot: BotConfig): string {
   return bot.backend ?? config.defaultConfig.backend;
 }
 
-export function getBotLiteModel(config: NiuBotConfig, bot: BotConfig, backend: AgentBackendType): string {
+export function getBotLiteModel(config: NiuBotConfig, bot: BotConfig, backend: string): string | undefined {
   return bot.liteModel ?? getDefaultLiteModel(config, backend);
 }
 
@@ -172,9 +182,26 @@ export function loadConfig(configPath?: string): NiuBotConfig {
     }];
   }
 
+  // 4. 解析自定义 backends
+  const backends: Record<string, CustomBackendDef> = {};
+  const backendsFile = fileConfig["backends"] as Record<string, Record<string, unknown>> | undefined;
+  if (backendsFile) {
+    for (const [name, def] of Object.entries(backendsFile)) {
+      if (!def["plugin"] || typeof def["plugin"] !== "string") {
+        throw new Error(`Config error: backend '${name}' missing 'plugin' path`);
+      }
+      backends[name] = {
+        plugin: def["plugin"] as string,
+        liteModel: (def["liteModel"] as string) ?? undefined,
+        options: (def["options"] as Record<string, unknown>) ?? undefined,
+      };
+    }
+  }
+
   return {
     bots,
     defaultConfig,
+    backends,
     queue: queueConfig,
   };
 }
@@ -188,17 +215,24 @@ function parseDefaultConfig(
       ?? (defaultConfigFile["backend"] as string | undefined)
       ?? (legacyAgentFile["backend"] as string | undefined)
       ?? DEFAULTS.defaultConfig.backend,
-    "default_config.backend",
   )!;
 
   const liteModelFile = (defaultConfigFile["liteModel"] as Record<string, string> | undefined) ?? {};
-  const liteModel = {} as Record<AgentBackendType, string>;
+  const liteModel: Record<string, string> = {};
 
-  for (const backendKey of AGENT_BACKEND_DISPLAY) {
+  // 内置 backend 的 liteModel 默认值
+  for (const backendKey of BUILTIN_BACKEND_LIST) {
     liteModel[backendKey] =
       liteModelFile[backendKey]
       ?? (backendKey === backend ? process.env["NIUBOT_LITE_MODEL"] : undefined)
       ?? DEFAULTS.defaultConfig.liteModel[backendKey];
+  }
+
+  // 用户指定的其他 liteModel（自定义 backend 可能在这里设置）
+  for (const [key, val] of Object.entries(liteModelFile)) {
+    if (!(key in liteModel)) {
+      liteModel[key] = val;
+    }
   }
 
   return { backend, liteModel };
@@ -222,7 +256,7 @@ function parseBotConfig(raw: Record<string, string>): BotConfig {
     ? adminUsersRaw.map(String)
     : undefined;
 
-  const backend = normalizeBackend(raw["backend"], `bot '${name}'.backend`);
+  const backend = normalizeBackend(raw["backend"]);
 
   return {
     name,

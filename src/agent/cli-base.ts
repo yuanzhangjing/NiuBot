@@ -13,6 +13,8 @@ export interface BaseCliSession {
   workingDirectory: string;
   model?: string;
   importantContext?: string;
+  /** agent 侧的 session ID（用于 resume），由基类自动管理 */
+  agentSessionId?: string;
   extraEnv: Record<string, string>;
   cumulativeBytes: number;
   /** 累计 compact 次数 */
@@ -93,6 +95,10 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
   async createSession(config: SessionConfig): Promise<AgentSession> {
     const id = `${this.name}_${Date.now()}_${crypto.randomUUID().slice(0, 8)}`;
     const session = this.buildSession(config);
+    // 基类统一管理 agentSessionId（recover 时从 config 传入）
+    if (config.agentSessionId) {
+      session.agentSessionId = config.agentSessionId;
+    }
     this.sessions.set(id, session);
     this.log.info("session created", { sessionId: id });
     return { id };
@@ -123,6 +129,10 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
       s.cumulativeBytes += stdout.length;
 
       const parsed = this.parseOutput(stdout);
+      // 基类自动管理 agentSessionId
+      if (parsed.agentSessionId) {
+        s.agentSessionId = parsed.agentSessionId;
+      }
       this.updateSession(s, parsed);
 
       this.log.info("prompt completed", {
@@ -161,6 +171,10 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
   async closeSession(session: AgentSession): Promise<void> {
     this.sessions.delete(session.id);
     this.log.info("session closed", { sessionId: session.id });
+  }
+
+  getAgentSessionId(sessionId: string): string | undefined {
+    return this.sessions.get(sessionId)?.agentSessionId;
   }
 
   getCumulativeBytes(sessionId: string): number {
