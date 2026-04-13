@@ -44,9 +44,6 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
   private cancelledSessions = new Set<string>();
   protected log;
 
-  /** 默认超时 10 分钟 */
-  protected promptTimeoutMs = 10 * 60 * 1000;
-
   constructor(protected name: string) {
     this.log = createLogger(name);
   }
@@ -115,7 +112,6 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
     try {
       const stdout = await this.exec(this.command(), args, {
         cwd: s.workingDirectory,
-        timeout: this.promptTimeoutMs,
         env: { ...s.extraEnv, ...this.agentEnv() },
         stdin: this.buildStdin(message),
       }, agentSession.id);
@@ -149,8 +145,8 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
         compactCount: s.compactCount || undefined,
       };
     } catch (err: any) {
-      if (err.killed || this.cancelledSessions.delete(agentSession.id)) {
-        this.log.warn(err.killed ? "prompt timed out" : "prompt cancelled", { sessionId: agentSession.id });
+      if (this.cancelledSessions.delete(agentSession.id)) {
+        this.log.warn("prompt cancelled", { sessionId: agentSession.id });
         return { text: "", cancelled: true };
       }
       throw err;
@@ -186,7 +182,7 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
   protected exec(
     cmd: string,
     args: string[],
-    opts?: { cwd?: string; timeout?: number; env?: Record<string, string>; stdin?: string },
+    opts?: { cwd?: string; env?: Record<string, string>; stdin?: string },
     sessionId?: string,
   ): Promise<string> {
     return new Promise((resolve, reject) => {
@@ -203,19 +199,8 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
       child.stdout.on("data", (chunk: Buffer) => chunks.push(chunk));
       child.stderr.on("data", (chunk: Buffer) => stderrChunks.push(chunk));
 
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      if (opts?.timeout) {
-        timer = setTimeout(() => {
-          child.kill();
-          const err = new Error(`Command timed out after ${opts.timeout}ms`);
-          (err as any).killed = true;
-          reject(err);
-        }, opts.timeout);
-      }
-
       child.on("close", (code) => {
         if (sessionId) this.activeProcesses.delete(sessionId);
-        if (timer) clearTimeout(timer);
         const stdout = Buffer.concat(chunks).toString();
         const stderr = Buffer.concat(stderrChunks).toString();
         if (code !== 0) {
@@ -230,7 +215,6 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
 
       child.on("error", (err) => {
         if (sessionId) this.activeProcesses.delete(sessionId);
-        if (timer) clearTimeout(timer);
         reject(err);
       });
 
