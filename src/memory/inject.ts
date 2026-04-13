@@ -40,7 +40,8 @@ export interface SceneInfo {
   /** Bot 的 short label，如 "U2(NiuBot)" */
   botLabel?: string;
   userName?: string;
-  userId: string;
+  /** 群聊时可省略（身份信息改为消息级注入） */
+  userId?: string;
   chatId: string;
   chatType: "p2p" | "group";
   /** Chat 的 short label，如 "C1(U1(Zen))" */
@@ -74,30 +75,87 @@ export function buildImportantContext(
   sceneLines.push(`Bot：${botDisplay}（即你自己，消息历史中显示为 assistant 角色。${botDisplay} 是你的平台注册标识）`);
   const chatDisplay = scene.chatLabel ?? scene.chatId;
   sceneLines.push(`会话：${chatDisplay}（${isGroup ? "群聊" : "私聊"}）`);
-  const userDisplay = formatShortLabel(scene.userId, scene.userName);
-  if (scene.isAdmin) {
-    sceneLines.push(`用户：${userDisplay}（admin）`);
-  } else {
-    sceneLines.push(`用户：${userDisplay}`);
-  }
-  if (scene.isAdmin && scene.personaPath) {
-    sceneLines.push(`人设配置：${scene.personaPath}（管理员可要求修改）`);
+
+  if (isGroup) {
+    // 群聊：不在 session 级注入用户身份，由消息级 <current-speaker> 动态注入
+  } else if (scene.userId) {
+    // 私聊：在 session 级注入用户身份和记忆
+    const userDisplay = formatShortLabel(scene.userId, scene.userName);
+    if (scene.isAdmin) {
+      sceneLines.push(`用户：${userDisplay}（admin）`);
+    } else {
+      sceneLines.push(`用户：${userDisplay}`);
+    }
+    if (scene.isAdmin && scene.personaPath) {
+      sceneLines.push(`人设配置：${scene.personaPath}（管理员可要求修改）`);
+    }
   }
   parts.push(`[当前场景]\n${sceneLines.join("\n")}`);
 
-  // 2. User memory
-  const memories = scene.chatType === "p2p"
-    ? listUserMemory(db, scene.userId)
-    : listUserMemory(db, scene.userId, "public");
+  // 2. User memory（仅私聊注入，群聊由消息级注入）
+  if (!isGroup && scene.userId) {
+    const memories = listUserMemory(db, scene.userId);
 
-  if (memories.length > 0) {
-    const label = scene.userName ? `关于 ${scene.userName} 的记忆` : "关于用户的记忆";
-    const lines = memories.map((m) => `  #${m.id}  ${m.summary}`);
-    lines.push("用 niubot user-memory get <id> 查看详情。");
-    parts.push(`[${label}]\n${lines.join("\n")}`);
+    if (memories.length > 0) {
+      const label = scene.userName ? `关于 ${scene.userName} 的记忆` : "关于用户的记忆";
+      const lines = memories.map((m) => `  #${m.id}  ${m.summary}`);
+      lines.push("用 niubot user-memory get <id> 查看详情。");
+      parts.push(`[${label}]\n${lines.join("\n")}`);
+    }
   }
 
   return parts.join("\n\n");
+}
+
+// ── Speaker context (群聊消息级注入) ────────────────────────
+
+export interface SpeakerInfo {
+  userId: string;
+  userName?: string;
+  isAdmin?: boolean;
+}
+
+/**
+ * 构建群聊消息级 speaker 上下文。
+ * 单人消息：`<current-speaker>` 块。
+ * 多人合并消息：`<speakers>` 块，列出每个 sender。
+ */
+export function buildSpeakerContext(
+  db: Database.Database,
+  speakers: SpeakerInfo[],
+): string {
+  if (speakers.length === 0) return "";
+
+  if (speakers.length === 1) {
+    const s = speakers[0];
+    const label = formatShortLabel(s.userId, s.userName);
+    const adminTag = s.isAdmin ? "（admin）" : "";
+    const lines: string[] = [`用户：${label}${adminTag}`];
+    const memories = listUserMemory(db, s.userId, "public");
+    if (memories.length > 0) {
+      lines.push("记忆：");
+      for (const m of memories) {
+        lines.push(`  #${m.id}  ${m.summary}`);
+      }
+    }
+    return `<current-speaker>\n${lines.join("\n")}\n</current-speaker>`;
+  }
+
+  // 多人合并消息
+  const blocks: string[] = [];
+  for (const s of speakers) {
+    const label = formatShortLabel(s.userId, s.userName);
+    const adminTag = s.isAdmin ? "（admin）" : "";
+    const memLines: string[] = [];
+    const memories = listUserMemory(db, s.userId, "public");
+    for (const m of memories) {
+      memLines.push(`  #${m.id}  ${m.summary}`);
+    }
+    blocks.push(memLines.length > 0
+      ? `${label}${adminTag}：\n${memLines.join("\n")}`
+      : `${label}${adminTag}`);
+  }
+  return `<speakers>\n${blocks.join("\n")}\n</speakers>`;
 }
 
 // ── Normal context (可以接受 compact 压缩) ───────────────────
@@ -111,11 +169,12 @@ export function buildNormalContext(
   chatId: string,
   workingDirectory: string,
   beforeMsgId?: number,
+  chatType: "p2p" | "group" = "p2p",
 ): string {
   const parts: string[] = [];
 
-  // 1. 活跃任务索引（实时从 tasks/index.yaml 读取）
-  const taskBriefs = buildTaskIndex(workingDirectory);
+  // 1. 活跃任务索引（实时从 tasks/index.yaml 读取，群聊仅 public）
+  const taskBriefs = buildTaskIndex(workingDirectory, chatType);
   if (taskBriefs.length > 0) {
     const lines = ["[活跃任务]", ...taskBriefs];
     parts.push(`<active-tasks>\n${lines.join("\n")}\n</active-tasks>`);
@@ -327,8 +386,9 @@ interface TaskEntry {
 /**
  * 从 tasks/index.yaml 实时读取活跃任务列表，生成简要索引。
  * 只展示非 archived、非 inactive 的任务（名称 + 描述）。
+ * 群聊时只展示 public 任务。
  */
-function buildTaskIndex(workingDirectory: string): string[] {
+function buildTaskIndex(workingDirectory: string, chatType: "p2p" | "group" = "p2p"): string[] {
   const indexPath = path.join(workingDirectory, "tasks", "index.yaml");
   try {
     if (!fs.existsSync(indexPath)) return [];
@@ -336,7 +396,10 @@ function buildTaskIndex(workingDirectory: string): string[] {
     const parsed = yaml.parse(content) as { tasks?: TaskEntry[] } | null;
     if (!parsed?.tasks?.length) return [];
 
-    const active = parsed.tasks.filter((t) => !t.status || t.status === "active");
+    let active = parsed.tasks.filter((t) => !t.status || t.status === "active");
+    if (chatType === "group") {
+      active = active.filter((t) => t.visibility === "public");
+    }
     if (active.length === 0) return [];
 
     return active.map((t) => {

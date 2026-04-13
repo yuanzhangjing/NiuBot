@@ -13,7 +13,7 @@ import {
   getUserShortLabel, getChatShortLabel, formatSenderLabel, getMessageByPlatformId, updateMessageContent, updateMessagePlatformId,
   getUnseenMessages, markMessagesSeen,
 } from "../database/schema.js";
-import { buildImportantContext, buildNormalContext, type SceneInfo } from "../memory/inject.js";
+import { buildImportantContext, buildNormalContext, buildSpeakerContext, type SceneInfo, type SpeakerInfo } from "../memory/inject.js";
 import { loadPersona } from "../persona.js";
 import { buildArchiveSummaryPrompt } from "./prompts.js";
 import { decideRoute, type RouteDecision } from "./routing.js";
@@ -334,25 +334,25 @@ export class Pipeline {
       }
 
       // 重建 important 上下文
-      const userRow = row.user_id
+      // 群聊：只注入 bot + chat 信息，不注入用户身份
+      const isGroup = chatType === "group";
+      const userRow = (!isGroup && row.user_id)
         ? this.db.prepare("SELECT name FROM users WHERE id = ?").get(row.user_id) as { name: string | null } | undefined
         : undefined;
       const isAdmin = row.user_id ? this.adminUserIds.has(row.user_id) : false;
       const persona = this.botIdentity.personaPath ? loadPersona(this.botIdentity.personaPath) : undefined;
-      const importantContext = row.user_id
-        ? buildImportantContext(this.db, {
-            botName: this.botIdentity.name,
-            botLabel: this.botUserId ? getUserShortLabel(this.db, this.botUserId) : undefined,
-            userName: userRow?.name ?? undefined,
-            userId: row.user_id,
-            chatId: row.chat_id,
-            chatLabel: getChatShortLabel(this.db, row.chat_id),
-            chatType,
-            isAdmin,
-            personaPath: isAdmin ? this.botIdentity.personaPath : undefined,
-            personaContent: persona,
-          })
-        : undefined;
+      const importantContext = buildImportantContext(this.db, {
+        botName: this.botIdentity.name,
+        botLabel: this.botUserId ? getUserShortLabel(this.db, this.botUserId) : undefined,
+        userName: userRow?.name ?? undefined,
+        userId: isGroup ? undefined : (row.user_id ?? undefined),
+        chatId: row.chat_id,
+        chatLabel: getChatShortLabel(this.db, row.chat_id),
+        chatType,
+        isAdmin,
+        personaPath: isAdmin ? this.botIdentity.personaPath : undefined,
+        personaContent: persona,
+      });
 
       try {
         const supportsSystemPrompt = this.agent.supportsSystemPrompt !== false;
@@ -567,6 +567,7 @@ export class Pipeline {
       chatId,
       text: agentText,
       senderLabel: label,
+      senderId: userId,
       dbMsgId: incomingMsgId,
       timestamp: Date.now(),
       platformMsgId: msg.platformMsgId,
@@ -926,31 +927,30 @@ export class Pipeline {
     const chatType = (chatRow?.type ?? "p2p") as "p2p" | "group";
 
     // Build important context（场景 + 用户记忆）
-    const userRow = userId
+    const isGroup = chatType === "group";
+    const userRow = (!isGroup && userId)
       ? this.db.prepare("SELECT name FROM users WHERE id = ?").get(userId) as { name: string | null } | undefined
       : undefined;
     const isAdmin = userId ? this.adminUserIds.has(userId) : false;
     const persona = this.botIdentity.personaPath ? loadPersona(this.botIdentity.personaPath) : undefined;
-    const importantContext = userId
-      ? buildImportantContext(this.db, {
-          botName: this.botIdentity.name,
-          botLabel: this.botUserId ? getUserShortLabel(this.db, this.botUserId) : undefined,
-          userName: userRow?.name ?? undefined,
-          userId,
-          chatId,
-          chatLabel: getChatShortLabel(this.db, chatId),
-          chatType,
-          isAdmin,
-          personaPath: isAdmin ? this.botIdentity.personaPath : undefined,
-          personaContent: persona,
-        })
-      : undefined;
+    const importantContext = buildImportantContext(this.db, {
+      botName: this.botIdentity.name,
+      botLabel: this.botUserId ? getUserShortLabel(this.db, this.botUserId) : undefined,
+      userName: userRow?.name ?? undefined,
+      userId: isGroup ? undefined : userId,
+      chatId,
+      chatLabel: getChatShortLabel(this.db, chatId),
+      chatType,
+      isAdmin,
+      personaPath: isAdmin ? this.botIdentity.personaPath : undefined,
+      personaContent: persona,
+    });
 
     // 等待上一个 session 的归档摘要完成，确保 context 注入拿到最新 summary
     await this.pendingSummary.get(chatId);
 
     // Build normal context（会话定位 + task 索引 + 最近 session summaries）
-    const normalContext = buildNormalContext(this.db, chatId, this.workingDirectory);
+    const normalContext = buildNormalContext(this.db, chatId, this.workingDirectory, undefined, chatType);
 
     // Create independent agent session
     const supportsSystemPrompt = this.agent.supportsSystemPrompt !== false;
@@ -1302,10 +1302,31 @@ export class Pipeline {
         messageToSend = `${parts.join("\n\n")}\n\n${mergedText}`;
       }
 
+      // 群聊：消息级 speaker 注入（<current-speaker> / <speakers>）
+      const chatTypeRow = this.db.prepare("SELECT type FROM chats WHERE id = ?").get(chatId) as { type: string } | undefined;
+      const processChatType = (chatTypeRow?.type ?? "p2p") as "p2p" | "group";
+      if (processChatType === "group" && messages.length > 0) {
+        // 提取去重的 sender 列表
+        const senderIds = [...new Set(messages.map((m) => m.senderId).filter((id): id is string => !!id))];
+        if (senderIds.length > 0) {
+          const speakers: SpeakerInfo[] = senderIds.map((id) => {
+            const row = this.db.prepare("SELECT name FROM users WHERE id = ?").get(id) as { name: string | null } | undefined;
+            return {
+              userId: id,
+              userName: row?.name ?? undefined,
+              isAdmin: this.adminUserIds.has(id),
+            };
+          });
+          const speakerCtx = buildSpeakerContext(this.db, speakers);
+          if (speakerCtx) {
+            messageToSend = `${speakerCtx}\n\n${messageToSend}`;
+          }
+        }
+      }
+
       // Inject unseen messages（agent 没见过的消息：内置命令回复、cron 结果等）
       // 只对 p2p 生效，群聊不注入
-      const chatTypeRow = this.db.prepare("SELECT type FROM chats WHERE id = ?").get(chatId) as { type: string } | undefined;
-      if ((chatTypeRow?.type ?? "p2p") === "p2p") {
+      if (processChatType === "p2p") {
         const sessionRow = this.db.prepare("SELECT start_msg_id FROM sessions WHERE id = ?").get(chatSession.sessionId) as { start_msg_id: number | null } | undefined;
         const baseline = sessionRow?.start_msg_id ?? 0;
         // 先把走 agent 的用户消息标为已见，再查 unseen 时就不会查到它们
@@ -1472,31 +1493,31 @@ export class Pipeline {
     this.pendingRouteDecisions.delete(chatId);
 
     // 构建 important 上下文（当前场景 + 用户记忆）
-    const userRow = userId
+    // 群聊：只注入 bot + chat 信息，不注入用户身份（由消息级 speaker 注入）
+    const isGroup = chatType === "group";
+    const userRow = (!isGroup && userId)
       ? this.db.prepare("SELECT name FROM users WHERE id = ?").get(userId) as { name: string | null } | undefined
       : undefined;
     const isAdmin = userId ? this.adminUserIds.has(userId) : false;
     const persona = this.botIdentity.personaPath ? loadPersona(this.botIdentity.personaPath) : undefined;
-    const importantContext = userId
-      ? buildImportantContext(this.db, {
-          botName: this.botIdentity.name,
-          botLabel: this.botUserId ? getUserShortLabel(this.db, this.botUserId) : undefined,
-          userName: userRow?.name ?? undefined,
-          userId,
-          chatId,
-          chatLabel: getChatShortLabel(this.db, chatId),
-          chatType,
-          isAdmin,
-          personaPath: isAdmin ? this.botIdentity.personaPath : undefined,
-          personaContent: persona,
-        })
-      : undefined;
+    const importantContext = buildImportantContext(this.db, {
+      botName: this.botIdentity.name,
+      botLabel: this.botUserId ? getUserShortLabel(this.db, this.botUserId) : undefined,
+      userName: userRow?.name ?? undefined,
+      userId: isGroup ? undefined : userId,
+      chatId,
+      chatLabel: getChatShortLabel(this.db, chatId),
+      chatType,
+      isAdmin,
+      personaPath: isAdmin ? this.botIdentity.personaPath : undefined,
+      personaContent: persona,
+    });
 
     // 等待上一个 session 的归档摘要完成，确保 context 注入拿到最新 summary
     await this.pendingSummary.get(chatId);
 
     // 构建 normal 上下文（会话定位 + task 索引 + 最近 session summaries）— 后续拼到首条消息前缀
-    const normalContext = buildNormalContext(this.db, chatId, this.workingDirectory, beforeMsgId);
+    const normalContext = buildNormalContext(this.db, chatId, this.workingDirectory, beforeMsgId, chatType);
     if (normalContext) {
       this.pendingNormalContext.set(chatId, normalContext);
     }
