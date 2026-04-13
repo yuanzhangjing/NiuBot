@@ -15,6 +15,7 @@
     "dist",
     "bin",
     "scripts",
+    "INSTALL.md",
     "README.md",
     "LICENSE"
   ],
