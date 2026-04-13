@@ -72,7 +72,7 @@ export class Pipeline {
   private agent: AgentBackend;
   private backendType: AgentBackendType;
   private backendResolver?: (type: AgentBackendType) => Promise<AgentBackend>;
-  private availableBackends: string[];
+  private getAvailableBackends: () => string[];
   private queue: MessageQueue;
   private botIdentity: BotIdentity;
   private log: ReturnType<typeof createLogger>;
@@ -133,14 +133,14 @@ export class Pipeline {
     bufferMs: number,
     backendType: AgentBackendType = "claude",
     backendResolver?: (type: AgentBackendType) => Promise<AgentBackend>,
-    availableBackends?: string[],
+    getAvailableBackends?: () => string[],
   ) {
     this.db = db;
     this.im = im;
     this.agent = agent;
     this.backendType = backendType;
     this.backendResolver = backendResolver;
-    this.availableBackends = availableBackends ?? [...BUILTIN_BACKEND_LIST];
+    this.getAvailableBackends = getAvailableBackends ?? (() => [...BUILTIN_BACKEND_LIST]);
     this.botIdentity = botIdentity;
     this.workingDirectory = workingDirectory;
     this.dbPath = dbPath;
@@ -747,6 +747,11 @@ export class Pipeline {
         this.handleAgentCommand(parts.slice(1), chatId, platformChatId, msgId);
         return true;
       }
+      case "/help": {
+        this.log.info("builtin command: help", { userId });
+        this.sendHelpCard(chatId, platformChatId, msgId, isAdmin);
+        return true;
+      }
       case "/stop": {
         this.log.info("builtin command: stop", { userId, chatId });
         const dropped = this.queue.drain(chatId);
@@ -1129,27 +1134,31 @@ export class Pipeline {
    */
   private handleAgentCommand(args: string[], chatId: string, platformChatId: string, msgId?: string): void {
     if (args.length === 0) {
-      // 显示当前 backend
-      this.replyText(chatId, platformChatId, msgId,
-        `当前 Agent: **${displayBackendType(this.backendType)}**\n可选: ${this.availableBackends.join(", ")}`);
+      // 显示当前 backend（卡片）
+      const backends = this.getAvailableBackends();
+      const content = backends.map((b) =>
+        b === this.backendType ? `◉ ${b}` : `○ ${b}`,
+      ).join("\n");
+      this.sendAgentCard(chatId, platformChatId, msgId, "Agent", content);
       return;
     }
 
     const target = normalizeBackend(args[0]);
 
-    if (!target || !this.availableBackends.includes(target)) {
-      this.replyText(chatId, platformChatId, msgId,
-        `无效的 backend: "${args[0]}"\n可选: ${this.availableBackends.join(", ")}`);
+    const available = this.getAvailableBackends();
+    if (!target || !available.includes(target)) {
+      const content = `无效的 backend: \`${args[0]}\`\n\n可选: ${available.join(", ")}`;
+      this.sendAgentCard(chatId, platformChatId, msgId, "Agent", content);
       return;
     }
 
     if (target === this.backendType) {
-      this.replyText(chatId, platformChatId, msgId, `已经是 ${displayBackendType(target)}，无需切换。`);
+      this.sendAgentCard(chatId, platformChatId, msgId, "Agent", `已经是 **${displayBackendType(target)}**，无需切换。`);
       return;
     }
 
     if (!this.backendResolver) {
-      this.replyText(chatId, platformChatId, msgId, "backend resolver 未配置，无法切换。");
+      this.sendAgentCard(chatId, platformChatId, msgId, "Agent", "backend resolver 未配置，无法切换。");
       return;
     }
 
@@ -1170,14 +1179,51 @@ export class Pipeline {
 
     doSwitch()
       .then(() => {
-        this.replyText(chatId, platformChatId, msgId,
-          `已切换到 **${displayBackendType(target)}**，上下文已重置。重启后恢复为配置值。`);
+        this.sendAgentCard(chatId, platformChatId, msgId, "Agent",
+          `已切换到 **${displayBackendType(target)}**\n上下文已重置，重启后恢复为配置值。`);
         this.log.info("agent backend switched (runtime only)", { backend: target });
       })
       .catch((err) => {
         this.log.error("failed to switch agent backend", { error: String(err) });
-        this.replyText(chatId, platformChatId, msgId, `切换失败: ${String(err)}`);
+        this.sendAgentCard(chatId, platformChatId, msgId, "Agent", `切换失败: ${String(err)}`);
       });
+  }
+
+  /** 发送 Agent 命令卡片回复 */
+  private sendAgentCard(chatId: string, platformChatId: string, msgId: string | undefined, header: string, content: string): void {
+    const send = msgId
+      ? this.im.replyCard(msgId, header, content)
+      : this.im.sendCard(platformChatId, header, content);
+    send
+      .then((pmid) => { this.storeBotResponse(chatId, content, pmid); })
+      .catch(() => {});
+  }
+
+  /** 发送 /help 卡片 */
+  private sendHelpCard(chatId: string, platformChatId: string, msgId: string | undefined, isAdmin: boolean): void {
+    const lines = [
+      "`/new`　　新会话（清空当前上下文）",
+      "`/stop`　　停止正在执行的任务",
+      "`/status`　查看运行状态",
+      "`/cron`　　查看定时任务",
+      "`/help`　　显示本帮助",
+    ];
+    if (isAdmin) {
+      lines.push(
+        "",
+        "**管理员**",
+        "`/agent`　　查看/切换 Agent backend",
+        "`/restart`　重启引擎",
+        "`/<cmd>`　　执行 shell 命令",
+      );
+    }
+    const content = lines.join("\n");
+    const send = msgId
+      ? this.im.replyCard(msgId, "Help", content)
+      : this.im.sendCard(platformChatId, "Help", content);
+    send
+      .then((pmid) => { this.storeBotResponse(chatId, content, pmid); })
+      .catch(() => {});
   }
 
   /**

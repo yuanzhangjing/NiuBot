@@ -7,7 +7,6 @@ import {
   NIUBOT_HOME,
   BUILTIN_BACKEND_LIST,
   type NiuBotConfig,
-  type CustomBackendDef,
 } from "./config.js";
 import type { AgentBackend } from "./agent/types.js";
 import type { CliAgentBackend } from "./agent/cli-base.js";
@@ -45,10 +44,33 @@ function validatePluginClass(name: string, cls: unknown): void {
   }
 }
 
+/** 从 config 文件热读 backends 段，完整同步到运行时 config（增 + 删 + 改） */
+function refreshCustomBackends(config: NiuBotConfig): void {
+  try {
+    const fresh = loadConfig();
+    // 添加 / 更新
+    for (const [name, def] of Object.entries(fresh.backends)) {
+      if (!(name in config.backends)) {
+        log.info("discovered new custom backend from config", { name });
+      }
+      config.backends[name] = def;
+    }
+    // 删除已从 config 中移除的（但保留 class 缓存，避免正在使用的 backend 挂掉）
+    for (const name of Object.keys(config.backends)) {
+      if (!(name in fresh.backends)) {
+        delete config.backends[name];
+        log.info("removed custom backend no longer in config", { name });
+      }
+    }
+  } catch (err) {
+    log.warn("failed to refresh custom backends from config", { error: String(err) });
+  }
+}
+
 /** 加载 backend class（内置或自定义插件） */
 async function loadBackendClass(
   type: string,
-  customBackends: Record<string, CustomBackendDef>,
+  config: NiuBotConfig,
 ): Promise<new (options: Record<string, unknown>) => CliAgentBackend> {
   const cached = backendClassCache.get(type);
   if (cached) return cached;
@@ -59,19 +81,23 @@ async function loadBackendClass(
     // 内置 backend
     const mod = await BUILTIN_BACKEND_PATHS[type]();
     BackendClass = mod.default;
-  } else if (type in customBackends) {
-    // 自定义插件
-    const def = customBackends[type];
+  } else {
+    // 自定义插件：先查已加载的，未命中则热读 config
+    if (!(type in config.backends)) {
+      refreshCustomBackends(config);
+    }
+    const def = config.backends[type];
+    if (!def) {
+      throw new Error(
+        `Unknown backend: "${type}". Built-in: ${BUILTIN_BACKEND_LIST.join(", ")}. ` +
+        `Custom backends must be declared in config.yaml 'backends' section.`,
+      );
+    }
     const pluginPath = resolve(NIUBOT_HOME, def.plugin);
     log.info("loading custom backend plugin", { name: type, path: pluginPath });
     const mod = await import(pluginPath);
     BackendClass = mod.default;
     validatePluginClass(type, BackendClass);
-  } else {
-    throw new Error(
-      `Unknown backend: "${type}". Built-in: ${BUILTIN_BACKEND_LIST.join(", ")}. ` +
-      `Custom backends must be declared in config.yaml 'backends' section.`,
-    );
   }
 
   backendClassCache.set(type, BackendClass);
@@ -105,7 +131,7 @@ async function main(): Promise<void> {
   const backends = new Map<string, AgentBackend>();
 
   async function createBackend(type: string): Promise<AgentBackend> {
-    const BackendClass = await loadBackendClass(type, config.backends);
+    const BackendClass = await loadBackendClass(type, config);
     const liteModel = getDefaultLiteModel(config, type);
     const customOptions = config.backends[type]?.options ?? {};
     return new BackendClass({ liteModel, ...customOptions });
@@ -124,13 +150,18 @@ async function main(): Promise<void> {
   }
 
   // 3. 创建所有 bot 实例（getOrCreateBackend 确保 backend 已 start）
-  const availableBackends = [...BUILTIN_BACKEND_LIST, ...Object.keys(config.backends)];
+  /** 动态获取可用 backend 列表（含热加载的自定义插件） */
+  const getAvailableBackends = () => {
+    refreshCustomBackends(config);
+    return [...BUILTIN_BACKEND_LIST, ...Object.keys(config.backends)];
+  };
+
   const bots: BotInstance[] = [];
   for (const botConfig of config.bots) {
     try {
       const backendType = getConfiguredBackend(config, botConfig);
       const agent = await getOrCreateBackend(backendType);
-      const instance = await createBotInstance(botConfig, agent, config.queue, backendType, getOrCreateBackend, availableBackends);
+      const instance = await createBotInstance(botConfig, agent, config.queue, backendType, getOrCreateBackend, getAvailableBackends);
       bots.push(instance);
       log.info("bot backend assigned", {
         bot: botConfig.name,
