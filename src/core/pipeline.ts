@@ -448,11 +448,13 @@ export class Pipeline {
       }
     }
 
-    // Collect user info from mentions
+    // Collect user info from mentions + replace @name with @shortLabel
     if (msg.mentions) {
       for (const m of msg.mentions) {
-        if (!m.isBot && m.platformUserId && m.name) {
-          ensureUser(this.db, platform, m.platformUserId, m.name, "mention");
+        if (m.platformUserId && m.name) {
+          const mentionUserId = ensureUser(this.db, platform, m.platformUserId, m.name, m.isBot ? "bot_sender" : "mention");
+          const shortLabel = getUserShortLabel(this.db, mentionUserId);
+          msg.contentText = msg.contentText.replaceAll(`@${m.name}`, `@${shortLabel}`);
         }
       }
     }
@@ -621,11 +623,11 @@ export class Pipeline {
       platformRaw: JSON.stringify(msg.raw),
     });
 
-    // Collect mentions
+    // Collect user info from mentions + replace @name with @shortLabel
     if (msg.mentions) {
       for (const m of msg.mentions) {
-        if (!m.isBot && m.platformUserId && m.name) {
-          ensureUser(this.db, platform, m.platformUserId, m.name, "mention");
+        if (m.platformUserId && m.name) {
+          ensureUser(this.db, platform, m.platformUserId, m.name, m.isBot ? "bot_sender" : "mention");
         }
       }
     }

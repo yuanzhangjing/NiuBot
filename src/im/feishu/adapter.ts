@@ -565,13 +565,10 @@ export class FeishuAdapter implements PlatformAdapter {
     }
   }
 
-  /** Replace @mention placeholders with display names, strip @bot */
+  /** Replace @mention placeholders with display names */
   private replaceMentions(text: string, mentions: MentionInfo[]): string {
     for (const m of mentions) {
-      if (m.isBot) {
-        // Strip bot mention entirely
-        text = text.replace(m.key, "").trim();
-      } else if (m.key === "@_all" || m.platformUserId === "@_all") {
+      if (m.key === "@_all" || m.platformUserId === "@_all") {
         // @all mention → @所有人 (key is @_all, open_id may be empty)
         text = text.replace(m.key, "@所有人");
       } else {
@@ -607,11 +604,7 @@ export class FeishuAdapter implements PlatformAdapter {
               lineTexts.push("@所有人");
             } else {
               const mention = mentions.find((m) => m.platformUserId === userId);
-              if (mention?.isBot) {
-                // Skip bot mention
-              } else {
-                lineTexts.push(`@${mention?.name ?? element.user_name ?? "用户"}`);
-              }
+              lineTexts.push(`@${mention?.name ?? element.user_name ?? "用户"}`);
             }
           } else if (element.tag === "img") {
             const imageKey: string = element.image_key ?? "";
@@ -659,11 +652,7 @@ export class FeishuAdapter implements PlatformAdapter {
               lineTexts.push("@所有人");
             } else {
               const mention = mentions.find((m) => m.platformUserId === userId);
-              if (mention?.isBot) {
-                // Skip bot mention
-              } else {
-                lineTexts.push(`@${mention?.name ?? element.user_name ?? "用户"}`);
-              }
+              lineTexts.push(`@${mention?.name ?? element.user_name ?? "用户"}`);
             }
           } else if (element.tag === "img") {
             lineTexts.push("[图片]");
