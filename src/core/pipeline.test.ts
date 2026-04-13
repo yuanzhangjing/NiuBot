@@ -107,6 +107,17 @@ class DeferredAgent extends RecordingAgent {
   }
 }
 
+class ErrorAgent extends RecordingAgent {
+  constructor(private readonly error: Error & { stdout?: string }) {
+    super();
+  }
+
+  override async sendMessage(_session: AgentSession, message: string): Promise<AgentResponse> {
+    this.sendMessageCalls.push(message);
+    throw this.error;
+  }
+}
+
 function createBotIdentity(): BotIdentity {
   return {
     name: "NiuBot",
@@ -540,5 +551,43 @@ describe("Pipeline.recover", () => {
     expect(handled).toBe(true);
     expect(row.status).toBe("archived");
     expect(sentTexts).toContain("已开始新会话，当前上下文已清空。");
+  });
+
+  test("surfaces structured agent errors to the user", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const { im, sentTexts } = createRecordingImStub();
+    const err = new Error("Command failed");
+    err.stdout = [
+      JSON.stringify({
+        type: "result",
+        is_error: true,
+        result: "API Error: 500 internal server error (request_id=req_123)",
+      }),
+      "",
+    ].join("\n");
+
+    const pipeline = new Pipeline(
+      db,
+      im,
+      new ErrorAgent(err),
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "claude",
+    );
+    await pipeline.start();
+
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "hello",
+      platformMsgId: "m1",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(sentTexts).toContain("处理出错了：API Error: 500 internal server error (request_id=req_123)");
   });
 });

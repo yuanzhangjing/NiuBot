@@ -16,7 +16,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { AGENT_REGISTRY } from "./config.js";
+import { AGENT_REGISTRY, loadConfig, getConfiguredBackend, type NiuBotConfig } from "./config.js";
 
 // ── Paths ──────────────────────────────────────────────────
 
@@ -73,6 +73,18 @@ interface CheckResult {
   passed: boolean;
   label: string;
   hint?: string;
+}
+
+function checkBotCredentials(config: NiuBotConfig, issues: string[]): void {
+  for (const bot of config.bots) {
+    if (!bot.appId || !bot.appSecret) {
+      fail(`Bot '${bot.name}' credentials empty`);
+      hint("Edit ~/.niubot/config.yaml, fill in appId and appSecret");
+      issues.push("credentials");
+    } else {
+      ok(`Bot '${bot.name}' credentials present`);
+    }
+  }
 }
 
 function checkNodeVersion(): CheckResult {
@@ -174,23 +186,16 @@ function cmdInit(niubotHome: string, flags: CliFlags): void {
   if (flags.check) {
     console.log();
 
-    // Check if config exists and has credentials
+    // Validate config via loadConfig
     const configPath = path.join(niubotHome, "config.yaml");
     if (fs.existsSync(configPath)) {
-      ok(`${configPath} exists`);
-
-      // Quick credential check
-      const content = fs.readFileSync(configPath, "utf-8");
-      const hasAppId = /appId:\s*".+"/.test(content) || /appId:\s*[^"'\s]+/.test(content);
-      const hasAppSecret = /appSecret:\s*".+"/.test(content) || /appSecret:\s*[^"'\s]+/.test(content);
-      const credsEmpty = !hasAppId || !hasAppSecret || /appId:\s*""/.test(content) || /appSecret:\s*""/.test(content);
-
-      if (credsEmpty) {
-        fail("Bot credentials empty");
-        hint("Edit ~/.niubot/config.yaml, fill in appId and appSecret");
-        issues.push("Bot credentials empty");
-      } else {
-        ok("Bot credentials present");
+      try {
+        const config = loadConfig(configPath);
+        ok(`${configPath} valid`);
+        checkBotCredentials(config, issues);
+      } catch (err) {
+        fail(`${configPath} invalid: ${err instanceof Error ? err.message : err}`);
+        issues.push("Config invalid");
       }
     } else {
       fail(`${configPath} not found`);
@@ -323,37 +328,44 @@ function cmdStart(niubotHome: string, flags: CliFlags): void {
     process.exit(1);
   }
 
-  // Quick validation: try to load config
-  let configContent: string;
+  // Parse and validate config
+  let config: NiuBotConfig;
   try {
-    configContent = fs.readFileSync(configPath, "utf-8");
+    config = loadConfig(configPath);
     ok("Config valid");
   } catch (err) {
-    fail(`Config unreadable: ${err}`);
+    fail(`Config invalid: ${err instanceof Error ? err.message : err}`);
     process.exit(1);
   }
 
-  // Check credentials (simple regex, not full YAML parse to avoid importing yaml)
-  const appIdMatch = configContent.match(/appId:\s*"([^"]*)"/);
-  const appSecretMatch = configContent.match(/appSecret:\s*"([^"]*)"/);
-  if (!appIdMatch?.[1] || !appSecretMatch?.[1]) {
-    fail("Bot credentials empty");
-    hint("Edit ~/.niubot/config.yaml, fill in appId and appSecret");
-    issues.push("credentials");
-  } else {
-    ok("Bot credentials present");
-  }
+  // Check credentials
+  checkBotCredentials(config, issues);
 
-  // Check backend CLI
-  const backendMatch = configContent.match(/backend:\s*(\w+)/);
-  const backend = backendMatch?.[1] ?? "claude";
-  const backendScan = scanBackend(backend);
-  if (backendScan.available) {
-    ok(`${backend} CLI available${backendScan.version ? ` (v${backendScan.version})` : ""}`);
-  } else {
-    fail(`${backend} CLI not found`);
-    hint(`Install ${backend} CLI, or change backend in config.yaml`);
-    issues.push("backend");
+  // Check backend availability (deduplicate across bots)
+  const backendsToCheck = new Set(config.bots.map((b) => getConfiguredBackend(config, b)));
+  for (const be of backendsToCheck) {
+    const customDef = config.backends[be];
+    if (customDef) {
+      // Custom plugin backend — check plugin file exists
+      const pluginPath = path.resolve(niubotHome, customDef.plugin);
+      if (fs.existsSync(pluginPath)) {
+        ok(`${be} plugin found (${customDef.plugin})`);
+      } else {
+        fail(`${be} plugin not found: ${pluginPath}`);
+        hint(`Create the plugin file, or change backend in config.yaml`);
+        issues.push("backend");
+      }
+    } else {
+      // Built-in backend — check CLI command
+      const backendScan = scanBackend(be);
+      if (backendScan.available) {
+        ok(`${be} CLI available${backendScan.version ? ` (v${backendScan.version})` : ""}`);
+      } else {
+        fail(`${be} CLI not found`);
+        hint(`Install ${be} CLI, or change backend in config.yaml`);
+        issues.push("backend");
+      }
+    }
   }
 
   // Check for existing process
@@ -384,12 +396,12 @@ function cmdStart(niubotHome: string, flags: CliFlags): void {
     process.exit(1);
   }
 
-  // Ensure working directory exists
-  const bots = configContent.match(/name:\s*(\w+)/g);
-  const botName = bots?.[0]?.replace(/name:\s*/, "") ?? "NiuBot";
-  const workDir = path.join(niubotHome, botName, "workspace");
-  fs.mkdirSync(workDir, { recursive: true });
-  ok("Working directory exists");
+  // Ensure working directories exist
+  for (const bot of config.bots) {
+    const workDir = path.join(niubotHome, bot.name, "workspace");
+    fs.mkdirSync(workDir, { recursive: true });
+  }
+  ok("Working directories exist");
 
   // Start process
   console.log();
@@ -420,21 +432,28 @@ function cmdStart(niubotHome: string, flags: CliFlags): void {
   fs.writeFileSync(pidFile, String(child.pid));
   ok(`Process started (PID ${child.pid})`);
 
-  // Health check
-  const socketPath = path.join(niubotHome, botName, "api.sock");
-  const healthy = waitForHealth(socketPath, 15);
-  if (healthy) {
-    ok("Health check passed");
-    console.log();
+  // Health check — all bots must respond
+  const failedBots: string[] = [];
+  for (const bot of config.bots) {
+    const socketPath = path.join(niubotHome, bot.name, "api.sock");
+    if (waitForHealth(socketPath, 15)) {
+      ok(`${bot.name} health check passed`);
+    } else {
+      fail(`${bot.name} health check failed`);
+      failedBots.push(bot.name);
+    }
+  }
+
+  console.log();
+  if (failedBots.length === 0) {
     console.log("NiuBot is running.");
     console.log(`  Log: ${logFile}`);
-    console.log(`  API: ${socketPath}`);
+    for (const bot of config.bots) {
+      console.log(`  API: ${path.join(niubotHome, bot.name, "api.sock")}`);
+    }
   } else {
-    fail("Health check failed (timeout)");
     hint(`Check log: ${logFile}`);
-    console.log();
-    console.log("Process started but health check did not pass.");
-    console.log("The service may still be initializing. Check the log for details.");
+    console.log("Some bots failed health check. The service may still be initializing.");
   }
   console.log();
 }

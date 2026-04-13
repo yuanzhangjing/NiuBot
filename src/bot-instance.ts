@@ -37,6 +37,7 @@ export async function createBotInstance(
   queueConfig: { bufferMs: number },
   backendType?: AgentBackendType,
   backendResolver?: (type: AgentBackendType) => Promise<AgentBackend>,
+  availableBackends?: string[],
 ): Promise<BotInstance> {
   const log = createLogger("bot-instance", botConfig.name);
 
@@ -91,6 +92,7 @@ export async function createBotInstance(
     queueConfig.bufferMs,
     backendType,
     backendResolver,
+    availableBackends,
   );
 
   // 6. 创建 API Server

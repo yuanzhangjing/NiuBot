@@ -204,7 +204,9 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
         const stdout = Buffer.concat(chunks).toString();
         const stderr = Buffer.concat(stderrChunks).toString();
         if (code !== 0) {
-          const err = new Error(`Command failed: ${cmd} ${args.join(" ")}\n${stderr}`);
+          const details = stderr || stdout;
+          const err = new Error(`Command failed: ${cmd} ${args.join(" ")}\n${details}`);
+          (err as any).stdout = stdout;
           (err as any).stderr = stderr;
           (err as any).code = code;
           reject(err);

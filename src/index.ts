@@ -5,7 +5,7 @@ import {
   getDefaultLiteModel,
   loadConfig,
   NIUBOT_HOME,
-  BUILTIN_BACKENDS,
+  BUILTIN_BACKEND_LIST,
   type NiuBotConfig,
   type CustomBackendDef,
 } from "./config.js";
@@ -69,7 +69,7 @@ async function loadBackendClass(
     validatePluginClass(type, BackendClass);
   } else {
     throw new Error(
-      `Unknown backend: "${type}". Built-in: ${[...BUILTIN_BACKENDS].join(", ")}. ` +
+      `Unknown backend: "${type}". Built-in: ${BUILTIN_BACKEND_LIST.join(", ")}. ` +
       `Custom backends must be declared in config.yaml 'backends' section.`,
     );
   }
@@ -124,12 +124,13 @@ async function main(): Promise<void> {
   }
 
   // 3. 创建所有 bot 实例（getOrCreateBackend 确保 backend 已 start）
+  const availableBackends = [...BUILTIN_BACKEND_LIST, ...Object.keys(config.backends)];
   const bots: BotInstance[] = [];
   for (const botConfig of config.bots) {
     try {
       const backendType = getConfiguredBackend(config, botConfig);
       const agent = await getOrCreateBackend(backendType);
-      const instance = await createBotInstance(botConfig, agent, config.queue, backendType, getOrCreateBackend);
+      const instance = await createBotInstance(botConfig, agent, config.queue, backendType, getOrCreateBackend, availableBackends);
       bots.push(instance);
       log.info("bot backend assigned", {
         bot: botConfig.name,

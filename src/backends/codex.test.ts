@@ -2,11 +2,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { CodexCliBackend } from "./backend.js";
+import CodexBackend from "./codex.js";
 
 const originalHome = process.env["HOME"];
 
-describe("CodexCliBackend session metadata", () => {
+describe("CodexBackend session metadata", () => {
   afterEach(() => {
     if (originalHome === undefined) {
       delete process.env["HOME"];
@@ -56,7 +56,7 @@ describe("CodexCliBackend session metadata", () => {
       ].join("\n"),
     );
 
-    const backend = new CodexCliBackend();
+    const backend = new CodexBackend();
     const session = backend.buildSession({ workingDirectory: tempHome });
     const parsed = backend.parseOutput([
       JSON.stringify({ type: "thread.started", thread_id: threadId }),
@@ -70,6 +70,8 @@ describe("CodexCliBackend session metadata", () => {
       }),
     ].join("\n"));
 
+    // 模拟基类 sendMessage 中自动设置 agentSessionId
+    session.agentSessionId = parsed.agentSessionId;
     backend.updateSession(session, parsed);
 
     expect(parsed.model).toBe("gpt-5.4");
@@ -92,7 +94,7 @@ describe("CodexCliBackend session metadata", () => {
       ].join("\n"),
     );
 
-    const backend = new CodexCliBackend();
+    const backend = new CodexBackend();
     const session = backend.buildSession({ workingDirectory: tempHome });
     const parsed = backend.parseOutput([
       JSON.stringify({ type: "thread.started", thread_id: threadId }),
@@ -102,13 +104,14 @@ describe("CodexCliBackend session metadata", () => {
       }),
     ].join("\n"));
 
+    session.agentSessionId = parsed.agentSessionId;
     backend.updateSession(session, parsed);
 
     expect(parsed.compactCount).toBe(2);
   });
 
   it("does not fall back to cumulative turn usage when session log metadata is unavailable", () => {
-    const backend = new CodexCliBackend();
+    const backend = new CodexBackend();
 
     const parsed = backend.parseOutput([
       JSON.stringify({
@@ -125,7 +128,7 @@ describe("CodexCliBackend session metadata", () => {
   });
 
   it("requires the caller to provide the default lite model", () => {
-    const backend = new CodexCliBackend();
+    const backend = new CodexBackend();
     const session = backend.buildSession({
       workingDirectory: "/tmp",
       modelTier: "lite",
@@ -135,7 +138,7 @@ describe("CodexCliBackend session metadata", () => {
   });
 
   it("passes the explicit lite model flag for lite tier sessions", () => {
-    const backend = new CodexCliBackend("danger-full-access", "gpt-5.4-mini");
+    const backend = new CodexBackend({ sandboxMode: "danger-full-access", liteModel: "gpt-5.4-mini" });
     const session = backend.buildSession({
       workingDirectory: "/tmp/project",
       modelTier: "lite",

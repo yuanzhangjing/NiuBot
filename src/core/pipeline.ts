@@ -6,7 +6,7 @@ import type Database from "better-sqlite3";
 import type { PlatformAdapter, NormalizedMessage } from "../im/types.js";
 import { escapeYamlContent, renderMessageNodes } from "../im/render.js";
 import type { AgentBackend, AgentSession } from "../agent/types.js";
-import { BUILTIN_BACKEND_LIST, BUILTIN_BACKENDS, normalizeBackend, type AgentBackendType } from "../config.js";
+import { BUILTIN_BACKEND_LIST, normalizeBackend, type AgentBackendType } from "../config.js";
 import { MessageQueue } from "./queue.js";
 import {
   ensureUser, ensureChat, storeMessage, updateChatName,
@@ -72,6 +72,7 @@ export class Pipeline {
   private agent: AgentBackend;
   private backendType: AgentBackendType;
   private backendResolver?: (type: AgentBackendType) => Promise<AgentBackend>;
+  private availableBackends: string[];
   private queue: MessageQueue;
   private botIdentity: BotIdentity;
   private log: ReturnType<typeof createLogger>;
@@ -132,12 +133,14 @@ export class Pipeline {
     bufferMs: number,
     backendType: AgentBackendType = "claude",
     backendResolver?: (type: AgentBackendType) => Promise<AgentBackend>,
+    availableBackends?: string[],
   ) {
     this.db = db;
     this.im = im;
     this.agent = agent;
     this.backendType = backendType;
     this.backendResolver = backendResolver;
+    this.availableBackends = availableBackends ?? [...BUILTIN_BACKEND_LIST];
     this.botIdentity = botIdentity;
     this.workingDirectory = workingDirectory;
     this.dbPath = dbPath;
@@ -1128,20 +1131,15 @@ export class Pipeline {
     if (args.length === 0) {
       // 显示当前 backend
       this.replyText(chatId, platformChatId, msgId,
-        `当前 Agent: **${displayBackendType(this.backendType)}**\n可选: ${BUILTIN_BACKEND_LIST.join(", ")}`);
+        `当前 Agent: **${displayBackendType(this.backendType)}**\n可选: ${this.availableBackends.join(", ")}`);
       return;
     }
 
-    let target: AgentBackendType | undefined;
-    try {
-      target = normalizeBackend(args[0]);
-    } catch {
-      target = undefined;
-    }
+    const target = normalizeBackend(args[0]);
 
-    if (!target || !(BUILTIN_BACKENDS as Set<string>).has(target)) {
+    if (!target || !this.availableBackends.includes(target)) {
       this.replyText(chatId, platformChatId, msgId,
-        `无效的 backend: "${args[0]}"\n可选: ${BUILTIN_BACKEND_LIST.join(", ")}`);
+        `无效的 backend: "${args[0]}"\n可选: ${this.availableBackends.join(", ")}`);
       return;
     }
 
@@ -1467,7 +1465,10 @@ export class Pipeline {
       this.log.error("pipeline error", { chatId, error: String(err) });
 
       if (platformChatId) {
-        const errorText = "处理出错了，请稍后再试。";
+        const detail = extractAgentErrorDetail(err);
+        const errorText = detail
+          ? `处理出错了：${detail}`
+          : "处理出错了，请稍后再试。";
         try {
           const pmid = await this.im.sendText(platformChatId, errorText);
           this.storeBotResponse(chatId, errorText, pmid);
@@ -1757,6 +1758,27 @@ export class Pipeline {
 
     await this.agent.cancelSession(session.agentSession);
   }
+}
+
+function extractAgentErrorDetail(err: unknown): string | null {
+  const stdout = typeof err === "object" && err !== null && "stdout" in err
+    ? String((err as { stdout?: unknown }).stdout ?? "")
+    : "";
+  if (!stdout) return null;
+
+  for (const line of stdout.split("\n")) {
+    if (!line) continue;
+    try {
+      const event = JSON.parse(line) as { type?: string; is_error?: boolean; result?: unknown };
+      if (event.type === "result" && event.is_error && typeof event.result === "string" && event.result.trim()) {
+        return event.result.trim();
+      }
+    } catch {
+      // ignore malformed lines
+    }
+  }
+
+  return null;
 }
 
 /** 检查命令是否在 PATH 中（对齐 Go exec.LookPath） */

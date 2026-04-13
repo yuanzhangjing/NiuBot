@@ -2,11 +2,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { ClaudeCliBackend } from "./backend.js";
+import ClaudeBackend from "./claude.js";
 
 const originalHome = process.env["HOME"];
 
-describe("ClaudeCliBackend session metadata", () => {
+describe("ClaudeBackend session metadata", () => {
   afterEach(() => {
     if (originalHome === undefined) {
       delete process.env["HOME"];
@@ -42,7 +42,7 @@ describe("ClaudeCliBackend session metadata", () => {
       ].join("\n"),
     );
 
-    const backend = new ClaudeCliBackend();
+    const backend = new ClaudeBackend();
     const session = backend.buildSession({
       workingDirectory,
       agentSessionId: sessionId,
