@@ -49,7 +49,7 @@ export default class ClaudeBackend extends CliAgentBackend<ClaudeSession> {
     };
   }
 
-  buildInput(session: ClaudeSession, message: string): { args: string[]; input?: string } {
+  buildInput(session: ClaudeSession, message: string): { args: string[]; stdin?: string } {
     const args = [
       "-p",
       "--input-format", "stream-json",
@@ -71,12 +71,12 @@ export default class ClaudeBackend extends CliAgentBackend<ClaudeSession> {
     // 禁用 Claude Code 云端定时任务，避免与 niubot cron 冲突
     args.push("--disallowedTools", "RemoteTrigger");
 
-    const input = JSON.stringify({
+    const stdin = JSON.stringify({
       type: "user",
       message: { role: "user", content: message },
     }) + "\n";
 
-    return { args, input };
+    return { args, stdin };
   }
 
   parseOutput(stdout: string, session: ClaudeSession): ParsedOutput {

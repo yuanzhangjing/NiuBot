@@ -58,10 +58,10 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
 
   /**
    * 构造 CLI 调用：参数 + stdin 内容。
-   * - 返回 input: 将其写入子进程 stdin
-   * - 不返回 input: 不写 stdin（子进程 stdin 直接关闭）
+   * - 返回 stdin: 将其写入子进程 stdin
+   * - 不返回 stdin: 不写 stdin（子进程 stdin 直接关闭）
    */
-  abstract buildInput(session: S, message: string): { args: string[]; input?: string };
+  abstract buildInput(session: S, message: string): { args: string[]; stdin?: string };
 
   /** 解析 CLI 输出 → 结构化结果（可访问 session 获取额外信息） */
   abstract parseOutput(stdout: string, session: S): ParsedOutput;
@@ -110,7 +110,7 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
     const s = this.sessions.get(agentSession.id);
     if (!s) throw new Error(`Session not found: ${agentSession.id}`);
 
-    const { args, input } = this.buildInput(s, message);
+    const { args, stdin } = this.buildInput(s, message);
 
     this.log.info("sending prompt", { sessionId: agentSession.id, textLength: message.length });
 
@@ -118,7 +118,7 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
       const stdout = await this.exec(this.command(), args, {
         cwd: s.workingDirectory,
         env: { ...s.extraEnv, ...this.agentEnv() },
-        stdin: input,
+        stdin,
       }, agentSession.id);
 
       // 进程可能收到 SIGTERM 后仍以 code 0 退出，检查 cancel 标记

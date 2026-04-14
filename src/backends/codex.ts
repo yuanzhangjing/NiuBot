@@ -51,7 +51,7 @@ export default class CodexBackend extends CliAgentBackend<CodexSession> {
     };
   }
 
-  buildInput(session: CodexSession, message: string): { args: string[]; input?: string } {
+  buildInput(session: CodexSession, message: string): { args: string[]; stdin?: string } {
     // resume 走不同的子命令
     if (session.agentSessionId) {
       const args = [
@@ -79,7 +79,7 @@ export default class CodexBackend extends CliAgentBackend<CodexSession> {
       args.push("-m", session.model);
     }
 
-    return { args, input: message };
+    return { args, stdin: message };
   }
 
   parseOutput(stdout: string, session: CodexSession): ParsedOutput {

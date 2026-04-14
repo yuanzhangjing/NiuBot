@@ -150,7 +150,7 @@ describe("CodexBackend session metadata", () => {
         "-m",
         "gpt-5.4-mini",
       ],
-      input: "ping",
+      stdin: "ping",
     });
   });
 });
