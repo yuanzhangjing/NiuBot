@@ -90,10 +90,10 @@ function checkBotCredentials(config: NiuBotConfig, issues: string[]): void {
 function checkNodeVersion(): CheckResult {
   const major = parseInt(process.versions.node.split(".")[0]!, 10);
   const ver = process.versions.node;
-  if (major >= 20) {
-    return { passed: true, label: `Node.js v${ver} (>= 20 required)` };
+  if (major >= 18) {
+    return { passed: true, label: `Node.js v${ver} (>= 18 required)` };
   }
-  return { passed: false, label: `Node.js v${ver} (>= 20 required)`, hint: "Upgrade Node.js to version 20 or later" };
+  return { passed: false, label: `Node.js v${ver} (>= 18 required)`, hint: "Upgrade Node.js to version 18 or later" };
 }
 
 interface BackendScanResult {
@@ -280,6 +280,7 @@ bots:
   - name: NiuBot
     appId: ""              # <- 飞书应用 App ID
     appSecret: ""          # <- 飞书应用 App Secret
+    # workingDirectory: ~/niubot-workspace/NiuBot  # agent 工作目录（默认 ~/niubot-workspace/<name>）
 
 # queue:
 #   bufferMs: 1500         # 消息缓冲合并窗口（ms）

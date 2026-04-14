@@ -4,7 +4,7 @@ This guide is written for coding agents (Claude, Codex, etc.) to follow when hel
 
 ## Prerequisites
 
-- Node.js >= 20
+- Node.js >= 18
 - One of: `claude` CLI or `codex` CLI (the agent backend)
 - A Feishu (Lark) enterprise account with permission to create apps
 
@@ -37,7 +37,7 @@ NiuBot Init
 ───────────
 
 Preflight checks
-  ✓ Node.js vXX.X.X (>= 20 required)
+  ✓ Node.js vXX.X.X (>= 18 required)
   Scanning agent backends...
     ✓ claude vX.X.X
   → Using 'claude' as default backend
@@ -79,7 +79,10 @@ bots:
   - name: NiuBot
     appId: "cli_xxxxxxxxxx"       # ← App ID from Step 3
     appSecret: "xxxxxxxxxxxxxxxx" # ← App Secret from Step 3
+    # workingDirectory: ~/niubot-workspace/NiuBot  # agent working directory (default: ~/niubot-workspace/<name>)
 ```
+
+The `workingDirectory` is where the agent runs commands, stores task files, and reads/writes project data. The default `~/niubot-workspace/<name>` keeps it separate from the config directory (`~/.niubot/`). Change it if you have a preferred location.
 
 Admin is auto-detected — no manual configuration needed:
 1. If `application:application:readonly` permission is granted, the Feishu app creator becomes **owner** on startup.
@@ -99,8 +102,6 @@ Admin status is persisted in the database and survives restarts. Owner can manag
 Edit `~/.niubot/NiuBot/persona.md` to customize the bot's personality:
 
 ```markdown
-> This file defines the bot's behavior style.
-
 ## Role
 A friendly AI assistant.
 

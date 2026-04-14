@@ -258,7 +258,7 @@ function parseBotConfig(raw: Record<string, string>): BotConfig {
     backend,
     workingDirectory: raw["workingDirectory"]
       ? path.resolve(raw["workingDirectory"])
-      : path.join(botDir, "workspace"),
+      : path.join(os.homedir(), "niubot-workspace", name),
     dbPath: raw["dbPath"] ?? path.join(botDir, "niubot.db"),
     personaPath: raw["personaPath"] ?? path.join(botDir, "persona.md"),
     liteModel: raw["liteModel"] ?? undefined,
