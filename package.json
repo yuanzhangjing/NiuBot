@@ -1,6 +1,6 @@
 {
   "name": "niubot",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "NiuBot Engine — AI Persona Runtime powering autonomous digital coworkers with memory and personality",
   "type": "module",
   "main": "dist/index.js",
@@ -42,7 +42,7 @@
     "vitest": "^3.0.0"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=18"
   },
   "license": "Apache-2.0"
 }
