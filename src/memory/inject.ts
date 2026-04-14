@@ -100,7 +100,8 @@ export function buildImportantContext(
       const label = scene.userName ? `关于 ${scene.userName} 的记忆` : "关于用户的记忆";
       const lines = memories.map((m) => `  #${m.id}  ${m.summary}`);
       lines.push("用 niubot user-memory get <id> 查看详情。");
-      parts.push(`<user-memory label="${label}">\n${lines.join("\n")}\n</user-memory>`);
+      const safeLabel = label.replace(/["<>&]/g, "");
+      parts.push(`<user-memory label="${safeLabel}">\n${lines.join("\n")}\n</user-memory>`);
     }
   }
 
