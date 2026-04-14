@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { exec, execFileSync, spawn } from "node:child_process";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -1012,7 +1013,7 @@ export class Pipeline {
     });
 
     // Create session record with source='cron'
-    const sessionId = crypto.randomUUID().slice(0, 8);
+    const sessionId = randomUUID().slice(0, 8);
     this.db.prepare(`
       INSERT INTO sessions (id, chat_id, user_id, source, status, started_at, last_active_at, backend_type)
       VALUES (?, ?, ?, 'cron', 'active', datetime('now'), datetime('now'), ?)
@@ -1697,7 +1698,7 @@ export class Pipeline {
       this.pendingImportantContext.set(chatId, importantContext);
     }
 
-    const sessionId = crypto.randomUUID().slice(0, 8);
+    const sessionId = randomUUID().slice(0, 8);
 
     try {
       const orphan = this.db.prepare(

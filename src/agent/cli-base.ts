@@ -3,6 +3,7 @@
  * 新增 CLI agent 只需继承并实现抽象方法。
  */
 
+import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import type { AgentBackend, AgentSession, AgentResponse, SessionConfig } from "./types.js";
 import { createLogger } from "../logger.js";
@@ -95,7 +96,7 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
   }
 
   async createSession(config: SessionConfig): Promise<AgentSession> {
-    const id = `${this.name}_${Date.now()}_${crypto.randomUUID().slice(0, 8)}`;
+    const id = `${this.name}_${Date.now()}_${randomUUID().slice(0, 8)}`;
     const session = this.buildSession(config);
     // 基类统一管理 agentSessionId（recover 时从 config 传入）
     if (config.agentSessionId) {
