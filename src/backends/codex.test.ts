@@ -58,6 +58,7 @@ describe("CodexBackend session metadata", () => {
 
     const backend = new CodexBackend();
     const session = backend.buildSession({ workingDirectory: tempHome });
+    // parseOutput now takes session and handles JSONL scan + agentSessionId internally
     const parsed = backend.parseOutput([
       JSON.stringify({ type: "thread.started", thread_id: threadId }),
       JSON.stringify({
@@ -68,11 +69,7 @@ describe("CodexBackend session metadata", () => {
         type: "turn.completed",
         usage: { input_tokens: 20504, cached_input_tokens: 10624, output_tokens: 19 },
       }),
-    ].join("\n"));
-
-    // 模拟基类 sendMessage 中自动设置 agentSessionId
-    session.agentSessionId = parsed.agentSessionId;
-    backend.updateSession(session, parsed);
+    ].join("\n"), session);
 
     expect(parsed.model).toBe("gpt-5.4");
     expect(parsed.contextWindow).toBe(258400);
@@ -102,16 +99,14 @@ describe("CodexBackend session metadata", () => {
         type: "item.completed",
         item: { type: "agent_message", text: "ok" },
       }),
-    ].join("\n"));
-
-    session.agentSessionId = parsed.agentSessionId;
-    backend.updateSession(session, parsed);
+    ].join("\n"), session);
 
     expect(parsed.compactCount).toBe(2);
   });
 
   it("does not fall back to cumulative turn usage when session log metadata is unavailable", () => {
     const backend = new CodexBackend();
+    const session = backend.buildSession({ workingDirectory: "/tmp" });
 
     const parsed = backend.parseOutput([
       JSON.stringify({
@@ -122,7 +117,7 @@ describe("CodexBackend session metadata", () => {
         type: "turn.completed",
         usage: { input_tokens: 2050400, cached_input_tokens: 2048000, output_tokens: 1900 },
       }),
-    ].join("\n"));
+    ].join("\n"), session);
 
     expect(parsed.contextTokens).toBeUndefined();
   });
@@ -144,15 +139,17 @@ describe("CodexBackend session metadata", () => {
       modelTier: "lite",
     });
 
-    expect(backend.buildArgs(session, "ping")).toEqual([
-      "exec",
-      "--json",
-      "--dangerously-bypass-approvals-and-sandbox",
-      "--skip-git-repo-check",
-      "-C",
-      "/tmp/project",
-      "-m",
-      "gpt-5.4-mini",
-    ]);
+    expect(backend.buildInput(session, "ping")).toEqual({
+      args: [
+        "exec",
+        "--json",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--skip-git-repo-check",
+        "-C",
+        "/tmp/project",
+        "-m",
+        "gpt-5.4-mini",
+      ],
+    });
   });
 });

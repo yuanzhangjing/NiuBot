@@ -36,15 +36,6 @@ export default class ClaudeBackend extends CliAgentBackend<ClaudeSession> {
     return "claude";
   }
 
-  async checkAvailable(): Promise<void> {
-    try {
-      await this.exec("claude", ["--version"]);
-      this.log.info("claude CLI found");
-    } catch {
-      throw new Error("claude CLI not found in PATH");
-    }
-  }
-
   buildSession(config: SessionConfig): ClaudeSession {
     return {
       workingDirectory: config.workingDirectory ?? process.cwd(),
@@ -58,7 +49,7 @@ export default class ClaudeBackend extends CliAgentBackend<ClaudeSession> {
     };
   }
 
-  buildArgs(session: ClaudeSession, _message: string): string[] {
+  buildInput(session: ClaudeSession, message: string): { args: string[]; input?: string } {
     const args = [
       "-p",
       "--input-format", "stream-json",
@@ -80,18 +71,15 @@ export default class ClaudeBackend extends CliAgentBackend<ClaudeSession> {
     // 禁用 Claude Code 云端定时任务，避免与 niubot cron 冲突
     args.push("--disallowedTools", "RemoteTrigger");
 
-    return args;
-  }
-
-  /** 将纯文本消息包装为 stream-json 格式 */
-  buildStdin(message: string): string {
-    return JSON.stringify({
+    const input = JSON.stringify({
       type: "user",
       message: { role: "user", content: message },
     }) + "\n";
+
+    return { args, input };
   }
 
-  parseOutput(stdout: string): ParsedOutput {
+  parseOutput(stdout: string, session: ClaudeSession): ParsedOutput {
     // stream-json 模式：stdout 是多行 JSONL 事件流，找 type=result 那行
     let resultEvent: {
       result?: string;
@@ -126,23 +114,23 @@ export default class ClaudeBackend extends CliAgentBackend<ClaudeSession> {
       if (total > 0) contextTokens = total;
     }
 
-    const model = resultEvent.modelUsage ? Object.keys(resultEvent.modelUsage)[0] : undefined;
+    let model = resultEvent.modelUsage ? Object.keys(resultEvent.modelUsage)[0] : undefined;
+
+    // 增量扫描 JSONL，用更精确的 model/token 信息覆盖 stdout 的摘要值
+    const agentSessionId = resultEvent.session_id;
+    if (agentSessionId) {
+      session.agentSessionId = agentSessionId;
+      const meta = this.scanJsonl(session);
+      if (meta.model) model = meta.model;
+      if (meta.contextTokens) contextTokens = meta.contextTokens;
+    }
 
     return {
       text: (resultEvent.result ?? "").trim(),
-      agentSessionId: resultEvent.session_id,
+      agentSessionId,
       contextTokens,
       model,
     };
-  }
-
-  updateSession(session: ClaudeSession, parsed: ParsedOutput): void {
-    // 增量扫描 JSONL，提取主 agent 的 model、usage 和 compactCount
-    if (session.agentSessionId) {
-      const meta = this.scanJsonl(session);
-      if (meta.model) parsed.model = meta.model;
-      if (meta.contextTokens) parsed.contextTokens = meta.contextTokens;
-    }
   }
 
   /**

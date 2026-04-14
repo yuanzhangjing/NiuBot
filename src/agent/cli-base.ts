@@ -48,34 +48,35 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
     this.log = createLogger(name);
   }
 
-  // ── 子类必须实现 ──────────────────────────────────────────
+  // ── 子类必须实现（4 个） ────────────────────────────────────
 
   /** CLI 命令名（如 "claude"、"codex"） */
   abstract command(): string;
 
-  /** 构建 CLI 参数（prompt、model、resume 等） */
-  abstract buildArgs(session: S, message: string): string[];
-
-  /** 解析 CLI 输出为 text + 可选的 agent session ID */
-  abstract parseOutput(stdout: string): ParsedOutput;
-
-  /** 检查 CLI 工具是否可用（start 时调用） */
-  abstract checkAvailable(): Promise<void>;
-
   /** 首次创建 session 时，构造 agent 特有的 session 字段 */
   abstract buildSession(config: SessionConfig): S;
 
-  /** 收到 agent 响应后更新 session 状态（如保存 resume ID） */
-  abstract updateSession(session: S, parsed: ParsedOutput): void;
+  /** 构造 CLI 调用：参数 + 输入内容 */
+  abstract buildInput(session: S, message: string): { args: string[]; input?: string };
+
+  /** 解析 CLI 输出 → 结构化结果（可访问 session 获取额外信息） */
+  abstract parseOutput(stdout: string, session: S): ParsedOutput;
+
+  // ── 可选 override ───────────────────────────────────────────
+
+  /** 检查 CLI 工具是否可用（start 时调用）。默认执行 command() --version */
+  async checkAvailable(): Promise<void> {
+    try {
+      await this.exec(this.command(), ["--version"]);
+      this.log.info(`${this.command()} CLI found`);
+    } catch {
+      throw new Error(`${this.command()} CLI not found in PATH`);
+    }
+  }
 
   /** 每次执行子进程时需要额外设置的环境变量 */
   protected agentEnv(): Record<string, string> {
     return {};
-  }
-
-  /** 构建 stdin 内容，子类可覆盖（如 stream-json 格式包装） */
-  buildStdin(message: string): string {
-    return message;
   }
 
   // ── 通用实现 ─────────────────────────────────────────────
@@ -105,7 +106,7 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
     const s = this.sessions.get(agentSession.id);
     if (!s) throw new Error(`Session not found: ${agentSession.id}`);
 
-    const args = this.buildArgs(s, message);
+    const { args, input } = this.buildInput(s, message);
 
     this.log.info("sending prompt", { sessionId: agentSession.id, textLength: message.length });
 
@@ -113,7 +114,7 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
       const stdout = await this.exec(this.command(), args, {
         cwd: s.workingDirectory,
         env: { ...s.extraEnv, ...this.agentEnv() },
-        stdin: this.buildStdin(message),
+        stdin: input ?? message,
       }, agentSession.id);
 
       // 进程可能收到 SIGTERM 后仍以 code 0 退出，检查 cancel 标记
@@ -124,12 +125,11 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
 
       s.cumulativeBytes += stdout.length;
 
-      const parsed = this.parseOutput(stdout);
+      const parsed = this.parseOutput(stdout, s);
       // 基类自动管理 agentSessionId
       if (parsed.agentSessionId) {
         s.agentSessionId = parsed.agentSessionId;
       }
-      this.updateSession(s, parsed);
 
       this.log.info("prompt completed", {
         sessionId: agentSession.id,

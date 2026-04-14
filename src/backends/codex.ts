@@ -37,15 +37,6 @@ export default class CodexBackend extends CliAgentBackend<CodexSession> {
     return "codex";
   }
 
-  async checkAvailable(): Promise<void> {
-    try {
-      await this.exec("codex", ["--version"]);
-      this.log.info("codex CLI found");
-    } catch {
-      throw new Error("codex CLI not found in PATH");
-    }
-  }
-
   buildSession(config: SessionConfig): CodexSession {
     return {
       workingDirectory: config.workingDirectory ?? process.cwd(),
@@ -60,7 +51,7 @@ export default class CodexBackend extends CliAgentBackend<CodexSession> {
     };
   }
 
-  buildArgs(session: CodexSession, message: string): string[] {
+  buildInput(session: CodexSession, message: string): { args: string[]; input?: string } {
     // resume 走不同的子命令
     if (session.agentSessionId) {
       const args = [
@@ -73,7 +64,7 @@ export default class CodexBackend extends CliAgentBackend<CodexSession> {
       if (session.model) {
         args.push("-m", session.model);
       }
-      return args;
+      return { args };
     }
 
     const args = [
@@ -88,15 +79,10 @@ export default class CodexBackend extends CliAgentBackend<CodexSession> {
       args.push("-m", session.model);
     }
 
-    return args;
+    return { args };
   }
 
-  /** Codex exec 从 stdin 读取 prompt */
-  buildStdin(message: string): string {
-    return message;
-  }
-
-  parseOutput(stdout: string): ParsedOutput {
+  parseOutput(stdout: string, session: CodexSession): ParsedOutput {
     let threadId: string | undefined;
     let lastAgentText = "";
 
@@ -128,27 +114,32 @@ export default class CodexBackend extends CliAgentBackend<CodexSession> {
       } catch { /* skip non-JSON lines */ }
     }
 
+    // 增量扫描 JSONL，补充 model/token/compact 信息
+    let model: string | undefined;
+    let contextTokens: number | undefined;
+    let contextWindow: number | undefined;
+    if (threadId) {
+      session.agentSessionId = threadId;
+      const meta = this.scanJsonl(session);
+      model = meta.model;
+      contextTokens = meta.contextTokens;
+      contextWindow = meta.contextWindow;
+    }
+
     return {
       text: lastAgentText.trim(),
       agentSessionId: threadId,
+      model,
+      contextTokens,
+      contextWindow,
+      compactCount: session.compactCount > 0 ? session.compactCount : undefined,
     };
-  }
-
-  updateSession(session: CodexSession, parsed: ParsedOutput): void {
-    if (session.agentSessionId) {
-      const meta = this.scanJsonl(session);
-      if (meta.model) parsed.model = meta.model;
-      if (meta.contextTokens) parsed.contextTokens = meta.contextTokens;
-      if (meta.contextWindow) parsed.contextWindow = meta.contextWindow;
-      if (meta.compactCount) parsed.compactCount = meta.compactCount;
-    }
   }
 
   private scanJsonl(session: CodexSession): {
     model?: string;
     contextTokens?: number;
     contextWindow?: number;
-    compactCount?: number;
   } {
     const jsonlPath = this.getJsonlPath(session);
     if (!jsonlPath) return {};
@@ -213,12 +204,7 @@ export default class CodexBackend extends CliAgentBackend<CodexSession> {
       return {};
     }
 
-    return {
-      model,
-      contextTokens,
-      contextWindow,
-      compactCount: session.compactCount > 0 ? session.compactCount : undefined,
-    };
+    return { model, contextTokens, contextWindow };
   }
 
   private getJsonlPath(session: CodexSession): string | null {

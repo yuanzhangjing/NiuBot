@@ -47,6 +47,7 @@ describe("ClaudeBackend session metadata", () => {
       workingDirectory,
       agentSessionId: sessionId,
     });
+    // parseOutput now takes session and does JSONL scan internally
     const parsed = backend.parseOutput([
       JSON.stringify({
         type: "result",
@@ -62,9 +63,7 @@ describe("ClaudeBackend session metadata", () => {
           "claude-sonnet-4-5-20250929": {},
         },
       }),
-    ].join("\n"));
-
-    backend.updateSession(session, parsed);
+    ].join("\n"), session);
 
     expect(parsed.model).toBe("claude-sonnet-4-5-20250929");
     expect(parsed.contextTokens).toBe(5662187);

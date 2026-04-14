@@ -155,17 +155,128 @@ Check the log file at `~/.niubot/logs/niubot-YYYY-MM-DD.log` for errors. Common 
 - Missing Feishu permissions
 - Agent backend CLI not working
 
-### Custom backend plugin
-To use a custom agent backend, create a plugin file and declare it in config:
+## Custom Backend Plugin
 
-```yaml
-backends:
-  my-agent:
-    plugin: "./backends/my-agent.js"
-    liteModel: "my-lite-model"
+NiuBot supports custom agent backends via plugins. A plugin is a JS file that extends `CliAgentBackend` and implements 4 required methods. The engine handles process management, cancellation, session resume, and all infrastructure — the plugin only defines how to talk to a specific CLI tool.
 
-default_config:
-  backend: my-agent
+### Plugin API
+
+Import from `niubot/plugin`:
+
+```js
+import { CliAgentBackend, buildNiubotEnv } from "niubot/plugin";
 ```
 
-See the plugin API docs for implementation details (`niubot/plugin` export).
+### Required Methods (4)
+
+| Method | Purpose |
+|--------|---------|
+| `command()` | Returns the CLI executable name (e.g. `"my-agent"`) |
+| `buildSession(config)` | Create initial session state from `SessionConfig`. Must return an object extending `BaseCliSession` |
+| `buildInput(session, message)` | Build CLI invocation: returns `{ args: string[], input?: string }`. `args` = CLI arguments, `input` = content to feed the CLI (defaults to `message` if omitted). `session.agentSessionId` is set automatically on resume |
+| `parseOutput(stdout, session)` | Parse CLI stdout → `{ text, agentSessionId?, contextTokens?, model? }`. Has access to session for advanced use cases (e.g. reading log files) |
+
+### Optional Overrides
+
+| Property/Method | Default | Purpose |
+|----------------|---------|---------|
+| `supportsSystemPrompt` | `true` | Set to `false` if the CLI cannot accept a system prompt |
+| `checkAvailable()` | `exec(command(), ["--version"])` | Custom availability check (most CLIs support `--version`, so the default works) |
+| `agentEnv()` | `{}` | Extra environment variables for the CLI process |
+
+### BaseCliSession Fields
+
+Every session must include these fields (the base class requires them):
+
+```js
+{
+  workingDirectory: string,    // from config.workingDirectory
+  model: string | undefined,   // resolved model ID
+  importantContext: string,    // system prompt content
+  agentSessionId: string,     // auto-managed by base class (for resume)
+  extraEnv: Record<string, string>,  // use buildNiubotEnv(config)
+  cumulativeBytes: 0,
+  compactCount: 0,
+  jsonlOffset: 0,
+}
+```
+
+### ParsedOutput Fields
+
+`parseOutput()` must return at minimum `{ text }`. Optional fields:
+
+```js
+{
+  text: string,                // required: the agent's response text
+  agentSessionId?: string,     // session ID for resume (base class stores it automatically)
+  contextTokens?: number,      // token count (shown in footer)
+  contextWindow?: number,      // model context window size
+  model?: string,              // model name (shown in footer)
+  compactCount?: number,       // context compaction count
+}
+```
+
+### Minimal Example
+
+A stateless agent that wraps a CLI tool with simple text I/O (~25 lines):
+
+```js
+// ~/.niubot/backends/my-agent.js
+import { CliAgentBackend, buildNiubotEnv } from "niubot/plugin";
+
+export default class MyAgentBackend extends CliAgentBackend {
+  constructor(options = {}) {
+    super("my-agent");
+    this.liteModel = options.liteModel;
+  }
+
+  command() { return "my-agent-cli"; }
+
+  buildSession(config) {
+    return {
+      workingDirectory: config.workingDirectory ?? process.cwd(),
+      model: config.modelTier === "lite" ? (config.liteModel ?? this.liteModel) : undefined,
+      importantContext: config.importantContext,
+      extraEnv: buildNiubotEnv(config),
+      cumulativeBytes: 0,
+      compactCount: 0,
+      jsonlOffset: 0,
+    };
+  }
+
+  buildInput(session, message) {
+    const args = ["run", "--print"];
+    if (session.model) args.push("--model", session.model);
+    if (session.agentSessionId) args.push("--resume", session.agentSessionId);
+    if (session.importantContext) args.push("--system", session.importantContext);
+    return { args };  // input defaults to message (plain text)
+  }
+
+  parseOutput(stdout, session) {
+    return { text: stdout.trim() };
+  }
+}
+```
+
+### Register in Config
+
+```yaml
+# ~/.niubot/config.yaml
+backends:
+  my-agent:
+    plugin: "./backends/my-agent.js"    # relative to ~/.niubot/
+    liteModel: "my-lite-model"          # optional
+    options:                            # optional, passed to constructor
+      timeout: 30000
+
+default_config:
+  backend: my-agent                     # use as default, or switch at runtime via /agent
+```
+
+### Verify
+
+After adding the plugin, use the `/agent` command in chat to see it in the list. No engine restart required — the plugin is discovered dynamically from config.yaml.
+
+To switch: `/agent my-agent`
+
+If the plugin file has errors (missing methods, import failures), the error message will include the specific issue and file path in the engine log.

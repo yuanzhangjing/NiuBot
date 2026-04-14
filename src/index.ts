@@ -37,7 +37,7 @@ function validatePluginClass(name: string, cls: unknown): void {
     throw new Error(`Backend plugin '${name}': default export is not a class`);
   }
   const proto = (cls as { prototype?: Record<string, unknown> }).prototype;
-  const required = ["command", "checkAvailable", "buildSession", "buildArgs", "parseOutput", "updateSession"];
+  const required = ["command", "buildSession", "buildInput", "parseOutput"];
   const missing = required.filter((m) => typeof proto?.[m] !== "function");
   if (missing.length > 0) {
     throw new Error(`Backend plugin '${name}': missing required methods: ${missing.join(", ")}`);
