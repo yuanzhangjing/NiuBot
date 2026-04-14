@@ -7,7 +7,8 @@ interface ResponseFooterInput {
 }
 
 export function buildResponseFooter(input: ResponseFooterInput): string {
-  const footerParts = [`${input.sessionId} · #${input.turnCount ?? "?"}`];
+  const shortId = input.sessionId.length > 8 ? input.sessionId.slice(0, 8) : input.sessionId;
+  const footerParts = [`${shortId} · #${input.turnCount ?? "?"}`];
 
   if (input.contextTokens && input.contextTokens > 0) {
     footerParts.push(formatTokenCount(input.contextTokens));

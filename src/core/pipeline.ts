@@ -1081,7 +1081,7 @@ export class Pipeline {
 
       // Build footer
       const footer = buildResponseFooter({
-        sessionId,
+        sessionId: agentSessionId ?? sessionId,
         turnCount: 1,
         contextTokens: response.contextTokens,
         compactCount: response.compactCount,
@@ -1562,7 +1562,7 @@ export class Pipeline {
         "SELECT turn_count FROM sessions WHERE id = ?",
       ).get(chatSession.sessionId) as { turn_count: number } | undefined;
       const footer = buildResponseFooter({
-        sessionId: chatSession.sessionId,
+        sessionId: agentSessionId ?? chatSession.sessionId,
         turnCount: stats?.turn_count,
         contextTokens: response.contextTokens,
         compactCount: response.compactCount,
