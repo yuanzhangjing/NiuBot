@@ -1,5 +1,6 @@
-import { writeFileSync, unlinkSync, mkdirSync } from "node:fs";
-import { resolve } from "node:path";
+import { writeFileSync, unlinkSync, mkdirSync, symlinkSync, realpathSync, rmSync } from "node:fs";
+import { resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   getConfiguredBackend,
   getDefaultLiteModel,
@@ -155,6 +156,25 @@ async function main(): Promise<void> {
     refreshCustomBackends(config);
     return [...BUILTIN_BACKEND_LIST, ...Object.keys(config.backends)];
   };
+
+  // 确保插件 symlink 存在（使 import("niubot/plugin") 可解析）
+  // 必须在 bot 创建之前，因为自定义 backend 可能在 getOrCreateBackend 中被 lazy-load
+  const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  const pluginLink = resolve(NIUBOT_HOME, "node_modules", "niubot");
+  let needSymlink = true;
+  try {
+    needSymlink = realpathSync(pluginLink) !== realpathSync(packageRoot);
+    if (needSymlink) rmSync(pluginLink, { recursive: true, force: true });
+  } catch { /* 不存在 */ }
+  if (needSymlink) {
+    try {
+      mkdirSync(dirname(pluginLink), { recursive: true });
+      symlinkSync(packageRoot, pluginLink);
+      log.info("plugin symlink created", { link: pluginLink, target: packageRoot });
+    } catch (e) {
+      log.warn("failed to create plugin symlink", { error: String(e) });
+    }
+  }
 
   const bots: BotInstance[] = [];
   for (const botConfig of config.bots) {

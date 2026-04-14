@@ -9,7 +9,7 @@ set -eo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BOT_NAME="${NIUBOT_BOT_NAME:-NiuBot}"
 CHAT_ID="${NIUBOT_CHAT_ID:-}"
-NIUBOT_HOME="${NIUBOT_HOME:-$HOME/.niubot}"
+export NIUBOT_HOME="${NIUBOT_HOME:-$HOME/.niubot-dev}"
 SOCKET_PATH="${NIUBOT_API_SOCKET:-$NIUBOT_HOME/$BOT_NAME/api.sock}"
 LOG_DIR="$NIUBOT_HOME/logs"
 mkdir -p "$LOG_DIR"

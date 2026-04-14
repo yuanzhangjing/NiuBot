@@ -3,7 +3,7 @@
 # PID file and logs stored in NIUBOT_HOME (default ~/.niubot)
 # Logs: niubot-YYYY-MM-DD.log, auto-cleanup files older than 7 days
 
-NIUBOT_HOME="${NIUBOT_HOME:-$HOME/.niubot}"
+export NIUBOT_HOME="${NIUBOT_HOME:-$HOME/.niubot-dev}"
 PID_FILE="$NIUBOT_HOME/niubot.pid"
 LOG_DIR="$NIUBOT_HOME/logs"
 LOG_FILE="$LOG_DIR/niubot-$(date '+%Y-%m-%d').log"
