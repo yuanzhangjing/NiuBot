@@ -56,7 +56,11 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
   /** 首次创建 session 时，构造 agent 特有的 session 字段 */
   abstract buildSession(config: SessionConfig): S;
 
-  /** 构造 CLI 调用：参数 + 输入内容 */
+  /**
+   * 构造 CLI 调用：参数 + stdin 内容。
+   * - 返回 input: 将其写入子进程 stdin
+   * - 不返回 input: 不写 stdin（子进程 stdin 直接关闭）
+   */
   abstract buildInput(session: S, message: string): { args: string[]; input?: string };
 
   /** 解析 CLI 输出 → 结构化结果（可访问 session 获取额外信息） */
@@ -114,7 +118,7 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
       const stdout = await this.exec(this.command(), args, {
         cwd: s.workingDirectory,
         env: { ...s.extraEnv, ...this.agentEnv() },
-        stdin: input ?? message,
+        stdin: input,
       }, agentSession.id);
 
       // 进程可能收到 SIGTERM 后仍以 code 0 退出，检查 cancel 标记

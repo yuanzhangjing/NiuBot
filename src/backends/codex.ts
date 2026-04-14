@@ -79,7 +79,7 @@ export default class CodexBackend extends CliAgentBackend<CodexSession> {
       args.push("-m", session.model);
     }
 
-    return { args };
+    return { args, input: message };
   }
 
   parseOutput(stdout: string, session: CodexSession): ParsedOutput {

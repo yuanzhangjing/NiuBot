@@ -175,7 +175,7 @@ import { CliAgentBackend, buildNiubotEnv } from "niubot/plugin";
 |--------|---------|
 | `command()` | Returns the CLI executable name (e.g. `"my-agent"`) |
 | `buildSession(config)` | Create initial session state from `SessionConfig`. Must return an object extending `BaseCliSession` |
-| `buildInput(session, message)` | Build CLI invocation: returns `{ args: string[], input?: string }`. `args` = CLI arguments, `input` = content to feed the CLI (defaults to `message` if omitted). `session.agentSessionId` is set automatically on resume |
+| `buildInput(session, message)` | Build CLI invocation: returns `{ args: string[], input?: string }`. `args` = CLI arguments. `input` = content to write to stdin (omit or `undefined` to not write stdin; set `input: message` to pass user message via stdin). `session.agentSessionId` is set automatically on resume |
 | `parseOutput(stdout, session)` | Parse CLI stdout → `{ text, agentSessionId?, contextTokens?, model? }`. Has access to session for advanced use cases (e.g. reading log files) |
 
 ### Optional Overrides
@@ -251,7 +251,7 @@ export default class MyAgentBackend extends CliAgentBackend {
     if (session.model) args.push("--model", session.model);
     if (session.agentSessionId) args.push("--resume", session.agentSessionId);
     if (session.importantContext) args.push("--system", session.importantContext);
-    return { args };  // input defaults to message (plain text)
+    return { args, input: message };  // pass user message via stdin
   }
 
   parseOutput(stdout, session) {
