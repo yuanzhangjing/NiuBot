@@ -182,7 +182,7 @@ import { CliAgentBackend, buildNiubotEnv } from "niubot/plugin";
 
 | Property/Method | Default | Purpose |
 |----------------|---------|---------|
-| `supportsSystemPrompt` | `true` | Set to `false` if the CLI cannot accept a system prompt |
+| `supportsSystemPrompt` | `false` | Set to `true` if the CLI can accept a system prompt |
 | `checkAvailable()` | `exec(command(), ["--version"])` | Custom availability check (most CLIs support `--version`, so the default works) |
 | `agentEnv()` | `{}` | Extra environment variables for the CLI process |
 

@@ -362,7 +362,7 @@ export class Pipeline {
       });
 
       try {
-        const supportsSystemPrompt = this.agent.supportsSystemPrompt !== false;
+        const supportsSystemPrompt = this.agent.supportsSystemPrompt === true;
 
         const agentSession = await this.agent.createSession({
           workingDirectory: this.workingDirectory,
@@ -996,7 +996,7 @@ export class Pipeline {
     const normalContext = buildNormalContext(this.db, chatId, this.workingDirectory, undefined, chatType);
 
     // Create independent agent session
-    const supportsSystemPrompt = this.agent.supportsSystemPrompt !== false;
+    const supportsSystemPrompt = this.agent.supportsSystemPrompt === true;
     const agentSession = await this.agent.createSession({
       workingDirectory: this.workingDirectory,
       importantContext: supportsSystemPrompt ? (importantContext || undefined) : undefined,
@@ -1677,7 +1677,7 @@ export class Pipeline {
     }
 
     // backend 不支持 system prompt 时，important 上下文 fallback 到首条消息前缀
-    const supportsSystemPrompt = this.agent.supportsSystemPrompt !== false;
+    const supportsSystemPrompt = this.agent.supportsSystemPrompt === true;
 
     const agentSession = await this.agent.createSession({
       workingDirectory: this.workingDirectory,
