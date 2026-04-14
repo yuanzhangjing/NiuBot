@@ -64,9 +64,8 @@ This is the only step that requires manual action from the user. Guide them thro
 3. On the **Permissions** page, add these permissions:
    - `im:message` — Read and send messages
    - `im:message.reaction:write` — Message reactions
-   - `im:resource` — Message resources (images/files)
+   - `im:resource` — Resources (image/file upload and download)
    - `im:chat:readonly` — Read group chat info
-   - `im:file` — File upload
 4. On the **Bot** page, enable the **Bot** capability
 5. Publish the app: Create a version → Submit for review → Release
 
