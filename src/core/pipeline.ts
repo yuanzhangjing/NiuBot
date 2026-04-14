@@ -12,6 +12,7 @@ import {
   ensureUser, ensureChat, storeMessage, updateChatName,
   getUserShortLabel, getChatShortLabel, formatSenderLabel, getMessageByPlatformId, updateMessageContent, updateMessagePlatformId,
   getUnseenMessages, markMessagesSeen,
+  setUserAdmin, getAdminUserIds,
 } from "../database/schema.js";
 import { buildImportantContext, buildNormalContext, buildSpeakerContext, type SceneInfo, type SpeakerInfo } from "../memory/inject.js";
 import { loadPersona } from "../persona.js";
@@ -466,8 +467,7 @@ export class Pipeline {
 
     // Fallback admin: if no admin detected yet and this is a p2p message, auto-promote first user
     if (this.adminUserIds.size === 0 && msg.chatType === "p2p") {
-      this.adminUserIds.add(userId);
-      this.log.info("admin detected (first p2p user, fallback)", { userId, platformId: msg.senderPlatformId });
+      this.addAdmin(userId, "first_p2p_user", msg.senderPlatformId);
     }
 
     // For p2p chats, link user_id
@@ -675,17 +675,37 @@ export class Pipeline {
     return "";
   }
 
-  /** Detect admin users from platform + config */
+  /** Persist a user as admin in both memory and DB */
+  private addAdmin(userId: string, source: string, platformId?: string): void {
+    if (this.adminUserIds.has(userId)) return;
+    this.adminUserIds.add(userId);
+    setUserAdmin(this.db, userId, true);
+    this.log.info("admin detected", { userId, source, platformId });
+  }
+
+  /** Remove admin from both memory and DB */
+  private removeAdmin(userId: string): void {
+    this.adminUserIds.delete(userId);
+    setUserAdmin(this.db, userId, false);
+    this.log.info("admin removed", { userId });
+  }
+
+  /** Detect admin users from DB + platform + config */
   private async detectAdmins(): Promise<void> {
     const platform = this.botIdentity.platform;
+
+    // 0. Restore from DB
+    for (const uid of getAdminUserIds(this.db)) {
+      this.adminUserIds.add(uid);
+      this.log.info("admin restored from DB", { userId: uid });
+    }
 
     // 1. App creator
     try {
       const creatorId = await this.im.getAppCreatorId();
       if (creatorId) {
         const userId = ensureUser(this.db, platform, creatorId, undefined, undefined);
-        this.adminUserIds.add(userId);
-        this.log.info("admin detected (app creator)", { userId, platformId: creatorId });
+        this.addAdmin(userId, "app_creator", creatorId);
       }
     } catch (err) {
       this.log.warn("failed to detect app creator", { error: String(err) });
@@ -695,8 +715,7 @@ export class Pipeline {
     if (this.botIdentity.adminPlatformIds) {
       for (const pid of this.botIdentity.adminPlatformIds) {
         const userId = ensureUser(this.db, platform, pid, undefined, undefined);
-        this.adminUserIds.add(userId);
-        this.log.info("admin detected (config)", { userId, platformId: pid });
+        this.addAdmin(userId, "config", pid);
       }
     }
   }
@@ -751,6 +770,14 @@ export class Pipeline {
           return true;
         }
         this.handleAgentCommand(parts.slice(1), chatId, platformChatId, msgId);
+        return true;
+      }
+      case "/admin": {
+        if (!isAdmin) {
+          this.replyText(chatId, platformChatId, msgId, "/admin 仅管理员可用。");
+          return true;
+        }
+        this.handleAdminCommand(parts.slice(1), chatId, platformChatId, msgId);
         return true;
       }
       case "/help": {
@@ -1134,6 +1161,67 @@ export class Pipeline {
   }
 
   /**
+   * /admin 命令：管理员列表/添加/移除。
+   * - /admin             → 显示管理员列表
+   * - /admin add @某人   → 添加管理员（需要 @ mention）
+   * - /admin remove @某人 → 移除管理员
+   */
+  private handleAdminCommand(args: string[], chatId: string, platformChatId: string, msgId?: string): void {
+    const sub = args[0]?.toLowerCase();
+
+    if (!sub || sub === "list") {
+      // 列出所有管理员
+      const adminIds = getAdminUserIds(this.db);
+      if (adminIds.length === 0) {
+        this.replyText(chatId, platformChatId, msgId, "当前没有管理员。");
+        return;
+      }
+      const lines = adminIds.map((uid) => `- ${getUserShortLabel(this.db, uid)}`);
+      this.replyText(chatId, platformChatId, msgId, `管理员列表：\n${lines.join("\n")}`);
+      return;
+    }
+
+    if (sub === "add" || sub === "remove") {
+      // 从文本中解析 @U<n>(...) 中的用户 ID
+      const rest = args.slice(1).join(" ");
+      const match = rest.match(/@(u\d+)/i);
+      if (!match) {
+        this.replyText(chatId, platformChatId, msgId, `用法：/admin ${sub} @某人`);
+        return;
+      }
+      const targetUserId = match[1].toLowerCase();
+
+      // 验证用户存在
+      const userRow = this.db.prepare("SELECT id, name FROM users WHERE id = ?").get(targetUserId) as { id: string; name: string | null } | undefined;
+      if (!userRow) {
+        this.replyText(chatId, platformChatId, msgId, `用户 ${targetUserId} 不存在。`);
+        return;
+      }
+
+      const label = getUserShortLabel(this.db, targetUserId);
+
+      if (sub === "add") {
+        if (this.adminUserIds.has(targetUserId)) {
+          this.replyText(chatId, platformChatId, msgId, `${label} 已经是管理员了。`);
+          return;
+        }
+        this.addAdmin(targetUserId, "manual");
+        this.replyText(chatId, platformChatId, msgId, `已添加 ${label} 为管理员。`);
+      } else {
+        if (!this.adminUserIds.has(targetUserId)) {
+          this.replyText(chatId, platformChatId, msgId, `${label} 不是管理员。`);
+          return;
+        }
+        this.removeAdmin(targetUserId);
+        this.replyText(chatId, platformChatId, msgId, `已移除 ${label} 的管理员权限。`);
+      }
+      return;
+    }
+
+    this.replyText(chatId, platformChatId, msgId, "用法：/admin [list|add|remove] [@某人]");
+  }
+
+  /**
    * /agent 命令：查看或切换 agent backend。
    * - /agent        → 显示当前 backend
    * - /agent <type> → 切换到指定 backend，归档当前 session
@@ -1218,6 +1306,7 @@ export class Pipeline {
       lines.push(
         "",
         "**管理员**",
+        "`/admin`　　管理员列表/添加/移除",
         "`/agent`　　查看/切换 Agent backend",
         "`/restart`　重启引擎",
         "`/<cmd>`　　执行 shell 命令",

@@ -232,6 +232,13 @@ const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 9,
+    description: "Add is_admin to users for persistent admin tracking",
+    up: (db) => {
+      db.exec("ALTER TABLE users ADD COLUMN is_admin INTEGER DEFAULT 0");
+    },
+  },
 ];
 
 const LATEST_VERSION = migrations[migrations.length - 1]!.version;
@@ -626,4 +633,17 @@ export function updateMessagePlatformId(
   platformMsgId: string,
 ): void {
   db.prepare("UPDATE messages SET platform_msg_id = ? WHERE id = ?").run(platformMsgId, id);
+}
+
+// ── Admin helpers ──────────────────────────────────────────────────
+
+/** Set a user as admin (persistent) */
+export function setUserAdmin(db: Database.Database, userId: string, isAdmin: boolean): void {
+  db.prepare("UPDATE users SET is_admin = ? WHERE id = ?").run(isAdmin ? 1 : 0, userId);
+}
+
+/** Get all admin user IDs from DB */
+export function getAdminUserIds(db: Database.Database): string[] {
+  const rows = db.prepare("SELECT id FROM users WHERE is_admin = 1").all() as { id: string }[];
+  return rows.map((r) => r.id);
 }

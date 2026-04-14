@@ -81,18 +81,14 @@ bots:
     appSecret: "xxxxxxxxxxxxxxxx" # ← App Secret from Step 3
 ```
 
-The Feishu app creator is automatically detected as admin on startup — no manual configuration needed.
+Admin is auto-detected — no manual configuration needed:
+1. If `application:application:readonly` permission is granted, the Feishu app creator becomes admin automatically on startup.
+2. Otherwise, the first user to send a private message to the bot becomes admin.
 
-To add additional admins, optionally configure `adminUsers` with their Feishu user IDs:
-
-```yaml
-bots:
-  - name: NiuBot
-    appId: "cli_xxxxxxxxxx"
-    appSecret: "xxxxxxxxxxxxxxxx"
-    adminUsers:          # optional, app creator is already admin
-      - "ou_xxxxxxxxxxxxxx"
-```
+Admin status is persisted in the database and survives restarts. To manage admins later, use the `/admin` command in chat:
+- `/admin` — list current admins
+- `/admin add @user` — add an admin
+- `/admin remove @user` — remove an admin
 
 ## Step 5: Configure Persona (optional)
 
