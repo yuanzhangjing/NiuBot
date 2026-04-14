@@ -134,60 +134,84 @@ sleep 2
 
 cd "$SCRIPT_DIR"
 
-# ── Build ──
-debug "building..."
-if ! npm run build >> "$DEBUG_LOG" 2>&1; then
-    debug "build FAILED, old process unaffected"
-    notify "重启失败：构建错误，当前服务不受影响。"
-    debug "=== restart.sh done (build failed) ==="
-    exit 1
-fi
-debug "build done"
-
-# ── Backup current dist (known-good) ──
-if [ -d "$DIST_DIR" ]; then
-    rm -rf "$BACKUP_DIR"
-    cp -r "$DIST_DIR" "$BACKUP_DIR"
-    debug "dist backed up to dist.bak"
+# ── Detect mode: dev (has src/) vs production (npm global install) ──
+DEV_MODE=false
+if [ -d "$SCRIPT_DIR/src" ]; then
+    DEV_MODE=true
 fi
 
-# ── Stop old → Start new → Health check ──
-stop_service
-start_service
+if $DEV_MODE; then
+    # ── Dev mode: build → backup → restart → health check → rollback on failure ──
 
-if check_health; then
-    sleep 1
-    rm -rf "$BACKUP_DIR"
-    notify "重启成功。"
-    debug "=== restart.sh done (success) ==="
-    exit 0
-fi
+    debug "dev mode: building..."
+    if ! npm run build >> "$DEBUG_LOG" 2>&1; then
+        debug "build FAILED, old process unaffected"
+        notify "重启失败：构建错误，当前服务不受影响。"
+        debug "=== restart.sh done (build failed) ==="
+        exit 1
+    fi
+    debug "build done"
 
-# ── Failed — rollback to backup ──
-debug "new version failed, rolling back..."
-stop_service
+    # Backup current dist (known-good)
+    if [ -d "$DIST_DIR" ]; then
+        rm -rf "$BACKUP_DIR"
+        cp -r "$DIST_DIR" "$BACKUP_DIR"
+        debug "dist backed up to dist.bak"
+    fi
 
-if [ -d "$BACKUP_DIR" ]; then
-    rm -rf "$DIST_DIR"
-    mv "$BACKUP_DIR" "$DIST_DIR"
-    debug "dist restored from backup"
-
+    stop_service
     start_service
+
     if check_health; then
         sleep 1
-        notify "新版本启动失败，已回滚到上一版本。"
-        debug "=== restart.sh done (rollback success) ==="
+        rm -rf "$BACKUP_DIR"
+        notify "重启成功。"
+        debug "=== restart.sh done (success) ==="
         exit 0
     fi
 
-    # Rollback also failed
-    debug "rollback also failed"
-    notify "重启失败（回滚也失败），请检查日志: $LOG_FILE"
-    debug "=== restart.sh done (rollback failed) ==="
-    exit 1
+    # Failed — rollback to backup
+    debug "new version failed, rolling back..."
+    stop_service
+
+    if [ -d "$BACKUP_DIR" ]; then
+        rm -rf "$DIST_DIR"
+        mv "$BACKUP_DIR" "$DIST_DIR"
+        debug "dist restored from backup"
+
+        start_service
+        if check_health; then
+            sleep 1
+            notify "新版本启动失败，已回滚到上一版本。"
+            debug "=== restart.sh done (rollback success) ==="
+            exit 0
+        fi
+
+        debug "rollback also failed"
+        notify "重启失败（回滚也失败），请检查日志: $LOG_FILE"
+        debug "=== restart.sh done (rollback failed) ==="
+        exit 1
+    else
+        debug "no backup to rollback to"
+        notify "重启失败，无备份可回滚，请检查日志: $LOG_FILE"
+        debug "=== restart.sh done (no backup) ==="
+        exit 1
+    fi
 else
-    debug "no backup to rollback to"
-    notify "重启失败，无备份可回滚，请检查日志: $LOG_FILE"
-    debug "=== restart.sh done (no backup) ==="
+    # ── Production mode: just restart (no build, no rollback) ──
+
+    debug "production mode: restarting..."
+    stop_service
+    start_service
+
+    if check_health; then
+        sleep 1
+        notify "重启成功。"
+        debug "=== restart.sh done (success) ==="
+        exit 0
+    fi
+
+    notify "重启失败，请检查日志: $LOG_FILE"
+    debug "=== restart.sh done (failed) ==="
     exit 1
 fi

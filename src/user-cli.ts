@@ -250,6 +250,10 @@ function cmdInit(niubotHome: string, flags: CliFlags): void {
     ok(`Created NiuBot/persona.md`);
   }
 
+  // Plugin symlink（使 import("niubot/plugin") 在插件目录下可用）
+  ensurePluginSymlink(niubotHome);
+  ok("Created node_modules/niubot symlink (for plugin imports)");
+
   console.log();
   console.log("Status: ready for configuration");
   console.log("\u2500".repeat(40));
@@ -396,6 +400,9 @@ function cmdStart(niubotHome: string, flags: CliFlags): void {
     process.exit(1);
   }
 
+  // Ensure plugin symlink
+  ensurePluginSymlink(niubotHome);
+
   // Ensure working directories exist
   for (const bot of config.bots) {
     const workDir = path.join(niubotHome, bot.name, "workspace");
@@ -539,6 +546,27 @@ function cmdStatus(niubotHome: string): void {
 
 function cmdVersion(): void {
   console.log(`niubot v${getPkgVersion()}`);
+}
+
+// ── Plugin symlink ────────────────────────────────────────
+
+/**
+ * 确保 ~/.niubot/node_modules/niubot 符号链接指向当前包目录。
+ * 这样插件文件中的 import("niubot/plugin") 才能正确解析。
+ */
+function ensurePluginSymlink(niubotHome: string): void {
+  const linkPath = path.join(niubotHome, "node_modules", "niubot");
+
+  try {
+    if (fs.realpathSync(linkPath) === fs.realpathSync(PROJECT_ROOT)) return;
+    // 指向错误位置，删掉重建
+    fs.rmSync(linkPath, { recursive: true, force: true });
+  } catch {
+    // 不存在或无法解析 — 继续创建
+  }
+
+  fs.mkdirSync(path.dirname(linkPath), { recursive: true });
+  fs.symlinkSync(PROJECT_ROOT, linkPath);
 }
 
 // ── Utilities ──────────────────────────────────────────────

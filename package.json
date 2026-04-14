@@ -15,6 +15,7 @@
     "dist",
     "bin",
     "scripts",
+    "restart.sh",
     "INSTALL.md",
     "README.md",
     "LICENSE"
