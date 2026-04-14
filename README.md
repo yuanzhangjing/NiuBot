@@ -1,122 +1,72 @@
-# NiuBot Engine
+# NiuBot
 
-AI Persona Runtime — powering autonomous digital coworkers with memory and personality.
+AI Persona Runtime — 让 AI agent 以独立人格驻扎在 IM 中，有记忆、有性格、能自主管理上下文。
 
-NiuBot Engine bridges IM platforms with AI coding agents. It's not a chatbot framework — it's a **persona runtime** where an AI agent lives as an independent team member: receiving messages, thinking, writing code, and replying, all autonomously.
+## 让 Coding Agent 帮你安装
 
-## Architecture
+NiuBot 提供了 [INSTALL.md](./INSTALL.md)，专为 coding agent 编写的安装手册。直接把下面这段话丢给你的 Claude Code / Codex：
 
-```
-Feishu (WebSocket)
-    ↓
-FeishuAdapter          ← IM layer (swappable)
-    ↓
-Pipeline               ← orchestration: session mgmt, DB persistence
-    ↓
-MessageQueue           ← buffer, merge, cancel+requeue
-    ↓
-AgentBackend           ← agent layer (swappable)
-    ↓
-ClaudeCliBackend       ← claude -p --input-format stream-json (default)
- or AcpBackend         ← ACP protocol (for other agents)
-    ↓
-SQLite                 ← users, chats, sessions, messages (FTS)
-```
+> 帮我安装和配置 NiuBot。按照 https://github.com/yuanzhangjing/NiuBot/blob/main/INSTALL.md 的步骤操作，需要我手动做的地方告诉我。
 
-**Key design decisions:**
-- **Interface-driven**: IM adapter and agent backend are swappable via interfaces
-- **Per-chat message queue**: buffers rapid messages, cancels+merges when agent is busy briefly, queues when agent is in a long task
-- **Session persistence**: SQLite tracks users, chats, sessions, and all messages with FTS search
-- **Session recovery**: on startup, restores active sessions from DB and recreates backend sessions
+## 手动安装
 
-## Quick Start
+### 方式一：npm 全局安装
 
 ```bash
-# Install dependencies
-npm install
-
-# Configure (~/.niubot/.env)
-mkdir -p ~/.niubot
-cat > ~/.niubot/.env << 'EOF'
-FEISHU_APP_ID=your-app-id
-FEISHU_APP_SECRET=your-app-secret
-EOF
-
-# Set agent working directory (~/.niubot/config.yaml)
-cat > ~/.niubot/config.yaml << 'EOF'
-agent:
-  workingDirectory: "~/workspace/your-project"
-EOF
-
-# Run
-npm run dev
+npm install -g niubot
 ```
 
-Requires Node.js >= 20 and a Feishu app with WebSocket event subscription enabled.
+### 方式二：从 GitHub Release 安装
 
-## Configuration
-
-All config lives in `~/.niubot/` (override via `NIUBOT_HOME` env var):
-
-```
-~/.niubot/
-├── .env            ← secrets (FEISHU_APP_ID, FEISHU_APP_SECRET)
-├── config.yaml     ← settings
-└── niubot.db       ← database (auto-created)
+```bash
+# 直接安装（需要 repo 访问权限）
+npm install -g https://github.com/yuanzhangjing/NiuBot/releases/download/v0.1.0/niubot-0.1.0.tgz
 ```
 
-| Key | Env Var | Default | Description |
-|-----|---------|---------|-------------|
-| `feishu.appId` | `FEISHU_APP_ID` | — | Feishu app ID (**required**) |
-| `feishu.appSecret` | `FEISHU_APP_SECRET` | — | Feishu app secret (**required**) |
-| `agent.workingDirectory` | `NIUBOT_WORK_DIR` | — | Agent working directory (**required**) |
-| `agent.backend` | `NIUBOT_BACKEND` | `claude-code` | Agent backend type |
-| `database.path` | `NIUBOT_DB_PATH` | `~/.niubot/niubot.db` | SQLite database path |
-| `queue.bufferMs` | `NIUBOT_BUFFER_MS` | `3000` | Message merge window (ms) |
-| `queue.cancelThresholdMs` | `NIUBOT_CANCEL_MS` | `10000` | Cancel+merge threshold (ms) |
+或手动下载 [Release 页面](https://github.com/yuanzhangjing/NiuBot/releases) 的 `.tgz` 文件后：
 
-## Project Structure
-
-```
-src/
-├── index.ts              # Entry point, lifecycle management
-├── config.ts             # Config loading (yaml + env)
-├── persona.ts            # Persona file loading
-├── logger.ts             # Structured JSON logger
-├── core/
-│   ├── pipeline.ts       # Central orchestration hub
-│   ├── queue.ts          # Per-chat message buffering
-│   ├── routing.ts        # Session routing decisions
-│   ├── prompts.ts        # System prompt templates
-│   └── cron.ts           # Scheduled task execution
-├── agent/
-│   ├── types.ts          # AgentBackend interface
-│   ├── cli-base.ts       # Base class for CLI-based backends
-│   └── claude-cli/
-│       └── backend.ts    # Claude Code CLI (stream-json mode)
-├── im/
-│   ├── types.ts          # PlatformAdapter interface
-│   ├── render.ts         # YAML message rendering
-│   └── feishu/
-│       └── adapter.ts    # Feishu (Lark) adapter
-├── memory/
-│   ├── inject.ts         # Context injection (static + important + normal)
-│   ├── chat-summary.ts   # Chat summary CRUD
-│   └── user-memory.ts    # User memory CRUD
-├── database/
-│   └── schema.ts         # SQLite schema + migrations
-├── cli/                  # niubot CLI tools (messages, contacts, task, cron, send)
-└── summarizer/
-    └── index.ts          # Auto chat summary generation
+```bash
+npm install -g ./niubot-0.1.0.tgz
 ```
 
-## Roadmap
+### 验证
 
-- **M1**: Scaffold + E2E (Feishu ↔ Claude Code) ✅
-- **M2**: Memory system (user_memory + chat_memory) ✅
-- **M3**: Context autonomy engine (routing, archive, recall) ✅
-- **M4**: Persona + polish + capability alignment ✅
-- **Next**: Multi-bot support, session-less cursor model
+```bash
+niubot version
+# niubot v0.1.0
+```
+
+### 快速开始
+
+```bash
+# 1. 初始化配置
+niubot init
+
+# 2. 配置飞书凭据（按 init 输出的提示操作）
+#    编辑 ~/.niubot/config.yaml，填入 appId 和 appSecret
+
+# 3. 启动
+niubot start
+```
+
+## 服务管理
+
+```bash
+niubot start            # 启动
+niubot stop             # 停止
+niubot status           # 查看状态
+niubot start --restart  # 重启
+```
+
+## 前置要求
+
+- Node.js >= 20
+- 飞书企业自建应用（需开通 Bot 能力）
+- Agent backend：`claude` CLI 或 `codex` CLI
+
+## 自定义 Backend 插件
+
+NiuBot 支持自定义 agent backend，无需修改引擎代码。详见 [INSTALL.md](./INSTALL.md#custom-backend-plugin) 中的插件开发说明。
 
 ## License
 
