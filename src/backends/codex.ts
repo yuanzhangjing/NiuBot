@@ -16,13 +16,11 @@ interface CodexSession extends BaseCliSession {
 }
 
 export interface CodexBackendOptions {
-  liteModel?: string;
   sandboxMode?: string;
 }
 
 export default class CodexBackend extends CliAgentBackend<CodexSession> {
   private sandboxMode: string;
-  private liteModel?: string;
 
   /** Codex 不支持 system prompt 注入 */
   readonly supportsSystemPrompt = false;
@@ -30,7 +28,6 @@ export default class CodexBackend extends CliAgentBackend<CodexSession> {
   constructor(options: CodexBackendOptions = {}) {
     super("codex");
     this.sandboxMode = options.sandboxMode ?? "danger-full-access";
-    this.liteModel = options.liteModel;
   }
 
   command(): string {
@@ -40,7 +37,7 @@ export default class CodexBackend extends CliAgentBackend<CodexSession> {
   buildSession(config: SessionConfig): CodexSession {
     return {
       workingDirectory: config.workingDirectory ?? process.cwd(),
-      model: config.modelTier === "lite" ? (config.liteModel ?? this.liteModel) : undefined,
+      model: config.modelTier === "lite" ? (config.liteModel ?? config.model) : config.model,
       importantContext: config.importantContext,
       extraEnv: buildNiubotEnv(config),
       cumulativeBytes: 0,

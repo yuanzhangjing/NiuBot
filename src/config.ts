@@ -15,11 +15,9 @@ export { NIUBOT_HOME };
 export const AGENT_REGISTRY = {
   claude: {
     aliases: ["claude", "claude-code"],
-    defaultLiteModel: "haiku",
   },
   codex: {
     aliases: ["codex"],
-    defaultLiteModel: "gpt-5.4-mini",
   },
 } as const;
 
@@ -31,13 +29,11 @@ export type AgentBackendType = string;
 /** 自定义 backend 插件配置 */
 export interface CustomBackendDef {
   plugin: string;
-  liteModel?: string;
   options?: Record<string, unknown>;
 }
 
 export interface DefaultConfig {
   backend: AgentBackendType;
-  liteModel: Record<string, string>;
 }
 
 /** 单个 Bot 的配置 */
@@ -53,6 +49,8 @@ export interface BotConfig {
   dbPath: string;
   /** 人格文件路径（默认 ~/.niubot/<name>/persona.md） */
   personaPath: string;
+  /** 主模型（可选，覆盖 backend 默认值） */
+  model?: string;
   /** 轻量模型（可选，覆盖 backend 默认值） */
   liteModel?: string;
 }
@@ -80,9 +78,6 @@ const BACKEND_ALIAS_MAP = new Map<string, BuiltinBackendType>(
 const DEFAULTS = {
   defaultConfig: {
     backend: "claude" as BuiltinBackendType,
-    liteModel: Object.fromEntries(
-      Object.entries(AGENT_REGISTRY).map(([backend, meta]) => [backend, meta.defaultLiteModel]),
-    ) as Record<string, string>,
   },
   queue: {
     bufferMs: 1500,
@@ -96,17 +91,8 @@ export function normalizeBackend(raw: string | undefined): string | undefined {
   return BACKEND_ALIAS_MAP.get(raw.toLowerCase()) ?? raw;
 }
 
-export function getDefaultLiteModel(config: NiuBotConfig, backend: string): string | undefined {
-  return config.defaultConfig.liteModel[backend]
-    ?? config.backends[backend]?.liteModel;
-}
-
 export function getConfiguredBackend(config: NiuBotConfig, bot: BotConfig): string {
   return bot.backend ?? config.defaultConfig.backend;
-}
-
-export function getBotLiteModel(config: NiuBotConfig, bot: BotConfig, backend: string): string | undefined {
-  return bot.liteModel ?? getDefaultLiteModel(config, backend);
 }
 
 export function loadConfig(configPath?: string): NiuBotConfig {
@@ -190,7 +176,6 @@ export function loadConfig(configPath?: string): NiuBotConfig {
       }
       backends[name] = {
         plugin: def["plugin"] as string,
-        liteModel: (def["liteModel"] as string) ?? undefined,
         options: (def["options"] as Record<string, unknown>) ?? undefined,
       };
     }
@@ -215,25 +200,7 @@ function parseDefaultConfig(
       ?? DEFAULTS.defaultConfig.backend,
   )!;
 
-  const liteModelFile = (defaultConfigFile["liteModel"] as Record<string, string> | undefined) ?? {};
-  const liteModel: Record<string, string> = {};
-
-  // 内置 backend 的 liteModel 默认值
-  for (const backendKey of BUILTIN_BACKEND_LIST) {
-    liteModel[backendKey] =
-      liteModelFile[backendKey]
-      ?? (backendKey === backend ? process.env["NIUBOT_LITE_MODEL"] : undefined)
-      ?? DEFAULTS.defaultConfig.liteModel[backendKey];
-  }
-
-  // 用户指定的其他 liteModel（自定义 backend 可能在这里设置）
-  for (const [key, val] of Object.entries(liteModelFile)) {
-    if (!(key in liteModel)) {
-      liteModel[key] = val;
-    }
-  }
-
-  return { backend, liteModel };
+  return { backend };
 }
 
 /** 解析单个 bot 配置，填充默认路径 */
@@ -261,6 +228,7 @@ function parseBotConfig(raw: Record<string, string>): BotConfig {
       : path.join(os.homedir(), "niubot-workspace", name),
     dbPath: raw["dbPath"] ?? path.join(botDir, "niubot.db"),
     personaPath: raw["personaPath"] ?? path.join(botDir, "persona.md"),
+    model: raw["model"] ?? undefined,
     liteModel: raw["liteModel"] ?? undefined,
   };
 }

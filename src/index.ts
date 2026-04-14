@@ -3,7 +3,6 @@ import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   getConfiguredBackend,
-  getDefaultLiteModel,
   loadConfig,
   NIUBOT_HOME,
   BUILTIN_BACKEND_LIST,
@@ -133,9 +132,8 @@ async function main(): Promise<void> {
 
   async function createBackend(type: string): Promise<AgentBackend> {
     const BackendClass = await loadBackendClass(type, config);
-    const liteModel = getDefaultLiteModel(config, type);
     const customOptions = config.backends[type]?.options ?? {};
-    return new BackendClass({ liteModel, ...customOptions });
+    return new BackendClass({ ...customOptions });
   }
 
   /** 获取或创建 backend，确保已 start */

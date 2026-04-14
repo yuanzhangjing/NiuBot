@@ -272,14 +272,13 @@ function generateConfigTemplate(backend: string): string {
 
 default_config:
   backend: ${backend}          # agent 后端：claude | codex
-  liteModel:
-    claude: haiku
-    codex: gpt-5.4-mini
 
 bots:
   - name: NiuBot
     appId: ""              # <- 飞书应用 App ID
     appSecret: ""          # <- 飞书应用 App Secret
+    # model: ""            # 主模型（不设则由 CLI 自行决定）
+    # liteModel: ""        # 轻量模型（归档摘要等低成本任务，不设则同主模型）
     # workingDirectory: ~/niubot-workspace/NiuBot  # agent 工作目录（默认 ~/niubot-workspace/<name>）
 
 # queue:
@@ -289,7 +288,6 @@ bots:
 # backends:
 #   my-agent:
 #     plugin: "./backends/my-agent.js"
-#     liteModel: "my-lite-model"
 `;
 }
 

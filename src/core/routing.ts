@@ -41,6 +41,7 @@ export async function decideRoute(
   lastActiveAt: string,
   newMessage: string,
   currentSessionKey: string,
+  liteModel?: string,
 ): Promise<RouteDecision> {
   // 1. 计算时间间隔
   const lastTime = new Date(lastActiveAt.replace(" ", "T") + "Z").getTime();
@@ -69,7 +70,7 @@ export async function decideRoute(
   // 3. 调 LLM（lite model，独立 session）
   let session;
   try {
-    session = await agent.createSession({ modelTier: "lite" });
+    session = await agent.createSession({ modelTier: "lite", liteModel });
   } catch (err) {
     log.warn("failed to create routing session, fallback to continue", { chatId, error: String(err) });
     return { action: "continue" };

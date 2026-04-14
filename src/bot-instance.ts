@@ -77,6 +77,7 @@ export async function createBotInstance(
     name: botConfig.name,
     platform: "feishu",
     platformBotId: `_bot_${botConfig.name}_`,
+    model: botConfig.model,
     liteModel: botConfig.liteModel,
     personaPath: botConfig.personaPath,
   };

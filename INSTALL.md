@@ -72,17 +72,21 @@ This is the only step that requires manual action from the user. Guide them thro
 
 ## Step 4: Configure Credentials
 
-Edit `~/.niubot/config.yaml` and fill in the Feishu app credentials:
+Edit `~/.niubot/config.yaml` and fill in the Feishu app credentials and model configuration:
 
 ```yaml
 bots:
   - name: NiuBot
     appId: "cli_xxxxxxxxxx"       # ← App ID from Step 3
     appSecret: "xxxxxxxxxxxxxxxx" # ← App Secret from Step 3
+    model: ""                     # ← Main model (e.g. claude-sonnet-4-5-20250514). Omit to use CLI default
+    liteModel: ""                 # ← Lite model for archive summaries (e.g. haiku). Omit = same as main
     # workingDirectory: ~/niubot-workspace/NiuBot  # agent working directory (default: ~/niubot-workspace/<name>)
 ```
 
-The `workingDirectory` is where the agent runs commands, stores task files, and reads/writes project data. The default `~/niubot-workspace/<name>` keeps it separate from the config directory (`~/.niubot/`). Change it if you have a preferred location.
+- `model`: The model used for all conversations. If not set, the agent CLI decides (e.g. Claude CLI uses its own default).
+- `liteModel`: A cheaper/faster model used only for background tasks like archive summaries. If not set, falls back to the main model.
+- `workingDirectory`: Where the agent runs commands, stores task files, and reads/writes project data. Default `~/niubot-workspace/<name>`.
 
 Admin is auto-detected — no manual configuration needed:
 1. If `application:application:readonly` permission is granted, the Feishu app creator becomes **owner** on startup.
@@ -230,7 +234,6 @@ import { CliAgentBackend, buildNiubotEnv } from "niubot/plugin";
 export default class MyAgentBackend extends CliAgentBackend {
   constructor(options = {}) {
     super("my-agent");
-    this.liteModel = options.liteModel;
   }
 
   command() { return "my-agent-cli"; }
@@ -238,7 +241,7 @@ export default class MyAgentBackend extends CliAgentBackend {
   buildSession(config) {
     return {
       workingDirectory: config.workingDirectory ?? process.cwd(),
-      model: config.modelTier === "lite" ? (config.liteModel ?? this.liteModel) : undefined,
+      model: config.modelTier === "lite" ? (config.liteModel ?? config.model) : config.model,
       importantContext: config.importantContext,
       extraEnv: buildNiubotEnv(config),
       cumulativeBytes: 0,
@@ -268,13 +271,14 @@ export default class MyAgentBackend extends CliAgentBackend {
 backends:
   my-agent:
     plugin: "./backends/my-agent.js"    # relative to ~/.niubot/
-    liteModel: "my-lite-model"          # optional
     options:                            # optional, passed to constructor
       timeout: 30000
 
 default_config:
   backend: my-agent                     # use as default, or switch at runtime via /agent
 ```
+
+Model configuration for custom backends works the same way — set `model` and `liteModel` on the bot entry. The values are passed to `buildSession()` via `config.model` and `config.liteModel`.
 
 ### Verify
 

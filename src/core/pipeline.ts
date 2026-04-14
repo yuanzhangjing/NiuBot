@@ -45,6 +45,8 @@ export interface BotIdentity {
   platform: string;
   /** Bot 在平台上的唯一标识（用于 DB 中的 bot 用户记录） */
   platformBotId: string;
+  /** 主模型 ID（可选，覆盖 backend 默认值） */
+  model?: string;
   /** 轻量模型 ID（可选，覆盖 backend 默认值） */
   liteModel?: string;
   /** 人设文件路径（注入到 admin 的场景信息中） */
@@ -374,6 +376,7 @@ export class Pipeline {
           dbPath: this.dbPath,
           botId: this.botIdentity.platformBotId,
           botName: this.botIdentity.name,
+          model: this.botIdentity.model,
           liteModel: this.botIdentity.liteModel,
           isAdmin,
           agentSessionId: canResumeRecoveredSession ? (row.agent_session_id ?? undefined) : undefined,
@@ -1008,6 +1011,7 @@ export class Pipeline {
       dbPath: this.dbPath,
       botId: this.botIdentity.platformBotId,
       botName: this.botIdentity.name,
+      model: this.botIdentity.model,
       liteModel: this.botIdentity.liteModel,
       isAdmin,
     });
@@ -1690,6 +1694,7 @@ export class Pipeline {
       dbPath: this.dbPath,
       botId: this.botIdentity.platformBotId,
       botName: this.botIdentity.name,
+      model: this.botIdentity.model,
       liteModel: this.botIdentity.liteModel,
       isAdmin,
     });
@@ -1763,6 +1768,7 @@ export class Pipeline {
       sessionRow.last_active_at,
       newMessage,
       existing.sessionId,
+      this.botIdentity.liteModel,
     );
 
     if (decision.action === "continue") return;
@@ -1868,7 +1874,7 @@ export class Pipeline {
 
     let session;
     try {
-      session = await this.agent.createSession({ modelTier: "lite" });
+      session = await this.agent.createSession({ modelTier: "lite", liteModel: this.botIdentity.liteModel });
     } catch (err) {
       this.log.warn("failed to create archive summary session", { chatId, sessionId, error: String(err) });
       return;

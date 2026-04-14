@@ -11,6 +11,8 @@ export interface SessionConfig {
   workingDirectory?: string;
   /** 模型档位，不设则用 default */
   modelTier?: ModelTier;
+  /** 主模型 ID（覆盖 backend 默认值） */
+  model?: string;
   /** 轻量模型 ID（覆盖 backend 默认值） */
   liteModel?: string;
   /** important 上下文（通过 system prompt 注入） */
