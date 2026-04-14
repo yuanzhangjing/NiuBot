@@ -1,9 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
-const DEFAULT_PERSONA = `> 此文件定义 bot 的行为风格，管理员可要求 bot 自行修改。
-
-## 角色
+const DEFAULT_PERSONA = `## 角色
 通用 AI 助手
 
 ## 风格

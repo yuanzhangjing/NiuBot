@@ -378,8 +378,9 @@ export class Pipeline {
           agentSessionId: canResumeRecoveredSession ? (row.agent_session_id ?? undefined) : undefined,
         });
 
-        // fallback 模式下 recover 也需要注入 important context（agent session 是全新的）
-        if (!supportsSystemPrompt && importantContext) {
+        // fallback 模式下：仅新建 session 时需要注入（resume 的 session 已有上下文）
+        const isResuming = canResumeRecoveredSession && !!row.agent_session_id;
+        if (!supportsSystemPrompt && importantContext && !isResuming) {
           this.pendingImportantContext.set(row.chat_id, importantContext);
         }
 

@@ -66,7 +66,7 @@ export function buildImportantContext(
 
   // 0. Persona（每次 session 启动时从文件读取，支持不重启热更新）
   if (scene.personaContent) {
-    parts.push(scene.personaContent);
+    parts.push(`<persona>\n${scene.personaContent}\n</persona>`);
   }
 
   // 1. 当前场景
@@ -90,7 +90,7 @@ export function buildImportantContext(
       sceneLines.push(`人设配置：${scene.personaPath}（管理员可要求修改）`);
     }
   }
-  parts.push(`[当前场景]\n${sceneLines.join("\n")}`);
+  parts.push(`<current-scene>\n${sceneLines.join("\n")}\n</current-scene>`);
 
   // 2. User memory（仅私聊注入，群聊由消息级注入）
   if (!isGroup && scene.userId) {
@@ -100,7 +100,7 @@ export function buildImportantContext(
       const label = scene.userName ? `关于 ${scene.userName} 的记忆` : "关于用户的记忆";
       const lines = memories.map((m) => `  #${m.id}  ${m.summary}`);
       lines.push("用 niubot user-memory get <id> 查看详情。");
-      parts.push(`[${label}]\n${lines.join("\n")}`);
+      parts.push(`<user-memory label="${label}">\n${lines.join("\n")}\n</user-memory>`);
     }
   }
 
