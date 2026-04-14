@@ -66,6 +66,7 @@ This is the only step that requires manual action from the user. Guide them thro
    - `im:message.reaction:write` — Message reactions
    - `im:resource` — Resources (image/file upload and download)
    - `im:chat:readonly` — Read group chat info
+   - `application:application:readonly` — Read app info (optional, for auto-detecting admin from app creator)
 4. On the **Bot** page, enable the **Bot** capability
 5. Publish the app: Create a version → Submit for review → Release
 

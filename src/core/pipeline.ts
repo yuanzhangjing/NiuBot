@@ -464,6 +464,12 @@ export class Pipeline {
 
     const userId = ensureUser(this.db, platform, msg.senderPlatformId, msg.senderName, "bot_sender");
 
+    // Fallback admin: if no admin detected yet and this is a p2p message, auto-promote first user
+    if (this.adminUserIds.size === 0 && msg.chatType === "p2p") {
+      this.adminUserIds.add(userId);
+      this.log.info("admin detected (first p2p user, fallback)", { userId, platformId: msg.senderPlatformId });
+    }
+
     // For p2p chats, link user_id
     const chatUserId = msg.chatType === "p2p" ? msg.senderPlatformId : undefined;
     const chatId = ensureChat(this.db, platform, msg.chatPlatformId, msg.chatType, msg.chatName, chatUserId);
