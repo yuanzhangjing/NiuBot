@@ -16,6 +16,7 @@
     "bin",
     "scripts",
     "restart.sh",
+    "AGENTS.template.md",
     "INSTALL.md",
     "README.md",
     "LICENSE"
