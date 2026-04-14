@@ -80,14 +80,16 @@ bots:
     appSecret: "xxxxxxxxxxxxxxxx" # ← App Secret from Step 3
 ```
 
-Optional: configure admin users (Feishu user IDs) for elevated commands:
+The Feishu app creator is automatically detected as admin on startup — no manual configuration needed.
+
+To add additional admins, optionally configure `adminUsers` with their Feishu user IDs:
 
 ```yaml
 bots:
   - name: NiuBot
     appId: "cli_xxxxxxxxxx"
     appSecret: "xxxxxxxxxxxxxxxx"
-    adminUsers:
+    adminUsers:          # optional, app creator is already admin
       - "ou_xxxxxxxxxxxxxx"
 ```
 
