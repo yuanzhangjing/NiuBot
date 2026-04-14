@@ -177,8 +177,7 @@ export function buildNormalContext(
   // 1. 活跃任务索引（实时从 tasks/index.yaml 读取，群聊仅 public）
   const taskBriefs = buildTaskIndex(workingDirectory, chatType);
   if (taskBriefs.length > 0) {
-    const lines = ["[活跃任务]", ...taskBriefs];
-    parts.push(`<active-tasks>\n${lines.join("\n")}\n</active-tasks>`);
+    parts.push(`<active-tasks>\n${taskBriefs.join("\n")}\n</active-tasks>`);
   }
 
   // 2. 最近归档 session 的摘要（短期记忆）— 最近一条完整，其余精简
