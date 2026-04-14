@@ -280,8 +280,6 @@ bots:
   - name: NiuBot
     appId: ""              # <- 飞书应用 App ID
     appSecret: ""          # <- 飞书应用 App Secret
-    # adminUsers:          # 管理员的飞书 user_id 列表（可选）
-    #   - "ou_xxxxxx"
 
 # queue:
 #   bufferMs: 1500         # 消息缓冲合并窗口（ms）

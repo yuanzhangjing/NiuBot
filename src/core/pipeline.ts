@@ -12,7 +12,7 @@ import {
   ensureUser, ensureChat, storeMessage, updateChatName,
   getUserShortLabel, getChatShortLabel, formatSenderLabel, getMessageByPlatformId, updateMessageContent, updateMessagePlatformId,
   getUnseenMessages, markMessagesSeen,
-  setUserAdmin, getAdminUserIds,
+  setUserAdminRole, getAdminUserIds, getUserAdminRole, type AdminRole,
 } from "../database/schema.js";
 import { buildImportantContext, buildNormalContext, buildSpeakerContext, type SceneInfo, type SpeakerInfo } from "../memory/inject.js";
 import { loadPersona } from "../persona.js";
@@ -46,8 +46,6 @@ export interface BotIdentity {
   platformBotId: string;
   /** 轻量模型 ID（可选，覆盖 backend 默认值） */
   liteModel?: string;
-  /** Admin 用户的 platform ID 列表 */
-  adminPlatformIds?: string[];
   /** 人设文件路径（注入到 admin 的场景信息中） */
   personaPath?: string;
 }
@@ -90,8 +88,8 @@ export class Pipeline {
   /** bot 的内部用户 ID */
   private botUserId: string | null = null;
 
-  /** admin 内部用户 ID 集合 */
-  private adminUserIds = new Set<string>();
+  /** admin 角色映射：userId → role */
+  private adminRoles = new Map<string, AdminRole>();
 
   /** agent 工作目录 */
   private workingDirectory: string;
@@ -185,7 +183,7 @@ export class Pipeline {
     this.log.info("pipeline started", {
       botUserId: this.botUserId,
       botPlatformId: this.botIdentity.platformBotId,
-      adminCount: this.adminUserIds.size,
+      adminCount: this.adminRoles.size,
     });
   }
 
@@ -216,9 +214,14 @@ export class Pipeline {
     return this.queue.hasBusyChats();
   }
 
-  /** 检查用户是否为 admin */
+  /** 检查用户是否为 admin 或 owner */
   isAdmin(userId: string): boolean {
-    return this.adminUserIds.has(userId);
+    return this.adminRoles.has(userId);
+  }
+
+  /** 检查用户是否为 owner */
+  isOwner(userId: string): boolean {
+    return this.adminRoles.get(userId) === "owner";
   }
 
   /** 获取 bot 用户 ID */
@@ -343,7 +346,7 @@ export class Pipeline {
       const userRow = (!isGroup && row.user_id)
         ? this.db.prepare("SELECT name FROM users WHERE id = ?").get(row.user_id) as { name: string | null } | undefined
         : undefined;
-      const isAdmin = row.user_id ? this.adminUserIds.has(row.user_id) : false;
+      const isAdmin = row.user_id ? this.adminRoles.has(row.user_id) : false;
       const persona = this.botIdentity.personaPath ? loadPersona(this.botIdentity.personaPath) : undefined;
       const importantContext = buildImportantContext(this.db, {
         botName: this.botIdentity.name,
@@ -465,9 +468,9 @@ export class Pipeline {
 
     const userId = ensureUser(this.db, platform, msg.senderPlatformId, msg.senderName, "bot_sender");
 
-    // Fallback admin: if no admin detected yet and this is a p2p message, auto-promote first user
-    if (this.adminUserIds.size === 0 && msg.chatType === "p2p") {
-      this.addAdmin(userId, "first_p2p_user", msg.senderPlatformId);
+    // Fallback: if no admin detected yet and this is a p2p message, first user becomes owner
+    if (this.adminRoles.size === 0 && msg.chatType === "p2p") {
+      this.setAdminRole(userId, "owner", "first_p2p_user", msg.senderPlatformId);
     }
 
     // For p2p chats, link user_id
@@ -675,48 +678,45 @@ export class Pipeline {
     return "";
   }
 
-  /** Persist a user as admin in both memory and DB */
-  private addAdmin(userId: string, source: string, platformId?: string): void {
-    if (this.adminUserIds.has(userId)) return;
-    this.adminUserIds.add(userId);
-    setUserAdmin(this.db, userId, true);
-    this.log.info("admin detected", { userId, source, platformId });
+  /** Persist a user's admin role in both memory and DB */
+  private setAdminRole(userId: string, role: AdminRole, source: string, platformId?: string): void {
+    const existing = this.adminRoles.get(userId);
+    if (existing === role) return;
+    // Never downgrade owner via this method
+    if (existing === "owner" && role === "admin") return;
+    this.adminRoles.set(userId, role);
+    setUserAdminRole(this.db, userId, role);
+    this.log.info("admin role set", { userId, role, source, platformId });
   }
 
-  /** Remove admin from both memory and DB */
-  private removeAdmin(userId: string): void {
-    this.adminUserIds.delete(userId);
-    setUserAdmin(this.db, userId, false);
+  /** Remove admin from both memory and DB (cannot remove owner) */
+  private removeAdmin(userId: string): boolean {
+    if (this.adminRoles.get(userId) === "owner") return false;
+    this.adminRoles.delete(userId);
+    setUserAdminRole(this.db, userId, "none");
     this.log.info("admin removed", { userId });
+    return true;
   }
 
-  /** Detect admin users from DB + platform + config */
+  /** Detect admin users from DB + platform */
   private async detectAdmins(): Promise<void> {
     const platform = this.botIdentity.platform;
 
     // 0. Restore from DB
-    for (const uid of getAdminUserIds(this.db)) {
-      this.adminUserIds.add(uid);
-      this.log.info("admin restored from DB", { userId: uid });
+    for (const { id, role } of getAdminUserIds(this.db)) {
+      this.adminRoles.set(id, role);
+      this.log.info("admin restored from DB", { userId: id, role });
     }
 
-    // 1. App creator
+    // 1. App creator → owner
     try {
       const creatorId = await this.im.getAppCreatorId();
       if (creatorId) {
         const userId = ensureUser(this.db, platform, creatorId, undefined, undefined);
-        this.addAdmin(userId, "app_creator", creatorId);
+        this.setAdminRole(userId, "owner", "app_creator", creatorId);
       }
     } catch (err) {
       this.log.warn("failed to detect app creator", { error: String(err) });
-    }
-
-    // 2. Config adminUsers
-    if (this.botIdentity.adminPlatformIds) {
-      for (const pid of this.botIdentity.adminPlatformIds) {
-        const userId = ensureUser(this.db, platform, pid, undefined, undefined);
-        this.addAdmin(userId, "config", pid);
-      }
     }
   }
 
@@ -735,7 +735,7 @@ export class Pipeline {
 
     const parts = text.split(/\s+/);
     const cmd = parts[0].toLowerCase();
-    const isAdmin = this.adminUserIds.has(userId);
+    const isAdmin = this.adminRoles.has(userId);
 
     // 1. 内置命令
     switch (cmd) {
@@ -777,7 +777,7 @@ export class Pipeline {
           this.replyText(chatId, platformChatId, msgId, "/admin 仅管理员可用。");
           return true;
         }
-        this.handleAdminCommand(parts.slice(1), chatId, platformChatId, msgId);
+        this.handleAdminCommand(parts.slice(1), userId, chatId, platformChatId, msgId);
         return true;
       }
       case "/help": {
@@ -974,7 +974,7 @@ export class Pipeline {
     const userRow = (!isGroup && userId)
       ? this.db.prepare("SELECT name FROM users WHERE id = ?").get(userId) as { name: string | null } | undefined
       : undefined;
-    const isAdmin = userId ? this.adminUserIds.has(userId) : false;
+    const isAdmin = userId ? this.adminRoles.has(userId) : false;
     const persona = this.botIdentity.personaPath ? loadPersona(this.botIdentity.personaPath) : undefined;
     const importantContext = buildImportantContext(this.db, {
       botName: this.botIdentity.name,
@@ -1166,23 +1166,30 @@ export class Pipeline {
    * - /admin add @某人   → 添加管理员（需要 @ mention）
    * - /admin remove @某人 → 移除管理员
    */
-  private handleAdminCommand(args: string[], chatId: string, platformChatId: string, msgId?: string): void {
+  private handleAdminCommand(args: string[], userId: string, chatId: string, platformChatId: string, msgId?: string): void {
     const sub = args[0]?.toLowerCase();
 
     if (!sub || sub === "list") {
-      // 列出所有管理员
-      const adminIds = getAdminUserIds(this.db);
-      if (adminIds.length === 0) {
+      const admins = getAdminUserIds(this.db);
+      if (admins.length === 0) {
         this.replyText(chatId, platformChatId, msgId, "当前没有管理员。");
         return;
       }
-      const lines = adminIds.map((uid) => `- ${getUserShortLabel(this.db, uid)}`);
+      const lines = admins.map(({ id, role }) => {
+        const label = getUserShortLabel(this.db, id);
+        return role === "owner" ? `- ${label} (owner)` : `- ${label}`;
+      });
       this.replyText(chatId, platformChatId, msgId, `管理员列表：\n${lines.join("\n")}`);
       return;
     }
 
     if (sub === "add" || sub === "remove") {
-      // 从文本中解析 @U<n>(...) 中的用户 ID
+      // Only owner can add/remove
+      if (!this.isOwner(userId)) {
+        this.replyText(chatId, platformChatId, msgId, "只有 owner 可以管理管理员。");
+        return;
+      }
+
       const rest = args.slice(1).join(" ");
       const match = rest.match(/@(u\d+)/i);
       if (!match) {
@@ -1191,7 +1198,6 @@ export class Pipeline {
       }
       const targetUserId = match[1].toLowerCase();
 
-      // 验证用户存在
       const userRow = this.db.prepare("SELECT id, name FROM users WHERE id = ?").get(targetUserId) as { id: string; name: string | null } | undefined;
       if (!userRow) {
         this.replyText(chatId, platformChatId, msgId, `用户 ${targetUserId} 不存在。`);
@@ -1201,15 +1207,19 @@ export class Pipeline {
       const label = getUserShortLabel(this.db, targetUserId);
 
       if (sub === "add") {
-        if (this.adminUserIds.has(targetUserId)) {
+        if (this.adminRoles.has(targetUserId)) {
           this.replyText(chatId, platformChatId, msgId, `${label} 已经是管理员了。`);
           return;
         }
-        this.addAdmin(targetUserId, "manual");
+        this.setAdminRole(targetUserId, "admin", "manual");
         this.replyText(chatId, platformChatId, msgId, `已添加 ${label} 为管理员。`);
       } else {
-        if (!this.adminUserIds.has(targetUserId)) {
+        if (!this.adminRoles.has(targetUserId)) {
           this.replyText(chatId, platformChatId, msgId, `${label} 不是管理员。`);
+          return;
+        }
+        if (this.isOwner(targetUserId)) {
+          this.replyText(chatId, platformChatId, msgId, `${label} 是 owner，不能被移除。`);
           return;
         }
         this.removeAdmin(targetUserId);
@@ -1455,7 +1465,7 @@ export class Pipeline {
             return {
               userId: id,
               userName: row?.name ?? undefined,
-              isAdmin: this.adminUserIds.has(id),
+              isAdmin: this.adminRoles.has(id),
             };
           });
           const speakerCtx = buildSpeakerContext(this.db, speakers);
@@ -1642,7 +1652,7 @@ export class Pipeline {
     const userRow = (!isGroup && userId)
       ? this.db.prepare("SELECT name FROM users WHERE id = ?").get(userId) as { name: string | null } | undefined
       : undefined;
-    const isAdmin = userId ? this.adminUserIds.has(userId) : false;
+    const isAdmin = userId ? this.adminRoles.has(userId) : false;
     const persona = this.botIdentity.personaPath ? loadPersona(this.botIdentity.personaPath) : undefined;
     const importantContext = buildImportantContext(this.db, {
       botName: this.botIdentity.name,

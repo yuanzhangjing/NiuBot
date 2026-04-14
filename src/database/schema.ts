@@ -239,6 +239,14 @@ const migrations: Migration[] = [
       db.exec("ALTER TABLE users ADD COLUMN is_admin INTEGER DEFAULT 0");
     },
   },
+  {
+    version: 10,
+    description: "Change is_admin from INTEGER to TEXT (none/admin/owner)",
+    up: (db) => {
+      // Convert: 0 → 'none', 1 → 'admin' (will be upgraded to 'owner' by detectAdmins)
+      db.exec("UPDATE users SET is_admin = CASE WHEN is_admin = 1 THEN 'admin' ELSE 'none' END");
+    },
+  },
 ];
 
 const LATEST_VERSION = migrations[migrations.length - 1]!.version;
@@ -637,13 +645,23 @@ export function updateMessagePlatformId(
 
 // ── Admin helpers ──────────────────────────────────────────────────
 
-/** Set a user as admin (persistent) */
-export function setUserAdmin(db: Database.Database, userId: string, isAdmin: boolean): void {
-  db.prepare("UPDATE users SET is_admin = ? WHERE id = ?").run(isAdmin ? 1 : 0, userId);
+export type AdminRole = "none" | "admin" | "owner";
+
+/** Set a user's admin role (persistent) */
+export function setUserAdminRole(db: Database.Database, userId: string, role: AdminRole): void {
+  db.prepare("UPDATE users SET is_admin = ? WHERE id = ?").run(role, userId);
 }
 
-/** Get all admin user IDs from DB */
-export function getAdminUserIds(db: Database.Database): string[] {
-  const rows = db.prepare("SELECT id FROM users WHERE is_admin = 1").all() as { id: string }[];
-  return rows.map((r) => r.id);
+/** Get a user's admin role */
+export function getUserAdminRole(db: Database.Database, userId: string): AdminRole {
+  const row = db.prepare("SELECT is_admin FROM users WHERE id = ?").get(userId) as { is_admin: string } | undefined;
+  const val = row?.is_admin;
+  if (val === "owner" || val === "admin") return val;
+  return "none";
+}
+
+/** Get all admin/owner user IDs from DB */
+export function getAdminUserIds(db: Database.Database): Array<{ id: string; role: AdminRole }> {
+  const rows = db.prepare("SELECT id, is_admin FROM users WHERE is_admin IN ('admin', 'owner')").all() as { id: string; is_admin: string }[];
+  return rows.map((r) => ({ id: r.id, role: r.is_admin as AdminRole }));
 }

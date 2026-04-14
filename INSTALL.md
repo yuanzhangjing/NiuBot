@@ -82,13 +82,17 @@ bots:
 ```
 
 Admin is auto-detected — no manual configuration needed:
-1. If `application:application:readonly` permission is granted, the Feishu app creator becomes admin automatically on startup.
-2. Otherwise, the first user to send a private message to the bot becomes admin.
+1. If `application:application:readonly` permission is granted, the Feishu app creator becomes **owner** on startup.
+2. Otherwise, the first user to send a private message to the bot becomes **owner**.
 
-Admin status is persisted in the database and survives restarts. To manage admins later, use the `/admin` command in chat:
-- `/admin` — list current admins
-- `/admin add @user` — add an admin
-- `/admin remove @user` — remove an admin
+There are two admin levels:
+- **owner**: full control, can manage other admins via `/admin add|remove`. Cannot be removed.
+- **admin**: has admin commands (/agent, /restart, shell), but cannot manage other admins.
+
+Admin status is persisted in the database and survives restarts. Owner can manage admins in chat:
+- `/admin` — list current admins and their roles
+- `/admin add @user` — add an admin (owner only)
+- `/admin remove @user` — remove an admin (owner only, cannot remove owner)
 
 ## Step 5: Configure Persona (optional)
 
