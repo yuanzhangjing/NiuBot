@@ -78,11 +78,11 @@ interface CheckResult {
 function checkBotCredentials(config: NiuBotConfig, issues: string[]): void {
   for (const bot of config.bots) {
     if (!bot.appId || !bot.appSecret) {
-      fail(`Bot '${bot.name}' credentials empty`);
+      fail(`Bot '${bot.id}' credentials empty`);
       hint("Edit ~/.niubot/config.yaml, fill in appId and appSecret");
       issues.push("credentials");
     } else {
-      ok(`Bot '${bot.name}' credentials present`);
+      ok(`Bot '${bot.id}' credentials present`);
     }
   }
 }
@@ -274,12 +274,12 @@ default_config:
   backend: ${backend}          # agent 后端：claude | codex
 
 bots:
-  - name: NiuBot            # 内部标识，决定数据目录路径，初始化后不可修改
+  - id: NiuBot              # 唯一标识，决定数据目录路径，初始化后不可修改
     appId: ""              # <- 飞书应用 App ID
     appSecret: ""          # <- 飞书应用 App Secret
     # model: ""            # 主模型（不设则由 CLI 自行决定）
     # liteModel: ""        # 轻量模型（归档摘要等低成本任务，不设则同主模型）
-    # workingDirectory: ~/niubot-workspace/NiuBot  # agent 工作目录（默认 ~/niubot-workspace/<name>）
+    # workingDirectory: ~/niubot-workspace/NiuBot  # agent 工作目录（默认 ~/niubot-workspace/<id>）
 
 # queue:
 #   bufferMs: 1500         # 消息缓冲合并窗口（ms）
@@ -402,7 +402,7 @@ function cmdStart(niubotHome: string, flags: CliFlags): void {
 
   // Ensure working directories exist
   for (const bot of config.bots) {
-    const workDir = path.join(niubotHome, bot.name, "workspace");
+    const workDir = path.join(niubotHome, bot.id, "workspace");
     fs.mkdirSync(workDir, { recursive: true });
   }
   ok("Working directories exist");
@@ -439,12 +439,12 @@ function cmdStart(niubotHome: string, flags: CliFlags): void {
   // Health check — all bots must respond
   const failedBots: string[] = [];
   for (const bot of config.bots) {
-    const socketPath = path.join(niubotHome, bot.name, "api.sock");
+    const socketPath = path.join(niubotHome, bot.id, "api.sock");
     if (waitForHealth(socketPath, 15)) {
-      ok(`${bot.name} health check passed`);
+      ok(`${bot.id} health check passed`);
     } else {
-      fail(`${bot.name} health check failed`);
-      failedBots.push(bot.name);
+      fail(`${bot.id} health check failed`);
+      failedBots.push(bot.id);
     }
   }
 
@@ -453,7 +453,7 @@ function cmdStart(niubotHome: string, flags: CliFlags): void {
     console.log("NiuBot is running.");
     console.log(`  Log: ${logFile}`);
     for (const bot of config.bots) {
-      console.log(`  API: ${path.join(niubotHome, bot.name, "api.sock")}`);
+      console.log(`  API: ${path.join(niubotHome, bot.id, "api.sock")}`);
     }
   } else {
     hint(`Check log: ${logFile}`);

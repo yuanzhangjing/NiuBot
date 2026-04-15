@@ -121,7 +121,7 @@ async function main(): Promise<void> {
   log.info("config loaded", {
     backend: config.defaultConfig.backend,
     botCount: config.bots.length,
-    bots: config.bots.map((b) => b.name).join(", "),
+    bots: config.bots.map((b) => b.id).join(", "),
     customBackends: Object.keys(config.backends).length > 0
       ? Object.keys(config.backends).join(", ")
       : undefined,
@@ -182,11 +182,11 @@ async function main(): Promise<void> {
       const instance = await createBotInstance(botConfig, agent, config.queue, backendType, getOrCreateBackend, getAvailableBackends);
       bots.push(instance);
       log.info("bot backend assigned", {
-        bot: botConfig.name,
+        bot: botConfig.id,
         backend: backendType,
       });
     } catch (err) {
-      log.error("failed to create bot instance", { bot: botConfig.name, error: String(err) });
+      log.error("failed to create bot instance", { bot: botConfig.id, error: String(err) });
     }
   }
 
@@ -208,9 +208,9 @@ async function main(): Promise<void> {
       // Start cron scheduler
       bot.cronScheduler.start();
 
-      log.info("bot started", { name: bot.name });
+      log.info("bot started", { name: bot.id });
     } catch (err) {
-      log.error("failed to start bot", { name: bot.name, error: String(err) });
+      log.error("failed to start bot", { name: bot.id, error: String(err) });
     }
   }
 
@@ -236,7 +236,7 @@ async function main(): Promise<void> {
 
     // 1. 停止接收新消息 + 停止 cron/摘要/队列/API
     for (const bot of bots) {
-      try { await bot.im.stop(); } catch (e) { log.error("im.stop failed", { bot: bot.name, error: String(e) }); }
+      try { await bot.im.stop(); } catch (e) { log.error("im.stop failed", { bot: bot.id, error: String(e) }); }
       bot.cronScheduler.stop();
       bot.pipeline.stop();
       bot.apiServer.stop();
@@ -270,7 +270,7 @@ async function main(): Promise<void> {
 
     // 4. 关闭所有数据库
     for (const bot of bots) {
-      try { bot.db.close(); } catch (e) { log.error("db.close failed", { bot: bot.name, error: String(e) }); }
+      try { bot.db.close(); } catch (e) { log.error("db.close failed", { bot: bot.id, error: String(e) }); }
     }
 
     // 删除 PID 文件

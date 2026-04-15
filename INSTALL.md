@@ -76,18 +76,18 @@ Edit `~/.niubot/config.yaml` and fill in the Feishu app credentials and model co
 
 ```yaml
 bots:
-  - name: NiuBot
-    appId: "cli_xxxxxxxxxx"       # ← App ID from Step 3
-    appSecret: "xxxxxxxxxxxxxxxx" # ← App Secret from Step 3
-    model: ""                     # ← Main model (e.g. claude-sonnet-4-5-20250514). Omit to use CLI default
-    liteModel: ""                 # ← Lite model for archive summaries (e.g. haiku). Omit = same as main
-    # workingDirectory: ~/niubot-workspace/NiuBot  # agent working directory (default: ~/niubot-workspace/<name>)
+  - id: NiuBot                          # ← Unique bot ID (immutable, determines data paths)
+    appId: "cli_xxxxxxxxxx"              # ← App ID from Step 3
+    appSecret: "xxxxxxxxxxxxxxxx"        # ← App Secret from Step 3
+    model: ""                            # ← Main model (e.g. claude-sonnet-4-5-20250514). Omit to use CLI default
+    liteModel: ""                        # ← Lite model for archive summaries (e.g. haiku). Omit = same as main
+    # workingDirectory: ~/niubot-workspace/NiuBot  # agent working directory (default: ~/niubot-workspace/<id>)
 ```
 
-- `name`: Internal identifier. Determines data directory (`~/.niubot/<name>/`) and default workspace (`~/niubot-workspace/<name>/`). **Do not change after initial setup** — renaming breaks data paths.
+- `id`: Unique bot identifier. Determines data directory (`~/.niubot/<id>/`) and default workspace (`~/niubot-workspace/<id>/`). **Do not change after initial setup** — renaming breaks data paths. Legacy `name` field is also accepted.
 - `model`: The model used for all conversations. If not set, the agent CLI decides (e.g. Claude CLI uses its own default).
 - `liteModel`: A cheaper/faster model used only for background tasks like archive summaries. If not set, falls back to the main model.
-- `workingDirectory`: Where the agent runs commands, stores task files, and reads/writes project data. Default `~/niubot-workspace/<name>`.
+- `workingDirectory`: Where the agent runs commands, stores task files, and reads/writes project data. Default `~/niubot-workspace/<id>`.
 
 Admin is auto-detected — no manual configuration needed:
 1. If `application:application:readonly` permission is granted, the Feishu app creator becomes **owner** on startup.

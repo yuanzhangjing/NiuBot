@@ -19,7 +19,7 @@ import { createLogger } from "./logger.js";
 import type Database from "better-sqlite3";
 
 export interface BotInstance {
-  name: string;
+  id: string;
   config: BotConfig;
   db: Database.Database;
   im: FeishuAdapter;
@@ -39,7 +39,7 @@ export async function createBotInstance(
   backendResolver?: (type: AgentBackendType) => Promise<AgentBackend>,
   getAvailableBackends?: () => string[],
 ): Promise<BotInstance> {
-  const log = createLogger("bot-instance", botConfig.name);
+  const log = createLogger("bot-instance", botConfig.id);
 
   // 1. 确保目录和默认文件存在
   fs.mkdirSync(path.dirname(botConfig.dbPath), { recursive: true });
@@ -74,9 +74,9 @@ export async function createBotInstance(
 
   // 5. 创建 Pipeline
   const botIdentity: BotIdentity = {
-    name: botConfig.name,
+    name: botConfig.id,
     platform: "feishu",
-    platformBotId: `_bot_${botConfig.name}_`,
+    platformBotId: `_bot_${botConfig.id}_`,
     model: botConfig.model,
     liteModel: botConfig.liteModel,
     personaPath: botConfig.personaPath,
@@ -131,7 +131,7 @@ export async function createBotInstance(
   });
 
   return {
-    name: botConfig.name,
+    id: botConfig.id,
     config: botConfig,
     db,
     im,

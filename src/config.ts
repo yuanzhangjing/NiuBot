@@ -38,16 +38,17 @@ export interface DefaultConfig {
 
 /** 单个 Bot 的配置 */
 export interface BotConfig {
-  name: string;
+  /** 唯一标识，决定数据目录路径，初始化后不可修改 */
+  id: string;
   appId: string;
   appSecret: string;
   /** agent backend（可选，覆盖全局 default_config.backend） */
   backend?: AgentBackendType;
-  /** agent 工作目录（默认 ~/.niubot/<name>/workspace/） */
+  /** agent 工作目录（默认 ~/niubot-workspace/<id>） */
   workingDirectory: string;
-  /** 数据库路径（默认 ~/.niubot/<name>/niubot.db） */
+  /** 数据库路径（默认 ~/.niubot/<id>/niubot.db） */
   dbPath: string;
-  /** 人格文件路径（默认 ~/.niubot/<name>/persona.md） */
+  /** 人格文件路径（默认 ~/.niubot/<id>/persona.md） */
   personaPath: string;
   /** 主模型（可选，覆盖 backend 默认值） */
   model?: string;
@@ -124,12 +125,12 @@ export function loadConfig(configPath?: string): NiuBotConfig {
     }
     bots = rawBots.map((b) => parseBotConfig(b));
 
-    const names = new Set<string>();
+    const ids = new Set<string>();
     for (const bot of bots) {
-      if (names.has(bot.name)) {
-        throw new Error(`Config error: duplicate bot name '${bot.name}'`);
+      if (ids.has(bot.id)) {
+        throw new Error(`Config error: duplicate bot id '${bot.id}'`);
       }
-      names.add(bot.name);
+      ids.add(bot.id);
     }
   } else {
     const feishuFile = (fileConfig["feishu"] as Record<string, string>) ?? {};
@@ -156,7 +157,7 @@ export function loadConfig(configPath?: string): NiuBotConfig {
       ?? path.join(NIUBOT_HOME, "niubot.db");
 
     bots = [{
-      name: "NiuBot",
+      id: "NiuBot",
       appId,
       appSecret,
       workingDirectory: path.resolve(legacyWorkDir),
@@ -205,27 +206,28 @@ function parseDefaultConfig(
 
 /** 解析单个 bot 配置，填充默认路径 */
 function parseBotConfig(raw: Record<string, string>): BotConfig {
-  const name = raw["name"];
-  if (!name) throw new Error("Config error: bot entry missing 'name'");
+  // 兼容旧配置：优先读 id，fallback 到 name
+  const id = raw["id"] ?? raw["name"];
+  if (!id) throw new Error("Config error: bot entry missing 'id'");
 
   const appId = raw["appId"];
   const appSecret = raw["appSecret"];
   if (!appId || !appSecret) {
-    throw new Error(`Config error: bot '${name}' missing appId or appSecret`);
+    throw new Error(`Config error: bot '${id}' missing appId or appSecret`);
   }
 
-  const botDir = path.join(NIUBOT_HOME, name);
+  const botDir = path.join(NIUBOT_HOME, id);
 
   const backend = normalizeBackend(raw["backend"]);
 
   return {
-    name,
+    id,
     appId,
     appSecret,
     backend,
     workingDirectory: raw["workingDirectory"]
       ? path.resolve(raw["workingDirectory"])
-      : path.join(os.homedir(), "niubot-workspace", name),
+      : path.join(os.homedir(), "niubot-workspace", id),
     dbPath: raw["dbPath"] ?? path.join(botDir, "niubot.db"),
     personaPath: raw["personaPath"] ?? path.join(botDir, "persona.md"),
     model: raw["model"] ?? undefined,
