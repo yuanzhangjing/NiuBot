@@ -2,7 +2,6 @@ import { writeFileSync, unlinkSync, mkdirSync, symlinkSync, realpathSync, rmSync
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  getConfiguredBackend,
   loadConfig,
   NIUBOT_HOME,
   BUILTIN_BACKEND_LIST,
@@ -176,7 +175,7 @@ async function main(): Promise<void> {
   const bots: BotInstance[] = [];
   for (const botConfig of config.bots) {
     try {
-      const backendType = getConfiguredBackend(config, botConfig);
+      const backendType = botConfig.backend;
       const agent = await getOrCreateBackend(backendType);
       const instance = await createBotInstance(botConfig, agent, config.queue, backendType, getOrCreateBackend, getAvailableBackends);
       bots.push(instance);

@@ -17,7 +17,7 @@ import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
-import { AGENT_REGISTRY, loadConfig, getConfiguredBackend, type NiuBotConfig } from "./config.js";
+import { AGENT_REGISTRY, loadConfig, type NiuBotConfig } from "./config.js";
 
 // ── Paths ──────────────────────────────────────────────────
 
@@ -183,7 +183,7 @@ async function cmdInit(niubotHome: string, flags: CliFlags): Promise<void> {
         checkBotCredentials(config, issues);
 
         // Validate backend availability for each bot
-        const backendsToCheck = new Set(config.bots.map((b) => getConfiguredBackend(config, b)));
+        const backendsToCheck = new Set(config.bots.map((b) => b.backend));
         for (const be of backendsToCheck) {
           const customDef = config.backends[be];
           if (customDef) {
@@ -503,7 +503,7 @@ function cmdStart(niubotHome: string, flags: CliFlags): void {
   checkBotCredentials(config, issues);
 
   // Check backend availability (deduplicate across bots)
-  const backendsToCheck = new Set(config.bots.map((b) => getConfiguredBackend(config, b)));
+  const backendsToCheck = new Set(config.bots.map((b) => b.backend));
   for (const be of backendsToCheck) {
     const customDef = config.backends[be];
     if (customDef) {

@@ -84,10 +84,6 @@ export function normalizeBackend(raw: string | undefined): string | undefined {
   return BACKEND_ALIAS_MAP.get(raw.toLowerCase()) ?? raw;
 }
 
-export function getConfiguredBackend(_config: NiuBotConfig, bot: BotConfig): string {
-  return bot.backend;
-}
-
 export function loadConfig(configPath?: string): NiuBotConfig {
   // 1. 尝试从配置文件加载
   let fileConfig: Record<string, unknown> = {};
