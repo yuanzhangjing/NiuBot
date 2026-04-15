@@ -32,18 +32,14 @@ export interface CustomBackendDef {
   options?: Record<string, unknown>;
 }
 
-export interface DefaultConfig {
-  backend: AgentBackendType;
-}
-
 /** 单个 Bot 的配置 */
 export interface BotConfig {
   /** 唯一标识，决定数据目录路径，初始化后不可修改 */
   id: string;
   appId: string;
   appSecret: string;
-  /** agent backend（可选，覆盖全局 default_config.backend） */
-  backend?: AgentBackendType;
+  /** agent backend（必填） */
+  backend: string;
   /** agent 工作目录（默认 ~/niubot-workspace/<id>） */
   workingDirectory: string;
   /** 数据库路径（默认 ~/.niubot/<id>/niubot.db） */
@@ -58,7 +54,6 @@ export interface BotConfig {
 
 export interface NiuBotConfig {
   bots: BotConfig[];
-  defaultConfig: DefaultConfig;
   /** 自定义 backend 插件注册 */
   backends: Record<string, CustomBackendDef>;
   queue: {
@@ -77,9 +72,6 @@ const BACKEND_ALIAS_MAP = new Map<string, BuiltinBackendType>(
 );
 
 const DEFAULTS = {
-  defaultConfig: {
-    backend: "claude" as BuiltinBackendType,
-  },
   queue: {
     bufferMs: 1500,
   },
@@ -92,8 +84,8 @@ export function normalizeBackend(raw: string | undefined): string | undefined {
   return BACKEND_ALIAS_MAP.get(raw.toLowerCase()) ?? raw;
 }
 
-export function getConfiguredBackend(config: NiuBotConfig, bot: BotConfig): string {
-  return bot.backend ?? config.defaultConfig.backend;
+export function getConfiguredBackend(_config: NiuBotConfig, bot: BotConfig): string {
+  return bot.backend;
 }
 
 export function loadConfig(configPath?: string): NiuBotConfig {
@@ -106,10 +98,15 @@ export function loadConfig(configPath?: string): NiuBotConfig {
   }
 
   // 2. 共享配置
-  const defaultConfigFile = (fileConfig["default_config"] as Record<string, unknown>) ?? {};
   const legacyAgentFile = (fileConfig["agent"] as Record<string, unknown>) ?? {};
   const queueFile = (fileConfig["queue"] as Record<string, number>) ?? {};
-  const defaultConfig = parseDefaultConfig(defaultConfigFile, legacyAgentFile);
+
+  // 向后兼容：从旧 default_config.backend / env 读取 fallback backend
+  const legacyDefaultBackend = normalizeBackend(
+    process.env["NIUBOT_BACKEND"]
+      ?? ((fileConfig["default_config"] as Record<string, unknown>)?.["backend"] as string | undefined)
+      ?? (legacyAgentFile["backend"] as string | undefined),
+  );
 
   const queueConfig = {
     bufferMs: parseNumEnv(process.env["NIUBOT_BUFFER_MS"]) ?? queueFile["bufferMs"] ?? DEFAULTS.queue.bufferMs,
@@ -123,7 +120,7 @@ export function loadConfig(configPath?: string): NiuBotConfig {
     if (rawBots.length === 0) {
       throw new Error("Config error: bots array is empty");
     }
-    bots = rawBots.map((b) => parseBotConfig(b));
+    bots = rawBots.map((b) => parseBotConfig(b, legacyDefaultBackend));
 
     const ids = new Set<string>();
     for (const bot of bots) {
@@ -160,6 +157,7 @@ export function loadConfig(configPath?: string): NiuBotConfig {
       id: "NiuBot",
       appId,
       appSecret,
+      backend: legacyDefaultBackend ?? "claude",
       workingDirectory: path.resolve(legacyWorkDir),
       dbPath: legacyDbPath,
       personaPath: path.join(NIUBOT_HOME, "persona.md"),
@@ -184,28 +182,13 @@ export function loadConfig(configPath?: string): NiuBotConfig {
 
   return {
     bots,
-    defaultConfig,
     backends,
     queue: queueConfig,
   };
 }
 
-function parseDefaultConfig(
-  defaultConfigFile: Record<string, unknown>,
-  legacyAgentFile: Record<string, unknown>,
-): DefaultConfig {
-  const backend = normalizeBackend(
-    process.env["NIUBOT_BACKEND"]
-      ?? (defaultConfigFile["backend"] as string | undefined)
-      ?? (legacyAgentFile["backend"] as string | undefined)
-      ?? DEFAULTS.defaultConfig.backend,
-  )!;
-
-  return { backend };
-}
-
 /** 解析单个 bot 配置，填充默认路径 */
-function parseBotConfig(raw: Record<string, string>): BotConfig {
+function parseBotConfig(raw: Record<string, string>, legacyDefaultBackend?: string): BotConfig {
   // 兼容旧配置：优先读 id，fallback 到 name
   const id = raw["id"] ?? raw["name"];
   if (!id) throw new Error("Config error: bot entry missing 'id'");
@@ -218,7 +201,14 @@ function parseBotConfig(raw: Record<string, string>): BotConfig {
 
   const botDir = path.join(NIUBOT_HOME, id);
 
-  const backend = normalizeBackend(raw["backend"]);
+  const backend = normalizeBackend(raw["backend"]) ?? legacyDefaultBackend;
+  if (!backend) {
+    throw new Error(
+      `Config error: bot '${id}' missing 'backend'. ` +
+      `Set backend on the bot entry (e.g. backend: claude). ` +
+      `Run 'niubot init' to detect available backends.`,
+    );
+  }
 
   return {
     id,

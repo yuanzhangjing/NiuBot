@@ -15,6 +15,7 @@ import { execFileSync, spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 import { AGENT_REGISTRY, loadConfig, getConfiguredBackend, type NiuBotConfig } from "./config.js";
 
@@ -66,6 +67,16 @@ const ok = (msg: string) => console.log(`  \u2713 ${msg}`);
 const fail = (msg: string) => console.log(`  \u2717 ${msg}`);
 const hint = (msg: string) => console.log(`    \u2192 ${msg}`);
 const info = (msg: string) => console.log(`  ${msg}`);
+
+function prompt(question: string): Promise<string> {
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  return new Promise((resolve) => {
+    rl.question(question, (answer) => {
+      rl.close();
+      resolve(answer.trim());
+    });
+  });
+}
 
 // ── Checks ─────────────────────────────────────────────────
 
@@ -145,7 +156,7 @@ function scanAllBackends(): { results: BackendScanResult[]; firstAvailable?: str
 
 // ── Init ───────────────────────────────────────────────────
 
-function cmdInit(niubotHome: string, flags: CliFlags): void {
+async function cmdInit(niubotHome: string, flags: CliFlags): Promise<void> {
   console.log();
   console.log("NiuBot Init");
   console.log("\u2500".repeat(40));
@@ -161,32 +172,9 @@ function cmdInit(niubotHome: string, flags: CliFlags): void {
   if (nodeCheck.passed) ok(nodeCheck.label);
   else { fail(nodeCheck.label); if (nodeCheck.hint) hint(nodeCheck.hint); issues.push(nodeCheck.hint ?? nodeCheck.label); }
 
-  // Backend scan
-  console.log("  Scanning agent backends...");
-  const { results: backendResults, firstAvailable } = scanAllBackends();
-  for (const r of backendResults) {
-    if (r.available) {
-      ok(`${r.name} v${r.version}`);
-    } else {
-      fail(`${r.name} \u2014 ${r.error}`);
-    }
-  }
-
-  if (firstAvailable) {
-    info(`\u2192 Using '${firstAvailable}' as default backend`);
-  } else {
-    info("\u2192 No agent backend found. Config template will default to 'claude'.");
-    info("  Install one before running 'niubot start'.");
-    issues.push("No agent backend CLI found");
-  }
-
-  const defaultBackend = firstAvailable ?? "claude";
-
-  // Check-only mode
+  // Check-only mode — non-interactive, no prompts
   if (flags.check) {
     console.log();
-
-    // Validate config via loadConfig
     const configPath = path.join(niubotHome, "config.yaml");
     if (fs.existsSync(configPath)) {
       try {
@@ -202,7 +190,6 @@ function cmdInit(niubotHome: string, flags: CliFlags): void {
       hint("Run 'niubot init' to generate config");
       issues.push("Config not found");
     }
-
     console.log();
     if (issues.length === 0) {
       console.log(`Result: all checks passed`);
@@ -213,6 +200,89 @@ function cmdInit(niubotHome: string, flags: CliFlags): void {
     return;
   }
 
+  // Backend selection
+  // Step 1: ask if user has a custom backend
+  console.log();
+  const customAnswer = await prompt("  Do you have a custom agent backend? (y/N): ");
+  const wantsCustom = customAnswer.toLowerCase() === "y" || customAnswer.toLowerCase() === "yes";
+
+  let defaultBackend: string;
+  let customBackendConfig: { name: string; plugin: string } | undefined;
+
+  if (wantsCustom) {
+    // Custom backend flow
+    console.log();
+    console.log("  Custom backend setup");
+    console.log("  \u2500".repeat(36));
+    console.log("  Create a plugin file that extends CliAgentBackend.");
+    console.log("  See INSTALL.md \"Plugin API Reference\" section for the full protocol.");
+    console.log("  Plugin location: ~/.niubot/backends/<name>.js");
+    console.log();
+
+    const backendName = await prompt("  Backend name (e.g. my-agent): ");
+    if (!backendName) {
+      fail("Backend name is required");
+      process.exit(1);
+    }
+
+    const defaultPlugin = `./backends/${backendName}.js`;
+    const pluginPath = (await prompt(`  Plugin path (default: ${defaultPlugin}): `)) || defaultPlugin;
+
+    customBackendConfig = { name: backendName, plugin: pluginPath };
+    defaultBackend = backendName;
+
+    // Create backends directory
+    const backendsDir = path.join(niubotHome, "backends");
+    fs.mkdirSync(backendsDir, { recursive: true });
+
+    info(`\u2192 Using custom backend '${defaultBackend}'`);
+    hint(`Create your plugin at ${path.resolve(niubotHome, pluginPath)} before running 'niubot start'`);
+  } else {
+    // Built-in backend flow
+    console.log();
+    console.log("  Scanning agent backends...");
+    const { results: backendResults } = scanAllBackends();
+    for (const r of backendResults) {
+      if (r.available) {
+        ok(`${r.name} v${r.version}`);
+      } else {
+        fail(`${r.name} \u2014 ${r.error}`);
+      }
+    }
+
+    const availableBackends = backendResults.filter((r) => r.available);
+
+    if (availableBackends.length === 0) {
+      fail("No agent backend found");
+      hint("Install claude or codex CLI, or re-run init with a custom backend");
+      console.log();
+      console.log("Aborted: at least one agent backend is required.");
+      console.log();
+      process.exit(1);
+    }
+
+    if (availableBackends.length === 1) {
+      defaultBackend = availableBackends[0]!.name;
+      info(`\u2192 Using '${defaultBackend}' as bot backend`);
+    } else {
+      console.log();
+      console.log("  Available backends:");
+      for (let i = 0; i < availableBackends.length; i++) {
+        const r = availableBackends[i]!;
+        console.log(`    ${i + 1}) ${r.name} (v${r.version})`);
+      }
+      const answer = await prompt(`  Select backend [1-${availableBackends.length}] (default: 1): `);
+      const parsed = answer ? parseInt(answer, 10) : 1;
+      const idx = Number.isNaN(parsed) ? -1 : parsed - 1;
+      if (idx < 0 || idx >= availableBackends.length) {
+        fail("Invalid selection");
+        process.exit(1);
+      }
+      defaultBackend = availableBackends[idx]!.name;
+      info(`\u2192 Using '${defaultBackend}' as bot backend`);
+    }
+  }
+
   // Generate files
   console.log();
   console.log(`Initializing ${niubotHome} ...`);
@@ -220,15 +290,6 @@ function cmdInit(niubotHome: string, flags: CliFlags): void {
   // Create home dir
   fs.mkdirSync(niubotHome, { recursive: true });
   ok(`Created ${niubotHome}/`);
-
-  // config.yaml
-  const configPath = path.join(niubotHome, "config.yaml");
-  if (fs.existsSync(configPath) && !flags.force) {
-    info(`config.yaml already exists (use --force to overwrite)`);
-  } else {
-    fs.writeFileSync(configPath, generateConfigTemplate(defaultBackend));
-    ok(`Created config.yaml (backend: ${defaultBackend})`);
-  }
 
   // .env
   const envPath = path.join(niubotHome, ".env");
@@ -250,51 +311,126 @@ function cmdInit(niubotHome: string, flags: CliFlags): void {
     ok(`Created NiuBot/persona.md`);
   }
 
-  // Plugin symlink（使 import("niubot/plugin") 在插件目录下可用）
+  // Plugin symlink
   ensurePluginSymlink(niubotHome);
   ok("Created node_modules/niubot symlink (for plugin imports)");
 
+  // ── Feishu app setup ──────────────────────────────────────
   console.log();
-  console.log("Status: ready for configuration");
+  console.log("Feishu App Setup");
   console.log("\u2500".repeat(40));
   console.log();
-  console.log("Next steps:");
-  console.log("  1. Fill in Feishu credentials in ~/.niubot/config.yaml");
-  console.log("     (appId and appSecret from https://open.feishu.cn/app)");
-  console.log("  2. Run 'niubot start' to launch the service");
+  console.log("  You need a Feishu (Lark) app to connect the bot.");
+  console.log("  If you already have one, skip ahead and enter the credentials.");
+  console.log();
+  console.log("  To create one:");
+  console.log("    1. Open https://open.feishu.cn/app");
+  console.log("    2. Create a new Enterprise Self-Built App");
+  console.log("    3. Credentials & Basic Info \u2192 copy App ID + App Secret");
+  console.log("    4. Permissions \u2192 add: im:message, im:message.reaction:write,");
+  console.log("       im:resource, im:chat:readonly, application:application:readonly");
+  console.log("    5. Bot page \u2192 enable Bot capability");
+  console.log("    6. Publish the app (create version \u2192 submit \u2192 release)");
+  console.log();
+
+  const appId = await prompt("  App ID: ");
+  const appSecret = await prompt("  App Secret: ");
+
+  if (!appId || !appSecret) {
+    info("Credentials skipped. You can fill them in later:");
+    hint(`Edit ${path.join(niubotHome, "config.yaml")}`);
+  }
+
+  // config.yaml — write with credentials
+  const configPath = path.join(niubotHome, "config.yaml");
+  if (fs.existsSync(configPath) && !flags.force) {
+    info(`config.yaml already exists (use --force to overwrite)`);
+    if (appId && appSecret) {
+      hint("Credentials were NOT saved. Add them manually or re-run with --force");
+    }
+  } else {
+    fs.writeFileSync(configPath, generateConfigTemplate(defaultBackend, customBackendConfig, appId, appSecret));
+    ok(`Created config.yaml`);
+  }
+
+  // ── Summary ───────────────────────────────────────────────
+  console.log();
+  console.log("Setup complete");
+  console.log("\u2500".repeat(40));
+  console.log(`  Config:  ${configPath}`);
+  console.log(`  Persona: ${personaPath}`);
+  console.log(`  Backend: ${defaultBackend}`);
+
+  if (customBackendConfig) {
+    console.log();
+    hint(`Create your backend plugin at ~/.niubot/${customBackendConfig.plugin}`);
+    hint("See INSTALL.md 'Plugin API Reference' for the protocol");
+  }
+
+  if (!appId || !appSecret) {
+    console.log();
+    console.log("  Run 'niubot start' after filling in Feishu credentials.");
+  } else {
+    console.log();
+    const startNow = await prompt("  Start NiuBot now? (Y/n): ");
+    if (!startNow || startNow.toLowerCase() === "y" || startNow.toLowerCase() === "yes") {
+      console.log();
+      cmdStart(niubotHome, {});
+    } else {
+      console.log();
+      console.log("  Run 'niubot start' when ready.");
+    }
+  }
+
   console.log();
 }
 
 // ── Templates ──────────────────────────────────────────────
 
-function generateConfigTemplate(backend: string): string {
-  return `# NiuBot 配置文件
+function generateConfigTemplate(
+  backend: string,
+  customBackend?: { name: string; plugin: string },
+  appId?: string,
+  appSecret?: string,
+): string {
+  let backendsSection: string;
+  if (customBackend) {
+    backendsSection = `
+backends:
+  ${customBackend.name}:
+    plugin: "${customBackend.plugin}"
+`;
+  } else {
+    backendsSection = `
+# 自定义 backend 插件（可选）
+# backends:
+#   my-agent:
+#     plugin: "./backends/my-agent.js"
+`;
+  }
 
-default_config:
-  backend: ${backend}          # agent 后端：claude | codex
+  const id = appId ? `"${appId}"` : '""';
+  const secret = appSecret ? `"${appSecret}"` : '""';
+
+  return `# NiuBot 配置文件
 
 bots:
   - id: NiuBot              # 唯一标识，决定数据目录路径，初始化后不可修改
-    appId: ""              # <- 飞书应用 App ID
-    appSecret: ""          # <- 飞书应用 App Secret
+    backend: ${backend}        # agent 后端
+    appId: ${id}
+    appSecret: ${secret}
     # model: ""            # 主模型（不设则由 CLI 自行决定）
     # liteModel: ""        # 轻量模型（归档摘要等低成本任务，不设则同主模型）
     # workingDirectory: ~/niubot-workspace/NiuBot  # agent 工作目录（默认 ~/niubot-workspace/<id>）
 
 # queue:
 #   bufferMs: 1500         # 消息缓冲合并窗口（ms）
-
-# 自定义 backend 插件（可选）
-# backends:
-#   my-agent:
-#     plugin: "./backends/my-agent.js"
-`;
+${backendsSection}`;
 }
 
 function generateEnvTemplate(): string {
   return `# NiuBot 环境变量
 # NIUBOT_LOG_LEVEL=info
-# NIUBOT_BACKEND=claude
 `;
 }
 
@@ -624,13 +760,13 @@ Start options:
 
 // ── Main ───────────────────────────────────────────────────
 
-function main(): void {
+async function main(): Promise<void> {
   const { command, flags } = parseCliArgs(process.argv.slice(2));
   const niubotHome = flags.home ?? process.env["NIUBOT_HOME"] ?? path.join(os.homedir(), ".niubot");
 
   switch (command) {
     case "init":
-      cmdInit(niubotHome, flags);
+      await cmdInit(niubotHome, flags);
       break;
     case "start":
       cmdStart(niubotHome, flags);

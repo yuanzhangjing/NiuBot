@@ -119,9 +119,8 @@ async function main(): Promise<void> {
   // 1. 加载配置
   const config = loadConfig();
   log.info("config loaded", {
-    backend: config.defaultConfig.backend,
     botCount: config.bots.length,
-    bots: config.bots.map((b) => b.id).join(", "),
+    bots: config.bots.map((b) => `${b.id}(${b.backend})`).join(", "),
     customBackends: Object.keys(config.backends).length > 0
       ? Object.keys(config.backends).join(", ")
       : undefined,
