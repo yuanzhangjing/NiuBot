@@ -181,6 +181,30 @@ async function cmdInit(niubotHome: string, flags: CliFlags): Promise<void> {
         const config = loadConfig(configPath);
         ok(`${configPath} valid`);
         checkBotCredentials(config, issues);
+
+        // Validate backend availability for each bot
+        const backendsToCheck = new Set(config.bots.map((b) => getConfiguredBackend(config, b)));
+        for (const be of backendsToCheck) {
+          const customDef = config.backends[be];
+          if (customDef) {
+            const pluginPath = path.resolve(niubotHome, customDef.plugin);
+            if (fs.existsSync(pluginPath)) {
+              ok(`${be} plugin found (${customDef.plugin})`);
+            } else {
+              fail(`${be} plugin not found: ${pluginPath}`);
+              issues.push("backend");
+            }
+          } else {
+            const backendScan = scanBackend(be);
+            if (backendScan.available) {
+              ok(`${be} CLI available${backendScan.version ? ` (v${backendScan.version})` : ""}`);
+            } else {
+              fail(`${be} CLI not found`);
+              hint(`Install ${be} CLI, or change backend in config.yaml`);
+              issues.push("backend");
+            }
+          }
+        }
       } catch (err) {
         fail(`${configPath} invalid: ${err instanceof Error ? err.message : err}`);
         issues.push("Config invalid");
