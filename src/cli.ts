@@ -6,8 +6,7 @@
  *
  * 环境变量：
  *   NIUBOT_HOME       — 配置/数据目录（默认 ~/.niubot）
- *   NIUBOT_DB_PATH    — 数据库路径（优先级最高）
- *   NIUBOT_BOT_NAME   — Bot 名称（用于定位 per-bot DB：~/.niubot/<name>/niubot.db）
+ *   NIUBOT_DB_PATH    — 数据库路径
  *   NIUBOT_USER_ID    — 当前用户 ID
  *   NIUBOT_CHAT_ID    — 当前会话 ID
  *   NIUBOT_CHAT_TYPE  — 当前会话类型（p2p / group）
@@ -45,14 +44,13 @@ dotenv.config({ path: path.join(NIUBOT_HOME, ".env"), quiet: true });
 const cliArgs = process.argv.slice(2);
 const globalFlags = extractGlobalFlags(cliArgs);
 
-const BOT_NAME = process.env["NIUBOT_BOT_NAME"];
 const DB_PATH = globalFlags["db-path"]
   ?? process.env["NIUBOT_DB_PATH"]
-  ?? (BOT_NAME ? path.join(NIUBOT_HOME, BOT_NAME, "niubot.db") : path.join(NIUBOT_HOME, "niubot.db"));
+  ?? path.join(NIUBOT_HOME, "niubot.db");
 const USER_ID = globalFlags["user-id"] ?? process.env["NIUBOT_USER_ID"];
 const CHAT_ID = globalFlags["chat-id"] ?? process.env["NIUBOT_CHAT_ID"];
 const CHAT_TYPE = (globalFlags["chat-type"] ?? process.env["NIUBOT_CHAT_TYPE"] ?? "p2p") as "p2p" | "group";
-const WORK_DIR = process.env["NIUBOT_WORK_DIR"] ?? (BOT_NAME ? path.join(NIUBOT_HOME, BOT_NAME, "workspace") : ".");
+const WORK_DIR = process.env["NIUBOT_WORK_DIR"] ?? ".";
 
 /** 提取全局 flags 并从 argv 中移除 */
 function extractGlobalFlags(args: string[]): Record<string, string> {
@@ -329,14 +327,12 @@ function userMemoryDel(db: Database.Database, userId: string, args: string[]): v
 
 function handleWhoami(): void {
   const db = openDb();
-  const botName = process.env["NIUBOT_BOT_NAME"] ?? "NiuBot";
+  const botName = "Bot";
   const botId = process.env["NIUBOT_BOT_ID"];
   const isAdmin = process.env["NIUBOT_IS_ADMIN"] === "true";
 
-  // 构建 persona 路径并读取内容
-  const personaPath = BOT_NAME
-    ? path.join(NIUBOT_HOME, BOT_NAME, "persona.md")
-    : path.join(NIUBOT_HOME, "persona.md");
+  // 构建 persona 路径并读取内容（从 DB_PATH 所在目录推导，与 daemon 一致）
+  const personaPath = path.join(path.dirname(DB_PATH), "persona.md");
   const personaContent = loadPersona(personaPath);
 
   // 构建 bot label

@@ -84,6 +84,7 @@ bots:
     # workingDirectory: ~/niubot-workspace/NiuBot  # agent working directory (default: ~/niubot-workspace/<name>)
 ```
 
+- `name`: Internal identifier. Determines data directory (`~/.niubot/<name>/`) and default workspace (`~/niubot-workspace/<name>/`). **Do not change after initial setup** — renaming breaks data paths.
 - `model`: The model used for all conversations. If not set, the agent CLI decides (e.g. Claude CLI uses its own default).
 - `liteModel`: A cheaper/faster model used only for background tasks like archive summaries. If not set, falls back to the main model.
 - `workingDirectory`: Where the agent runs commands, stores task files, and reads/writes project data. Default `~/niubot-workspace/<name>`.

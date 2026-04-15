@@ -7,12 +7,12 @@ import path from "node:path";
 import os from "node:os";
 
 const NIUBOT_HOME = process.env["NIUBOT_HOME"] ?? path.join(os.homedir(), ".niubot");
-const BOT_NAME = process.env["NIUBOT_BOT_NAME"];
+const DB_PATH = process.env["NIUBOT_DB_PATH"];
 
 function getSocketPath(): string {
   return process.env["NIUBOT_API_SOCKET"]
-    ?? (BOT_NAME
-      ? path.join(NIUBOT_HOME, BOT_NAME, "api.sock")
+    ?? (DB_PATH
+      ? path.join(path.dirname(DB_PATH), "api.sock")
       : path.join(NIUBOT_HOME, "run", "api.sock"));
 }
 

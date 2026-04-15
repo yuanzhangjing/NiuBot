@@ -154,28 +154,27 @@ export class Pipeline {
 
   /** 启动管道：注册 IM 消息回调 */
   async start(): Promise<void> {
-    // Resolve bot's real open_id and name from platform
+    // Resolve bot's real open_id and display name from platform
+    let platformBotName: string | undefined;
     try {
-      const [realBotId, platformBotName] = await Promise.all([
+      const [realBotId, name] = await Promise.all([
         this.im.getBotOpenId(),
         this.im.getBotName(),
       ]);
       if (realBotId) {
         this.botIdentity.platformBotId = realBotId;
       }
-      if (platformBotName) {
-        this.botIdentity.name = platformBotName;
-        this.log.info("bot name updated from platform", { name: platformBotName });
-      }
+      platformBotName = name ?? undefined;
     } catch (err) {
       this.log.warn("failed to fetch bot identity", { error: String(err) });
     }
 
+    // 平台显示名写入 DB user 记录（用于 whoami 等场景），但不覆盖 botIdentity.name（config name，用于路径）
     this.botUserId = ensureUser(
       this.db,
       this.botIdentity.platform,
       this.botIdentity.platformBotId,
-      this.botIdentity.name,
+      platformBotName ?? this.botIdentity.name,
       "bot_info",
     );
 
@@ -375,7 +374,6 @@ export class Pipeline {
           chatType,
           dbPath: this.dbPath,
           botId: this.botIdentity.platformBotId,
-          botName: this.botIdentity.name,
           model: this.botIdentity.model,
           liteModel: this.botIdentity.liteModel,
           isAdmin,
@@ -1010,7 +1008,6 @@ export class Pipeline {
       chatType,
       dbPath: this.dbPath,
       botId: this.botIdentity.platformBotId,
-      botName: this.botIdentity.name,
       model: this.botIdentity.model,
       liteModel: this.botIdentity.liteModel,
       isAdmin,
@@ -1393,7 +1390,6 @@ export class Pipeline {
       stdio: "ignore",
       env: {
         ...process.env,
-        NIUBOT_BOT_NAME: this.botIdentity.name,
         NIUBOT_CHAT_ID: chatId ?? "",
         NIUBOT_API_SOCKET: socketPath,
       },
@@ -1693,7 +1689,6 @@ export class Pipeline {
       chatType,
       dbPath: this.dbPath,
       botId: this.botIdentity.platformBotId,
-      botName: this.botIdentity.name,
       model: this.botIdentity.model,
       liteModel: this.botIdentity.liteModel,
       isAdmin,

@@ -274,7 +274,7 @@ default_config:
   backend: ${backend}          # agent 后端：claude | codex
 
 bots:
-  - name: NiuBot
+  - name: NiuBot            # 内部标识，决定数据目录路径，初始化后不可修改
     appId: ""              # <- 飞书应用 App ID
     appSecret: ""          # <- 飞书应用 App Secret
     # model: ""            # 主模型（不设则由 CLI 自行决定）

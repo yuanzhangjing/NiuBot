@@ -28,7 +28,7 @@ npx tsc --noEmit     # 类型检查（不生成文件）
 ### 重启服务
 修改代码后需要重启才能生效。使用安全重启脚本：
 ```bash
-NIUBOT_BOT_NAME=NiuBot NIUBOT_HOME=~/.niubot bash restart.sh
+NIUBOT_HOME=~/.niubot bash restart.sh
 ```
 流程：build → backup dist → stop → start → health check → rollback on failure
 
