@@ -2,7 +2,13 @@
 
 import fs from "node:fs";
 
-import { ensureCleanWorktree, parseReleaseArgs, run } from "./release-lib.mjs";
+import {
+  ensureCleanWorktree,
+  isRetryableNpmViewError,
+  parseReleaseArgs,
+  retry,
+  run,
+} from "./release-lib.mjs";
 
 const { bump, dryRun } = parseReleaseArgs(process.argv.slice(2));
 
@@ -20,6 +26,13 @@ const version = pkg.version;
 run("npm", ["publish", "--access", "public"], { dryRun, stdio: "inherit" });
 run("git", ["push", "origin", branch, "--follow-tags"], { dryRun, stdio: "inherit" });
 run("npm", ["view", pkg.name, "dist-tags", "--json"], { dryRun, stdio: "inherit" });
-run("npm", ["view", `${pkg.name}@${version}`, "version"], { dryRun, stdio: "inherit" });
+if (dryRun) {
+  run("npm", ["view", `${pkg.name}@${version}`, "version"], { dryRun, stdio: "inherit" });
+} else {
+  await retry(
+    () => run("npm", ["view", `${pkg.name}@${version}`, "version"], { stdio: "inherit" }),
+    { attempts: 6, delayMs: 5000, shouldRetry: isRetryableNpmViewError },
+  );
+}
 
 console.log(`Release complete: ${pkg.name}@${version}`);

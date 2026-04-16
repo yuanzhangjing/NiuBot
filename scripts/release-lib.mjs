@@ -27,6 +27,11 @@ export function ensureCleanWorktree(statusOutput) {
   }
 }
 
+export function isRetryableNpmViewError(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes("No match found for version");
+}
+
 export function run(command, args, options = {}) {
   const printable = [command, ...args].join(" ");
   console.log(`$ ${printable}`);
@@ -35,4 +40,18 @@ export function run(command, args, options = {}) {
     stdio: options.stdio ?? "pipe",
     encoding: options.encoding ?? "utf8",
   });
+}
+
+export async function retry(fn, { attempts, delayMs, shouldRetry }) {
+  let lastError;
+  for (let index = 0; index < attempts; index += 1) {
+    try {
+      return fn();
+    } catch (error) {
+      lastError = error;
+      if (index === attempts - 1 || !shouldRetry(error)) throw error;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+  throw lastError;
 }

@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { ensureCleanWorktree, parseReleaseArgs } from "../scripts/release-lib.mjs";
+import {
+  ensureCleanWorktree,
+  isRetryableNpmViewError,
+  parseReleaseArgs,
+} from "../scripts/release-lib.mjs";
 
 describe("parseReleaseArgs", () => {
   it("accepts patch as the default bump", () => {
@@ -25,5 +29,17 @@ describe("ensureCleanWorktree", () => {
 
   it("rejects a dirty git status", () => {
     expect(() => ensureCleanWorktree(" M README.md\n")).toThrow("Git worktree is not clean");
+  });
+});
+
+describe("isRetryableNpmViewError", () => {
+  it("treats npm registry lag as retryable", () => {
+    const error = new Error("npm error 404 No match found for version 0.1.14");
+    expect(isRetryableNpmViewError(error)).toBe(true);
+  });
+
+  it("does not hide unrelated errors", () => {
+    const error = new Error("npm error code E401");
+    expect(isRetryableNpmViewError(error)).toBe(false);
   });
 });
