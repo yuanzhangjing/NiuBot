@@ -25,12 +25,14 @@ const version = pkg.version;
 
 run("npm", ["publish", "--access", "public"], { dryRun, stdio: "inherit" });
 run("git", ["push", "origin", branch, "--follow-tags"], { dryRun, stdio: "inherit" });
-run("npm", ["view", pkg.name, "dist-tags", "--json"], { dryRun, stdio: "inherit" });
 if (dryRun) {
+  run("npm", ["view", pkg.name, "dist-tags", "--json"], { dryRun, stdio: "inherit" });
   run("npm", ["view", `${pkg.name}@${version}`, "version"], { dryRun, stdio: "inherit" });
 } else {
   await retry(
     () => {
+      const tags = run("npm", ["view", pkg.name, "dist-tags", "--json"]);
+      process.stdout.write(tags);
       const resolved = run("npm", ["view", `${pkg.name}@${version}`, "version"]);
       process.stdout.write(resolved);
       return resolved;

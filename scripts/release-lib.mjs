@@ -60,6 +60,7 @@ export async function retry(fn, { attempts, delayMs, shouldRetry }) {
     } catch (error) {
       lastError = error;
       if (index === attempts - 1 || !shouldRetry(error)) throw error;
+      console.log(`  retrying (${index + 1}/${attempts - 1}), waiting ${delayMs / 1000}s...`);
       await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
   }
