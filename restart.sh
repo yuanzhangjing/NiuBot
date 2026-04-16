@@ -6,6 +6,15 @@
 # Flow: build → preflight (verify new code) → stop old → start new → health check → rollback on failure → notify
 set -eo pipefail
 
+# Block agent sessions from running this script directly.
+# Only the /restart Feishu builtin command (which sets NIUBOT_INTERNAL_RESTART=1)
+# or an interactive terminal are allowed.
+if [ "${NIUBOT_INTERNAL_RESTART:-}" != "1" ] && [ ! -t 0 ]; then
+    echo "Error: restart.sh cannot be run from an agent session." >&2
+    echo "Use the /restart command in Feishu instead." >&2
+    exit 1
+fi
+
 # Auto-detach: re-exec in background so the caller can exit safely.
 # Skip if already detached (RESTART_DETACHED=1) or if --no-detach is passed.
 if [ "$1" = "--no-detach" ]; then
@@ -17,16 +26,12 @@ elif [ "${RESTART_DETACHED:-}" != "1" ]; then
     fi
     LOG_DIR="$NIUBOT_HOME/logs"
     mkdir -p "$LOG_DIR"
-    RESTART_DETACHED=1 perl -e 'use POSIX "setsid"; setsid(); exec @ARGV' bash "$0" "$@" > /dev/null 2>&1 &
+    RESTART_DETACHED=1 perl -e 'use POSIX "setsid"; setsid(); exec @ARGV' bash "$0" "$@" >> "$LOG_DIR/restart-debug.log" 2>&1 &
     echo "restart detached (pid=$!)"
     echo "  debug log: $LOG_DIR/restart-debug.log"
     echo "  service log: $LOG_DIR/niubot-$(date '+%Y-%m-%d').log"
     exit 0
 fi
-
-# Ignore signals so that killing the daemon cannot take us down,
-# even if setsid failed to create a new session.
-trap '' TERM HUP INT PIPE
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BOT_NAME="${NIUBOT_BOT_NAME:-NiuBot}"
@@ -193,7 +198,7 @@ run_preflight() {
 }
 
 # ──────── Main ────────
-debug ""
+echo "" > "$DEBUG_LOG"
 debug "=== restart.sh started ==="
 debug "PID=$$, BOT=$BOT_NAME, CHAT=$CHAT_ID"
 

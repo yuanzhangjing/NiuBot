@@ -1405,20 +1405,36 @@ export class Pipeline {
 
     const child = spawn("bash", [restartScript], {
       cwd: projectRoot,
-      stdio: "ignore",
+      stdio: ["ignore", "ignore", "pipe"],
       env: {
         ...process.env,
         NIUBOT_HOME,
+        NIUBOT_INTERNAL_RESTART: "1",
         NIUBOT_CHAT_ID: chatId ?? "",
         NIUBOT_API_SOCKET: socketPath,
       },
     });
     child.unref();
 
-    // 立即停止接收新消息，避免窗口期内的消息被老进程接住后丢失
-    this.stop();
+    // Collect stderr for error reporting
+    let stderr = "";
+    child.stderr?.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
 
-    this.log.info("restart script spawned, pipeline stopped", { pid: child.pid, chatId, socketPath });
+    // Wait for the initial process to exit (auto-detach exits 0 quickly, guard failure exits 1)
+    child.on("exit", (code) => {
+      if (code === 0) {
+        // restart.sh auto-detached successfully — stop accepting new messages
+        this.stop();
+        this.log.info("restart script detached, pipeline stopped", { pid: child.pid, chatId, socketPath });
+      } else {
+        // restart.sh failed to start (guard blocked, missing deps, etc.)
+        const errMsg = stderr.trim() || `restart.sh exited with code ${code}`;
+        this.log.error("restart script failed", { code, stderr: errMsg });
+        if (platformChatId) {
+          this.im.sendText(platformChatId, `重启失败：${errMsg}`).catch(() => {});
+        }
+      }
+    });
   }
 
   private async process(chatId: string, mergedText: string, messages: import("./queue.js").QueuedMessage[] = []): Promise<void> {
