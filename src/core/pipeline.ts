@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { exec, execFileSync, spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
@@ -846,12 +847,21 @@ export class Pipeline {
     ).get() as { count: number } | undefined;
     const cronCount = cronRow?.count ?? 0;
 
+    let version = "unknown";
+    try {
+      const pkgRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+      const pkg = JSON.parse(readFileSync(path.join(pkgRoot, "package.json"), "utf-8"));
+      version = pkg.version;
+    } catch { /* ignore */ }
+
     const content = [
       `**Bot:** ${this.botIdentity.name}`,
+      `**Version:** ${version}`,
       `**Platform:** ${this.botIdentity.platform}`,
       `**Uptime:** ${uptimeStr}`,
       `**Active sessions:** ${activeSessions}`,
       `**Cron jobs:** ${cronCount}`,
+      `**Path:** \`${path.resolve(process.argv[1])}\``,
       `**Working directory:** \`${this.workingDirectory}\``,
     ].join("\n");
 

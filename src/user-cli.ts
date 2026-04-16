@@ -727,6 +727,8 @@ function cmdStatus(niubotHome: string): void {
   const logFile = path.join(niubotHome, "logs", `niubot-${today}.log`);
 
   console.log(`NiuBot is running (PID ${pid})`);
+  console.log(`  Version: ${getPkgVersion()}`);
+  console.log(`  Path: ${PROJECT_ROOT}`);
   if (uptime) console.log(`  Uptime: ${uptime}`);
   console.log(`  Log: ${logFile}`);
   console.log(`  Config: ${configPath}`);
