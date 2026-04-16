@@ -17,7 +17,7 @@ elif [ "${RESTART_DETACHED:-}" != "1" ]; then
     fi
     LOG_DIR="$NIUBOT_HOME/logs"
     mkdir -p "$LOG_DIR"
-    RESTART_DETACHED=1 nohup bash "$0" "$@" >> "$LOG_DIR/restart-debug.log" 2>&1 &
+    RESTART_DETACHED=1 perl -e 'use POSIX "setsid"; setsid(); exec @ARGV' bash "$0" "$@" >> "$LOG_DIR/restart-debug.log" 2>&1 &
     echo "restart detached (pid=$!)"
     echo "  debug log: $LOG_DIR/restart-debug.log"
     echo "  service log: $LOG_DIR/niubot-$(date '+%Y-%m-%d').log"

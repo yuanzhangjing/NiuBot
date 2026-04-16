@@ -861,7 +861,7 @@ export class Pipeline {
       `**Uptime:** ${uptimeStr}`,
       `**Active sessions:** ${activeSessions}`,
       `**Cron jobs:** ${cronCount}`,
-      `**Path:** \`${path.resolve(process.argv[1])}\``,
+      `**Path:** \`${path.dirname(path.resolve(process.argv[1]))}\``,
       `**Working directory:** \`${this.workingDirectory}\``,
     ].join("\n");
 
