@@ -26,10 +26,10 @@ niubot version
 ## Step 2: Select Agent Backend
 
 NiuBot needs an agent backend to power conversations. There are two options:
-- **Built-in**: `claude` (Claude Code CLI) or `codex` (OpenAI Codex CLI)
+- **Built-in**: `claude` (Claude Code CLI), `codex` (OpenAI Codex CLI), or `traecli` (Trae CLI)
 - **Custom plugin**: any CLI tool, integrated via a JS plugin file
 
-**Ask the user**: "Do you want to use a built-in backend (claude / codex), or do you have a custom agent CLI to integrate?"
+**Ask the user**: "Do you want to use a built-in backend (claude / codex / traecli), or do you have a custom agent CLI to integrate?"
 
 ### Option A: Built-in Backend
 
@@ -38,9 +38,10 @@ Check which CLIs are available:
 ```bash
 claude --version   # Check Claude CLI
 codex --version    # Check Codex CLI
+traecli --version  # Check Trae CLI
 ```
 
-If at least one is available, note which one the user wants to use (e.g. `claude`). Proceed to [Step 2.1](#step-21-generate-config).
+If at least one is available, note which one the user wants to use (e.g. `claude`). Before writing config, also ask whether they want to set a separate `liteModel` for cheaper background tasks. Proceed to [Step 2.1](#step-21-generate-config).
 
 If neither is available, tell the user to install one first:
 - Claude CLI: https://docs.anthropic.com/en/docs/claude-code
@@ -111,6 +112,15 @@ mkdir -p ~/.niubot
 
 Write `~/.niubot/config.yaml`:
 
+Before filling the config, ask the user:
+- whether they want to pin a main `model` now, or keep the CLI default
+- whether they want to set a separate `liteModel`
+
+For built-in backends, if the user wants a `liteModel` but has no preference, suggest:
+- `claude`: `haiku`
+- `codex`: `gpt-5.4-mini`
+- `traecli`: `Gemini-3-Flash-Preview`
+
 **For built-in backend** (e.g. `claude`):
 ```yaml
 bots:
@@ -141,9 +151,13 @@ bots:
 
 Config fields:
 - `id`: Unique bot identifier (immutable). Determines data directory (`~/.niubot/<id>/`) and default workspace (`~/niubot-workspace/<id>/`). **Do not change after setup.**
-- `backend`: Agent backend to use (required). Built-in: `claude` or `codex`. Custom: the name registered under `backends:`.
+- `backend`: Agent backend to use (required). Built-in: `claude`, `codex`, or `traecli`. Custom: the name registered under `backends:`.
 - `model`: Main model for conversations. Omit to use the CLI's default.
 - `liteModel`: Cheaper model for background tasks (archive summaries). Omit = same as main model.
+  Recommended examples for built-in backends:
+  - `claude`: `haiku`
+  - `codex`: `gpt-5.4-mini`
+  - `traecli`: `Gemini-3-Flash-Preview`
 - `workingDirectory`: Where the agent runs. Default: `~/niubot-workspace/<id>`.
 
 Create default persona file:
@@ -255,10 +269,10 @@ niubot start --restart  # Restart (stop + start)
 Fill in `appId` and `appSecret` in `~/.niubot/config.yaml`.
 
 ### "claude CLI not found"
-Install the Claude CLI, or switch backend: set `backend: codex` on the bot entry.
+Install the Claude CLI, or switch backend: set `backend: codex` or `backend: traecli` on the bot entry.
 
 ### "bot missing 'backend'"
-Add `backend: claude` (or `codex`) to the bot entry in config.yaml.
+Add `backend: claude` (or `codex` / `traecli`) to the bot entry in config.yaml.
 
 ### Health check fails after start
 Check the log for errors:
@@ -343,6 +357,6 @@ bots:
     backend: my-agent
 ```
 
-Model configuration for custom backends works the same way — set `model` and `liteModel` on the bot entry. The values are passed to `buildSession()` via `config.model` and `config.liteModel`.
+Model configuration for custom backends works the same way — set `model` and `liteModel` on the bot entry. The values are passed to `buildSession()` via `config.model` and `config.liteModel`. These recommendation values are documentation only, not runtime defaults.
 
 After adding the plugin, use `/agent` in chat to verify it appears in the list. To switch: `/agent my-agent`. No engine restart required.

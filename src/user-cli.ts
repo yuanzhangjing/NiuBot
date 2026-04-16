@@ -118,6 +118,7 @@ function scanBackend(name: string): BackendScanResult {
   const commands: Record<string, { cmd: string; args: string[] }> = {
     claude: { cmd: "claude", args: ["--version"] },
     codex: { cmd: "codex", args: ["--version"] },
+    traecli: { cmd: "traecli", args: ["--version"] },
   };
 
   const entry = commands[name];
@@ -152,6 +153,19 @@ function scanAllBackends(): { results: BackendScanResult[]; firstAvailable?: str
   }
 
   return { results, firstAvailable };
+}
+
+export function getSuggestedLiteModel(backend: string): string | undefined {
+  switch (backend) {
+    case "claude":
+      return "haiku";
+    case "codex":
+      return "gpt-5.4-mini";
+    case "traecli":
+      return "Gemini-3-Flash-Preview";
+    default:
+      return undefined;
+  }
 }
 
 // ── Init ───────────────────────────────────────────────────
@@ -278,7 +292,7 @@ async function cmdInit(niubotHome: string, flags: CliFlags): Promise<void> {
 
     if (availableBackends.length === 0) {
       fail("No agent backend found");
-      hint("Install claude or codex CLI, or re-run init with a custom backend");
+      hint("Install claude, codex, or traecli CLI, or re-run init with a custom backend");
       console.log();
       console.log("Aborted: at least one agent backend is required.");
       console.log();
@@ -339,6 +353,16 @@ async function cmdInit(niubotHome: string, flags: CliFlags): Promise<void> {
   ensurePluginSymlink(niubotHome);
   ok("Created node_modules/niubot symlink (for plugin imports)");
 
+  // Model configuration
+  console.log();
+  console.log("Model configuration");
+  console.log("\u2500".repeat(40));
+  console.log();
+  const model = (await prompt("  Main model (optional, press Enter to use CLI default): ")) || undefined;
+  const liteSuggestion = getSuggestedLiteModel(defaultBackend);
+  const liteHint = liteSuggestion ? `, suggested: ${liteSuggestion}` : "";
+  const liteModel = (await prompt(`  Lite model (optional, press Enter to reuse main model${liteHint}): `)) || undefined;
+
   // ── Feishu app setup ──────────────────────────────────────
   console.log();
   console.log("Feishu App Setup");
@@ -373,7 +397,7 @@ async function cmdInit(niubotHome: string, flags: CliFlags): Promise<void> {
       hint("Credentials were NOT saved. Add them manually or re-run with --force");
     }
   } else {
-    fs.writeFileSync(configPath, generateConfigTemplate(defaultBackend, customBackendConfig, appId, appSecret));
+    fs.writeFileSync(configPath, generateConfigTemplate(defaultBackend, customBackendConfig, appId, appSecret, model, liteModel));
     ok(`Created config.yaml`);
   }
 
@@ -384,6 +408,8 @@ async function cmdInit(niubotHome: string, flags: CliFlags): Promise<void> {
   console.log(`  Config:  ${configPath}`);
   console.log(`  Persona: ${personaPath}`);
   console.log(`  Backend: ${defaultBackend}`);
+  if (model) console.log(`  Model:   ${model}`);
+  if (liteModel) console.log(`  Lite:    ${liteModel}`);
 
   if (customBackendConfig) {
     console.log();
@@ -411,11 +437,13 @@ async function cmdInit(niubotHome: string, flags: CliFlags): Promise<void> {
 
 // ── Templates ──────────────────────────────────────────────
 
-function generateConfigTemplate(
+export function generateConfigTemplate(
   backend: string,
   customBackend?: { name: string; plugin: string },
   appId?: string,
   appSecret?: string,
+  model?: string,
+  liteModel?: string,
 ): string {
   let backendsSection: string;
   if (customBackend) {
@@ -435,6 +463,12 @@ backends:
 
   const id = appId ? `"${appId}"` : '""';
   const secret = appSecret ? `"${appSecret}"` : '""';
+  const modelLine = model
+    ? `    model: "${model}"         # 主模型\n`
+    : '    # model: ""            # 主模型（不设则由 CLI 自行决定）\n';
+  const liteModelLine = liteModel
+    ? `    liteModel: "${liteModel}" # 轻量模型（归档摘要等低成本任务）\n`
+    : '    # liteModel: ""        # 轻量模型（归档摘要等低成本任务，不设则同主模型）\n';
 
   return `# NiuBot 配置文件
 
@@ -443,9 +477,7 @@ bots:
     backend: ${backend}        # agent 后端
     appId: ${id}
     appSecret: ${secret}
-    # model: ""            # 主模型（不设则由 CLI 自行决定）
-    # liteModel: ""        # 轻量模型（归档摘要等低成本任务，不设则同主模型）
-    # workingDirectory: ~/niubot-workspace/NiuBot  # agent 工作目录（默认 ~/niubot-workspace/<id>）
+${modelLine}${liteModelLine}    # workingDirectory: ~/niubot-workspace/NiuBot  # agent 工作目录（默认 ~/niubot-workspace/<id>）
 
 # queue:
 #   bufferMs: 1500         # 消息缓冲合并窗口（ms）
@@ -812,4 +844,9 @@ async function main(): Promise<void> {
   }
 }
 
-main();
+const entryPath = process.argv[1] ? path.resolve(process.argv[1]) : undefined;
+const modulePath = fileURLToPath(import.meta.url);
+
+if (entryPath === modulePath) {
+  void main();
+}

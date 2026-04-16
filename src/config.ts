@@ -19,6 +19,9 @@ export const AGENT_REGISTRY = {
   codex: {
     aliases: ["codex"],
   },
+  traecli: {
+    aliases: ["traecli", "trae-cli"],
+  },
 } as const;
 
 /** 内置 agent backend 类型 */

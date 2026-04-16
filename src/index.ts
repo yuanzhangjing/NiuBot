@@ -23,6 +23,7 @@ const VALID_LOG_LEVELS = new Set(["debug", "info", "warn", "error"]);
 const BUILTIN_BACKEND_PATHS: Record<string, () => Promise<{ default: new (options: Record<string, unknown>) => CliAgentBackend }>> = {
   claude: () => import("./backends/claude.js"),
   codex: () => import("./backends/codex.js"),
+  traecli: () => import("./backends/traecli.js"),
 };
 
 // ── 插件加载 ────────────────────────────────────────────
