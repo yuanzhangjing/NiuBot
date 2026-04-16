@@ -7,6 +7,13 @@ import TraeCliBackend from "./traecli.js";
 const originalHome = process.env["HOME"];
 const originalXdgCacheHome = process.env["XDG_CACHE_HOME"];
 
+function getTraeLogDir(tempHome: string, sessionId: string): string {
+  if (process.platform === "darwin") {
+    return path.join(tempHome, "Library", "Caches", "coco", "sessions", sessionId);
+  }
+  return path.join(process.env["XDG_CACHE_HOME"] || path.join(tempHome, ".cache"), "coco", "sessions", sessionId);
+}
+
 describe("TraeCliBackend", () => {
   afterEach(() => {
     if (originalHome === undefined) {
@@ -75,9 +82,10 @@ describe("TraeCliBackend", () => {
   it("hydrates model, current context tokens, and compact count from the session log", () => {
     const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "trae-home-"));
     process.env["HOME"] = tempHome;
+    process.env["XDG_CACHE_HOME"] = path.join(tempHome, ".cache");
 
     const sessionId = "session-log-1";
-    const logDir = path.join(tempHome, "Library", "Caches", "coco", "sessions", sessionId);
+    const logDir = getTraeLogDir(tempHome, sessionId);
     fs.mkdirSync(logDir, { recursive: true });
     fs.writeFileSync(
       path.join(logDir, "events.jsonl"),
@@ -130,9 +138,10 @@ describe("TraeCliBackend", () => {
   it("keeps scanning incrementally across resume turns", () => {
     const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "trae-home-"));
     process.env["HOME"] = tempHome;
+    process.env["XDG_CACHE_HOME"] = path.join(tempHome, ".cache");
 
     const sessionId = "session-log-2";
-    const logDir = path.join(tempHome, "Library", "Caches", "coco", "sessions", sessionId);
+    const logDir = getTraeLogDir(tempHome, sessionId);
     const logPath = path.join(logDir, "events.jsonl");
     fs.mkdirSync(logDir, { recursive: true });
     fs.writeFileSync(
