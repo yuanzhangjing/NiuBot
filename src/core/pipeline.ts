@@ -1949,33 +1949,46 @@ function extractAgentErrorDetail(err: unknown): string | null {
     ? String((err as { stdout?: unknown }).stdout ?? "")
     : "";
 
+  // Collect all meaningful error fragments from every source.
+  // Different agent backends embed errors in different formats / streams,
+  // so we gather everything and let the caller display it all.
+  const parts: string[] = [];
+
   for (const stream of [stdout, stderr]) {
     if (!stream) continue;
     for (const line of stream.split("\n")) {
       if (!line) continue;
       try {
-        const event = JSON.parse(line) as { type?: string; is_error?: boolean; result?: unknown };
+        const event = JSON.parse(line) as Record<string, unknown>;
+        // Claude format: {type:"result", is_error:true, result:"..."}
         if (event.type === "result" && event.is_error && typeof event.result === "string" && event.result.trim()) {
-          return event.result.trim();
+          parts.push(event.result.trim());
+        }
+        // Codex / generic format: {type:"error", message:"..."}
+        if (event.type === "error" && typeof event.message === "string" && event.message.trim()) {
+          parts.push(event.message.trim());
         }
       } catch {
-        // ignore malformed lines
+        // Not JSON — keep raw non-empty lines as-is
+        const trimmed = line.trim();
+        if (trimmed) parts.push(trimmed);
       }
     }
   }
 
-  const message = err instanceof Error ? err.message : String(err ?? "");
-  for (const text of [stderr, stdout, message]) {
-    const lines = text
-      .split("\n")
-      .map((line) => line.trim())
-      .filter(Boolean);
-    if (lines.length > 0) {
-      return lines[lines.length - 1] ?? null;
-    }
-  }
+  // Also include the Error.message itself (may carry info not in streams)
+  const message = err instanceof Error ? err.message.trim() : String(err ?? "").trim();
+  if (message) parts.push(message);
 
-  return null;
+  // Deduplicate while preserving order
+  const seen = new Set<string>();
+  const unique = parts.filter((p) => {
+    if (seen.has(p)) return false;
+    seen.add(p);
+    return true;
+  });
+
+  return unique.length > 0 ? unique.join("\n") : null;
 }
 
 function extractPlatformErrorDetail(err: unknown): string {

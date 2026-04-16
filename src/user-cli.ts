@@ -844,7 +844,7 @@ async function main(): Promise<void> {
   }
 }
 
-const entryPath = process.argv[1] ? path.resolve(process.argv[1]) : undefined;
+const entryPath = process.argv[1] ? fs.realpathSync(path.resolve(process.argv[1])) : undefined;
 const modulePath = fileURLToPath(import.meta.url);
 
 if (entryPath === modulePath) {

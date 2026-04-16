@@ -3,7 +3,7 @@
 # Usage: Called by /restart command with env vars:
 #   NIUBOT_BOT_NAME, NIUBOT_CHAT_ID, NIUBOT_API_SOCKET, NIUBOT_HOME
 #
-# Flow: build → stop old → start new → health check → rollback to backup on failure → notify
+# Flow: build → preflight (verify new code) → stop old → start new → health check → rollback on failure → notify
 set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -21,6 +21,8 @@ BACKUP_DIR="$SCRIPT_DIR/dist.bak"
 
 HEALTH_TIMEOUT=15
 HEALTH_INTERVAL=1
+PREFLIGHT_TIMEOUT=20
+PREFLIGHT_SOCKET="$NIUBOT_HOME/$BOT_NAME/api.sock.preflight"
 
 debug() { echo "[$(date '+%H:%M:%S')] $*" >> "$DEBUG_LOG"; }
 
@@ -124,6 +126,46 @@ check_health() {
     return 1
 }
 
+# Preflight: start new code with --preflight, verify it can init successfully
+# without stopping the old process. Returns 0 if preflight passes.
+run_preflight() {
+    debug "preflight: starting new code with --preflight..."
+    rm -f "$PREFLIGHT_SOCKET"
+
+    # Run preflight in background, capture PID
+    NIUBOT_LOG_LEVEL="${NIUBOT_LOG_LEVEL:-info}" node dist/index.js --preflight >> "$LOG_FILE" 2>&1 &
+    local preflight_pid=$!
+    debug "preflight: PID=$preflight_pid"
+
+    local elapsed=0
+    while [ "$elapsed" -lt "$PREFLIGHT_TIMEOUT" ]; do
+        # Check if process already exited
+        if ! kill -0 "$preflight_pid" 2>/dev/null; then
+            wait "$preflight_pid" 2>/dev/null
+            local exit_code=$?
+            if [ "$exit_code" -eq 0 ]; then
+                debug "preflight: passed (exit code 0, ${elapsed}s)"
+                rm -f "$PREFLIGHT_SOCKET"
+                return 0
+            else
+                debug "preflight: FAILED (exit code $exit_code)"
+                rm -f "$PREFLIGHT_SOCKET"
+                return 1
+            fi
+        fi
+
+        sleep "$HEALTH_INTERVAL"
+        elapsed=$((elapsed + HEALTH_INTERVAL))
+        debug "  preflight: waiting... ($elapsed/${PREFLIGHT_TIMEOUT})"
+    done
+
+    # Timed out — kill preflight process
+    debug "preflight: TIMEOUT, killing PID $preflight_pid"
+    kill -9 "$preflight_pid" 2>/dev/null || true
+    rm -f "$PREFLIGHT_SOCKET"
+    return 1
+}
+
 # ──────── Main ────────
 echo "" > "$DEBUG_LOG"
 debug "=== restart.sh started ==="
@@ -158,6 +200,21 @@ if $DEV_MODE; then
         cp -r "$DIST_DIR" "$BACKUP_DIR"
         debug "dist backed up to dist.bak"
     fi
+
+    # Preflight: verify new code can start before killing old process
+    if ! run_preflight; then
+        debug "preflight FAILED, old process unaffected"
+        # Rollback dist if we have backup
+        if [ -d "$BACKUP_DIR" ]; then
+            rm -rf "$DIST_DIR"
+            mv "$BACKUP_DIR" "$DIST_DIR"
+            debug "dist restored from backup after preflight failure"
+        fi
+        notify "重启失败：新版本预检不通过，当前服务不受影响。"
+        debug "=== restart.sh done (preflight failed) ==="
+        exit 1
+    fi
+    debug "preflight passed, safe to switch"
 
     stop_service
     start_service
@@ -198,9 +255,17 @@ if $DEV_MODE; then
         exit 1
     fi
 else
-    # ── Production mode: just restart (no build, no rollback) ──
+    # ── Production mode: preflight → restart (no build, no rollback) ──
 
-    debug "production mode: restarting..."
+    debug "production mode: preflight..."
+    if ! run_preflight; then
+        debug "preflight FAILED, old process unaffected"
+        notify "重启失败：预检不通过，当前服务不受影响。"
+        debug "=== restart.sh done (preflight failed) ==="
+        exit 1
+    fi
+    debug "preflight passed, restarting..."
+
     stop_service
     start_service
 

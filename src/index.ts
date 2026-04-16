@@ -107,13 +107,15 @@ async function loadBackendClass(
 // ── Main ────────────────────────────────────────────────
 
 async function main(): Promise<void> {
+  const preflight = process.argv.includes("--preflight");
+
   // 日志级别
   const envLogLevel = process.env["NIUBOT_LOG_LEVEL"]?.toLowerCase();
   if (envLogLevel && VALID_LOG_LEVELS.has(envLogLevel)) {
     setLogLevel(envLogLevel as "debug" | "info" | "warn" | "error");
   }
 
-  log.info("NiuBot starting...");
+  log.info(preflight ? "NiuBot preflight check starting..." : "NiuBot starting...");
   process.env["PATH"] = prependNiubotBinToPath();
 
   // 1. 加载配置
@@ -192,6 +194,26 @@ async function main(): Promise<void> {
   if (bots.length === 0) {
     log.error("no bot instances created, exiting");
     process.exit(1);
+  }
+
+  // ── Preflight mode: verify init works, respond to /ping on temp socket, then exit ──
+  if (preflight) {
+    // Use a temporary socket so we don't conflict with the running instance
+    const tempSocket = resolve(NIUBOT_HOME, bots[0].config.id ?? "NiuBot", "api.sock.preflight");
+    const { ApiServer } = await import("./core/api.js");
+    const tempApi = new ApiServer(tempSocket, {
+      sendMessage: async () => {},
+      sendFile: async () => {},
+      resolveChatPlatformId: () => undefined,
+      getDefaultPlatformChatId: () => undefined,
+    });
+    await tempApi.start();
+    log.info("preflight check passed");
+    tempApi.stop();
+    for (const bot of bots) {
+      try { bot.db.close(); } catch { /* ignore */ }
+    }
+    process.exit(0);
   }
 
   // 4. 启动所有 bot：start（identity + admin 检测） → recover → IM connect → API server → Cron

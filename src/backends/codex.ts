@@ -54,6 +54,7 @@ export default class CodexBackend extends CliAgentBackend<CodexSession> {
       const args = [
         "exec", "resume",
         session.agentSessionId,
+        "-",  // read prompt from stdin
         "--json",
         "--dangerously-bypass-approvals-and-sandbox",
         "--skip-git-repo-check",
