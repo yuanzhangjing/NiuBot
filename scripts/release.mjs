@@ -30,7 +30,11 @@ if (dryRun) {
   run("npm", ["view", `${pkg.name}@${version}`, "version"], { dryRun, stdio: "inherit" });
 } else {
   await retry(
-    () => run("npm", ["view", `${pkg.name}@${version}`, "version"], { stdio: "inherit" }),
+    () => {
+      const resolved = run("npm", ["view", `${pkg.name}@${version}`, "version"]);
+      process.stdout.write(resolved);
+      return resolved;
+    },
     { attempts: 6, delayMs: 5000, shouldRetry: isRetryableNpmViewError },
   );
 }

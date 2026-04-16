@@ -27,8 +27,18 @@ export function ensureCleanWorktree(statusOutput) {
   }
 }
 
+export function getCommandErrorText(error) {
+  if (error && typeof error === "object") {
+    const stderr = typeof error.stderr === "string" ? error.stderr : "";
+    const stdout = typeof error.stdout === "string" ? error.stdout : "";
+    const message = error instanceof Error ? error.message : String(error);
+    return [message, stderr, stdout].filter(Boolean).join("\n");
+  }
+  return String(error);
+}
+
 export function isRetryableNpmViewError(error) {
-  const message = error instanceof Error ? error.message : String(error);
+  const message = getCommandErrorText(error);
   return message.includes("No match found for version");
 }
 
