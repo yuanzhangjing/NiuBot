@@ -115,8 +115,9 @@ export default class CodexBackend extends CliAgentBackend<CodexSession> {
     let model: string | undefined;
     let contextTokens: number | undefined;
     let contextWindow: number | undefined;
-    if (threadId) {
-      session.agentSessionId = threadId;
+    const resolvedThreadId = threadId ?? session.agentSessionId;
+    if (resolvedThreadId) {
+      session.agentSessionId = resolvedThreadId;
       const meta = this.scanJsonl(session);
       model = meta.model;
       contextTokens = meta.contextTokens;
@@ -125,7 +126,7 @@ export default class CodexBackend extends CliAgentBackend<CodexSession> {
 
     return {
       text: lastAgentText.trim(),
-      agentSessionId: threadId,
+      agentSessionId: resolvedThreadId,
       model,
       contextTokens,
       contextWindow,
@@ -174,6 +175,7 @@ export default class CodexBackend extends CliAgentBackend<CodexSession> {
                   last_token_usage?: {
                     input_tokens?: number;
                     output_tokens?: number;
+                    total_tokens?: number;
                   };
                   model_context_window?: number;
                 };
@@ -182,11 +184,12 @@ export default class CodexBackend extends CliAgentBackend<CodexSession> {
 
             if (entry.type === "turn_context") {
               model = entry.payload?.model ?? entry.payload?.collaboration_mode?.settings?.model ?? model;
-            } else if (entry.type === "compacted") {
+            } else if (entry.type === "event_msg" && entry.payload?.type === "context_compacted") {
               session.compactCount++;
             } else if (entry.type === "event_msg" && entry.payload?.type === "token_count") {
               const lastUsage = entry.payload.info?.last_token_usage;
-              const visibleTokens = (lastUsage?.input_tokens ?? 0) + (lastUsage?.output_tokens ?? 0);
+              const visibleTokens = lastUsage?.total_tokens
+                ?? ((lastUsage?.input_tokens ?? 0) + (lastUsage?.output_tokens ?? 0));
               if (visibleTokens > 0) {
                 contextTokens = visibleTokens;
               }
