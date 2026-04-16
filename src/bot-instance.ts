@@ -112,9 +112,9 @@ export async function createBotInstance(
       return row?.platform_id ?? input;
     },
     getDefaultPlatformChatId: () => undefined,
-    restart: () => {
-      log.info("restart requested via API");
-      process.exit(0); // Exit cleanly, let supervisor restart
+    restart: (chatId?: string) => {
+      log.info("restart requested via API", { chatId });
+      pipeline.triggerRestart(chatId ? { chatId } : undefined);
     },
   };
   const apiServer = new ApiServer(socketPath, apiHandler);

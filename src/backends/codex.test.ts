@@ -299,6 +299,7 @@ describe("CodexBackend session metadata", () => {
         "exec",
         "resume",
         "thread_123",
+        "-",
         "--json",
         "--dangerously-bypass-approvals-and-sandbox",
         "--skip-git-repo-check",

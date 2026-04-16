@@ -82,7 +82,8 @@ export function handleRestart(): void {
   }
 
   const socketPath = getSocketPath();
-  ipcRequest(socketPath, "/restart", {})
+  const chatId = process.env["NIUBOT_CHAT_ID"] || undefined;
+  ipcRequest(socketPath, "/restart", chatId ? { chat_id: chatId } : {})
     .then(() => console.log("Restart signal sent."))
     .catch((err) => {
       console.error(`Error: ${err.message}`);

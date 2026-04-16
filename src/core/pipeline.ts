@@ -748,8 +748,7 @@ export class Pipeline {
           return true;
         }
         this.log.info("builtin command: restart", { userId });
-        this.replyText(chatId, platformChatId, msgId, "正在重启...");
-        this.spawnRestart(platformChatId);
+        this.triggerRestart({ platformChatId });
         return true;
       }
       case "/status": {
@@ -1366,20 +1365,30 @@ export class Pipeline {
 
   /**
    * Spawn detached restart.sh（对齐 cc-connect cmdRestart）。
-   * restart.sh 负责：sleep → kill old → start new → health check → notify result。
+   * restart.sh 负责：sleep → build → preflight → kill old → start new → health check → notify。
+   * 可通过 platformChatId 或 chatId 指定通知目标，都不传则不发通知。
    */
-  private spawnRestart(platformChatId: string): void {
-    // restart.sh 位于项目根目录（和 package.json 同级）
+  triggerRestart(opts?: { platformChatId?: string; chatId?: string }): void {
     const projectRoot = path.resolve(
       path.dirname(fileURLToPath(import.meta.url)),
       "../..",
     );
     const restartScript = path.join(projectRoot, "restart.sh");
 
-    // 找到 chatId（内部 ID）用于通知
-    let chatId: string | undefined;
-    for (const [cid, pid] of this.platformChatIds) {
-      if (pid === platformChatId) { chatId = cid; break; }
+    // 解析 chatId 和 platformChatId（互相反查）
+    let chatId = opts?.chatId;
+    let platformChatId = opts?.platformChatId;
+    if (!chatId && platformChatId) {
+      for (const [cid, pid] of this.platformChatIds) {
+        if (pid === platformChatId) { chatId = cid; break; }
+      }
+    } else if (chatId && !platformChatId) {
+      platformChatId = this.platformChatIds.get(chatId);
+    }
+
+    // 发送"正在重启..."通知
+    if (platformChatId) {
+      this.im.sendText(platformChatId, "正在重启...").catch(() => {});
     }
 
     const socketPath = path.join(path.dirname(this.dbPath), "api.sock");
