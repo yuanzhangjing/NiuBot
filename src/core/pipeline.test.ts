@@ -641,7 +641,9 @@ describe("Pipeline.recover", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(sentTexts).toContain("处理出错了：API Error: 500 internal server error (request_id=req_123)");
+    expect(sentTexts).toContain(
+      "处理出错了：API Error: 500 internal server error (request_id=req_123)\nCommand failed",
+    );
   });
 
   test("surfaces plain-text CLI errors from stderr to the user", async () => {
@@ -672,7 +674,9 @@ describe("Pipeline.recover", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(sentTexts).toContain("处理出错了：Error: conversation not found for session thread_123");
+    expect(sentTexts).toContain(
+      "处理出错了：Error: conversation not found for session thread_123\nCommand failed: codex exec resume thread_123",
+    );
   });
 
   test("falls back to the latest raw error line when stderr is JSON text", async () => {
@@ -706,7 +710,9 @@ describe("Pipeline.recover", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(sentTexts).toContain("处理出错了：{\"type\":\"error\",\"message\":\"session expired\"}");
+    expect(sentTexts).toContain(
+      "处理出错了：warning: retrying request\nsession expired\nCommand failed: codex exec resume thread_123",
+    );
   });
 
   test("surfaces platform send errors to the user before degrading", async () => {
