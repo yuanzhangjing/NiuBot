@@ -627,6 +627,7 @@ function cmdStart(niubotHome: string, flags: CliFlags): void {
   // Write PID (engine also writes it, but we write early for immediate status checks)
   fs.writeFileSync(pidFile, String(child.pid));
   ok(`Process started (PID ${child.pid})`);
+  info(`Log: ${logFile}`);
 
   // Health check — all bots must respond
   const failedBots: string[] = [];

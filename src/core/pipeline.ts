@@ -1401,6 +1401,7 @@ export class Pipeline {
         ...process.env,
         NIUBOT_CHAT_ID: chatId ?? "",
         NIUBOT_API_SOCKET: socketPath,
+        RESTART_DETACHED: "1",
       },
     });
     child.unref();

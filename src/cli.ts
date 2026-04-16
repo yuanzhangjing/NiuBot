@@ -29,7 +29,7 @@ import { buildImportantContext, type SceneInfo } from "./memory/inject.js";
 import { loadPersona } from "./persona.js";
 import { handleMessages } from "./cli/messages.js";
 import { handleContacts } from "./cli/contacts.js";
-import { handleSend, handleSendFile, handleRestart } from "./cli/send.js";
+import { handleSend, handleSendFile } from "./cli/send.js";
 import { handleCron } from "./cli/cron.js";
 import { handleTask } from "./cli/task.js";
 import { handleSession } from "./cli/session.js";
@@ -153,9 +153,6 @@ async function main(): Promise<void> {
       break;
     case "sessions":
       handleSession(openDb(), args.slice(1), CHAT_ID, parseArgs);
-      break;
-    case "restart":
-      handleRestart();
       break;
     case "whoami":
       handleWhoami();

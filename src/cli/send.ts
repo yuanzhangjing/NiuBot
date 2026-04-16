@@ -74,23 +74,6 @@ export function handleSend(
     });
 }
 
-export function handleRestart(): void {
-  // Admin-only: check env var set by pipeline
-  if (process.env["NIUBOT_IS_ADMIN"] !== "true") {
-    console.error("Error: restart is admin-only");
-    process.exit(1);
-  }
-
-  const socketPath = getSocketPath();
-  const chatId = process.env["NIUBOT_CHAT_ID"] || undefined;
-  ipcRequest(socketPath, "/restart", chatId ? { chat_id: chatId } : {})
-    .then(() => console.log("Restart signal sent."))
-    .catch((err) => {
-      console.error(`Error: ${err.message}`);
-      process.exit(1);
-    });
-}
-
 export function handleSendFile(
   args: string[],
   chatId: string | undefined,

@@ -6,10 +6,32 @@
 # Flow: build → preflight (verify new code) → stop old → start new → health check → rollback on failure → notify
 set -eo pipefail
 
+# Auto-detach: re-exec in background so the caller can exit safely.
+# Skip if already detached (RESTART_DETACHED=1) or if --no-detach is passed.
+if [ "$1" = "--no-detach" ]; then
+    shift
+elif [ "${RESTART_DETACHED:-}" != "1" ]; then
+    if [ -z "${NIUBOT_HOME:-}" ]; then
+        echo "Error: NIUBOT_HOME is not set." >&2
+        exit 1
+    fi
+    LOG_DIR="$NIUBOT_HOME/logs"
+    mkdir -p "$LOG_DIR"
+    RESTART_DETACHED=1 nohup bash "$0" "$@" >> "$LOG_DIR/restart-debug.log" 2>&1 &
+    echo "restart detached (pid=$!)"
+    echo "  debug log: $LOG_DIR/restart-debug.log"
+    echo "  service log: $LOG_DIR/niubot-$(date '+%Y-%m-%d').log"
+    exit 0
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BOT_NAME="${NIUBOT_BOT_NAME:-NiuBot}"
 CHAT_ID="${NIUBOT_CHAT_ID:-}"
-export NIUBOT_HOME="${NIUBOT_HOME:-$HOME/.niubot-dev}"
+if [ -z "${NIUBOT_HOME:-}" ]; then
+    echo "Error: NIUBOT_HOME is not set." >&2
+    exit 1
+fi
+export NIUBOT_HOME
 SOCKET_PATH="${NIUBOT_API_SOCKET:-$NIUBOT_HOME/$BOT_NAME/api.sock}"
 LOG_DIR="$NIUBOT_HOME/logs"
 mkdir -p "$LOG_DIR"
@@ -193,6 +215,10 @@ if $DEV_MODE; then
         exit 1
     fi
     debug "build done"
+
+    # Ensure global CLI symlink matches current build
+    npm link --silent >> "$DEBUG_LOG" 2>&1 || debug "npm link skipped"
+    debug "npm link done"
 
     # Backup current dist (known-good)
     if [ -d "$DIST_DIR" ]; then
