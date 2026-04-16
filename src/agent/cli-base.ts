@@ -112,8 +112,16 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
     if (!s) throw new Error(`Session not found: ${agentSession.id}`);
 
     const { args, stdin } = this.buildInput(s, message);
+    const mode = s.agentSessionId ? "resume" : "new";
 
-    this.log.info("sending prompt", { sessionId: agentSession.id, textLength: message.length });
+    this.log.info("sending prompt", {
+      sessionId: agentSession.id,
+      mode,
+      agentSessionId: s.agentSessionId ?? null,
+      textLength: message.length,
+      stdinDefined: stdin !== undefined,
+      stdinLength: stdin?.length ?? 0,
+    });
 
     try {
       const stdout = await this.exec(this.command(), args, {
@@ -191,6 +199,20 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
     sessionId?: string,
   ): Promise<string> {
     return new Promise((resolve, reject) => {
+      const startedAt = Date.now();
+      const stdinDefined = opts?.stdin !== undefined;
+      const stdinLength = opts?.stdin?.length ?? 0;
+      const stdinPreview = summarizeForLog(opts?.stdin, 120);
+      this.log.debug("spawning child process", {
+        sessionId: sessionId ?? null,
+        cmd,
+        args,
+        cwd: opts?.cwd ?? process.cwd(),
+        stdinDefined,
+        stdinLength,
+        stdinPreview,
+      });
+
       const child = spawn(cmd, args, {
         cwd: opts?.cwd,
         env: { ...process.env, ...opts?.env },
@@ -204,11 +226,29 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
       child.stdout.on("data", (chunk: Buffer) => chunks.push(chunk));
       child.stderr.on("data", (chunk: Buffer) => stderrChunks.push(chunk));
 
-      child.on("close", (code) => {
+      child.on("close", (code, signal) => {
         if (sessionId) this.activeProcesses.delete(sessionId);
         const stdout = Buffer.concat(chunks).toString();
         const stderr = Buffer.concat(stderrChunks).toString();
+        const durationMs = Date.now() - startedAt;
+        const stdoutTail = tailForLog(stdout, 6);
+        const stderrTail = tailForLog(stderr, 6);
         if (code !== 0) {
+          this.log.error("child process failed", {
+            sessionId: sessionId ?? null,
+            cmd,
+            args,
+            code,
+            signal: signal ?? null,
+            durationMs,
+            stdinDefined,
+            stdinLength,
+            stdinPreview,
+            stdoutLength: stdout.length,
+            stderrLength: stderr.length,
+            stdoutTail,
+            stderrTail,
+          });
           const details = stderr || stdout;
           const err = new Error(`Command failed: ${cmd} ${args.join(" ")}\n${details}`);
           (err as any).stdout = stdout;
@@ -216,23 +256,76 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
           (err as any).code = code;
           reject(err);
         } else {
+          this.log.debug("child process completed", {
+            sessionId: sessionId ?? null,
+            cmd,
+            args,
+            code,
+            signal: signal ?? null,
+            durationMs,
+            stdinDefined,
+            stdinLength,
+            stdoutLength: stdout.length,
+            stderrLength: stderr.length,
+          });
           resolve(stdout);
         }
       });
 
       child.on("error", (err) => {
         if (sessionId) this.activeProcesses.delete(sessionId);
+        this.log.error("child process spawn error", {
+          sessionId: sessionId ?? null,
+          cmd,
+          args,
+          stdinDefined,
+          stdinLength,
+          stdinPreview,
+          error: String(err),
+        });
         reject(err);
       });
 
-      if (opts?.stdin) {
-        child.stdin.write(opts.stdin);
+      if (stdinDefined) {
+        child.stdin.write(opts?.stdin ?? "", (err) => {
+          if (err) {
+            this.log.error("stdin write failed", {
+              sessionId: sessionId ?? null,
+              cmd,
+              args,
+              stdinLength,
+              error: String(err),
+            });
+          } else {
+            this.log.debug("stdin write completed", {
+              sessionId: sessionId ?? null,
+              cmd,
+              args,
+              stdinLength,
+            });
+          }
+        });
         child.stdin.end();
       } else {
         child.stdin.end();
       }
     });
   }
+}
+
+function summarizeForLog(text: string | undefined, maxLen: number): string {
+  if (text === undefined) return "";
+  if (text.length <= maxLen) return text;
+  return text.slice(0, maxLen) + "…";
+}
+
+function tailForLog(text: string, maxLines: number): string {
+  return text
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .filter((line) => line.length > 0)
+    .slice(-maxLines)
+    .join("\n");
 }
 
 /** 从 SessionConfig 构造 NiuBot CLI 工具需要的环境变量 */
