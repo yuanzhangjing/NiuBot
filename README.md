@@ -1,70 +1,59 @@
 # NiuBot
 
-AI Persona Runtime — let AI agents live in your IM with memory, personality, and full autonomy.
+NiuBot 把 coding agent 接进飞书，让它不只是一次性的聊天窗口，而是一个能长期工作的 bot。
 
-NiuBot connects coding agents (Claude Code, Codex, or your own) to Feishu (Lark), turning them into persistent team members that remember conversations, manage tasks, and develop their own style.
+它能在 IM 里收消息、回消息、记住上下文、维护任务、跑定时任务，也能按人格配置说话。你可以把 Claude Code、Codex，或者你自己的 CLI agent 挂进去，让它在群聊或私聊里持续工作。
 
-## Install
+核心能力：
 
-### Let your coding agent handle it
+- 把 agent 接到飞书，变成可对话的 bot
+- 保存用户记忆、会话摘要和消息记录
+- 支持多 bot、多 backend、自定义插件
+- 提供任务、联系人、消息、定时任务等内置 CLI
+- 允许管理员通过人格文件持续调整 bot 风格
 
-First install:
+## Prompt for Your Agent
+
+把下面这段话直接发给你的 coding agent：
+
+```text
+Install and configure NiuBot for me.
+
+Install @yuanzhangjing/niubot if it is not installed yet.
+Then read the INSTALL.md inside the package and follow it end to end.
+
+Requirements:
+- complete installation, configuration, initialization, startup, and verification
+- ask me only when user action is strictly required, especially Feishu app creation, permissions, App ID, and App Secret
+- prefer built-in backends if available; otherwise explain what is missing
+- after setup, verify the bot can start cleanly and tell me what was configured
+
+Do not give me a summary of the docs first. Just perform the setup.
+```
+
+## More
+
+- Agent installation and setup guide: [INSTALL.md](./INSTALL.md)
+- Custom backend plugin API: [INSTALL.md](./INSTALL.md#plugin-api-reference)
+
+## Release
+
+For maintainers, publish with:
 
 ```bash
-npm install -g niubot
+npm run release -- patch
 ```
 
-Then copy this prompt to your coding agent (Claude Code, Cursor, etc.):
+You can replace `patch` with `minor` or `major`.
 
-```
-Help me install and configure NiuBot.
-Read the INSTALL.md in the niubot package for step-by-step instructions.
-```
+The release script will:
 
-The agent reads INSTALL.md, follows the steps, and only asks you when it needs input (Feishu credentials, backend choice, etc.).
-
-### Or do it yourself
-
-```bash
-npm install -g niubot
-niubot init
-```
-
-The interactive wizard walks you through everything: backend detection, Feishu app setup, credential input, and startup. No docs needed.
-
-### From GitHub Release
-
-```bash
-npm install -g https://github.com/yuanzhangjing/NiuBot/releases/download/v0.1.0/niubot-0.1.0.tgz
-```
-
-## What it does
-
-- **Multi-backend** — Claude Code, Codex, or any CLI tool via a ~25-line plugin
-- **Memory** — per-user memories, session summaries, searchable message history
-- **Persona** — personality file that admins (and the bot itself) can edit
-- **Tasks** — built-in task management with per-user visibility
-- **Multi-bot** — run multiple bots from one config, each with its own identity
-- **Scheduled tasks** — cron-based recurring or one-time automation
-
-## Service management
-
-```bash
-niubot start            # Start
-niubot stop             # Stop
-niubot status           # Check status
-niubot start --restart  # Restart
-```
-
-## Prerequisites
-
-- Node.js >= 18
-- Feishu enterprise app with Bot capability
-- Agent backend: `claude` CLI, `codex` CLI, or custom plugin
-
-## Custom backend plugin
-
-NiuBot can wrap any CLI-based coding agent. See [INSTALL.md](./INSTALL.md#plugin-api-reference) for the plugin API.
+- require a clean git worktree
+- run `npm run release:check`
+- create the new npm version and matching `vX.Y.Z` git tag
+- publish to npm
+- push the current branch and tags with `--follow-tags`
+- verify the published version on npm
 
 ## License
 

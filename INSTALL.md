@@ -14,8 +14,10 @@ Human users: run `niubot init` and follow the prompts. You don't need to read th
 ## Step 1: Install NiuBot
 
 ```bash
-npm install -g niubot
+npm install -g @yuanzhangjing/niubot
 ```
+
+The installed command is still `niubot`.
 
 Verify:
 ```bash
