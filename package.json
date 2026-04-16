@@ -1,6 +1,6 @@
 {
   "name": "niubot",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "description": "NiuBot Engine — AI Persona Runtime powering autonomous digital coworkers with memory and personality",
   "type": "module",
   "main": "dist/index.js",
