@@ -165,4 +165,27 @@ describe("CodexBackend session metadata", () => {
       stdin: "ping",
     });
   });
+
+  it("passes the new user message when resuming an existing codex thread", () => {
+    const backend = new CodexBackend();
+    const session = backend.buildSession({
+      workingDirectory: "/tmp/project",
+      model: "gpt-5.4",
+    });
+    session.agentSessionId = "thread_123";
+
+    expect(backend.buildInput(session, "second turn")).toEqual({
+      args: [
+        "exec",
+        "resume",
+        "thread_123",
+        "--json",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--skip-git-repo-check",
+        "-m",
+        "gpt-5.4",
+      ],
+      stdin: "second turn",
+    });
+  });
 });

@@ -1915,20 +1915,36 @@ export class Pipeline {
 }
 
 function extractAgentErrorDetail(err: unknown): string | null {
+  const stderr = typeof err === "object" && err !== null && "stderr" in err
+    ? String((err as { stderr?: unknown }).stderr ?? "")
+    : "";
   const stdout = typeof err === "object" && err !== null && "stdout" in err
     ? String((err as { stdout?: unknown }).stdout ?? "")
     : "";
-  if (!stdout) return null;
 
-  for (const line of stdout.split("\n")) {
-    if (!line) continue;
-    try {
-      const event = JSON.parse(line) as { type?: string; is_error?: boolean; result?: unknown };
-      if (event.type === "result" && event.is_error && typeof event.result === "string" && event.result.trim()) {
-        return event.result.trim();
+  for (const stream of [stdout, stderr]) {
+    if (!stream) continue;
+    for (const line of stream.split("\n")) {
+      if (!line) continue;
+      try {
+        const event = JSON.parse(line) as { type?: string; is_error?: boolean; result?: unknown };
+        if (event.type === "result" && event.is_error && typeof event.result === "string" && event.result.trim()) {
+          return event.result.trim();
+        }
+      } catch {
+        // ignore malformed lines
       }
-    } catch {
-      // ignore malformed lines
+    }
+  }
+
+  const message = err instanceof Error ? err.message : String(err ?? "");
+  for (const text of [stderr, stdout, message]) {
+    const lines = text
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+    if (lines.length > 0) {
+      return lines[lines.length - 1] ?? null;
     }
   }
 

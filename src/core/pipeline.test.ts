@@ -590,4 +590,69 @@ describe("Pipeline.recover", () => {
 
     expect(sentTexts).toContain("处理出错了：API Error: 500 internal server error (request_id=req_123)");
   });
+
+  test("surfaces plain-text CLI errors from stderr to the user", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const { im, sentTexts } = createRecordingImStub();
+    const err = new Error("Command failed: codex exec resume thread_123");
+    err.stderr = "Error: conversation not found for session thread_123";
+
+    const pipeline = new Pipeline(
+      db,
+      im,
+      new ErrorAgent(err),
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+    await pipeline.start();
+
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "hello",
+      platformMsgId: "m1",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(sentTexts).toContain("处理出错了：Error: conversation not found for session thread_123");
+  });
+
+  test("falls back to the latest raw error line when stderr is JSON text", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const { im, sentTexts } = createRecordingImStub();
+    const err = new Error("Command failed: codex exec resume thread_123");
+    err.stderr = [
+      "warning: retrying request",
+      "{\"type\":\"error\",\"message\":\"session expired\"}",
+    ].join("\n");
+
+    const pipeline = new Pipeline(
+      db,
+      im,
+      new ErrorAgent(err),
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+    await pipeline.start();
+
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "hello",
+      platformMsgId: "m1",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(sentTexts).toContain("处理出错了：{\"type\":\"error\",\"message\":\"session expired\"}");
+  });
 });

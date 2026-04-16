@@ -61,7 +61,7 @@ export default class CodexBackend extends CliAgentBackend<CodexSession> {
       if (session.model) {
         args.push("-m", session.model);
       }
-      return { args };
+      return { args, stdin: message };
     }
 
     const args = [
