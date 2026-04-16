@@ -89,6 +89,59 @@ function createRecordingImStub() {
   return { im, sentTexts, sentCards, reactions, removedReactions };
 }
 
+function createImStubWithSendFailures(options: {
+  cardError: Error;
+  rawTextError?: Error;
+}) {
+  const sentTexts: string[] = [];
+  const sentReplies: Array<{ chatId: string; text: string; replyToMsgId: string }> = [];
+  const sentCards: Array<{ header: string; content: string; footer?: string }> = [];
+  let sendTextCalls = 0;
+  let sendReplyCalls = 0;
+
+  const im: PlatformAdapter = {
+    onMessage() {},
+    async start() {},
+    async stop() {},
+    async sendText(_chatId, text) {
+      sendTextCalls++;
+      if (sendTextCalls === 1 && options.rawTextError) {
+        throw options.rawTextError;
+      }
+      sentTexts.push(text);
+      return "pmid";
+    },
+    async sendReply(chatId, text, replyToMsgId) {
+      sendReplyCalls++;
+      if (sendReplyCalls === 1 && options.rawTextError) {
+        throw options.rawTextError;
+      }
+      sentReplies.push({ chatId, text, replyToMsgId });
+      return "pmid";
+    },
+    async sendMarkdownCard() { return "pmid"; },
+    async sendCard(_chatId, header, content, footer) {
+      sentCards.push({ header, content, footer });
+      throw options.cardError;
+    },
+    async replyCard(_msgId, header, content, footer) {
+      sentCards.push({ header, content, footer });
+      throw options.cardError;
+    },
+    async editMessage() {},
+    async addReaction() {},
+    async removeReaction() {},
+    async sendFile() { return "pmid"; },
+    async getBotOpenId() { return "bot-open-id"; },
+    async getBotName() { return "NiuBot"; },
+    async getChatName() { return "Admin"; },
+    async getMessageContent() { return undefined; },
+    async getAppCreatorId() { return undefined; },
+  };
+
+  return { im, sentTexts, sentReplies, sentCards };
+}
+
 class DeferredAgent extends RecordingAgent {
   private readonly pendingResolvers: Array<() => void> = [];
 
@@ -654,5 +707,131 @@ describe("Pipeline.recover", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(sentTexts).toContain("处理出错了：{\"type\":\"error\",\"message\":\"session expired\"}");
+  });
+
+  test("surfaces platform send errors to the user before degrading", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const platformErr = new Error("Request failed with status code 400") as Error & {
+      response?: { data?: { code?: number; msg?: string } };
+    };
+    platformErr.response = {
+      data: {
+        code: 230028,
+        msg: "The messages do NOT pass the audit, ext=contain sensitive data: EMAIL_ADDRESS",
+      },
+    };
+    const { im, sentReplies, sentTexts } = createImStubWithSendFailures({ cardError: platformErr });
+
+    const pipeline = new Pipeline(
+      db,
+      im,
+      new RecordingAgent(),
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+    await pipeline.start();
+
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "why no reply",
+      platformMsgId: "m1",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(sentTexts).toHaveLength(0);
+    expect(sentReplies).toContainEqual({
+      chatId: "chat-open-id",
+      text: "发送失败：The messages do NOT pass the audit, ext=contain sensitive data: EMAIL_ADDRESS (code: 230028)",
+      replyToMsgId: "m1",
+    });
+    const row = db.prepare(`
+      SELECT content_text, platform_msg_id
+      FROM messages
+      WHERE role = 'assistant'
+      ORDER BY id DESC
+      LIMIT 1
+    `).get() as { content_text: string; platform_msg_id: string | null };
+    expect(row).toEqual({
+      content_text: "发送失败：The messages do NOT pass the audit, ext=contain sensitive data: EMAIL_ADDRESS (code: 230028)",
+      platform_msg_id: "pmid",
+    });
+    const ftsRow = db.prepare(`
+      SELECT rowid
+      FROM messages_fts
+      WHERE messages_fts MATCH ?
+      LIMIT 1
+    `).get("230028") as { rowid: number } | undefined;
+    expect(ftsRow).toBeTruthy();
+  });
+
+  test("degrades platform send errors when raw platform error cannot be delivered", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const platformErr = new Error("Request failed with status code 400") as Error & {
+      response?: { data?: { code?: number; msg?: string } };
+    };
+    platformErr.response = {
+      data: {
+        code: 230028,
+        msg: "The messages do NOT pass the audit, ext=contain sensitive data: EMAIL_ADDRESS",
+      },
+    };
+    const rawTextErr = new Error("raw platform error blocked");
+    const { im, sentReplies, sentTexts } = createImStubWithSendFailures({
+      cardError: platformErr,
+      rawTextError: rawTextErr,
+    });
+
+    const pipeline = new Pipeline(
+      db,
+      im,
+      new RecordingAgent(),
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+    await pipeline.start();
+
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "still no reply",
+      platformMsgId: "m1",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(sentTexts).toHaveLength(0);
+    expect(sentReplies).toContainEqual({
+      chatId: "chat-open-id",
+      text: "上一条回复未送达：平台发送失败（code: 230028）。",
+      replyToMsgId: "m1",
+    });
+    const row = db.prepare(`
+      SELECT content_text, platform_msg_id
+      FROM messages
+      WHERE role = 'assistant'
+      ORDER BY id DESC
+      LIMIT 1
+    `).get() as { content_text: string; platform_msg_id: string | null };
+    expect(row).toEqual({
+      content_text: "上一条回复未送达：平台发送失败（code: 230028）。",
+      platform_msg_id: "pmid",
+    });
+    const ftsRow = db.prepare(`
+      SELECT rowid
+      FROM messages_fts
+      WHERE messages_fts MATCH ?
+      LIMIT 1
+    `).get("230028") as { rowid: number } | undefined;
+    expect(ftsRow).toBeTruthy();
   });
 });

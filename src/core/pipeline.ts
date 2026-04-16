@@ -1572,6 +1572,7 @@ export class Pipeline {
 
       // 合并消息提示头
       let displayText = response.text;
+      let deliveredText = response.text;
       if (isMerged) {
         const lines = messages.map((m) => {
           const brief = m.text.length > 10 ? m.text.slice(0, 10) + "…" : m.text;
@@ -1582,6 +1583,9 @@ export class Pipeline {
 
       // 发送到 IM（始终用卡片，footer 带 session 信息）
       let sentPlatformMsgId: string | undefined;
+      const sendFallbackText = (text: string) => triggerMsgId
+        ? this.im.sendReply(chatSession.platformChatId, text, triggerMsgId)
+        : this.im.sendText(chatSession.platformChatId, text);
       try {
         const useReply = !!triggerMsgId;
         this.log.info("send decision", { chatId, useReply, merged: isMerged, messageCount: messages.length, triggerMsgId: triggerMsgId ?? "none" });
@@ -1596,24 +1600,47 @@ export class Pipeline {
           error: String(sendErr),
           responseLength: response.text.length,
         });
-        // Fallback to plain text if card fails
+        // 先把平台错误原样回给用户；若平台连这条也拦，再降级为稳定短句。
         try {
-          sentPlatformMsgId = await this.im.sendText(chatSession.platformChatId, response.text);
-        } catch {
-          // Give up
+          deliveredText = `发送失败：${extractPlatformErrorDetail(sendErr)}`;
+          sentPlatformMsgId = await sendFallbackText(deliveredText);
+        } catch (platformErrEchoErr) {
+          this.log.warn("failed to surface platform error to user", {
+            chatId,
+            error: String(platformErrEchoErr),
+          });
+          try {
+            deliveredText = buildPlatformFailureFallback(sendErr);
+            sentPlatformMsgId = await sendFallbackText(deliveredText);
+          } catch (fallbackSendErr) {
+            this.log.error("failed to send degraded platform error", {
+              chatId,
+              error: String(fallbackSendErr),
+            });
+          }
         }
       }
 
       // 回写 platform_msg_id（用于 merge_forward 等场景的内容缓存查找）
       if (sentPlatformMsgId) {
+        if (deliveredText !== response.text) {
+          updateMessageContent(this.db, replyMsgId, deliveredText);
+        }
         updateMessagePlatformId(this.db, replyMsgId, sentPlatformMsgId);
       }
 
-      this.log.info("response sent", {
-        chatId,
-        responseLength: response.text.length,
-        filesChanged: response.filesChanged,
-      });
+      if (sentPlatformMsgId) {
+        this.log.info("response sent", {
+          chatId,
+          responseLength: response.text.length,
+          filesChanged: response.filesChanged,
+        });
+      } else {
+        this.log.warn("response not delivered to IM", {
+          chatId,
+          responseLength: response.text.length,
+        });
+      }
     } catch (err) {
       this.log.error("pipeline error", { chatId, error: String(err) });
 
@@ -1949,6 +1976,34 @@ function extractAgentErrorDetail(err: unknown): string | null {
   }
 
   return null;
+}
+
+function extractPlatformErrorDetail(err: unknown): string {
+  const data = typeof err === "object" && err !== null && "response" in err
+    ? (err as { response?: { data?: { code?: unknown; msg?: unknown } } }).response?.data
+    : undefined;
+  const msg = typeof data?.msg === "string" ? data.msg.trim() : "";
+  const code = data?.code;
+
+  if (msg && code !== undefined && code !== null && String(code).trim()) {
+    return `${msg} (code: ${String(code).trim()})`;
+  }
+  if (msg) return msg;
+
+  const message = err instanceof Error ? err.message.trim() : String(err ?? "").trim();
+  return message || "平台发送失败";
+}
+
+function buildPlatformFailureFallback(err: unknown): string {
+  const data = typeof err === "object" && err !== null && "response" in err
+    ? (err as { response?: { data?: { code?: unknown } } }).response?.data
+    : undefined;
+  const code = data?.code;
+
+  if (code !== undefined && code !== null && String(code).trim()) {
+    return `上一条回复未送达：平台发送失败（code: ${String(code).trim()}）。`;
+  }
+  return "上一条回复未送达：平台发送失败。";
 }
 
 /** 检查命令是否在 PATH 中（对齐 Go exec.LookPath） */

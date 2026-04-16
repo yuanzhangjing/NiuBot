@@ -631,7 +631,21 @@ export function updateMessageContent(
   id: number,
   contentText: string,
 ): void {
-  db.prepare("UPDATE messages SET content_text = ? WHERE id = ?").run(contentText, id);
+  const tx = db.transaction(() => {
+    const existing = db.prepare("SELECT content_text FROM messages WHERE id = ?").get(id) as
+      | { content_text: string | null }
+      | undefined;
+    db.prepare("UPDATE messages SET content_text = ? WHERE id = ?").run(contentText, id);
+    if (existing?.content_text) {
+      db.prepare(
+        "INSERT INTO messages_fts(messages_fts, rowid, content_text) VALUES('delete', ?, ?)",
+      ).run(id, existing.content_text);
+    }
+    if (contentText) {
+      db.prepare("INSERT INTO messages_fts (rowid, content_text) VALUES (?, ?)").run(id, contentText);
+    }
+  });
+  tx();
 }
 
 /** Update platform_msg_id for an existing message (e.g., after bot sends and gets platform ID back) */
