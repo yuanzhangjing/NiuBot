@@ -17,12 +17,16 @@ elif [ "${RESTART_DETACHED:-}" != "1" ]; then
     fi
     LOG_DIR="$NIUBOT_HOME/logs"
     mkdir -p "$LOG_DIR"
-    RESTART_DETACHED=1 perl -e 'use POSIX "setsid"; setsid(); exec @ARGV' bash "$0" "$@" >> "$LOG_DIR/restart-debug.log" 2>&1 &
+    RESTART_DETACHED=1 perl -e 'use POSIX "setsid"; setsid(); exec @ARGV' bash "$0" "$@" > /dev/null 2>&1 &
     echo "restart detached (pid=$!)"
     echo "  debug log: $LOG_DIR/restart-debug.log"
     echo "  service log: $LOG_DIR/niubot-$(date '+%Y-%m-%d').log"
     exit 0
 fi
+
+# Ignore signals so that killing the daemon cannot take us down,
+# even if setsid failed to create a new session.
+trap '' TERM HUP INT PIPE
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BOT_NAME="${NIUBOT_BOT_NAME:-NiuBot}"
@@ -189,7 +193,7 @@ run_preflight() {
 }
 
 # ──────── Main ────────
-echo "" > "$DEBUG_LOG"
+debug ""
 debug "=== restart.sh started ==="
 debug "PID=$$, BOT=$BOT_NAME, CHAT=$CHAT_ID"
 

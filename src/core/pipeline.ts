@@ -8,7 +8,7 @@ import type Database from "better-sqlite3";
 import type { PlatformAdapter, NormalizedMessage } from "../im/types.js";
 import { escapeYamlContent, renderMessageNodes } from "../im/render.js";
 import type { AgentBackend, AgentSession } from "../agent/types.js";
-import { BUILTIN_BACKEND_LIST, normalizeBackend, type AgentBackendType } from "../config.js";
+import { BUILTIN_BACKEND_LIST, NIUBOT_HOME, normalizeBackend, type AgentBackendType } from "../config.js";
 import { MessageQueue } from "./queue.js";
 import {
   ensureUser, ensureChat, storeMessage, updateChatName,
@@ -1403,15 +1403,14 @@ export class Pipeline {
 
     const socketPath = path.join(path.dirname(this.dbPath), "api.sock");
 
-    const child = spawn("nohup", ["bash", restartScript], {
+    const child = spawn("bash", [restartScript], {
       cwd: projectRoot,
-      detached: true,
       stdio: "ignore",
       env: {
         ...process.env,
+        NIUBOT_HOME,
         NIUBOT_CHAT_ID: chatId ?? "",
         NIUBOT_API_SOCKET: socketPath,
-        RESTART_DETACHED: "1",
       },
     });
     child.unref();
