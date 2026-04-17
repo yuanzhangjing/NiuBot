@@ -8,6 +8,7 @@
  *   niubot start   — 校验 + 启动服务
  *   niubot stop    — 停止服务
  *   niubot status  — 查看运行状态
+ *   niubot update  — 检查并安装最新版本
  *   niubot version — 显示版本号
  */
 
@@ -686,6 +687,14 @@ function cmdStart(niubotHome: string, flags: CliFlags): void {
     hint(`Check log: ${logFile}`);
     console.log("Some bots failed health check. The service may still be initializing.");
   }
+
+  // Check for updates (non-blocking, best-effort)
+  const latest = checkForUpdate();
+  if (latest) {
+    console.log();
+    console.log(`  Update available: ${getPkgVersion()} → ${latest}`);
+    console.log(`  Run 'niubot update' to upgrade.`);
+  }
   console.log();
 }
 
@@ -774,6 +783,83 @@ function cmdVersion(): void {
   console.log(`niubot v${getPkgVersion()}`);
 }
 
+// ── Update ────────────────────────────────────────────────
+
+const PKG_NAME = "@yuanzhangjing/niubot";
+
+/** Check npm registry for a newer version. Returns latest version or null. */
+function checkForUpdate(): string | null {
+  const local = getPkgVersion();
+  try {
+    const latest = execFileSync("npm", ["view", `${PKG_NAME}@latest`, "version"], {
+      encoding: "utf-8",
+      timeout: 8000,
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    if (latest && latest !== local) return latest;
+  } catch { /* network error, not published, etc. */ }
+  return null;
+}
+
+function cmdUpdate(niubotHome: string): void {
+  const current = getPkgVersion();
+  console.log();
+  console.log(`Current version: ${current}`);
+
+  // Check for latest
+  info("Checking npm registry...");
+  const latest = checkForUpdate();
+  if (!latest) {
+    ok("Already up to date.");
+    console.log();
+    return;
+  }
+
+  console.log(`  New version available: ${latest}`);
+  console.log();
+
+  // Install
+  info(`Installing ${PKG_NAME}@${latest} ...`);
+  try {
+    execFileSync("npm", ["install", "-g", `${PKG_NAME}@${latest}`], {
+      encoding: "utf-8",
+      timeout: 60000,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    ok(`Updated to ${latest}`);
+  } catch (err) {
+    fail(`Install failed: ${err instanceof Error ? err.message : err}`);
+    hint("Try manually: npm install -g " + PKG_NAME + "@latest");
+    console.log();
+    process.exit(1);
+  }
+
+  // Restart if running
+  const pidFile = path.join(niubotHome, "niubot.pid");
+  if (fs.existsSync(pidFile)) {
+    const pid = parseInt(fs.readFileSync(pidFile, "utf-8").trim(), 10);
+    if (isProcessRunning(pid)) {
+      console.log();
+      info("Restarting service...");
+      stopProcess(niubotHome);
+
+      // Re-exec start with the NEW binary (the just-installed version)
+      try {
+        execFileSync("niubot", ["start"], {
+          encoding: "utf-8",
+          timeout: 30000,
+          stdio: "inherit",
+          env: { ...process.env, NIUBOT_HOME: niubotHome },
+        });
+      } catch {
+        hint("Auto-restart failed. Run 'niubot start' manually.");
+      }
+    }
+  }
+
+  console.log();
+}
+
 // ── Plugin symlink ────────────────────────────────────────
 
 /**
@@ -840,6 +926,7 @@ Commands:
   start      Start the NiuBot service
   stop       Stop the NiuBot service
   status     Show service status
+  update     Check for updates and install latest version
   version    Show version
 
 Init options:
@@ -869,6 +956,9 @@ async function main(): Promise<void> {
       break;
     case "status":
       cmdStatus(niubotHome);
+      break;
+    case "update":
+      cmdUpdate(niubotHome);
       break;
     case "version":
     case "--version":
