@@ -14,7 +14,7 @@ Human users: run `niubot init` and follow the prompts. You don't need to read th
 ## Step 1: Install NiuBot
 
 ```bash
-npm install -g @yuanzhangjing/niubot
+npm install -g @yuanzhangjing/niubot@latest
 ```
 
 The installed command is still `niubot`.
@@ -114,13 +114,14 @@ mkdir -p ~/.niubot
 
 Write `~/.niubot/config.yaml`:
 
-Before filling the config, ask the user:
-- **Bot ID**: default is `NiuBot`. This is immutable after setup — it determines the data directory (`~/.niubot/<id>/`) and default workspace (`~/niubot-workspace/<id>/`). If the user wants a different name, set it now.
-- **Working directory**: where the agent runs. Default is `~/niubot-workspace/<id>`. Ask if they want a different path.
-- **Model**: whether they want to pin a main `model` now, or keep the CLI default
-- **Lite model**: whether they want to set a separate `liteModel` for cheaper background tasks
+Before filling the config, ask the user the following **in this exact order**:
 
-For built-in backends, if the user wants a `liteModel` but has no preference, suggest:
+1. **Bot ID** (default: `NiuBot`). Immutable after setup — determines data directory (`~/.niubot/<id>/`) and default workspace. Must ask first because other defaults depend on it.
+2. **Working directory** (default: `~/niubot-workspace/<id>`). Show the default path based on the Bot ID chosen above, then ask if they want a different path.
+3. **Model** (optional). Main model for conversations. Press Enter to use the CLI's default.
+4. **Lite model** (optional). Cheaper model for background tasks. Press Enter to use the recommended default below, or same as main model if no recommendation.
+
+Recommended lite models for built-in backends:
 - `claude`: `haiku`
 - `codex`: `gpt-5.4-mini`
 - `traecli`: `Gemini-3-Flash-Preview`
