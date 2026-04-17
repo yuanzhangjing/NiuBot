@@ -1267,9 +1267,18 @@ export class Pipeline {
     if (args.length === 0) {
       // 显示当前 backend（卡片）
       const backends = this.getAvailableBackends();
-      const content = backends.map((b) =>
-        b === this.backendType ? `◉ ${b}` : `○ ${b}`,
-      ).join("\n");
+      const content = backends.map((b) => {
+        if (b === this.backendType) {
+          const modelLine = `model: ${this.botIdentity.model ?? "default"}, lite: ${this.botIdentity.liteModel ?? "default"}`;
+          return `◉ ${b} (${modelLine})`;
+        }
+        const cached = this.backendModelCache.get(b);
+        if (cached) {
+          const modelLine = `model: ${cached.model ?? "default"}, lite: ${cached.liteModel ?? "default"}`;
+          return `○ ${b} (${modelLine})`;
+        }
+        return `○ ${b}`;
+      }).join("\n");
       this.sendAgentCard(chatId, platformChatId, msgId, "Agent", content);
       return;
     }
