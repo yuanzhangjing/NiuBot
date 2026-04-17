@@ -24,7 +24,6 @@ const pkg = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.ur
 const version = pkg.version;
 
 run("npm", ["publish", "--access", "public"], { dryRun, stdio: "inherit" });
-run("git", ["push", "origin", branch, "--follow-tags"], { dryRun, stdio: "inherit" });
 if (dryRun) {
   run("npm", ["view", pkg.name, "dist-tags", "--json"], { dryRun, stdio: "inherit" });
   run("npm", ["view", `${pkg.name}@${version}`, "version"], { dryRun, stdio: "inherit" });
@@ -37,8 +36,9 @@ if (dryRun) {
       process.stdout.write(resolved);
       return resolved;
     },
-    { attempts: 6, delayMs: 5000, shouldRetry: isRetryableNpmViewError },
+    { timeoutMs: 120_000, delayMs: 5000, shouldRetry: isRetryableNpmViewError },
   );
 }
 
+run("git", ["push", "origin", branch, "--follow-tags"], { dryRun, stdio: "inherit" });
 console.log(`Release complete: ${pkg.name}@${version}`);

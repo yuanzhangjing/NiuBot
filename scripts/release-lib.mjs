@@ -52,15 +52,19 @@ export function run(command, args, options = {}) {
   });
 }
 
-export async function retry(fn, { attempts, delayMs, shouldRetry }) {
+export async function retry(fn, { timeoutMs = 120_000, delayMs, shouldRetry }) {
+  const deadline = Date.now() + timeoutMs;
   let lastError;
-  for (let index = 0; index < attempts; index += 1) {
+  let attempt = 0;
+  while (true) {
     try {
       return fn();
     } catch (error) {
       lastError = error;
-      if (index === attempts - 1 || !shouldRetry(error)) throw error;
-      console.log(`  retrying (${index + 1}/${attempts - 1}), waiting ${delayMs / 1000}s...`);
+      if (!shouldRetry(error)) throw error;
+      attempt++;
+      if (Date.now() + delayMs > deadline) break;
+      console.log(`  retrying (attempt ${attempt}), waiting ${delayMs / 1000}s...`);
       await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
   }
