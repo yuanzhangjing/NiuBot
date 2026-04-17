@@ -191,7 +191,7 @@ function handleUserMemory(args: string[]): void {
       userMemoryDel(db, userId, rest);
       break;
     default:
-      console.log("Usage: niubot user-memory <add|list|get|update|del>");
+      console.log("Usage: nb-agent user-memory <add|list|get|update|del>");
       break;
   }
   db.close();
@@ -201,7 +201,7 @@ function userMemoryAdd(db: Database.Database, userId: string, args: string[]): v
   const { flags } = parseArgs(args);
   const summary = flags["summary"] ?? flags["s"];
   if (!summary) {
-    console.error("Usage: niubot user-memory add --summary \"...\" [--detail \"...\"] [--visibility private|public]");
+    console.error("Usage: nb-agent user-memory add --summary \"...\" [--detail \"...\"] [--visibility private|public]");
     process.exit(1);
   }
   const detail = flags["detail"] ?? flags["d"] ?? "";
@@ -248,7 +248,7 @@ function userMemoryList(db: Database.Database, userId: string, args: string[]): 
 function userMemoryGet(db: Database.Database, userId: string, args: string[]): void {
   const { positional } = parseArgs(args);
   const id = Number(positional[0]);
-  if (!id) { console.error("Usage: niubot user-memory get <id>"); process.exit(1); }
+  if (!id) { console.error("Usage: nb-agent user-memory get <id>"); process.exit(1); }
 
   const m = getUserMemory(db, id);
   if (!m) { console.error(`Memory #${id} not found`); process.exit(1); }
@@ -276,7 +276,7 @@ function userMemoryUpdate(db: Database.Database, userId: string, args: string[])
   const { positional, flags } = parseArgs(args);
   const id = Number(positional[0]);
   if (!id) {
-    console.error("Usage: niubot user-memory update <id> [--summary \"...\"] [--detail \"...\"] [--visibility private|public]");
+    console.error("Usage: nb-agent user-memory update <id> [--summary \"...\"] [--detail \"...\"] [--visibility private|public]");
     process.exit(1);
   }
 
@@ -310,7 +310,7 @@ function userMemoryUpdate(db: Database.Database, userId: string, args: string[])
 function userMemoryDel(db: Database.Database, userId: string, args: string[]): void {
   const { positional } = parseArgs(args);
   const id = Number(positional[0]);
-  if (!id) { console.error("Usage: niubot user-memory del <id>"); process.exit(1); }
+  if (!id) { console.error("Usage: nb-agent user-memory del <id>"); process.exit(1); }
 
   const m = getUserMemory(db, id);
   if (!m) { console.error(`Memory #${id} not found`); process.exit(1); }
@@ -375,9 +375,9 @@ function handleWhoami(): void {
 // ─── Usage ─────────────────────────────────────────────────
 
 function printUsage(): void {
-  console.log(`NiuBot CLI
+  console.log(`NiuBot Agent CLI
 
-Usage: niubot <command> <subcommand> [options]
+Usage: nb-agent <command> <subcommand> [options]
 
 Commands:
   user-memory   add|list|get|update|del     Manage user memories
@@ -388,7 +388,6 @@ Commands:
   send-file     <file-path>                 Send file via IPC
   cron          add|list|del                Manage scheduled tasks
   task          create|list|update|delete   Manage task projects
-  restart                                   Restart bot (admin, via IPC)
   whoami                                    Show current scene info
 
 Global flags (apply to all commands):

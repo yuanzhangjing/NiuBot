@@ -61,7 +61,7 @@ export function handleSend(
     process.exit(1);
   }
   if (!text) {
-    console.error("Usage: niubot send <text>");
+    console.error("Usage: nb-agent send <text>");
     process.exit(1);
   }
 
@@ -88,7 +88,7 @@ export function handleSendFile(
     process.exit(1);
   }
   if (!filePath) {
-    console.error("Usage: niubot send-file <file-path>");
+    console.error("Usage: nb-agent send-file <file-path>");
     process.exit(1);
   }
 

@@ -1045,7 +1045,7 @@ export class Pipeline {
     if (!supportsSystemPrompt && importantContext) {
       contextParts.push(
         `<important-context preserve="true">\n` +
-        `以下是关键场景信息，上下文压缩时必须保留。如果丢失，用 niubot whoami 重建。\n\n` +
+        `以下是关键场景信息，上下文压缩时必须保留。如果丢失，用 nb-agent whoami 重建。\n\n` +
         `${importantContext}\n` +
         `</important-context>`,
       );
@@ -1477,7 +1477,7 @@ export class Pipeline {
         if (importantCtx) {
           parts.push(
             `<important-context preserve="true">\n` +
-            `以下是关键场景信息，上下文压缩时必须保留。如果丢失，用 niubot whoami 重建。\n\n` +
+            `以下是关键场景信息，上下文压缩时必须保留。如果丢失，用 nb-agent whoami 重建。\n\n` +
             `${importantCtx}\n` +
             `</important-context>`,
           );

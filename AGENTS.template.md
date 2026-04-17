@@ -5,10 +5,10 @@ Do NOT modify this file (CLAUDE.md / AGENTS.md). It is auto-generated on startup
 
 ## Core rules
 - **No self-restart**: NEVER start, stop, or restart the NiuBot Engine service from within a session. It kills your own process and causes a restart loop.
-- **Data access**: All user data (memories, messages) must go through `niubot` CLI tools. Do NOT read database files directly.
-- **No built-in memory**: Do NOT use the auto memory system. Use niubot tools instead: `user-memory`, `task`.
-- **Proactive memory**: When you learn something noteworthy about a user, save it via `niubot user-memory add`.
-- **Auto-delivery**: Your final reply is automatically delivered to the current chat. Only use `niubot send` / `niubot send-file` when explicitly asked or truly necessary (e.g. cross-chat messaging, sending files).
+- **Data access**: All user data (memories, messages) must go through `nb-agent` CLI tools. Do NOT read database files directly.
+- **No built-in memory**: Do NOT use the auto memory system. Use `nb-agent` tools instead: `user-memory`, `task`.
+- **Proactive memory**: When you learn something noteworthy about a user, save it via `nb-agent user-memory add`.
+- **Auto-delivery**: Your final reply is automatically delivered to the current chat. Only use `nb-agent send` / `nb-agent send-file` when explicitly asked or truly necessary (e.g. cross-chat messaging, sending files).
 - **System access**: Full access within working directory. Outside it, read freely but write/delete requires user confirmation.
 
 ## Response delivery rules
@@ -27,8 +27,8 @@ Before writing your final text block: did the user ask any questions? Verify ALL
 
 ## Context recovery
 Session context may be lost during long conversations due to compaction. Recovery commands:
-- `niubot whoami` — current scene + user memories (one shot)
-- `niubot messages list` — recent messages
+- `nb-agent whoami` — current scene + user memories (one shot)
+- `nb-agent messages list` — recent messages
 
 ## Available Tools
 
@@ -41,11 +41,11 @@ Remember things about users (preferences, background, experiences). Proactively 
 
 | Action | Command |
 |--------|---------|
-| Add | `niubot user-memory add --summary "..." [--detail "..."] [--visibility private\|public]` |
-| List | `niubot user-memory list [--user-id <id>]` |
-| Detail | `niubot user-memory get <id>` |
-| Update | `niubot user-memory update <id> [--summary "..."] [--detail "..."] [--visibility ...]` |
-| Delete | `niubot user-memory del <id>` |
+| Add | `nb-agent user-memory add --summary "..." [--detail "..."] [--visibility private\|public]` |
+| List | `nb-agent user-memory list [--user-id <id>]` |
+| Detail | `nb-agent user-memory get <id>` |
+| Update | `nb-agent user-memory update <id> [--summary "..."] [--detail "..."] [--visibility ...]` |
+| Delete | `nb-agent user-memory del <id>` |
 
 ### Message history
 Complete record of every chat message (sender, timestamp, original text). This is the raw data — the actual words that were said.
@@ -54,8 +54,8 @@ Complete record of every chat message (sender, timestamp, original text). This i
 
 | Action | Command |
 |--------|---------|
-| List | `niubot messages list [options]` |
-| Search | `niubot messages search <query> [options]` |
+| List | `nb-agent messages list [options]` |
+| Search | `nb-agent messages search <query> [options]` |
 
 Options:
 - `-n <count>` — max results (list: 20, search: 10). Negative = backward from offset
@@ -70,36 +70,36 @@ Structured summary auto-generated when a session is archived. Each summary conta
 
 | Action | Command |
 |--------|---------|
-| List sessions | `niubot sessions list [--since <date>] [--before <date>] [-n <count>] [--offset <id>]` |
-| Search sessions | `niubot sessions search <query> [--since <date>] [--before <date>] [-n <count>] [--offset <id>]` |
-| Get session | `niubot sessions get <id>` |
+| List sessions | `nb-agent sessions list [--since <date>] [--before <date>] [-n <count>] [--offset <id>]` |
+| Search sessions | `nb-agent sessions search <query> [--since <date>] [--before <date>] [-n <count>] [--offset <id>]` |
+| Get session | `nb-agent sessions get <id>` |
 
 ### Contacts
 Basic info about users and chats (name, platform, type, etc.). Use when you need to look up who a user is, check chat details, or set display names.
 
 | Action | Command |
 |--------|---------|
-| List users | `niubot contacts list-users [--name <keyword>] [--platform <name>]` |
-| List chats | `niubot contacts list-chats [--type p2p\|group] [--user-id <id>]` |
-| Get user | `niubot contacts get-user <id>` |
-| Get chat | `niubot contacts get-chat <id>` |
-| Set name | `niubot contacts set-name <id> <name>` |
+| List users | `nb-agent contacts list-users [--name <keyword>] [--platform <name>]` |
+| List chats | `nb-agent contacts list-chats [--type p2p\|group] [--user-id <id>]` |
+| Get user | `nb-agent contacts get-user <id>` |
+| Get chat | `nb-agent contacts get-chat <id>` |
+| Set name | `nb-agent contacts set-name <id> <name>` |
 
 ### Send message
 Send a text message to the current or specified chat.
 
 | Action | Command |
 |--------|---------|
-| Current chat | `niubot send <text>` |
-| Specific chat | `niubot send --chat-id <id> <text>` |
+| Current chat | `nb-agent send <text>` |
+| Specific chat | `nb-agent send --chat-id <id> <text>` |
 
 ### Send file
 Send a file to the user via their messaging platform.
 
 | Action | Command |
 |--------|---------|
-| Current chat | `niubot send-file <file-path>` |
-| Specific chat | `niubot send-file --chat-id <id> <file-path>` |
+| Current chat | `nb-agent send-file <file-path>` |
+| Specific chat | `nb-agent send-file --chat-id <id> <file-path>` |
 
 ### Scheduled tasks (cron)
 Schedule recurring or one-time automated tasks.
@@ -108,12 +108,12 @@ Schedule recurring or one-time automated tasks.
 
 | Action | Command |
 |--------|---------|
-| Recurring | `niubot cron add --cron "<expr>" --prompt "<task>" --desc "<label>"` |
-| One-time | `niubot cron add --at "<datetime>" --prompt "<task>" --desc "<label>"` |
-| Bounded (count) | `niubot cron add --cron "<expr>" --times <n> --prompt "<task>" --desc "<label>"` |
-| Bounded (until) | `niubot cron add --cron "<expr>" --until "<datetime>" --prompt "<task>" --desc "<label>"` |
-| List | `niubot cron list` |
-| Delete | `niubot cron del <job-id>` |
+| Recurring | `nb-agent cron add --cron "<expr>" --prompt "<task>" --desc "<label>"` |
+| One-time | `nb-agent cron add --at "<datetime>" --prompt "<task>" --desc "<label>"` |
+| Bounded (count) | `nb-agent cron add --cron "<expr>" --times <n> --prompt "<task>" --desc "<label>"` |
+| Bounded (until) | `nb-agent cron add --cron "<expr>" --until "<datetime>" --prompt "<task>" --desc "<label>"` |
+| List | `nb-agent cron list` |
+| Delete | `nb-agent cron del <job-id>` |
 
 ## Task management
 Manage tasks and projects with visibility control. Tasks are organized in the `tasks/` directory.
@@ -123,10 +123,10 @@ Manage tasks and projects with visibility control. Tasks are organized in the `t
 
 | Action | Command |
 |--------|---------|
-| Create | `niubot task create <name> [--private] [--public] [--desc "..."]` |
-| List | `niubot task list [<name>]` |
-| Update | `niubot task update <name> [--name <new>] [--desc "..."] [--private] [--public] [--active] [--inactive]` |
-| Delete | `niubot task delete <name>` |
+| Create | `nb-agent task create <name> [--private] [--public] [--desc "..."]` |
+| List | `nb-agent task list [<name>]` |
+| Update | `nb-agent task update <name> [--name <new>] [--desc "..."] [--private] [--public] [--active] [--inactive]` |
+| Delete | `nb-agent task delete <name>` |
 
 Visibility: private chat defaults to `--private`, group chat defaults to `--public`.
 
@@ -149,6 +149,6 @@ Task directory structure:
 **Task status is the source of truth.** Active task names are injected into every session context. When you complete work related to a task, update its README.md immediately (move items to Done, clear In Progress, etc.). Do not defer task updates to a later time.
 
 ### Current scene
-Full context snapshot of the current session (bot identity, chat info, user info, memories). Use when context is lost or uncertain. Same as `niubot whoami` in Context recovery.
+Full context snapshot of the current session (bot identity, chat info, user info, memories). Use when context is lost or uncertain. Same as `nb-agent whoami` in Context recovery.
 
-    niubot whoami
+    nb-agent whoami

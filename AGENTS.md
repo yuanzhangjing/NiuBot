@@ -15,7 +15,7 @@ src/
 ├── im/          # IM 平台适配（feishu）+ 消息渲染（render.ts）
 ├── memory/      # 上下文注入（inject）+ 记忆管理（user-memory, chat-summary）
 ├── database/    # SQLite schema + migrations
-├── cli/         # niubot CLI 工具（messages, contacts, task, cron, send）
+├── cli/         # nb-agent CLI 工具（messages, contacts, task, cron, send）
 └── index.ts     # 入口
 ```
 

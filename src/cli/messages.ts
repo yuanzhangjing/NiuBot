@@ -34,7 +34,7 @@ export function handleMessages(
   } else if (sub === "get") {
     messagesGet(db, args.slice(1), parseArgs);
   } else {
-    console.log("Usage: niubot messages <list|search|get>");
+    console.log("Usage: nb-agent messages <list|search|get>");
   }
 }
 
@@ -133,7 +133,7 @@ function messagesSearch(
   const { positional, flags } = parseArgs(args);
   const query = positional[0];
   if (!query) {
-    console.error("Usage: niubot messages search <query>");
+    console.error("Usage: nb-agent messages search <query>");
     process.exit(1);
   }
 
@@ -228,7 +228,7 @@ function messagesGet(
   const { positional } = parseArgs(args);
   const id = positional[0];
   if (!id) {
-    console.error("Usage: niubot messages get <id>");
+    console.error("Usage: nb-agent messages get <id>");
     process.exit(1);
   }
 

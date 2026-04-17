@@ -30,7 +30,7 @@ export function handleContacts(
       setName(db, args.slice(1), parseArgs);
       break;
     default:
-      console.log("Usage: niubot contacts <list-users|list-chats|get-user|get-chat|set-name>");
+      console.log("Usage: nb-agent contacts <list-users|list-chats|get-user|get-chat|set-name>");
       break;
   }
 }
@@ -145,7 +145,7 @@ function getUser(
   const { positional } = parseArgs(args);
   const idArg = positional[0];
   if (!idArg) {
-    console.error("Usage: niubot contacts get-user <id>");
+    console.error("Usage: nb-agent contacts get-user <id>");
     process.exit(1);
   }
 
@@ -195,7 +195,7 @@ function getChat(
   const { positional } = parseArgs(args);
   const idArg = positional[0];
   if (!idArg) {
-    console.error("Usage: niubot contacts get-chat <id>");
+    console.error("Usage: nb-agent contacts get-chat <id>");
     process.exit(1);
   }
 
@@ -254,7 +254,7 @@ function setName(
   const idArg = positional[0];
   const name = positional[1];
   if (!idArg || !name) {
-    console.error("Usage: niubot contacts set-name <user-id> <name>");
+    console.error("Usage: nb-agent contacts set-name <user-id> <name>");
     process.exit(1);
   }
 

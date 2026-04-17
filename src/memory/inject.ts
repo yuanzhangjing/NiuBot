@@ -24,10 +24,10 @@ const NEW_SESSION_SEARCH_REMINDER =
 如果用户的消息涉及之前讨论过的内容、历史决策、或你不确定的背景信息，请先使用工具检索再回答，不要凭记忆猜测。
 
 可用的检索工具：
-- \`niubot sessions list [--since <date>]\` — 查看历史会话列表
-- \`niubot sessions search <query>\` — 按关键词搜索历史会话
-- \`niubot messages search <query> [-C <n>]\` — 搜索历史消息（支持上下文）
-- \`niubot task list\` — 查看全部任务（含 inactive），活跃任务已在上方注入
+- \`nb-agent sessions list [--since <date>]\` — 查看历史会话列表
+- \`nb-agent sessions search <query>\` — 按关键词搜索历史会话
+- \`nb-agent messages search <query> [-C <n>]\` — 搜索历史消息（支持上下文）
+- \`nb-agent task list\` — 查看全部任务（含 inactive），活跃任务已在上方注入
 - 读取 <path>/README.md — 查看具体任务进展（path 见活跃任务列表）
 
 不需要每次都检索。如果用户的意图清晰且不依赖历史上下文（如简单问答、新话题），直接回答即可。
@@ -99,7 +99,7 @@ export function buildImportantContext(
     if (memories.length > 0) {
       const label = scene.userName ? `关于 ${scene.userName} 的记忆` : "关于用户的记忆";
       const lines = memories.map((m) => `  #${m.id}  ${m.summary}`);
-      lines.push("用 niubot user-memory get <id> 查看详情。");
+      lines.push("用 nb-agent user-memory get <id> 查看详情。");
       const safeLabel = label.replace(/["<>&]/g, "");
       parts.push(`<user-memory label="${safeLabel}">\n${lines.join("\n")}\n</user-memory>`);
     }

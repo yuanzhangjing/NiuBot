@@ -75,7 +75,7 @@ export function handleTask(
       taskDelete(args.slice(1), workingDirectory, userId, parseArgs);
       break;
     default:
-      console.log("Usage: niubot task <create|list|update|delete>");
+      console.log("Usage: nb-agent task <create|list|update|delete>");
       break;
   }
 }
@@ -115,7 +115,7 @@ function taskCreate(
   const { positional, flags } = parseArgs(args);
   const name = positional[0] ?? flags["name"];
   if (!name) {
-    console.error("Usage: niubot task create <name> [--desc \"...\"] [--private|--public]");
+    console.error("Usage: nb-agent task create <name> [--desc \"...\"] [--private|--public]");
     process.exit(1);
   }
 
@@ -213,7 +213,7 @@ function taskUpdate(
   const { positional, flags } = parseArgs(args);
   const name = positional[0];
   if (!name) {
-    console.error("Usage: niubot task update <name> [--name <new>] [--desc \"...\"] [--private|--public] [--active|--inactive]");
+    console.error("Usage: nb-agent task update <name> [--name <new>] [--desc \"...\"] [--private|--public] [--active|--inactive]");
     process.exit(1);
   }
 
@@ -262,7 +262,7 @@ function taskDelete(
   const { positional } = parseArgs(args);
   const name = positional[0];
   if (!name) {
-    console.error("Usage: niubot task delete <name>");
+    console.error("Usage: nb-agent task delete <name>");
     process.exit(1);
   }
 
