@@ -179,22 +179,17 @@ None
 Keep conversations natural and friendly.
 ```
 
-## Step 3: Create Feishu App (requires user action)
+## Step 3: Create Feishu App and Get Credentials (requires user action)
 
-This step requires manual action from the user. Guide them through:
+Guide the user through these steps:
 
 1. Open https://open.feishu.cn/app and create a new **Enterprise Self-Built App**
 2. On the **Credentials & Basic Info** page, copy the **App ID** and **App Secret**
-3. On the **Permissions** page, add these permissions:
-   - `im:message` — Read and send messages
-   - `im:message.reaction:write` — Message reactions
-   - `im:resource` — Resources (image/file upload and download)
-   - `im:chat:readonly` — Read group chat info
-   - `application:application:readonly` — Read app info (optional, for auto-detecting admin from app creator)
-4. On the **Bot** page, enable the **Bot** capability
-5. Publish the app: Create a version -> Submit for review -> Release
+3. On the **Bot** page, enable the **Bot** capability
 
-## Step 4: Fill Credentials
+**Important**: Do NOT add permissions, create a version, or publish the app yet. The "receive message" event requires an active WebSocket connection, which is only established after the engine starts. Permissions are configured in Step 5, and the version must be created AFTER all permissions are in place (Step 6).
+
+## Step 4: Fill Credentials and Start Engine
 
 After the user provides App ID and App Secret, write them into `~/.niubot/config.yaml`:
 
@@ -206,7 +201,7 @@ bots:
     appSecret: "xxxxxxxxxxxxxxxx"  # <- from Step 3
 ```
 
-## Step 5: Start and Verify
+Then start the engine to establish the WebSocket connection:
 
 ```bash
 niubot start
@@ -232,9 +227,40 @@ NiuBot is running.
 
 If pre-start checks fail, fix the reported issues and retry.
 
-## Step 6: Verify Bot Works
+## Step 5: Configure Permissions (requires user action)
 
-Ask the user to send a message to the bot in Feishu. The bot should respond within a few seconds.
+Now that the engine is running and has established a WebSocket connection with Feishu, guide the user to configure permissions:
+
+### 5.1 Batch-enable non-review permissions
+
+On the **Permissions** page, batch-enable the following (all are non-review, can be activated immediately):
+
+**Messages & Groups:**
+- `im:message` — Read and send messages
+- `im:message.reaction:write` — Message reactions
+- `im:chat:readonly` — Read group chat info
+
+**Contacts:**
+- Non-review contact permissions as needed
+
+**Resources:**
+- `im:resource` — Image/file upload and download
+- Document-related non-review permissions as needed
+
+**App info:**
+- `application:application:readonly` — Read app info (optional, for auto-detecting admin from app creator)
+
+### 5.2 Add "receive message" event
+
+On the **Events** page, add:
+- `im.message.receive_v1` — Receive messages
+
+This event is only available after the bot has established a WebSocket connection (which happened in Step 4).
+
+## Step 6: Publish and Verify
+
+1. **Publish the app**: Create a version → Submit for review → Release
+2. **Verify**: Ask the user to send a message to the bot in Feishu. The bot should respond within a few seconds.
 
 If no response, check the log:
 ```bash

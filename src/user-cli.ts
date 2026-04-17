@@ -375,10 +375,10 @@ async function cmdInit(niubotHome: string, flags: CliFlags): Promise<void> {
   console.log("    1. Open https://open.feishu.cn/app");
   console.log("    2. Create a new Enterprise Self-Built App");
   console.log("    3. Credentials & Basic Info \u2192 copy App ID + App Secret");
-  console.log("    4. Permissions \u2192 add: im:message, im:message.reaction:write,");
-  console.log("       im:resource, im:chat:readonly, application:application:readonly");
-  console.log("    5. Bot page \u2192 enable Bot capability");
-  console.log("    6. Publish the app (create version \u2192 submit \u2192 release)");
+  console.log("    4. Bot page \u2192 enable Bot capability");
+  console.log();
+  console.log("  Don't add permissions or publish yet \u2014 do that after the engine starts.");
+  console.log("  (The 'receive message' event requires an active connection first.)");
   console.log();
 
   const appId = await prompt("  App ID: ");
@@ -432,6 +432,13 @@ async function cmdInit(niubotHome: string, flags: CliFlags): Promise<void> {
     }
   }
 
+  console.log();
+  console.log("Next steps (after engine is running)");
+  console.log("\u2500".repeat(40));
+  console.log("  1. Go to Feishu app \u2192 Permissions \u2192 batch-enable non-review permissions");
+  console.log("  2. Go to Events \u2192 add 'im.message.receive_v1' (receive messages)");
+  console.log("  3. Create a version \u2192 publish the app");
+  console.log("  4. Send a message to the bot to verify it works");
   console.log();
 }
 
