@@ -4,7 +4,9 @@ import { fileURLToPath } from "node:url";
 import {
   loadConfig,
   NIUBOT_HOME,
+  BUILTIN_BACKENDS,
   BUILTIN_BACKEND_LIST,
+  type BuiltinBackendType,
   type NiuBotConfig,
 } from "./config.js";
 import type { AgentBackend } from "./agent/types.js";
@@ -153,7 +155,8 @@ async function main(): Promise<void> {
   /** 动态获取可用 backend 列表（含热加载的自定义插件） */
   const getAvailableBackends = () => {
     refreshCustomBackends(config);
-    return [...BUILTIN_BACKEND_LIST, ...Object.keys(config.backends)];
+    const custom = Object.keys(config.backends).filter((b) => !BUILTIN_BACKENDS.has(b as BuiltinBackendType));
+    return [...BUILTIN_BACKEND_LIST, ...custom];
   };
 
   // 确保插件 symlink 存在（使 import("niubot/plugin") 可解析）
