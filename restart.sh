@@ -47,6 +47,15 @@ mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/niubot-$(date '+%Y-%m-%d').log"
 DEBUG_LOG="$LOG_DIR/restart-debug.log"
 
+# Prevent internal restart state from leaking into child processes.
+# Without this, the new daemon — and every agent subprocess it later
+# spawns — inherits NIUBOT_INTERNAL_RESTART=1, which lets agents bypass
+# the guard at the top of this script and restart the service from
+# inside their own session (killing themselves in the process).
+# The env vars are captured into BOT_NAME / CHAT_ID / SOCKET_PATH above
+# before we unset them, so the rest of this script is unaffected.
+unset NIUBOT_INTERNAL_RESTART NIUBOT_CHAT_ID NIUBOT_API_SOCKET
+
 DIST_DIR="$SCRIPT_DIR/dist"
 BACKUP_DIR="$SCRIPT_DIR/dist.bak"
 
