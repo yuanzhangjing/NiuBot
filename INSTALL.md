@@ -114,14 +114,15 @@ mkdir -p ~/.niubot
 
 Write `~/.niubot/config.yaml`:
 
-Before filling the config, ask the user the following **in this exact order**:
+Before filling the config, ask the user the following questions **one at a time** (each answer affects the next question's defaults — do NOT combine them into a single prompt):
 
-1. **Bot ID** (default: `NiuBot`). Immutable after setup — determines data directory (`~/.niubot/<id>/`) and default workspace. Must ask first because other defaults depend on it.
-2. **Working directory** (default: `~/niubot-workspace/<id>`). Show the default path based on the Bot ID chosen above, then ask if they want a different path.
-3. **Model** (optional). Main model for conversations. Press Enter to use the CLI's default.
-4. **Lite model** (optional). Cheaper model for background tasks. Press Enter to use the recommended default below, or same as main model if no recommendation.
+**Ask 1 — Bot ID**: default `NiuBot`. Immutable after setup — determines data directory and default workspace path. Wait for answer before proceeding.
 
-Recommended lite models for built-in backends:
+**Ask 2 — Working directory**: default `~/niubot-workspace/<Bot ID from Ask 1>`. Show the computed default, ask if they want a different path.
+
+**Ask 3 — Model** (optional): main model for conversations. Skip to use the CLI's default.
+
+**Ask 4 — Lite model** (optional): cheaper model for background tasks. Recommended defaults:
 - `claude`: `haiku`
 - `codex`: `gpt-5.4-mini`
 - `traecli`: `Gemini-3-Flash-Preview`
