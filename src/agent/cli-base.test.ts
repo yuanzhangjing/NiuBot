@@ -45,9 +45,12 @@ describe("CliAgentBackend diagnostic logging", () => {
 
     const session = await backend.createSession({ workingDirectory: process.cwd() });
 
-    await expect(backend.sendMessage(session as AgentSession, "publish to npm")).rejects.toThrow(
-      /No prompt provided via stdin/,
-    );
+    // err.message is intentionally short (does not embed stderr/stdout).
+    // Raw stream content is accessible via err.stderr / err.stdout.
+    await expect(backend.sendMessage(session as AgentSession, "publish to npm")).rejects.toMatchObject({
+      message: expect.stringMatching(/^Command failed: node \(exit 1\)$/),
+      stderr: expect.stringContaining("No prompt provided via stdin"),
+    });
 
     const startLog = entries.find((entry) => entry.msg === "spawning child process");
     expect(startLog?.data).toMatchObject({

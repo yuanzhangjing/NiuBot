@@ -249,8 +249,11 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
             stdoutTail,
             stderrTail,
           });
-          const details = stderr || stdout;
-          const err = new Error(`Command failed: ${cmd} ${args.join(" ")}\n${details}`);
+          // Keep err.message short. stdout/stderr may contain the full
+          // injected prompt + streaming events (tens of KB); stashing them
+          // here would leak into user-facing error messages. Callers that
+          // need the raw streams read `.stdout` / `.stderr` directly.
+          const err = new Error(`Command failed: ${cmd} (exit ${code ?? "null"}${signal ? `, signal ${signal}` : ""})`);
           (err as any).stdout = stdout;
           (err as any).stderr = stderr;
           (err as any).code = code;

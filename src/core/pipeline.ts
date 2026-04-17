@@ -126,6 +126,9 @@ export class Pipeline {
   /** 已加过 Get 的消息，避免重复加 reaction */
   private processingMsgIds = new Set<string>();
 
+  /** 每个 backend 的模型配置快照，切换时保存/恢复 */
+  private backendModelCache = new Map<string, { model?: string; liteModel?: string }>();
+
   constructor(
     db: Database.Database,
     im: PlatformAdapter,
@@ -149,6 +152,12 @@ export class Pipeline {
     this.dbPath = dbPath;
     this.log = createLogger("pipeline", botIdentity.name);
     this.queue = new MessageQueue(bufferMs);
+
+    // 初始 backend 的模型配置入缓存，确保切走再切回来能恢复
+    this.backendModelCache.set(backendType, {
+      model: botIdentity.model,
+      liteModel: botIdentity.liteModel,
+    });
 
     this.queue.onProcess((chatId, mergedText, messages) => this.process(chatId, mergedText, messages));
   }
@@ -187,6 +196,9 @@ export class Pipeline {
       botUserId: this.botUserId,
       botPlatformId: this.botIdentity.platformBotId,
       adminCount: this.adminRoles.size,
+      backend: this.backendType,
+      model: this.botIdentity.model ?? "default",
+      liteModel: this.botIdentity.liteModel ?? "default",
     });
   }
 
@@ -858,6 +870,9 @@ export class Pipeline {
       `**Bot:** ${this.botIdentity.name}`,
       `**Version:** ${version}`,
       `**Platform:** ${this.botIdentity.platform}`,
+      `**Backend:** ${displayBackendType(this.backendType)}`,
+      `**Model:** ${this.botIdentity.model ?? "default"}`,
+      `**Lite model:** ${this.botIdentity.liteModel ?? "default"}`,
       `**Uptime:** ${uptimeStr}`,
       `**Active sessions:** ${activeSessions}`,
       `**Cron jobs:** ${cronCount}`,
@@ -1281,6 +1296,7 @@ export class Pipeline {
     this.log.info("switching agent backend", { from: this.backendType, to: target });
 
     // 归档所有当前 session，获取新 backend（含 start），然后切换
+    // 切 backend 时保存当前模型配置，恢复目标 backend 的历史配置（如有），否则走默认。
     const doSwitch = async () => {
       const archivePromises: Promise<boolean>[] = [];
       for (const [cid] of this.chatSessions) {
@@ -1288,16 +1304,32 @@ export class Pipeline {
       }
       await Promise.all(archivePromises);
 
+      // 保存当前 backend 的模型配置
+      this.backendModelCache.set(this.backendType, {
+        model: this.botIdentity.model,
+        liteModel: this.botIdentity.liteModel,
+      });
+
       const newBackend = await this.backendResolver!(target);
       this.agent = newBackend;
       this.backendType = target;
+
+      // 恢复目标 backend 的模型配置（如有），否则清空走默认
+      const cached = this.backendModelCache.get(target);
+      this.botIdentity.model = cached?.model;
+      this.botIdentity.liteModel = cached?.liteModel;
     };
 
     doSwitch()
       .then(() => {
+        const modelLine = `model: ${this.botIdentity.model ?? "default"}, lite: ${this.botIdentity.liteModel ?? "default"}`;
         this.sendAgentCard(chatId, platformChatId, msgId, "Agent",
-          `已切换到 **${displayBackendType(target)}**\n上下文已重置，重启后恢复为配置值。`);
-        this.log.info("agent backend switched (runtime only)", { backend: target });
+          `已切换到 **${displayBackendType(target)}** (${modelLine})\n上下文已重置，重启后恢复为配置值。`);
+        this.log.info("agent backend switched (runtime only)", {
+          backend: target,
+          model: this.botIdentity.model ?? null,
+          liteModel: this.botIdentity.liteModel ?? null,
+        });
       })
       .catch((err) => {
         this.log.error("failed to switch agent backend", { error: String(err) });
@@ -1984,14 +2016,19 @@ function extractAgentErrorDetail(err: unknown): string | null {
     ? String((err as { stdout?: unknown }).stdout ?? "")
     : "";
 
-  // Collect all meaningful error fragments from every source.
-  // Different agent backends embed errors in different formats / streams,
-  // so we gather everything and let the caller display it all.
+  // Only scan the tail of each stream. For streaming JSON backends (Claude),
+  // the terminating `result` event is by protocol the last frame; Codex's
+  // error events also sit at the tail. Earlier lines are system / hook /
+  // message events we don't want. A small tail also bounds the work done
+  // on pathologically large streams.
+  const TAIL_LINES = 20;
   const parts: string[] = [];
 
   for (const stream of [stdout, stderr]) {
     if (!stream) continue;
-    for (const line of stream.split("\n")) {
+    const allLines = stream.split("\n");
+    const tail = allLines.slice(-TAIL_LINES);
+    for (const line of tail) {
       if (!line) continue;
       try {
         const event = JSON.parse(line) as Record<string, unknown>;
@@ -2023,7 +2060,14 @@ function extractAgentErrorDetail(err: unknown): string | null {
     return true;
   });
 
-  return unique.length > 0 ? unique.join("\n") : null;
+  if (unique.length === 0) return null;
+
+  // Safety cap: even with cleaner extraction, some error paths may still
+  // produce multi-KB output. Cap total length so user-facing errors stay
+  // readable and don't flood IM.
+  const MAX_LEN = 2000;
+  const joined = unique.join("\n");
+  return joined.length > MAX_LEN ? joined.slice(0, MAX_LEN) + "…" : joined;
 }
 
 function extractPlatformErrorDetail(err: unknown): string {
