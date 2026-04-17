@@ -135,6 +135,65 @@ describe("TraeCliBackend", () => {
     expect(parsed.compactCount).toBe(2);
   });
 
+  it("surfaces agent_end error_message from events.jsonl when stdout content is empty", () => {
+    const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "trae-home-"));
+    process.env["HOME"] = tempHome;
+    process.env["XDG_CACHE_HOME"] = path.join(tempHome, ".cache");
+
+    const sessionId = "session-error-1";
+    const logDir = getTraeLogDir(tempHome, sessionId);
+    fs.mkdirSync(logDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(logDir, "events.jsonl"),
+      JSON.stringify({
+        agent_end: {
+          error_message: "model 'Test-O-New': ValidationException: The value at messages.30.content.0.toolUse.input is empty.",
+        },
+      }),
+    );
+
+    const backend = new TraeCliBackend();
+    const session = backend.buildSession({ workingDirectory: "/tmp/workspace" });
+    session.agentSessionId = sessionId;
+
+    const parsed = backend.parseOutput(JSON.stringify({
+      message: { content: "" },
+      session_id: sessionId,
+    }), session);
+
+    expect(parsed.text).toContain("Coco 错误");
+    expect(parsed.text).toContain("ValidationException");
+  });
+
+  it("does not override non-empty content with error_message", () => {
+    const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "trae-home-"));
+    process.env["HOME"] = tempHome;
+    process.env["XDG_CACHE_HOME"] = path.join(tempHome, ".cache");
+
+    const sessionId = "session-error-2";
+    const logDir = getTraeLogDir(tempHome, sessionId);
+    fs.mkdirSync(logDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(logDir, "events.jsonl"),
+      JSON.stringify({
+        agent_end: {
+          error_message: "some error",
+        },
+      }),
+    );
+
+    const backend = new TraeCliBackend();
+    const session = backend.buildSession({ workingDirectory: "/tmp/workspace" });
+    session.agentSessionId = sessionId;
+
+    const parsed = backend.parseOutput(JSON.stringify({
+      message: { content: "actual reply" },
+      session_id: sessionId,
+    }), session);
+
+    expect(parsed.text).toBe("actual reply");
+  });
+
   it("keeps scanning incrementally across resume turns", () => {
     const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "trae-home-"));
     process.env["HOME"] = tempHome;

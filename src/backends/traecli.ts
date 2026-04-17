@@ -88,18 +88,25 @@ export default class TraeCliBackend extends CliAgentBackend<TraeCliSession> {
       if (meta.contextTokens !== undefined) result.contextTokens = meta.contextTokens;
       if (session.compactCount > 0) result.compactCount = session.compactCount;
 
+      // Coco CLI bug workaround: exit 0 + empty content when LLM API errors.
+      // The error is only in events.jsonl agent_end.error_message.
+      if (!result.text && meta.errorMessage) {
+        result.text = `（Coco 错误）${meta.errorMessage}`;
+      }
+
       return result;
     } catch {
       return { text: stdout.trim() };
     }
   }
 
-  private scanJsonl(session: TraeCliSession): { model?: string; contextTokens?: number } {
+  private scanJsonl(session: TraeCliSession): { model?: string; contextTokens?: number; errorMessage?: string } {
     const jsonlPath = this.getJsonlPath(session);
     if (!jsonlPath) return {};
 
     let model: string | undefined;
     let contextTokens: number | undefined;
+    let errorMessage: string | undefined;
 
     try {
       const stat = statSync(jsonlPath);
@@ -118,6 +125,9 @@ export default class TraeCliBackend extends CliAgentBackend<TraeCliSession> {
           try {
             const entry = JSON.parse(line) as {
               compaction_end?: unknown;
+              agent_end?: {
+                error_message?: string;
+              };
               message?: {
                 message?: {
                   role?: string;
@@ -137,6 +147,10 @@ export default class TraeCliBackend extends CliAgentBackend<TraeCliSession> {
               session.compactCount++;
             }
 
+            if (entry.agent_end?.error_message) {
+              errorMessage = entry.agent_end.error_message;
+            }
+
             const msg = entry.message?.message;
             if (msg?.role === "assistant" && msg.response_meta?.usage?.total_tokens !== undefined) {
               contextTokens = msg.response_meta.usage.total_tokens;
@@ -153,7 +167,7 @@ export default class TraeCliBackend extends CliAgentBackend<TraeCliSession> {
       return {};
     }
 
-    return { model, contextTokens };
+    return { model, contextTokens, errorMessage };
   }
 
   private getJsonlPath(session: TraeCliSession): string | null {
