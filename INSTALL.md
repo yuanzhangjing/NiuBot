@@ -136,7 +136,7 @@ bots:
     appSecret: ""
     # model: ""
     # liteModel: ""
-    # workingDirectory: ~/niubot-workspace/NiuBot
+    # workingDirectory: ~/niubot-workspace/<id>
 ```
 
 **For custom backend** (e.g. `my-agent`):
@@ -152,7 +152,7 @@ bots:
     appSecret: ""
     # model: ""
     # liteModel: ""
-    # workingDirectory: ~/niubot-workspace/NiuBot
+    # workingDirectory: ~/niubot-workspace/<id>
 ```
 
 Config fields:
