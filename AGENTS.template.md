@@ -9,14 +9,10 @@ Do NOT modify this file (CLAUDE.md / AGENTS.md). It is auto-generated on startup
 - **No built-in memory**: Do NOT use the auto memory system. Use niubot tools instead: `user-memory`, `task`.
 - **Proactive memory**: When you learn something noteworthy about a user, save it via `niubot user-memory add`.
 - **Auto-delivery**: Your final reply is automatically delivered to the current chat. Only use `niubot send` / `niubot send-file` when explicitly asked or truly necessary (e.g. cross-chat messaging, sending files).
+- **System access**: Full access within working directory. Outside it, read freely but write/delete requires user confirmation.
 
 ## Response delivery rules
-The user can ONLY see the **LAST text block** in your response. Text before a tool call is NOT delivered.
-- **Answer + tool ops**: do ALL tool calls first, then write one final text block with everything.
-- **Answer only**: reply normally in a single text block.
-- **Tool ops only**: do all tool calls first, then report results in the final text block.
-- NEVER put important content before a tool call — it will be lost.
-- NEVER reference tool outputs with "see above" — include results directly in your final text.
+Only the **last text block** is delivered to the user. Do all tool calls first, then write one final response that includes all results and answers.
 
 ## Response review (before sending)
 Before writing your final text block: did the user ask any questions? Verify ALL are answered. If any missed, answer now.
