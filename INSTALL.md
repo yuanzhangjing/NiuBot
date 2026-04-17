@@ -115,8 +115,10 @@ mkdir -p ~/.niubot
 Write `~/.niubot/config.yaml`:
 
 Before filling the config, ask the user:
-- whether they want to pin a main `model` now, or keep the CLI default
-- whether they want to set a separate `liteModel`
+- **Bot ID**: default is `NiuBot`. This is immutable after setup — it determines the data directory (`~/.niubot/<id>/`) and default workspace (`~/niubot-workspace/<id>/`). If the user wants a different name, set it now.
+- **Working directory**: where the agent runs. Default is `~/niubot-workspace/<id>`. Ask if they want a different path.
+- **Model**: whether they want to pin a main `model` now, or keep the CLI default
+- **Lite model**: whether they want to set a separate `liteModel` for cheaper background tasks
 
 For built-in backends, if the user wants a `liteModel` but has no preference, suggest:
 - `claude`: `haiku`
@@ -233,27 +235,17 @@ Now that the engine is running and has established a WebSocket connection with F
 
 ### 5.1 Batch-enable non-review permissions
 
-On the **Permissions** page, batch-enable the following (all are non-review, can be activated immediately):
+On the **权限管理** page, batch-enable all non-review permissions in these groups (use the exact group names on the website):
+- **消息与群组**
+- **云文档**
+- **应用信息**
 
-**Messages & Groups:**
-- `im:message` — Read and send messages
-- `im:message.reaction:write` — Message reactions
-- `im:chat:readonly` — Read group chat info
-
-**Contacts:**
-- Non-review contact permissions as needed
-
-**Resources:**
-- `im:resource` — Image/file upload and download
-- Document-related non-review permissions as needed
-
-**App info:**
-- `application:application:readonly` — Read app info (optional, for auto-detecting admin from app creator)
+No need to add permissions one by one — Feishu supports batch-enabling all non-review permissions within each group.
 
 ### 5.2 Add "receive message" event
 
-On the **Events** page, add:
-- `im.message.receive_v1` — Receive messages
+On the **事件订阅** page, add:
+- `im.message.receive_v1`
 
 This event is only available after the bot has established a WebSocket connection (which happened in Step 4).
 

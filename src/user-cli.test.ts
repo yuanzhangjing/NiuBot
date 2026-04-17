@@ -10,7 +10,7 @@ describe("user-cli init model configuration", () => {
   });
 
   it("writes chosen model settings into config.yaml", () => {
-    const config = generateConfigTemplate("codex", undefined, "app-id", "app-secret", "gpt-5.4", "gpt-5.4-mini");
+    const config = generateConfigTemplate("codex", undefined, "NiuBot", "app-id", "app-secret", "gpt-5.4", "gpt-5.4-mini");
 
     expect(config).toContain('model: "gpt-5.4"');
     expect(config).toContain('liteModel: "gpt-5.4-mini"');

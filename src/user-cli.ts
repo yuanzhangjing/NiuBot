@@ -338,15 +338,39 @@ async function cmdInit(niubotHome: string, flags: CliFlags): Promise<void> {
     ok(`Created .env`);
   }
 
+  // Bot ID
+  console.log();
+  console.log("Bot configuration");
+  console.log("\u2500".repeat(40));
+  console.log();
+  console.log("  Bot ID determines the data directory and cannot be changed after setup.");
+  let botId: string;
+  while (true) {
+    botId = (await prompt("  Bot ID (default: NiuBot): ")).trim() || "NiuBot";
+    // Check for conflict with existing config
+    const existingConfigPath = path.join(niubotHome, "config.yaml");
+    if (fs.existsSync(existingConfigPath)) {
+      try {
+        const existing = loadConfig(existingConfigPath);
+        if (existing.bots.some((b) => b.id === botId)) {
+          fail(`Bot ID '${botId}' already exists in config.yaml`);
+          hint("Choose a different ID, or use --force to overwrite");
+          if (!flags.force) continue;
+        }
+      } catch { /* config parse error, proceed */ }
+    }
+    break;
+  }
+
   // Default bot directory + persona
-  const botDir = path.join(niubotHome, "NiuBot");
+  const botDir = path.join(niubotHome, botId);
   fs.mkdirSync(botDir, { recursive: true });
   const personaPath = path.join(botDir, "persona.md");
   if (fs.existsSync(personaPath) && !flags.force) {
-    info(`NiuBot/persona.md already exists (use --force to overwrite)`);
+    info(`${botId}/persona.md already exists (use --force to overwrite)`);
   } else {
     fs.writeFileSync(personaPath, generatePersonaTemplate());
-    ok(`Created NiuBot/persona.md`);
+    ok(`Created ${botId}/persona.md`);
   }
 
   // Plugin symlink
@@ -397,7 +421,7 @@ async function cmdInit(niubotHome: string, flags: CliFlags): Promise<void> {
       hint("Credentials were NOT saved. Add them manually or re-run with --force");
     }
   } else {
-    fs.writeFileSync(configPath, generateConfigTemplate(defaultBackend, customBackendConfig, appId, appSecret, model, liteModel));
+    fs.writeFileSync(configPath, generateConfigTemplate(defaultBackend, customBackendConfig, botId, appId, appSecret, model, liteModel));
     ok(`Created config.yaml`);
   }
 
@@ -405,6 +429,7 @@ async function cmdInit(niubotHome: string, flags: CliFlags): Promise<void> {
   console.log();
   console.log("Setup complete");
   console.log("\u2500".repeat(40));
+  console.log(`  Bot ID:  ${botId}`);
   console.log(`  Config:  ${configPath}`);
   console.log(`  Persona: ${personaPath}`);
   console.log(`  Backend: ${defaultBackend}`);
@@ -435,8 +460,9 @@ async function cmdInit(niubotHome: string, flags: CliFlags): Promise<void> {
   console.log();
   console.log("Next steps (after engine is running)");
   console.log("\u2500".repeat(40));
-  console.log("  1. Go to Feishu app \u2192 Permissions \u2192 batch-enable non-review permissions");
-  console.log("  2. Go to Events \u2192 add 'im.message.receive_v1' (receive messages)");
+  console.log("  1. \u6743\u9650\u7ba1\u7406 \u2192 batch-enable non-review permissions");
+  console.log("     Groups: \u6d88\u606f\u4e0e\u7fa4\u7ec4\u3001\u4e91\u6587\u6863\u3001\u5e94\u7528\u4fe1\u606f");
+  console.log("  2. \u4e8b\u4ef6\u8ba2\u9605 \u2192 add 'im.message.receive_v1'");
   console.log("  3. Create a version \u2192 publish the app");
   console.log("  4. Send a message to the bot to verify it works");
   console.log();
@@ -447,6 +473,7 @@ async function cmdInit(niubotHome: string, flags: CliFlags): Promise<void> {
 export function generateConfigTemplate(
   backend: string,
   customBackend?: { name: string; plugin: string },
+  botId: string = "NiuBot",
   appId?: string,
   appSecret?: string,
   model?: string,
@@ -480,7 +507,7 @@ backends:
   return `# NiuBot 配置文件
 
 bots:
-  - id: NiuBot              # 唯一标识，决定数据目录路径，初始化后不可修改
+  - id: ${botId}              # 唯一标识，决定数据目录路径，初始化后不可修改
     backend: ${backend}        # agent 后端
     appId: ${id}
     appSecret: ${secret}
