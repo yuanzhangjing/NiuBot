@@ -27,21 +27,6 @@ export function ensureCleanWorktree(statusOutput) {
   }
 }
 
-export function getCommandErrorText(error) {
-  if (error && typeof error === "object") {
-    const stderr = typeof error.stderr === "string" ? error.stderr : "";
-    const stdout = typeof error.stdout === "string" ? error.stdout : "";
-    const message = error instanceof Error ? error.message : String(error);
-    return [message, stderr, stdout].filter(Boolean).join("\n");
-  }
-  return String(error);
-}
-
-export function isRetryableNpmViewError(error) {
-  const message = getCommandErrorText(error);
-  return message.includes("No match found for version");
-}
-
 export function run(command, args, options = {}) {
   const printable = [command, ...args].join(" ");
   console.log(`$ ${printable}`);
@@ -52,21 +37,3 @@ export function run(command, args, options = {}) {
   });
 }
 
-export async function retry(fn, { timeoutMs = 120_000, delayMs, shouldRetry }) {
-  const deadline = Date.now() + timeoutMs;
-  let lastError;
-  let attempt = 0;
-  while (true) {
-    try {
-      return fn();
-    } catch (error) {
-      lastError = error;
-      if (!shouldRetry(error)) throw error;
-      attempt++;
-      if (Date.now() + delayMs > deadline) break;
-      console.log(`  retrying (attempt ${attempt}), waiting ${delayMs / 1000}s...`);
-      await new Promise((resolve) => setTimeout(resolve, delayMs));
-    }
-  }
-  throw lastError;
-}
