@@ -8,6 +8,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { CliAgentBackend, buildNiubotEnv, type BaseCliSession, type ParsedOutput } from "../agent/cli-base.js";
 import type { SessionConfig } from "../agent/types.js";
+import { DEFAULT_LITE_MODELS } from "../config.js";
 
 interface TraeCliSession extends BaseCliSession {
   sessionLogPath?: string;
@@ -27,7 +28,7 @@ export default class TraeCliBackend extends CliAgentBackend<TraeCliSession> {
   buildSession(config: SessionConfig): TraeCliSession {
     return {
       workingDirectory: config.workingDirectory ?? process.cwd(),
-      model: config.modelTier === "lite" ? (config.liteModel ?? config.model) : config.model,
+      model: config.modelTier === "lite" ? (config.liteModel ?? DEFAULT_LITE_MODELS.traecli ?? config.model) : config.model,
       importantContext: config.importantContext,
       extraEnv: buildNiubotEnv(config),
       cumulativeBytes: 0,

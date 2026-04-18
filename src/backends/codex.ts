@@ -8,6 +8,7 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { CliAgentBackend, buildNiubotEnv, type BaseCliSession, type ParsedOutput } from "../agent/cli-base.js";
 import type { SessionConfig } from "../agent/types.js";
+import { DEFAULT_LITE_MODELS } from "../config.js";
 
 interface CodexSession extends BaseCliSession {
   sessionLogPath?: string;
@@ -37,7 +38,7 @@ export default class CodexBackend extends CliAgentBackend<CodexSession> {
   buildSession(config: SessionConfig): CodexSession {
     return {
       workingDirectory: config.workingDirectory ?? process.cwd(),
-      model: config.modelTier === "lite" ? (config.liteModel ?? config.model) : config.model,
+      model: config.modelTier === "lite" ? (config.liteModel ?? DEFAULT_LITE_MODELS.codex ?? config.model) : config.model,
       importantContext: config.importantContext,
       extraEnv: buildNiubotEnv(config),
       cumulativeBytes: 0,

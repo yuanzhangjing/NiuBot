@@ -8,7 +8,7 @@ import type Database from "better-sqlite3";
 import type { PlatformAdapter, NormalizedMessage } from "../im/types.js";
 import { escapeYamlContent, renderMessageNodes } from "../im/render.js";
 import type { AgentBackend, AgentSession } from "../agent/types.js";
-import { BUILTIN_BACKEND_LIST, NIUBOT_HOME, normalizeBackend, type AgentBackendType } from "../config.js";
+import { BUILTIN_BACKEND_LIST, DEFAULT_LITE_MODELS, NIUBOT_HOME, normalizeBackend, type AgentBackendType, type BuiltinBackendType } from "../config.js";
 import { MessageQueue } from "./queue.js";
 import {
   ensureUser, ensureChat, storeMessage, updateChatName,
@@ -872,7 +872,7 @@ export class Pipeline {
       `**Platform:** ${this.botIdentity.platform}`,
       `**Backend:** ${displayBackendType(this.backendType)}`,
       `**Model:** ${this.botIdentity.model ?? "default"}`,
-      `**Lite model:** ${this.botIdentity.liteModel ?? "default"}`,
+      `**Lite model:** ${formatLiteModel(this.botIdentity.liteModel, this.backendType)}`,
       `**Uptime:** ${uptimeStr}`,
       `**Active sessions:** ${activeSessions}`,
       `**Cron jobs:** ${cronCount}`,
@@ -1269,12 +1269,12 @@ export class Pipeline {
       const backends = this.getAvailableBackends();
       const content = backends.map((b) => {
         if (b === this.backendType) {
-          const modelLine = `model: ${this.botIdentity.model ?? "default"}, lite: ${this.botIdentity.liteModel ?? "default"}`;
+          const modelLine = `model: ${this.botIdentity.model ?? "default"}, lite: ${formatLiteModel(this.botIdentity.liteModel, b)}`;
           return `◉ ${b} (${modelLine})`;
         }
         const cached = this.backendModelCache.get(b);
         if (cached) {
-          const modelLine = `model: ${cached.model ?? "default"}, lite: ${cached.liteModel ?? "default"}`;
+          const modelLine = `model: ${cached.model ?? "default"}, lite: ${formatLiteModel(cached.liteModel, b)}`;
           return `○ ${b} (${modelLine})`;
         }
         return `○ ${b}`;
@@ -1331,7 +1331,7 @@ export class Pipeline {
 
     doSwitch()
       .then(() => {
-        const modelLine = `model: ${this.botIdentity.model ?? "default"}, lite: ${this.botIdentity.liteModel ?? "default"}`;
+        const modelLine = `model: ${this.botIdentity.model ?? "default"}, lite: ${formatLiteModel(this.botIdentity.liteModel, target)}`;
         this.sendAgentCard(chatId, platformChatId, msgId, "Agent",
           `已切换到 **${displayBackendType(target)}** (${modelLine})\n上下文已重置，重启后恢复为配置值。`);
         this.log.info("agent backend switched (runtime only)", {
@@ -2159,4 +2159,11 @@ function formatUptime(ms: number): string {
 
 function displayBackendType(type: AgentBackendType): string {
   return type;
+}
+
+/** 格式化 lite model 显示：优先显示用户配置值，否则显示 backend 默认值 */
+function formatLiteModel(liteModel: string | undefined, backend: string): string {
+  if (liteModel) return liteModel;
+  const defaultModel = DEFAULT_LITE_MODELS[backend as BuiltinBackendType];
+  return defaultModel ? `${defaultModel} (default)` : "same as model";
 }

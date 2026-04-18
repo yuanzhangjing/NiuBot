@@ -68,6 +68,13 @@ export interface NiuBotConfig {
 export const BUILTIN_BACKENDS = new Set<BuiltinBackendType>(Object.keys(AGENT_REGISTRY) as BuiltinBackendType[]);
 export const BUILTIN_BACKEND_LIST = Object.keys(AGENT_REGISTRY) as BuiltinBackendType[];
 
+/** 内置 backend 默认轻量模型，用户未配置 liteModel 时自动使用 */
+export const DEFAULT_LITE_MODELS: Partial<Record<BuiltinBackendType, string>> = {
+  claude: "haiku",
+  codex: "gpt-5.4-mini",
+  traecli: "Gemini-3-Flash-Preview",
+};
+
 const BACKEND_ALIAS_MAP = new Map<string, BuiltinBackendType>(
   Object.entries(AGENT_REGISTRY).flatMap(([backend, meta]) =>
     meta.aliases.map((alias) => [alias, backend as BuiltinBackendType] as const),

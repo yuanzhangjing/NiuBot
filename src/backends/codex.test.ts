@@ -242,7 +242,7 @@ describe("CodexBackend session metadata", () => {
     expect(parsed.contextTokens).toBeUndefined();
   });
 
-  it("lite tier with no liteModel falls back to model", () => {
+  it("lite tier with no liteModel uses backend default lite model", () => {
     const backend = new CodexBackend();
     const session = backend.buildSession({
       workingDirectory: "/tmp",
@@ -250,17 +250,17 @@ describe("CodexBackend session metadata", () => {
       model: "gpt-5.4",
     });
 
-    expect(session.model).toBe("gpt-5.4");
+    expect(session.model).toBe("gpt-5.4-mini");
   });
 
-  it("lite tier with no liteModel and no model uses CLI default", () => {
+  it("lite tier with no liteModel and no model uses backend default lite model", () => {
     const backend = new CodexBackend();
     const session = backend.buildSession({
       workingDirectory: "/tmp",
       modelTier: "lite",
     });
 
-    expect(session.model).toBeUndefined();
+    expect(session.model).toBe("gpt-5.4-mini");
   });
 
   it("passes liteModel via SessionConfig for lite tier sessions", () => {

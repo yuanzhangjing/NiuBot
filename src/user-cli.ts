@@ -18,7 +18,7 @@ import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
-import { AGENT_REGISTRY, loadConfig, type NiuBotConfig } from "./config.js";
+import { AGENT_REGISTRY, DEFAULT_LITE_MODELS, loadConfig, type BuiltinBackendType, type NiuBotConfig } from "./config.js";
 
 // ── Paths ──────────────────────────────────────────────────
 
@@ -157,16 +157,7 @@ function scanAllBackends(): { results: BackendScanResult[]; firstAvailable?: str
 }
 
 export function getSuggestedLiteModel(backend: string): string | undefined {
-  switch (backend) {
-    case "claude":
-      return "haiku";
-    case "codex":
-      return "gpt-5.4-mini";
-    case "traecli":
-      return "Gemini-3-Flash-Preview";
-    default:
-      return undefined;
-  }
+  return DEFAULT_LITE_MODELS[backend as BuiltinBackendType];
 }
 
 // ── Init ───────────────────────────────────────────────────
@@ -503,7 +494,7 @@ backends:
     : '    # model: ""            # 主模型（不设则由 CLI 自行决定）\n';
   const liteModelLine = liteModel
     ? `    liteModel: "${liteModel}" # 轻量模型（归档摘要等低成本任务）\n`
-    : '    # liteModel: ""        # 轻量模型（归档摘要等低成本任务，不设则同主模型）\n';
+    : '    # liteModel: ""        # 轻量模型（归档摘要等低成本任务，不设则用 backend 默认值）\n';
 
   return `# NiuBot 配置文件
 
