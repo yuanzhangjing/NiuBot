@@ -4,7 +4,6 @@ import fs from "node:fs";
 
 import {
   ensureCleanWorktree,
-  isRetryableNpmViewError,
   parseReleaseArgs,
   retry,
   run,
@@ -26,17 +25,17 @@ const version = pkg.version;
 run("npm", ["publish", "--access", "public"], { dryRun, stdio: "inherit" });
 if (dryRun) {
   run("npm", ["view", pkg.name, "dist-tags", "--json"], { dryRun, stdio: "inherit" });
-  run("npm", ["view", `${pkg.name}@${version}`, "version"], { dryRun, stdio: "inherit" });
 } else {
   await retry(
     () => {
-      const tags = run("npm", ["view", pkg.name, "dist-tags", "--json"]);
-      process.stdout.write(tags);
-      const resolved = run("npm", ["view", `${pkg.name}@${version}`, "version"]);
-      process.stdout.write(resolved);
-      return resolved;
+      const raw = run("npm", ["view", pkg.name, "dist-tags", "--json"]);
+      const tags = JSON.parse(raw);
+      console.log(`  dist-tags: latest=${tags.latest}`);
+      if (tags.latest !== version) {
+        throw new Error(`latest is ${tags.latest}, expected ${version}`);
+      }
     },
-    { timeoutMs: 300_000, delayMs: 8000, shouldRetry: isRetryableNpmViewError },
+    { timeoutMs: 120_000, delayMs: 5000, shouldRetry: () => true },
   );
 }
 
