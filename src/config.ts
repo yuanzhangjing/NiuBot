@@ -22,6 +22,12 @@ export const AGENT_REGISTRY = {
   traecli: {
     aliases: ["traecli", "trae-cli"],
   },
+  gemini: {
+    aliases: ["gemini", "gemini-cli"],
+  },
+  opencode: {
+    aliases: ["opencode"],
+  },
 } as const;
 
 /** 内置 agent backend 类型 */
@@ -73,6 +79,7 @@ export const DEFAULT_LITE_MODELS: Partial<Record<BuiltinBackendType, string>> = 
   claude: "haiku",
   codex: "gpt-5.4-mini",
   traecli: "Gemini-3-Flash-Preview",
+  gemini: "gemini-2.5-flash",
 };
 
 const BACKEND_ALIAS_MAP = new Map<string, BuiltinBackendType>(

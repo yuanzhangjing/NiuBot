@@ -142,20 +142,23 @@ export async function createBotInstance(
 }
 
 /**
- * 在 workingDirectory 下生成 AGENTS.md 和 CLAUDE.md（→ AGENTS.md 的 symlink）。
+ * 在 workingDirectory 下生成 AGENTS.md 及各 CLI backend 的 symlink（CLAUDE.md, GEMINI.md 等）。
  */
 function generateAgentFiles(
   botConfig: BotConfig,
   log: ReturnType<typeof createLogger>,
 ): void {
   const agentsPath = path.join(botConfig.workingDirectory, "AGENTS.md");
-  const claudePath = path.join(botConfig.workingDirectory, "CLAUDE.md");
 
   const content = loadStaticContextTemplate();
   fs.writeFileSync(agentsPath, content, "utf-8");
 
-  try { fs.unlinkSync(claudePath); } catch { /* 不存在就忽略 */ }
-  fs.symlinkSync("AGENTS.md", claudePath);
+  // 各 CLI backend 的指令文件名 → 统一指向 AGENTS.md
+  for (const name of ["CLAUDE.md", "GEMINI.md"]) {
+    const linkPath = path.join(botConfig.workingDirectory, name);
+    try { fs.unlinkSync(linkPath); } catch { /* 不存在就忽略 */ }
+    fs.symlinkSync("AGENTS.md", linkPath);
+  }
 
-  log.info("agent files generated", { agentsPath, claudePath });
+  log.info("agent files generated", { agentsPath });
 }

@@ -16,7 +16,7 @@ import {
   getUnseenMessages, markMessagesSeen,
   setUserAdminRole, getAdminUserIds, getUserAdminRole, type AdminRole,
 } from "../database/schema.js";
-import { buildImportantContext, buildNormalContext, buildSpeakerContext, type SceneInfo, type SpeakerInfo } from "../memory/inject.js";
+import { buildImportantContext, buildNormalContext, buildSpeakerContext, NEW_SESSION_SEARCH_REMINDER, type SceneInfo, type SpeakerInfo } from "../memory/inject.js";
 import { loadPersona } from "../persona.js";
 import { buildArchiveSummaryPrompt } from "./prompts.js";
 import { decideRoute, type RouteDecision } from "./routing.js";
@@ -1066,15 +1066,11 @@ export class Pipeline {
     let messageToSend = prompt;
     const contextParts: string[] = [];
     if (!supportsSystemPrompt && importantContext) {
-      contextParts.push(
-        `<important-context preserve="true">\n` +
-        `以下是关键场景信息，上下文压缩时必须保留。如果丢失，用 nb-agent whoami 重建。\n\n` +
-        `${importantContext}\n` +
-        `</important-context>`,
-      );
+      contextParts.push(importantContext);
     }
     if (normalContext) {
-      contextParts.push(`<context>\n${normalContext}\n</context>`);
+      contextParts.push(`<session-state>\n${normalContext}\n</session-state>`);
+      contextParts.push(NEW_SESSION_SEARCH_REMINDER);
     }
     if (contextParts.length > 0) {
       messageToSend = `${contextParts.join("\n\n")}\n\n${prompt}`;
@@ -1273,29 +1269,37 @@ export class Pipeline {
    */
   private handleAgentCommand(args: string[], chatId: string, platformChatId: string, msgId?: string): void {
     if (args.length === 0) {
-      // 显示当前 backend（卡片）
+      // 显示当前 agent（卡片）
       const backends = this.getAvailableBackends();
-      const content = backends.map((b) => {
-        if (b === this.backendType) {
-          const modelLine = `model: ${this.botIdentity.model ?? "default"}, lite: ${formatLiteModel(this.botIdentity.liteModel, b)}`;
-          return `◉ ${b} (${modelLine})`;
-        }
-        const cached = this.backendModelCache.get(b);
-        if (cached) {
-          const modelLine = `model: ${cached.model ?? "default"}, lite: ${formatLiteModel(cached.liteModel, b)}`;
-          return `○ ${b} (${modelLine})`;
-        }
-        return `○ ${b}`;
-      }).join("\n");
-      this.sendAgentCard(chatId, platformChatId, msgId, "Agent", content);
+      const currentModel = this.botIdentity.model ?? "default";
+      const currentLite = formatLiteModel(this.botIdentity.liteModel, this.backendType);
+      const lines: string[] = [
+        `**Agent:** ${this.backendType}`,
+        `**Model:** ${currentModel}`,
+        `**Lite:** ${currentLite}`,
+        "",
+      ];
+      lines.push("**可选 Agent:**");
+      for (let i = 0; i < backends.length; i++) {
+        const b = backends[i]!;
+        const tag = b === this.backendType ? "  ✓" : "";
+        lines.push(`  ${i + 1}. ${b}${tag}`);
+      }
+      lines.push("", "`/agent <名字或编号>` 切换");
+      this.sendAgentCard(chatId, platformChatId, msgId, "Agent", lines.join("\n"));
       return;
     }
 
-    const target = normalizeBackend(args[0]);
-
     const available = this.getAvailableBackends();
+
+    // 支持编号选择：数字当编号，否则当名字走别名解析
+    const index = Number(args[0]);
+    const target = Number.isInteger(index) && index >= 1 && index <= available.length
+      ? available[index - 1]!
+      : normalizeBackend(args[0]);
+
     if (!target || !available.includes(target)) {
-      const content = `无效的 backend: \`${args[0]}\`\n\n可选: ${available.join(", ")}`;
+      const content = `无效的 backend: \`${args[0]}\`\n\n可选: ${available.map((b, i) => `${i + 1}. ${b}`).join(", ")}`;
       this.sendAgentCard(chatId, platformChatId, msgId, "Agent", content);
       return;
     }
@@ -1339,9 +1343,10 @@ export class Pipeline {
 
     doSwitch()
       .then(() => {
-        const modelLine = `model: ${this.botIdentity.model ?? "default"}, lite: ${formatLiteModel(this.botIdentity.liteModel, target)}`;
+        const model = this.botIdentity.model ?? "default";
+        const lite = formatLiteModel(this.botIdentity.liteModel, target);
         this.sendAgentCard(chatId, platformChatId, msgId, "Agent",
-          `已切换到 **${displayBackendType(target)}** (${modelLine})\n上下文已重置，重启后恢复为配置值。`);
+          `已切换到 **${displayBackendType(target)}** (Model: ${model}, Lite: ${lite})\n上下文已重置，重启后恢复为配置值。`);
         this.log.info("agent backend switched (runtime only)", {
           backend: target,
           model: this.botIdentity.model ?? null,
@@ -1371,8 +1376,9 @@ export class Pipeline {
       const cached = this.backendModelCache.get(this.backendType);
       this.botIdentity.model = cached?.model;
       this.botIdentity.liteModel = cached?.liteModel;
-      const modelLine = `model: ${this.botIdentity.model ?? "default"}, lite: ${formatLiteModel(this.botIdentity.liteModel, this.backendType)}`;
-      this.sendAgentCard(chatId, platformChatId, msgId, "Model", `已恢复为初始配置 (${modelLine})\n下次会话生效，发 /new 立即生效。`);
+      const model = this.botIdentity.model ?? "default";
+      const lite = formatLiteModel(this.botIdentity.liteModel, this.backendType);
+      this.sendAgentCard(chatId, platformChatId, msgId, "Model", `已恢复为初始配置 (Model: ${model}, Lite: ${lite})\n下次会话生效，发 /new 立即生效。`);
       this.log.info("model reset to config defaults", { backend: this.backendType });
       return;
     }
@@ -1402,7 +1408,7 @@ export class Pipeline {
     }
   }
 
-  /** 构建模型候选列表：当前值 + 推荐值 + 历史 */
+  /** 构建模型候选列表：初始配置 → 默认 lite → 历史 → 运行时新增，顺序稳定 */
   private buildModelCandidates(): string[] {
     const seen = new Set<string>();
     const list: string[] = [];
@@ -1414,14 +1420,15 @@ export class Pipeline {
       }
     };
 
-    // 当前值
-    add(this.botIdentity.model);
-    add(this.botIdentity.liteModel);
+    // 1. 初始配置值（顺序锚点，不随运行时切换而变动）
+    const initCache = this.backendModelCache.get(this.backendType);
+    add(initCache?.model);
+    add(initCache?.liteModel);
 
-    // backend 推荐的 lite model
+    // 2. backend 推荐的 lite model
     add(DEFAULT_LITE_MODELS[this.backendType as BuiltinBackendType]);
 
-    // 历史记录
+    // 3. 历史记录
     try {
       const rows = this.db.prepare(
         "SELECT model_name FROM model_history WHERE backend = ? ORDER BY last_used_at DESC LIMIT 10",
@@ -1430,6 +1437,10 @@ export class Pipeline {
         add(row.model_name);
       }
     } catch { /* table may not exist yet */ }
+
+    // 4. 运行时新值（手动输入的新模型名，追加到末尾）
+    add(this.botIdentity.model);
+    add(this.botIdentity.liteModel);
 
     return list;
   }
@@ -1461,8 +1472,8 @@ export class Pipeline {
     const defaultLite = DEFAULT_LITE_MODELS[this.backendType as BuiltinBackendType];
 
     const lines: string[] = [
-      `**Backend:** ${this.backendType}`,
-      `**主模型:** ${currentModel ?? "default"}`,
+      `**Agent:** ${this.backendType}`,
+      `**Model:** ${currentModel ?? "default"}`,
       `**Lite:** ${formatLiteModel(currentLite, this.backendType)}`,
       "",
     ];
@@ -1472,15 +1483,14 @@ export class Pipeline {
       for (let i = 0; i < candidates.length; i++) {
         const name = candidates[i]!;
         const tags: string[] = [];
-        if (name === currentModel) tags.push("当前");
-        if (name === currentLite) tags.push("lite");
-        else if (!currentLite && name === defaultLite) tags.push("lite 默认");
-        const suffix = tags.length > 0 ? ` (${tags.join(", ")})` : "";
+        if (name === currentModel) tags.push("✓ Model");
+        if (name === (currentLite ?? defaultLite)) tags.push("✓ Lite");
+        const suffix = tags.length > 0 ? `  ${tags.join("  ")}` : "";
         lines.push(`  ${i + 1}. ${name}${suffix}`);
       }
       lines.push("");
-      lines.push("`/model <名字或编号>` 切主模型");
-      lines.push("`/model lite <名字或编号>` 切 lite");
+      lines.push("`/model <名字或编号>` 切 Model");
+      lines.push("`/model lite <名字或编号>` 切 Lite");
       lines.push("`/model reset` 恢复初始值");
     }
 
@@ -1664,16 +1674,12 @@ export class Pipeline {
       if (importantCtx || normalCtx) {
         const parts: string[] = [];
         if (importantCtx) {
-          parts.push(
-            `<important-context preserve="true">\n` +
-            `以下是关键场景信息，上下文压缩时必须保留。如果丢失，用 nb-agent whoami 重建。\n\n` +
-            `${importantCtx}\n` +
-            `</important-context>`,
-          );
+          parts.push(importantCtx);
         }
         if (normalCtx) {
-          parts.push(`<context>\n${normalCtx}\n</context>`);
+          parts.push(`<session-state>\n${normalCtx}\n</session-state>`);
         }
+        parts.push(NEW_SESSION_SEARCH_REMINDER);
         this.pendingImportantContext.delete(chatId);
         this.pendingNormalContext.delete(chatId);
         messageToSend = `${parts.join("\n\n")}\n\n${mergedText}`;
@@ -2313,5 +2319,5 @@ function displayBackendType(type: AgentBackendType): string {
 function formatLiteModel(liteModel: string | undefined, backend: string): string {
   if (liteModel) return liteModel;
   const defaultModel = DEFAULT_LITE_MODELS[backend as BuiltinBackendType];
-  return defaultModel ? `${defaultModel} (default)` : "same as model";
+  return defaultModel ? `${defaultModel} (默认)` : "同 Model";
 }

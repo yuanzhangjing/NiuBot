@@ -40,5 +40,12 @@ export function formatModelName(raw: string): string {
     return parts.length > 1 ? `${name} ${parts.slice(1).join(".")}` : name;
   }
 
+  // gemini-2.5-flash-preview → Gemini 2.5 Flash
+  if (raw.startsWith("gemini-")) {
+    const s = raw.replace(/^gemini-/, "").replace(/-preview$/, "");
+    const parts = s.split("-").filter((p) => p.length > 0);
+    return "Gemini " + parts.map((p) => (/^\d/.test(p) ? p : p[0]!.toUpperCase() + p.slice(1))).join(" ");
+  }
+
   return raw;
 }

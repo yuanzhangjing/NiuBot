@@ -17,7 +17,7 @@ const CONTINUATION_TAIL_COUNT = 10;
 const CONTINUATION_MSG_MAX_LEN = 200;
 
 /** 新 session 首条消息：引导 agent 按需检索历史上下文 */
-const NEW_SESSION_SEARCH_REMINDER =
+export const NEW_SESSION_SEARCH_REMINDER =
 `<system-reminder>
 这是一个全新的对话 session。你当前的上下文有限，仅包含活跃任务列表和最近一次会话摘要。
 
@@ -66,7 +66,7 @@ export function buildImportantContext(
 
   // 0. Persona（每次 session 启动时从文件读取，支持不重启热更新）
   if (scene.personaContent) {
-    parts.push(`<persona>\n${scene.personaContent}\n</persona>`);
+    parts.push(`<persona label="你（Bot）的人设">\n${scene.personaContent}\n</persona>`);
   }
 
   // 1. 当前场景
@@ -87,7 +87,7 @@ export function buildImportantContext(
       sceneLines.push(`用户：${userDisplay}`);
     }
     if (scene.isAdmin && scene.personaPath) {
-      sceneLines.push(`人设配置：${scene.personaPath}（管理员可要求修改）`);
+      sceneLines.push(`Bot 人设配置：${scene.personaPath}（管理员可要求修改）`);
     }
   }
   parts.push(`<current-scene>\n${sceneLines.join("\n")}\n</current-scene>`);
@@ -105,7 +105,8 @@ export function buildImportantContext(
     }
   }
 
-  return parts.join("\n\n");
+  const inner = parts.join("\n\n");
+  return `<session-profile desc="上下文压缩时必须保留，丢失后用 nb-agent whoami 恢复">\n${inner}\n</session-profile>`;
 }
 
 // ── Speaker context (群聊消息级注入) ────────────────────────
@@ -197,9 +198,6 @@ export function buildNormalContext(
   if (continuation) {
     parts.push(continuation);
   }
-
-  // 4. 新 session 引导检索提示
-  parts.push(NEW_SESSION_SEARCH_REMINDER);
 
   return parts.join("\n\n");
 }
