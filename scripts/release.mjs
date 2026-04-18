@@ -36,7 +36,7 @@ if (dryRun) {
       process.stdout.write(resolved);
       return resolved;
     },
-    { timeoutMs: 120_000, delayMs: 5000, shouldRetry: isRetryableNpmViewError },
+    { timeoutMs: 300_000, delayMs: 8000, shouldRetry: isRetryableNpmViewError },
   );
 }
 
