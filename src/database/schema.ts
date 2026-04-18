@@ -247,6 +247,21 @@ const migrations: Migration[] = [
       db.exec("UPDATE users SET is_admin = CASE WHEN is_admin = 1 THEN 'admin' ELSE 'none' END");
     },
   },
+  {
+    version: 11,
+    description: "Model history for /model command quick switching",
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS model_history (
+          id           INTEGER PRIMARY KEY AUTOINCREMENT,
+          backend      TEXT NOT NULL,
+          model_name   TEXT NOT NULL,
+          last_used_at TEXT DEFAULT (datetime('now')),
+          UNIQUE(backend, model_name)
+        );
+      `);
+    },
+  },
 ];
 
 const LATEST_VERSION = migrations[migrations.length - 1]!.version;

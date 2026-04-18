@@ -787,6 +787,14 @@ export class Pipeline {
         this.handleAgentCommand(parts.slice(1), chatId, platformChatId, msgId);
         return true;
       }
+      case "/model": {
+        if (!isAdmin) {
+          this.replyText(chatId, platformChatId, msgId, "/model 仅管理员可用。");
+          return true;
+        }
+        this.handleModelCommand(parts.slice(1), chatId, platformChatId, msgId);
+        return true;
+      }
       case "/admin": {
         if (!isAdmin) {
           this.replyText(chatId, platformChatId, msgId, "/admin 仅管理员可用。");
@@ -1346,6 +1354,145 @@ export class Pipeline {
       });
   }
 
+  /**
+   * /model 命令：查看或切换模型。
+   * - /model              → 显示当前模型 + 可选列表
+   * - /model <name|index> → 切主模型
+   * - /model lite <name|index> → 切 lite 模型
+   * - /model reset        → 恢复为配置初始值
+   */
+  private handleModelCommand(args: string[], chatId: string, platformChatId: string, msgId?: string): void {
+    if (args.length === 0) {
+      this.sendModelList(chatId, platformChatId, msgId);
+      return;
+    }
+
+    if (args[0] === "reset") {
+      const cached = this.backendModelCache.get(this.backendType);
+      this.botIdentity.model = cached?.model;
+      this.botIdentity.liteModel = cached?.liteModel;
+      const modelLine = `model: ${this.botIdentity.model ?? "default"}, lite: ${formatLiteModel(this.botIdentity.liteModel, this.backendType)}`;
+      this.sendAgentCard(chatId, platformChatId, msgId, "Model", `已恢复为初始配置 (${modelLine})\n下次会话生效，发 /new 立即生效。`);
+      this.log.info("model reset to config defaults", { backend: this.backendType });
+      return;
+    }
+
+    const isLite = args[0] === "lite";
+    const modelArg = isLite ? args.slice(1).join(" ") : args.join(" ");
+
+    if (!modelArg) {
+      this.sendModelList(chatId, platformChatId, msgId);
+      return;
+    }
+
+    // 解析 model：支持编号或名字
+    const candidates = this.buildModelCandidates();
+    const resolvedModel = this.resolveModelArg(modelArg, candidates);
+
+    if (isLite) {
+      this.botIdentity.liteModel = resolvedModel;
+      this.recordModelHistory(this.backendType, resolvedModel);
+      this.sendAgentCard(chatId, platformChatId, msgId, "Model", `Lite 模型已切换为 **${resolvedModel}**\n下次会话生效，发 /new 立即生效。重启恢复初始值。`);
+      this.log.info("lite model switched (runtime)", { model: resolvedModel, backend: this.backendType });
+    } else {
+      this.botIdentity.model = resolvedModel;
+      this.recordModelHistory(this.backendType, resolvedModel);
+      this.sendAgentCard(chatId, platformChatId, msgId, "Model", `主模型已切换为 **${resolvedModel}**\n下次会话生效，发 /new 立即生效。重启恢复初始值。`);
+      this.log.info("model switched (runtime)", { model: resolvedModel, backend: this.backendType });
+    }
+  }
+
+  /** 构建模型候选列表：当前值 + 推荐值 + 历史 */
+  private buildModelCandidates(): string[] {
+    const seen = new Set<string>();
+    const list: string[] = [];
+
+    const add = (name: string | undefined) => {
+      if (name && !seen.has(name)) {
+        seen.add(name);
+        list.push(name);
+      }
+    };
+
+    // 当前值
+    add(this.botIdentity.model);
+    add(this.botIdentity.liteModel);
+
+    // backend 推荐的 lite model
+    add(DEFAULT_LITE_MODELS[this.backendType as BuiltinBackendType]);
+
+    // 历史记录
+    try {
+      const rows = this.db.prepare(
+        "SELECT model_name FROM model_history WHERE backend = ? ORDER BY last_used_at DESC LIMIT 10",
+      ).all(this.backendType) as Array<{ model_name: string }>;
+      for (const row of rows) {
+        add(row.model_name);
+      }
+    } catch { /* table may not exist yet */ }
+
+    return list;
+  }
+
+  /** 解析模型参数：数字当编号，否则当名字 */
+  private resolveModelArg(arg: string, candidates: string[]): string {
+    const index = Number(arg);
+    if (Number.isInteger(index) && index >= 1 && index <= candidates.length) {
+      return candidates[index - 1]!;
+    }
+    return arg;
+  }
+
+  /** 记录模型使用历史 */
+  private recordModelHistory(backend: string, modelName: string): void {
+    try {
+      this.db.prepare(
+        "INSERT INTO model_history (backend, model_name, last_used_at) VALUES (?, ?, datetime('now')) " +
+        "ON CONFLICT(backend, model_name) DO UPDATE SET last_used_at = datetime('now')",
+      ).run(backend, modelName);
+    } catch { /* ignore if table doesn't exist */ }
+  }
+
+  /** 显示模型列表卡片 */
+  private sendModelList(chatId: string, platformChatId: string, msgId?: string): void {
+    const candidates = this.buildModelCandidates();
+    const currentModel = this.botIdentity.model;
+    const currentLite = this.botIdentity.liteModel;
+    const defaultLite = DEFAULT_LITE_MODELS[this.backendType as BuiltinBackendType];
+
+    const lines: string[] = [
+      `**Backend:** ${this.backendType}`,
+      `**主模型:** ${currentModel ?? "default"}`,
+      `**Lite:** ${formatLiteModel(currentLite, this.backendType)}`,
+      "",
+    ];
+
+    if (candidates.length > 0) {
+      lines.push("**可选模型:**");
+      for (let i = 0; i < candidates.length; i++) {
+        const name = candidates[i]!;
+        const tags: string[] = [];
+        if (name === currentModel) tags.push("当前");
+        if (name === currentLite) tags.push("lite");
+        else if (!currentLite && name === defaultLite) tags.push("lite 默认");
+        const suffix = tags.length > 0 ? ` (${tags.join(", ")})` : "";
+        lines.push(`  ${i + 1}. ${name}${suffix}`);
+      }
+      lines.push("");
+      lines.push("`/model <名字或编号>` 切主模型");
+      lines.push("`/model lite <名字或编号>` 切 lite");
+      lines.push("`/model reset` 恢复初始值");
+    }
+
+    const content = lines.join("\n");
+    const send = msgId
+      ? this.im.replyCard(msgId, "Model", content)
+      : this.im.sendCard(platformChatId, "Model", content);
+    send
+      .then((pmid) => { this.storeBotResponse(chatId, content, pmid); })
+      .catch(() => {});
+  }
+
   /** 发送 Agent 命令卡片回复 */
   private sendAgentCard(chatId: string, platformChatId: string, msgId: string | undefined, header: string, content: string): void {
     const send = msgId
@@ -1370,6 +1517,7 @@ export class Pipeline {
         "",
         "**管理员**",
         "`/admin`　　管理员列表/添加/移除",
+        "`/model`　　查看/切换模型",
         "`/agent`　　查看/切换 Agent backend",
         "`/restart`　重启引擎",
         "`/<cmd>`　　执行 shell 命令",
