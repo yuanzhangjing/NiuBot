@@ -3,9 +3,10 @@
  * 通过 `opencode run` 命令驱动 agent，JSON 事件流输出。
  */
 
-import { statSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
+import Database from "better-sqlite3";
 import { CliAgentBackend, buildNiubotEnv, type BaseCliSession, type ParsedOutput } from "../agent/cli-base.js";
 import type { SessionConfig, ExecHooks } from "../agent/types.js";
 
@@ -65,19 +66,32 @@ export default class OpencodeBackend extends CliAgentBackend<OpencodeSession> {
     };
   }
 
-  protected probeSessionFileMtime(_session: OpencodeSession): number | null {
-    // Opencode uses SQLite with WAL; stat all three files and take max mtime
-    const dbPath = resolve(homedir(), ".local", "share", "opencode", "opencode.db");
+  protected probeSessionFileMtime(session: OpencodeSession): number | null {
+    if (!session.agentSessionId) return null;
+    const db = this.getOpencodeDb();
+    if (!db) return null;
     try {
-      let maxMtime = statSync(dbPath).mtimeMs;
-      for (const suffix of ["-wal", "-shm"]) {
-        try {
-          const mt = statSync(dbPath + suffix).mtimeMs;
-          if (mt > maxMtime) maxMtime = mt;
-        } catch { /* file may not exist */ }
-      }
-      return maxMtime;
+      const row = db.prepare("SELECT time_updated FROM session WHERE id = ?").get(session.agentSessionId) as { time_updated: number } | undefined;
+      return row?.time_updated ?? null;
     } catch {
+      return null;
+    }
+  }
+
+  /** 懒加载 Opencode 的 SQLite DB（只读） */
+  private opencodeDb: Database.Database | null | undefined; // undefined = 未初始化
+  private getOpencodeDb(): Database.Database | null {
+    if (this.opencodeDb !== undefined) return this.opencodeDb;
+    const dbPath = resolve(homedir(), ".local", "share", "opencode", "opencode.db");
+    if (!existsSync(dbPath)) {
+      this.opencodeDb = null;
+      return null;
+    }
+    try {
+      this.opencodeDb = new Database(dbPath, { readonly: true });
+      return this.opencodeDb;
+    } catch {
+      this.opencodeDb = null;
       return null;
     }
   }
