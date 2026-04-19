@@ -82,3 +82,35 @@ export interface AgentBackend {
   /** 是否支持 system prompt 注入 */
   supportsSystemPrompt?: boolean;
 }
+
+// ── Activity Watchdog 相关类型 ──────────────────────────────
+
+export type AgentExecutionStatus =
+  | "pending" | "running" | "finished" | "failed" | "cancelled";
+
+export interface AgentSessionActivity {
+  status: AgentExecutionStatus;
+  startedAt: number;
+  lastActiveAt: number;
+  lastExitAt?: number;
+  /** stdout 流式解析检测到完成事件 */
+  completionDetected?: boolean;
+  /** 是否正在做上下文压缩 */
+  compacting?: boolean;
+  /** 当前 exec 的子进程 PID（用于 watchdog kill） */
+  pid?: number;
+  /** 本轮已发送的通知次数（封顶 2 次） */
+  notifyCount: number;
+  /** 上次通知时间 */
+  lastNotifiedAt?: number;
+}
+
+/** exec() 流式 hooks，由各 backend 提供 */
+export interface ExecHooks {
+  /** 每行 stdout 回调（用于早期 session ID 捕获等） */
+  onLine?: (line: string) => void;
+  /** 判断某行是否为完成事件。返回 true 则标记 completionDetected */
+  isComplete?: (line: string) => boolean;
+  /** 状态变更回调（如 compacting）。通知上层展示提示 */
+  onStatus?: (status: string) => void;
+}

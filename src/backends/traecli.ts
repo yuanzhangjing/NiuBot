@@ -101,6 +101,16 @@ export default class TraeCliBackend extends CliAgentBackend<TraeCliSession> {
     }
   }
 
+  protected probeSessionFileMtime(session: TraeCliSession): number | null {
+    const jsonlPath = this.getJsonlPath(session);
+    if (!jsonlPath) return null;
+    try {
+      return statSync(jsonlPath).mtimeMs;
+    } catch {
+      return null;
+    }
+  }
+
   private scanJsonl(session: TraeCliSession): { model?: string; contextTokens?: number; errorMessage?: string } {
     const jsonlPath = this.getJsonlPath(session);
     if (!jsonlPath) return {};

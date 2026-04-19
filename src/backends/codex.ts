@@ -7,7 +7,7 @@ import { existsSync, openSync, readSync, closeSync, readdirSync, statSync } from
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { CliAgentBackend, buildNiubotEnv, type BaseCliSession, type ParsedOutput } from "../agent/cli-base.js";
-import type { SessionConfig } from "../agent/types.js";
+import type { SessionConfig, ExecHooks } from "../agent/types.js";
 import { DEFAULT_LITE_MODELS } from "../config.js";
 
 interface CodexSession extends BaseCliSession {
@@ -207,6 +207,36 @@ export default class CodexBackend extends CliAgentBackend<CodexSession> {
     }
 
     return { model, contextTokens, contextWindow };
+  }
+
+  protected getExecHooks(session: CodexSession): ExecHooks {
+    return {
+      onLine: (line) => {
+        try {
+          const e = JSON.parse(line);
+          if (e.type === "thread.started" && e.thread_id && !session.agentSessionId) {
+            session.agentSessionId = e.thread_id;
+          }
+        } catch { /* non-JSON line */ }
+      },
+      isComplete: (line) => {
+        try {
+          const e = JSON.parse(line);
+          // Codex emits item.completed with type=agent_message for the final response
+          return e.type === "item.completed" && e.item?.type === "agent_message";
+        } catch { return false; }
+      },
+    };
+  }
+
+  protected probeSessionFileMtime(session: CodexSession): number | null {
+    const jsonlPath = this.getJsonlPath(session);
+    if (!jsonlPath) return null;
+    try {
+      return statSync(jsonlPath).mtimeMs;
+    } catch {
+      return null;
+    }
   }
 
   private getJsonlPath(session: CodexSession): string | null {

@@ -1,10 +1,13 @@
 /**
  * Gemini CLI backend plugin.
- * 通过 `gemini -p` 命令驱动 agent，JSON 输出。
+ * 通过 `gemini -p` 命令驱动 agent，stream-json 模式。
  */
 
+import { readdirSync, statSync } from "node:fs";
+import { homedir } from "node:os";
+import { resolve, sep } from "node:path";
 import { CliAgentBackend, buildNiubotEnv, type BaseCliSession, type ParsedOutput } from "../agent/cli-base.js";
-import type { SessionConfig } from "../agent/types.js";
+import type { SessionConfig, ExecHooks } from "../agent/types.js";
 import { DEFAULT_LITE_MODELS } from "../config.js";
 
 interface GeminiSession extends BaseCliSession {}
@@ -33,72 +36,101 @@ export default class GeminiBackend extends CliAgentBackend<GeminiSession> {
   }
 
   buildInput(session: GeminiSession, message: string): { args: string[]; stdin?: string } {
-    const args = ["-p", "", "-o", "json", "-y"];
+    const args = ["-p", "", "-o", "stream-json", "-y"];
     if (session.model) args.push("-m", session.model);
     if (session.agentSessionId) args.push("-r", session.agentSessionId);
     return { args, stdin: message };
   }
 
-  parseOutput(stdout: string, _session: GeminiSession): ParsedOutput {
-    // Gemini CLI with `-o json` outputs a single formatted JSON object (not JSONL).
-    // Try parsing the entire stdout as one JSON object first.
-    let event: Record<string, unknown> | undefined;
+  protected probeSessionFileMtime(session: GeminiSession): number | null {
+    if (!session.agentSessionId) return null;
+    // Gemini stores sessions at ~/.gemini/tmp/<project>/chats/session-*-<sid>.json
+    const absWorkDir = resolve(session.workingDirectory);
+    const projectKey = absWorkDir.split(sep).join("-");
+    const chatsDir = resolve(homedir(), ".gemini", "tmp", projectKey, "chats");
     try {
-      event = JSON.parse(stdout) as Record<string, unknown>;
-    } catch {
-      // Fallback: try line-by-line JSONL parsing
-      for (const line of stdout.split("\n")) {
-        if (!line.trim()) continue;
+      const match = readdirSync(chatsDir).find((name) => name.includes(session.agentSessionId!));
+      if (match) return statSync(resolve(chatsDir, match)).mtimeMs;
+    } catch { /* directory may not exist */ }
+    return null;
+  }
+
+  protected getExecHooks(session: GeminiSession): ExecHooks {
+    return {
+      onLine: (line) => {
         try {
-          event = JSON.parse(line) as Record<string, unknown>;
-          break; // use first valid JSON line
-        } catch { /* skip non-JSON lines */ }
-      }
-    }
+          const e = JSON.parse(line);
+          if (e.session_id && !session.agentSessionId) {
+            session.agentSessionId = e.session_id;
+          }
+        } catch { /* non-JSON line */ }
+      },
+      isComplete: (line) => {
+        try { return JSON.parse(line).type === "result"; }
+        catch { return false; }
+      },
+    };
+  }
 
-    if (!event) {
-      return { text: stdout.trim() || "（Gemini 无输出）" };
-    }
-
-    // Error handling
-    if (event["error"]) {
-      const err = event["error"] as Record<string, unknown>;
-      const errMsg = (typeof err === "string" ? err : (err["message"] as string)) ?? JSON.stringify(err);
-      const response = typeof event["response"] === "string" ? event["response"] : "";
-      if (!response) return { text: `（Gemini 错误）${errMsg}` };
-    }
-
-    // Extract response text
-    const text = typeof event["response"] === "string" ? event["response"]
-               : typeof event["result"] === "string" ? event["result"]
-               : typeof event["text"] === "string" ? event["text"]
-               : "";
-
-    // Extract session ID
-    const sessionId = typeof event["session_id"] === "string" ? event["session_id"] : undefined;
-
-    // Extract token stats and model from stats object
+  parseOutput(stdout: string, _session: GeminiSession): ParsedOutput {
+    // stream-json: JSONL event stream
+    // init → message(user) → message(assistant, delta) → result
+    let sessionId: string | undefined;
     let contextTokens: number | undefined;
     let model: string | undefined;
-    const stats = event["stats"] as Record<string, unknown> | undefined;
-    if (stats) {
-      const models = stats["models"] as Record<string, unknown> | undefined;
-      if (models) {
-        // stats.models is keyed by model name — grab the first one
-        const modelNames = Object.keys(models);
-        if (modelNames.length > 0) {
-          model = modelNames[0];
-          const modelStats = models[model] as Record<string, unknown> | undefined;
-          const tokens = modelStats?.["tokens"] as Record<string, number> | undefined;
-          if (tokens) {
-            contextTokens = tokens["total"] ?? ((tokens["input"] ?? 0) + (tokens["candidates"] ?? 0) + (tokens["thoughts"] ?? 0));
+    let errorMsg: string | undefined;
+    const textParts: string[] = [];
+
+    for (const line of stdout.split("\n")) {
+      if (!line.trim()) continue;
+      let event: Record<string, unknown>;
+      try {
+        event = JSON.parse(line) as Record<string, unknown>;
+      } catch { continue; }
+
+      // init event: session_id + model
+      if (event["type"] === "init") {
+        if (typeof event["session_id"] === "string") sessionId = event["session_id"];
+        if (typeof event["model"] === "string") model = event["model"];
+        continue;
+      }
+
+      // assistant message: accumulate text
+      if (event["type"] === "message" && event["role"] === "assistant") {
+        if (typeof event["content"] === "string") textParts.push(event["content"]);
+        continue;
+      }
+
+      // result event: stats + error
+      if (event["type"] === "result") {
+        if (event["status"] === "error") {
+          const err = event["error"] as Record<string, unknown> | undefined;
+          errorMsg = (err?.["message"] as string) ?? JSON.stringify(err);
+        }
+        const stats = event["stats"] as Record<string, unknown> | undefined;
+        if (stats) {
+          const models = stats["models"] as Record<string, unknown> | undefined;
+          if (models) {
+            const modelNames = Object.keys(models);
+            if (modelNames.length > 0) {
+              model = modelNames[0];
+              const ms = models[model] as Record<string, number> | undefined;
+              if (ms) {
+                contextTokens = (ms["input_tokens"] ?? 0) + (ms["output_tokens"] ?? 0);
+              }
+            }
           }
         }
       }
     }
 
+    const text = textParts.join("");
+    if (!text && errorMsg) {
+      return { text: `（Gemini 错误）${errorMsg}`, agentSessionId: sessionId, model };
+    }
+
     return {
-      text: text.trim() || stdout.trim(),
+      text: text.trim() || stdout.trim() || "（Gemini 无输出）",
       agentSessionId: sessionId,
       contextTokens,
       model,

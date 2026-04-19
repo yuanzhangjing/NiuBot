@@ -7,7 +7,8 @@ import { fileURLToPath } from "node:url";
 import type Database from "better-sqlite3";
 import type { PlatformAdapter, NormalizedMessage } from "../im/types.js";
 import { escapeYamlContent, renderMessageNodes } from "../im/render.js";
-import type { AgentBackend, AgentSession } from "../agent/types.js";
+import type { AgentBackend, AgentSession, AgentSessionActivity } from "../agent/types.js";
+import { CliAgentBackend } from "../agent/cli-base.js";
 import { BUILTIN_BACKEND_LIST, DEFAULT_LITE_MODELS, NIUBOT_HOME, normalizeBackend, type AgentBackendType, type BuiltinBackendType } from "../config.js";
 import { MessageQueue } from "./queue.js";
 import {
@@ -38,6 +39,11 @@ const INTERRUPT_WORDS = new Set([
   "等等", "等一下", "稍等",
   "stop", "cancel", "abort",
 ]);
+// ── Watchdog 常量 ──
+const AGENT_WATCHDOG_INTERVAL_MS = 15_000;     // 15 秒检测间隔
+const AGENT_IDLE_THRESHOLD_MS = 600_000;       // 10 分钟：第一次 idle 通知
+const AGENT_IDLE_THRESHOLD_2_MS = 1_800_000;   // 30 分钟：第二次 idle 通知
+
 /** Bot 身份信息，由外部传入 */
 export interface BotIdentity {
   /** Bot 显示名称（如 "CowBot"，从平台 API 获取或 config 指定） */
@@ -129,6 +135,12 @@ export class Pipeline {
   /** 每个 backend 的模型配置快照，切换时保存/恢复 */
   private backendModelCache = new Map<string, { model?: string; liteModel?: string }>();
 
+  /** Watchdog 定时器 */
+  private watchdogTimer: ReturnType<typeof setInterval> | null = null;
+
+  /** 已发送 compact 通知的 session（避免重复通知） */
+  private compactNotifiedSessions = new Set<string>();
+
   constructor(
     db: Database.Database,
     im: PlatformAdapter,
@@ -192,6 +204,9 @@ export class Pipeline {
     await this.detectAdmins();
 
     this.im.onMessage((msg) => this.handleMessage(msg));
+    // 启动 watchdog 定时器
+    this.watchdogTimer = setInterval(() => this.runIdleWatchdog(), AGENT_WATCHDOG_INTERVAL_MS);
+
     this.log.info("pipeline started", {
       botUserId: this.botUserId,
       botPlatformId: this.botIdentity.platformBotId,
@@ -204,12 +219,20 @@ export class Pipeline {
 
   /** 停止管道：清除队列计时器 */
   stop(): void {
+    if (this.watchdogTimer) {
+      clearInterval(this.watchdogTimer);
+      this.watchdogTimer = null;
+    }
     this.queue.stop();
     this.log.info("pipeline stopped");
   }
 
   /** 优雅关闭：cancel 所有活跃 session，清理资源（DB 中 session 保持 active，下次启动恢复） */
   async shutdown(): Promise<void> {
+    if (this.watchdogTimer) {
+      clearInterval(this.watchdogTimer);
+      this.watchdogTimer = null;
+    }
     for (const [chatId, session] of this.chatSessions) {
       try {
         // 更新 DB 最后活跃时间
@@ -574,11 +597,10 @@ export class Pipeline {
       this.triggerMsgIds.set(chatId, msg.platformMsgId);
     }
 
-    // 短词打断检测
+    // 短词打断检测（不清空队列，只 kill 当前进程，与 /stop 行为一致）
     const trimmedText = msg.contentText.trim().toLowerCase();
     if (INTERRUPT_WORDS.has(trimmedText) && this.chatSessions.has(chatId)) {
       this.log.info("interrupt word detected", { chatId, word: trimmedText });
-      this.queue.drain(chatId);
       this.cancelChat(chatId).catch(() => {});
       const interruptText = "好的，已停止。";
       this.im.sendText(msg.chatPlatformId, interruptText).then((pmid) => {
@@ -742,7 +764,7 @@ export class Pipeline {
    * 未命中返回 false，消息继续走 agent 流程。
    *
    * 分发顺序（对齐 cc-connect）：
-   *   1. 内置命令 switch（/restart, /status, /new, /clear, /cron, /stop）
+   *   1. 内置命令 switch（/restart, /status, /new, /clear, /stop, /cron）
    *   2. 管理员 shell 命令（tryShellCommand）
    *   3. return false → 转发给 agent
    */
@@ -769,8 +791,7 @@ export class Pipeline {
         this.sendStatus(chatId, platformChatId, msgId);
         return true;
       }
-      case "/new":
-      case "/clear": {
+      case "/new": {
         this.log.info("builtin command: reset-session", { userId, cmd, chatId });
         this.startSessionTransition(chatId, () => this.resetSession(chatId, platformChatId, msgId));
         return true;
@@ -810,15 +831,25 @@ export class Pipeline {
       }
       case "/stop": {
         this.log.info("builtin command: stop", { userId, chatId });
-        const dropped = this.queue.drain(chatId);
         if (this.chatSessions.has(chatId)) {
           this.cancelChat(chatId).catch(() => {});
-          const hint = dropped > 0 ? `好的，已停止（丢弃 ${dropped} 条排队消息）。` : "好的，已停止。";
+          const pending = this.queue.pendingCount(chatId);
+          const hint = pending > 0
+            ? `好的，已停止。还有 ${pending} 条待处理消息，发 /clear 可清空。`
+            : "好的，已停止。";
           this.replyText(chatId, platformChatId, msgId, hint);
-        } else if (dropped > 0) {
-          this.replyText(chatId, platformChatId, msgId, `已清空 ${dropped} 条排队消息。`);
         } else {
           this.replyText(chatId, platformChatId, msgId, "当前没有正在执行的任务。");
+        }
+        return true;
+      }
+      case "/clear": {
+        this.log.info("builtin command: clear", { userId, chatId });
+        const dropped = this.queue.drain(chatId);
+        if (dropped > 0) {
+          this.replyText(chatId, platformChatId, msgId, `已清空 ${dropped} 条排队消息。`);
+        } else {
+          this.replyText(chatId, platformChatId, msgId, "队列是空的，没啥可清的。");
         }
         return true;
       }
@@ -1142,7 +1173,7 @@ export class Pipeline {
     }
   }
 
-  /** /new 和 /clear：归档当前 session，让下一条消息自然创建新 session。 */
+  /** /new：归档当前 session，让下一条消息自然创建新 session。 */
   private async resetSession(chatId: string, platformChatId: string, msgId?: string): Promise<void> {
     await this.archiveSession(chatId)
       .then((archived) => {
@@ -1518,6 +1549,7 @@ export class Pipeline {
     const lines = [
       "`/new`　　新会话（清空当前上下文）",
       "`/stop`　　停止正在执行的任务",
+      "`/clear`　　清空排队中的消息",
       "`/status`　查看运行状态",
       "`/cron`　　查看定时任务",
       "`/help`　　显示本帮助",
@@ -2168,6 +2200,96 @@ export class Pipeline {
     if (!session) return;
 
     await this.agent.cancelSession(session.agentSession);
+  }
+
+  // ── Watchdog ─────────────────────────────────────────────
+
+  /** 向指定 chat 发送系统通知（不走 pipeline 队列） */
+  private sendWatchdogNotification(chatId: string, text: string): void {
+    const platformChatId = this.platformChatIds.get(chatId);
+    if (!platformChatId) return;
+    this.im.sendText(platformChatId, text).then((pmid) => {
+      this.storeBotResponse(chatId, text, pmid);
+    }).catch(() => {});
+  }
+
+  /** 发送 compact 中提示（仅通知一次） */
+  notifyCompacting(chatId: string): void {
+    const session = this.chatSessions.get(chatId);
+    if (!session) return;
+    const key = session.agentSession.id;
+    if (this.compactNotifiedSessions.has(key)) return;
+    this.compactNotifiedSessions.add(key);
+    this.sendWatchdogNotification(chatId, "上下文比较大，正在压缩，稍等一下。");
+  }
+
+  /** Watchdog 主循环：检测 idle session，按策略通知或自动 kill */
+  private runIdleWatchdog(): void {
+    if (!(this.agent instanceof CliAgentBackend)) return;
+    const cliAgent = this.agent as CliAgentBackend;
+
+    const now = Date.now();
+    for (const [chatId, session] of this.chatSessions) {
+      const a = cliAgent.getActivity(session.agentSession.id);
+      if (!a || (a.status !== "running")) continue;
+
+      // 探测 session 文件 mtime，更新 lastActiveAt
+      const s = (cliAgent as any).sessions?.get(session.agentSession.id);
+      if (s && typeof (cliAgent as any).probeSessionFileMtime === "function") {
+        const fileMtime = (cliAgent as any).probeSessionFileMtime(s) as number | null;
+        if (fileMtime && fileMtime > a.lastActiveAt) {
+          a.lastActiveAt = fileMtime;
+        }
+      }
+
+      const idleMs = now - a.lastActiveAt;
+
+      // ── 活动恢复检测：发过通知后又有活动 → 通知用户 + 重置 ──
+      if (a.notifyCount > 0 && a.lastNotifiedAt && a.lastActiveAt > a.lastNotifiedAt) {
+        this.sendWatchdogNotification(chatId, "又有动静了，继续跑着。");
+        a.notifyCount = 0;
+        a.lastNotifiedAt = undefined;
+        continue;
+      }
+
+      // ── Compact 中：发送提示 + 跳过 idle 检测 ──
+      if (a.compacting) {
+        this.notifyCompacting(chatId);
+        continue;
+      }
+
+      // ── 策略 1: 有 completion + 无活动超过 5s → 自动 kill ──
+      // 留 5 秒 grace period，让进程有时间自行退出
+      if (a.completionDetected && idleMs > 5_000) {
+        this.log.info("watchdog: auto-kill, completion detected + idle", {
+          chatId,
+          sessionId: session.agentSession.id,
+          idleMs,
+        });
+        this.cancelChat(chatId).catch(() => {});
+        continue;
+      }
+
+      // ── 策略 2: 无 completion + 长时间无活动 → 通知 ──
+      if (!a.completionDetected) {
+        if (a.notifyCount >= 2) continue;  // 两次封顶
+
+        const thresholdMs = a.notifyCount === 0
+          ? AGENT_IDLE_THRESHOLD_MS       // 第一次：10 分钟
+          : AGENT_IDLE_THRESHOLD_2_MS;    // 第二次：30 分钟
+
+        if (idleMs > thresholdMs) {
+          const idleMin = Math.round(idleMs / 60_000);
+          const text = a.notifyCount === 0
+            ? `已经 ${idleMin} 分钟没动静了，可能卡住了。发 /stop 停掉。`
+            : `已经 ${idleMin} 分钟没动静了，大概率卡住了。发 /stop 停掉吧。`;
+
+          this.sendWatchdogNotification(chatId, text);
+          a.notifyCount++;
+          a.lastNotifiedAt = now;
+        }
+      }
+    }
   }
 }
 

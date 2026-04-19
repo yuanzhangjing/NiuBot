@@ -1,5 +1,5 @@
 /**
- * IPC API Server — Unix socket server for CLI commands (send, send-file, cron, restart).
+ * IPC API Server — Unix socket server for CLI commands (send, send-file, cron).
  * Allows the CLI process to communicate with the running daemon.
  */
 
@@ -19,8 +19,6 @@ export interface ApiHandler {
   resolveChatPlatformId(chatIdOrShort: string): string | undefined;
   /** Get the default platform chat ID (from current session context) */
   getDefaultPlatformChatId(sessionId?: string): string | undefined;
-  /** Restart the bot process (admin only) */
-  restart?(chatId?: string): void;
 }
 
 export class ApiServer {
@@ -118,16 +116,6 @@ export class ApiServer {
       await this.handler.sendFile(platformChatId, filePath);
       res.writeHead(200);
       res.end(JSON.stringify({ status: "ok" }));
-    } else if (url === "/restart" && req.method === "POST") {
-      if (this.handler.restart) {
-        res.writeHead(200);
-        res.end(JSON.stringify({ status: "restarting" }));
-        // Delay restart to let response be sent
-        setTimeout(() => this.handler.restart!(data.chat_id), 100);
-      } else {
-        res.writeHead(501);
-        res.end(JSON.stringify({ error: "Restart not supported" }));
-      }
     } else if (url === "/ping") {
       res.writeHead(200);
       res.end(JSON.stringify({ status: "ok" }));

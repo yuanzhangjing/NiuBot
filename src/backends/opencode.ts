@@ -3,8 +3,11 @@
  * 通过 `opencode run` 命令驱动 agent，JSON 事件流输出。
  */
 
+import { statSync } from "node:fs";
+import { homedir } from "node:os";
+import { resolve } from "node:path";
 import { CliAgentBackend, buildNiubotEnv, type BaseCliSession, type ParsedOutput } from "../agent/cli-base.js";
-import type { SessionConfig } from "../agent/types.js";
+import type { SessionConfig, ExecHooks } from "../agent/types.js";
 
 interface OpencodeSession extends BaseCliSession {}
 
@@ -44,11 +47,45 @@ export default class OpencodeBackend extends CliAgentBackend<OpencodeSession> {
     return { args };
   }
 
-  parseOutput(stdout: string, _session: OpencodeSession): ParsedOutput {
+  protected getExecHooks(session: OpencodeSession): ExecHooks {
+    return {
+      onLine: (line) => {
+        try {
+          const e = JSON.parse(line);
+          if (e.sessionID && !session.agentSessionId) {
+            session.agentSessionId = e.sessionID;
+          }
+        } catch { /* non-JSON line */ }
+      },
+      isComplete: (line) => {
+        try {
+          return JSON.parse(line).type === "step_finish";
+        } catch { return false; }
+      },
+    };
+  }
+
+  protected probeSessionFileMtime(_session: OpencodeSession): number | null {
+    // Opencode uses SQLite with WAL; stat all three files and take max mtime
+    const dbPath = resolve(homedir(), ".local", "share", "opencode", "opencode.db");
+    try {
+      let maxMtime = statSync(dbPath).mtimeMs;
+      for (const suffix of ["-wal", "-shm"]) {
+        try {
+          const mt = statSync(dbPath + suffix).mtimeMs;
+          if (mt > maxMtime) maxMtime = mt;
+        } catch { /* file may not exist */ }
+      }
+      return maxMtime;
+    } catch {
+      return null;
+    }
+  }
+
+  parseOutput(stdout: string, session: OpencodeSession): ParsedOutput {
     let text = "";
     let sessionId: string | undefined;
-    let inputTokens = 0;
-    let outputTokens = 0;
+    let contextTokens = 0;
 
     for (const line of stdout.split("\n")) {
       if (!line.trim()) continue;
@@ -61,8 +98,6 @@ export default class OpencodeBackend extends CliAgentBackend<OpencodeSession> {
             text?: string;
             tokens?: {
               total?: number;
-              input?: number;
-              output?: number;
             };
           };
         };
@@ -73,19 +108,17 @@ export default class OpencodeBackend extends CliAgentBackend<OpencodeSession> {
           text += event.part.text;
         }
 
-        if (event.type === "step_finish" && event.part?.tokens) {
-          inputTokens += event.part.tokens.input ?? 0;
-          outputTokens += event.part.tokens.output ?? 0;
+        if (event.type === "step_finish" && event.part?.tokens?.total) {
+          contextTokens = event.part.tokens.total;
         }
       } catch { /* skip non-JSON lines */ }
     }
-
-    const contextTokens = inputTokens + outputTokens;
 
     return {
       text: text.trim() || stdout.trim(),
       agentSessionId: sessionId,
       contextTokens: contextTokens > 0 ? contextTokens : undefined,
+      model: session.model,
     };
   }
 }

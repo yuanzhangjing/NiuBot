@@ -5,9 +5,10 @@
 
 import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
-import type { AgentBackend, AgentSession, AgentResponse, SessionConfig } from "./types.js";
+import type { AgentBackend, AgentSession, AgentResponse, SessionConfig, AgentSessionActivity, ExecHooks } from "./types.js";
 import { createLogger } from "../logger.js";
 import { prependNiubotBinToPath } from "../niubot-cli.js";
+import { createInterface } from "node:readline";
 
 /** 子类 session 的基础字段 */
 export interface BaseCliSession {
@@ -43,10 +44,22 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
   protected sessions = new Map<string, S>();
   private activeProcesses = new Map<string, ChildProcess>();
   private cancelledSessions = new Set<string>();
+  /** 每个 session 的活动状态（watchdog 用） */
+  private activityMap = new Map<string, AgentSessionActivity>();
   protected log;
 
   constructor(protected name: string) {
     this.log = createLogger(name);
+  }
+
+  /** 获取指定 session 的活动状态（供 watchdog 读取） */
+  getActivity(sessionId: string): AgentSessionActivity | undefined {
+    return this.activityMap.get(sessionId);
+  }
+
+  /** 获取所有活动状态（供 watchdog 遍历） */
+  getAllActivities(): ReadonlyMap<string, AgentSessionActivity> {
+    return this.activityMap;
   }
 
   // ── 子类必须实现（4 个） ────────────────────────────────────
@@ -83,6 +96,12 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
   protected agentEnv(): Record<string, string> {
     return {};
   }
+
+  /** watchdog 调用：返回 session 文件的最新 mtime（毫秒时间戳），null 表示不支持或文件不存在 */
+  protected probeSessionFileMtime?(_session: S): number | null;
+
+  /** 子类提供 exec hooks（onLine / isComplete / onStatus） */
+  protected getExecHooks?(_session: S): ExecHooks;
 
   // ── 通用实现 ─────────────────────────────────────────────
 
@@ -123,19 +142,38 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
       stdinLength: stdin?.length ?? 0,
     });
 
+    // 初始化 activity（清空上一轮状态）
+    const now = Date.now();
+    this.activityMap.set(agentSession.id, {
+      status: "running",
+      startedAt: now,
+      lastActiveAt: now,
+      completionDetected: false,
+      compacting: false,
+      notifyCount: 0,
+    });
+
+    // 获取子类提供的 hooks
+    const hooks = this.getExecHooks?.(s);
+
     try {
       const stdout = await this.exec(this.command(), args, {
         cwd: s.workingDirectory,
         env: { ...s.extraEnv, ...this.agentEnv() },
         stdin,
-      }, agentSession.id);
+      }, agentSession.id, hooks);
+
+      // 更新 activity 状态
+      const activity = this.activityMap.get(agentSession.id);
 
       // 进程可能收到 SIGTERM 后仍以 code 0 退出，检查 cancel 标记
       if (this.cancelledSessions.delete(agentSession.id)) {
+        if (activity) activity.status = "cancelled";
         this.log.info("prompt cancelled (process exited gracefully)", { sessionId: agentSession.id });
         return { text: "", cancelled: true };
       }
 
+      if (activity) activity.status = "finished";
       s.cumulativeBytes += stdout.length;
 
       const parsed = this.parseOutput(stdout, s);
@@ -158,10 +196,13 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
         compactCount: s.compactCount || undefined,
       };
     } catch (err: any) {
+      const activity = this.activityMap.get(agentSession.id);
       if (this.cancelledSessions.delete(agentSession.id)) {
+        if (activity) activity.status = "cancelled";
         this.log.warn("prompt cancelled", { sessionId: agentSession.id });
         return { text: "", cancelled: true };
       }
+      if (activity) activity.status = "failed";
       throw err;
     }
   }
@@ -197,6 +238,7 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
     args: string[],
     opts?: { cwd?: string; env?: Record<string, string>; stdin?: string },
     sessionId?: string,
+    hooks?: ExecHooks,
   ): Promise<string> {
     return new Promise((resolve, reject) => {
       const startedAt = Date.now();
@@ -219,16 +261,76 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
         stdio: ["pipe", "pipe", "pipe"],
       });
 
-      if (sessionId) this.activeProcesses.set(sessionId, child);
+      if (sessionId) {
+        this.activeProcesses.set(sessionId, child);
+        // 记录 PID 到 activity（供 watchdog 使用）
+        const activity = this.activityMap.get(sessionId);
+        if (activity) activity.pid = child.pid;
+      }
 
-      const chunks: Buffer[] = [];
+      const lines: string[] = [];
       const stderrChunks: Buffer[] = [];
-      child.stdout.on("data", (chunk: Buffer) => chunks.push(chunk));
-      child.stderr.on("data", (chunk: Buffer) => stderrChunks.push(chunk));
+
+      // ── 流式逐行读取 stdout ──
+      if (hooks) {
+        const rl = createInterface({ input: child.stdout, crlfDelay: Infinity });
+        rl.on("line", (line) => {
+          lines.push(line);
+          // 更新活动时间
+          if (sessionId) {
+            const a = this.activityMap.get(sessionId);
+            if (a) a.lastActiveAt = Date.now();
+          }
+          // compact 检测（通用：所有 backend 共享）
+          try {
+            const parsed = JSON.parse(line);
+            if (parsed.type === "system" && parsed.subtype === "status" && parsed.status === "compacting") {
+              if (sessionId) {
+                const a = this.activityMap.get(sessionId);
+                if (a) a.compacting = true;
+              }
+              hooks.onStatus?.("compacting");
+            } else {
+              // 收到非 compact 事件，清除 compacting 标记
+              if (sessionId) {
+                const a = this.activityMap.get(sessionId);
+                if (a && a.compacting) a.compacting = false;
+              }
+            }
+          } catch {
+            // 非 JSON 行，清除 compacting
+            if (sessionId) {
+              const a = this.activityMap.get(sessionId);
+              if (a && a.compacting) a.compacting = false;
+            }
+          }
+          // 回调
+          hooks.onLine?.(line);
+          // 完成检测
+          if (hooks.isComplete?.(line)) {
+            if (sessionId) {
+              const a = this.activityMap.get(sessionId);
+              if (a) a.completionDetected = true;
+            }
+          }
+        });
+      } else {
+        // 无 hooks 时退化为 buffer 模式（兼容 checkAvailable 等非业务调用）
+        child.stdout.on("data", (chunk: Buffer) => lines.push(chunk.toString()));
+      }
+
+      child.stderr.on("data", (chunk: Buffer) => {
+        stderrChunks.push(chunk);
+        // stderr 也更新活动时间
+        if (sessionId) {
+          const a = this.activityMap.get(sessionId);
+          if (a) a.lastActiveAt = Date.now();
+        }
+      });
 
       child.on("close", (code, signal) => {
         if (sessionId) this.activeProcesses.delete(sessionId);
-        const stdout = Buffer.concat(chunks).toString();
+        const stdout = hooks ? lines.join("\n") : lines.join("");
         const stderr = Buffer.concat(stderrChunks).toString();
         const durationMs = Date.now() - startedAt;
         const stdoutTail = tailForLog(stdout, 6);
@@ -249,10 +351,6 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
             stdoutTail,
             stderrTail,
           });
-          // Keep err.message short. stdout/stderr may contain the full
-          // injected prompt + streaming events (tens of KB); stashing them
-          // here would leak into user-facing error messages. Callers that
-          // need the raw streams read `.stdout` / `.stderr` directly.
           const err = new Error(`Command failed: ${cmd} (exit ${code ?? "null"}${signal ? `, signal ${signal}` : ""})`);
           (err as any).stdout = stdout;
           (err as any).stderr = stderr;

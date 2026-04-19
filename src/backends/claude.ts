@@ -7,7 +7,7 @@ import { statSync, openSync, readSync, closeSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve, sep } from "node:path";
 import { CliAgentBackend, buildNiubotEnv, type BaseCliSession, type ParsedOutput } from "../agent/cli-base.js";
-import type { SessionConfig } from "../agent/types.js";
+import type { SessionConfig, ExecHooks } from "../agent/types.js";
 import { DEFAULT_LITE_MODELS } from "../config.js";
 
 interface ClaudeSession extends BaseCliSession {
@@ -206,6 +206,34 @@ export default class ClaudeBackend extends CliAgentBackend<ClaudeSession> {
     const projectKey = absWorkDir.split(sep).join("-");
     const dir = resolve(home, ".claude", "projects", projectKey);
     return resolve(dir, `${session.agentSessionId}.jsonl`);
+  }
+
+  protected getExecHooks(session: ClaudeSession): ExecHooks {
+    return {
+      onLine: (line) => {
+        try {
+          const e = JSON.parse(line);
+          // 早期捕获 session ID
+          if (e.session_id && !session.agentSessionId) {
+            session.agentSessionId = e.session_id;
+          }
+        } catch { /* non-JSON line */ }
+      },
+      isComplete: (line) => {
+        try { return JSON.parse(line).type === "result"; }
+        catch { return false; }
+      },
+    };
+  }
+
+  protected probeSessionFileMtime(session: ClaudeSession): number | null {
+    const jsonlPath = this.getJsonlPath(session);
+    if (!jsonlPath) return null;
+    try {
+      return statSync(jsonlPath).mtimeMs;
+    } catch {
+      return null;
+    }
   }
 
   protected agentEnv(): Record<string, string> {

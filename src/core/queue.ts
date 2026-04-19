@@ -100,6 +100,13 @@ export class MessageQueue {
     return dropped;
   }
 
+  /** 获取指定 chat 的待处理消息数（buffer + pending） */
+  pendingCount(chatId: string): number {
+    const q = this.queues.get(chatId);
+    if (!q) return 0;
+    return q.buffer.length + q.pending.length;
+  }
+
   /** 是否有正在处理的任务 */
   hasBusyChats(): boolean {
     for (const [, q] of this.queues) {
