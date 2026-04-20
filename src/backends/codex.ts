@@ -222,8 +222,9 @@ export default class CodexBackend extends CliAgentBackend<CodexSession> {
       isComplete: (line) => {
         try {
           const e = JSON.parse(line);
-          // Codex emits item.completed with type=agent_message for the final response
-          return e.type === "item.completed" && e.item?.type === "agent_message";
+          // 一轮里可能先后出现 commentary 和 final 两条 agent_message。
+          // 必须等 turn.completed，再由 parseOutput 取最后一条 agent_message。
+          return e.type === "turn.completed";
         } catch { return false; }
       },
     };

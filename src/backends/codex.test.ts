@@ -309,4 +309,42 @@ describe("CodexBackend session metadata", () => {
       stdin: "second turn",
     });
   });
+
+  it("returns the last agent message when commentary and final answer both appear in one turn", () => {
+    const backend = new CodexBackend();
+    const session = backend.buildSession({ workingDirectory: "/tmp" });
+
+    const parsed = backend.parseOutput([
+      JSON.stringify({
+        type: "item.completed",
+        item: { type: "agent_message", text: "先回一条 commentary" },
+      }),
+      JSON.stringify({
+        type: "item.completed",
+        item: { type: "agent_message", text: "最终结果" },
+      }),
+      JSON.stringify({
+        type: "turn.completed",
+        usage: { input_tokens: 12, output_tokens: 3 },
+      }),
+    ].join("\n"), session);
+
+    expect(parsed.text).toBe("最终结果");
+  });
+
+  it("waits for turn completion instead of finishing on the first agent message", () => {
+    const backend = new CodexBackend();
+    const session = backend.buildSession({ workingDirectory: "/tmp" });
+    const hooks = (backend as any).getExecHooks(session) as { isComplete?: (line: string) => boolean };
+
+    expect(hooks.isComplete?.(JSON.stringify({
+      type: "item.completed",
+      item: { type: "agent_message", text: "先回一条 commentary" },
+    }))).toBe(false);
+
+    expect(hooks.isComplete?.(JSON.stringify({
+      type: "turn.completed",
+      usage: { input_tokens: 12, output_tokens: 3 },
+    }))).toBe(true);
+  });
 });

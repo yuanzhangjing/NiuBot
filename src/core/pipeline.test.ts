@@ -550,7 +550,7 @@ describe("Pipeline.recover", () => {
     expect(removedReactions).not.toContainEqual({ chatId: "chat-open-id", msgId: "m2", emoji: "Get" });
   });
 
-  test("replies safely on /clear when no active session exists", async () => {
+  test("replies safely on /clear when queue is empty", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
@@ -571,10 +571,10 @@ describe("Pipeline.recover", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(handled).toBe(true);
-    expect(sentTexts).toContain("当前没有进行中的会话；下一条消息会新建会话。");
+    expect(sentTexts).toContain("队列是空的，没啥可清的。");
   });
 
-  test("archives db-only active session on /clear", async () => {
+  test("/clear does not archive session, only drains queue", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
@@ -602,8 +602,8 @@ describe("Pipeline.recover", () => {
     const row = db.prepare("SELECT status FROM sessions WHERE id = 's1'").get() as { status: string };
 
     expect(handled).toBe(true);
-    expect(row.status).toBe("archived");
-    expect(sentTexts).toContain("已开始新会话，当前上下文已清空。");
+    expect(row.status).toBe("active");
+    expect(sentTexts).toContain("队列是空的，没啥可清的。");
   });
 
   test("surfaces structured agent errors to the user", async () => {

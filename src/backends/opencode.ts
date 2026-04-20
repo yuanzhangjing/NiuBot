@@ -44,8 +44,7 @@ export default class OpencodeBackend extends CliAgentBackend<OpencodeSession> {
     ];
     if (session.model) args.push("-m", session.model);
     if (session.agentSessionId) args.push("-s", session.agentSessionId);
-    args.push(message);
-    return { args };
+    return { args, stdin: message };
   }
 
   protected getExecHooks(session: OpencodeSession): ExecHooks {
@@ -60,7 +59,10 @@ export default class OpencodeBackend extends CliAgentBackend<OpencodeSession> {
       },
       isComplete: (line) => {
         try {
-          return JSON.parse(line).type === "step_finish";
+          const e = JSON.parse(line);
+          // step_finish with reason="stop" or "end_turn" = 真正结束
+          // reason="tool-calls" = 中间 step，还有后续
+          return e.type === "step_finish" && e.part?.reason !== "tool-calls";
         } catch { return false; }
       },
     };
@@ -128,11 +130,28 @@ export default class OpencodeBackend extends CliAgentBackend<OpencodeSession> {
       } catch { /* skip non-JSON lines */ }
     }
 
+    // 优先用配置里的 model，没配则从 opencode DB 查 modelID
+    const model = session.model ?? (sessionId ? this.queryModelId(sessionId) : undefined);
+
     return {
       text: text.trim() || stdout.trim(),
       agentSessionId: sessionId,
       contextTokens: contextTokens > 0 ? contextTokens : undefined,
-      model: session.model,
+      model,
     };
+  }
+
+  /** 从 opencode DB 的 message 表查最新 assistant 消息的 modelID */
+  private queryModelId(sessionId: string): string | undefined {
+    const db = this.getOpencodeDb();
+    if (!db) return undefined;
+    try {
+      const row = db.prepare(
+        "SELECT json_extract(data, '$.modelID') AS model_id FROM message WHERE session_id = ? AND json_extract(data, '$.role') = 'assistant' ORDER BY time_created DESC LIMIT 1",
+      ).get(sessionId) as { model_id: string | null } | undefined;
+      return row?.model_id ?? undefined;
+    } catch {
+      return undefined;
+    }
   }
 }

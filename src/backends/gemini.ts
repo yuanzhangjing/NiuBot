@@ -93,7 +93,13 @@ export default class GeminiBackend extends CliAgentBackend<GeminiSession> {
         continue;
       }
 
-      // assistant message: accumulate text
+      // tool_use: clear accumulated text — previous assistant messages are intermediate thoughts
+      if (event["type"] === "tool_use") {
+        textParts.length = 0;
+        continue;
+      }
+
+      // assistant message: accumulate text (delta chunks of the current turn)
       if (event["type"] === "message" && event["role"] === "assistant") {
         if (typeof event["content"] === "string") textParts.push(event["content"]);
         continue;
