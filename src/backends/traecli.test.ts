@@ -37,7 +37,7 @@ describe("TraeCliBackend", () => {
     session.agentSessionId = "session-123";
 
     expect(backend.buildInput(session, "second turn")).toEqual({
-      args: ["-p", "--json", "--yolo", "--", "second turn", "--resume=session-123"],
+      args: ["-p", "--json", "--yolo", "--resume=session-123", "--", "second turn"],
     });
   });
 

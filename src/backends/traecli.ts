@@ -40,8 +40,8 @@ export default class TraeCliBackend extends CliAgentBackend<TraeCliSession> {
   buildInput(session: TraeCliSession, message: string): { args: string[]; stdin?: string } {
     const args = ["-p", "--json", "--yolo"];
     if (session.model) args.push("-c", `model.name=${session.model}`);
-    args.push("--", message);
     if (session.agentSessionId) args.push(`--resume=${session.agentSessionId}`);
+    args.push("--", message);
     return { args };
   }
 
