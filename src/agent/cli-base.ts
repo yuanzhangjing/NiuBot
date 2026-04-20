@@ -270,6 +270,8 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
 
       const lines: string[] = [];
       const stderrChunks: Buffer[] = [];
+      let settled = false;
+      let earlyResolveAt: number | undefined;
 
       // ── 流式逐行读取 stdout ──
       if (hooks) {
@@ -306,11 +308,24 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
           }
           // 回调
           hooks.onLine?.(line);
-          // 完成检测
+          // 完成检测 → 立即 resolve，不等进程退出
           if (hooks.isComplete?.(line)) {
             if (sessionId) {
               const a = this.activityMap.get(sessionId);
               if (a) a.completionDetected = true;
+            }
+            if (!settled) {
+              settled = true;
+              earlyResolveAt = Date.now();
+              const stdout = lines.join("\n");
+              this.log.info("completion detected, resolving immediately", {
+                sessionId: sessionId ?? null,
+                linesCollected: lines.length,
+                stdoutLength: stdout.length,
+                elapsedMs: earlyResolveAt - startedAt,
+              });
+              resolve(stdout);
+              // 进程继续在后台运行，等它自行退出；退不了的由 watchdog 收尸
             }
           }
         });
@@ -329,10 +344,33 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
       });
 
       child.on("close", (code, signal) => {
+        const durationMs = Date.now() - startedAt;
+
+        // 已经在收到 result 时提前 resolve 了，这里只做清理
+        if (settled) {
+          const afterResolveMs = earlyResolveAt ? Date.now() - earlyResolveAt : undefined;
+          if (sessionId) {
+            // 只清理自己的 activeProcesses 条目（新请求可能已覆盖为新进程）
+            if (this.activeProcesses.get(sessionId) === child) {
+              this.activeProcesses.delete(sessionId);
+            }
+            // 清理 watchdog kill 留下的 cancel 标记，防止污染下次请求
+            this.cancelledSessions.delete(sessionId);
+          }
+          this.log.info("child process exited after early resolve", {
+            sessionId: sessionId ?? null,
+            code,
+            signal: signal ?? null,
+            durationMs,
+            afterResolveMs,
+          });
+          return;
+        }
+
+        // 未提前 resolve → 正常的退出处理
         if (sessionId) this.activeProcesses.delete(sessionId);
         const stdout = hooks ? lines.join("\n") : lines.join("");
         const stderr = Buffer.concat(stderrChunks).toString();
-        const durationMs = Date.now() - startedAt;
         const stdoutTail = tailForLog(stdout, 6);
         const stderrTail = tailForLog(stderr, 6);
         if (code !== 0) {
@@ -374,7 +412,18 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
       });
 
       child.on("error", (err) => {
-        if (sessionId) this.activeProcesses.delete(sessionId);
+        if (sessionId) {
+          if (this.activeProcesses.get(sessionId) === child) {
+            this.activeProcesses.delete(sessionId);
+          }
+        }
+        if (settled) {
+          this.log.warn("child process error after early resolve", {
+            sessionId: sessionId ?? null,
+            error: String(err),
+          });
+          return;
+        }
         this.log.error("child process spawn error", {
           sessionId: sessionId ?? null,
           cmd,

@@ -830,14 +830,19 @@ export class Pipeline {
         return true;
       }
       case "/stop": {
-        this.log.info("builtin command: stop", { userId, chatId });
+        const clearAll = parts.includes("-a");
+        this.log.info("builtin command: stop", { userId, chatId, clearAll });
         if (this.chatSessions.has(chatId)) {
           this.cancelChat(chatId).catch(() => {});
           const pending = this.queue.pendingCount(chatId);
-          const hint = pending > 0
-            ? `好的，已停止。还有 ${pending} 条待处理消息，发 /clear 可清空。`
-            : "好的，已停止。";
-          this.replyText(chatId, platformChatId, msgId, hint);
+          if (clearAll && pending > 0) {
+            this.queue.drain(chatId);
+            this.replyText(chatId, platformChatId, msgId, `已停止，并清空 ${pending} 条排队消息。`);
+          } else if (pending > 0) {
+            this.replyText(chatId, platformChatId, msgId, `已停止当前任务，还有 ${pending} 条排队消息会继续处理。发 /stop -a 可全部停止并清空队列。`);
+          } else {
+            this.replyText(chatId, platformChatId, msgId, "好的，已停止。");
+          }
         } else {
           this.replyText(chatId, platformChatId, msgId, "当前没有正在执行的任务。");
         }
@@ -1548,7 +1553,8 @@ export class Pipeline {
   private sendHelpCard(chatId: string, platformChatId: string, msgId: string | undefined, isAdmin: boolean): void {
     const lines = [
       "`/new`　　新会话（清空当前上下文）",
-      "`/stop`　　停止正在执行的任务",
+      "`/stop`　　停止当前任务（排队消息继续处理）",
+      "`/stop -a`　全部停止并清空队列",
       "`/clear`　　清空排队中的消息",
       "`/status`　查看运行状态",
       "`/cron`　　查看定时任务",

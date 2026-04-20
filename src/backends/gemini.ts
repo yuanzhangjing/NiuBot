@@ -3,9 +3,9 @@
  * 通过 `gemini -p` 命令驱动 agent，stream-json 模式。
  */
 
-import { readdirSync, statSync } from "node:fs";
+import { readFileSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { resolve, sep } from "node:path";
+import { resolve, basename } from "node:path";
 import { CliAgentBackend, buildNiubotEnv, type BaseCliSession, type ParsedOutput } from "../agent/cli-base.js";
 import type { SessionConfig, ExecHooks } from "../agent/types.js";
 import { DEFAULT_LITE_MODELS } from "../config.js";
@@ -44,12 +44,10 @@ export default class GeminiBackend extends CliAgentBackend<GeminiSession> {
 
   protected probeSessionFileMtime(session: GeminiSession): number | null {
     if (!session.agentSessionId) return null;
-    // Gemini stores sessions at ~/.gemini/tmp/<project>/chats/session-*-<sid>.json
-    const absWorkDir = resolve(session.workingDirectory);
-    const projectKey = absWorkDir.split(sep).join("-");
-    const chatsDir = resolve(homedir(), ".gemini", "tmp", projectKey, "chats");
+    const chatsDir = this.getChatsDir(session);
+    const shortId = session.agentSessionId.split("-")[0]!;
     try {
-      const match = readdirSync(chatsDir).find((name) => name.includes(session.agentSessionId!));
+      const match = readdirSync(chatsDir).find((name) => name.includes(shortId));
       if (match) return statSync(resolve(chatsDir, match)).mtimeMs;
     } catch { /* directory may not exist */ }
     return null;
@@ -101,26 +99,23 @@ export default class GeminiBackend extends CliAgentBackend<GeminiSession> {
         continue;
       }
 
-      // result event: stats + error
+      // result event: error + model
       if (event["type"] === "result") {
         if (event["status"] === "error") {
           const err = event["error"] as Record<string, unknown> | undefined;
           errorMsg = (err?.["message"] as string) ?? JSON.stringify(err);
         }
+        // model 从 stats 里取（result.stats.models 的第一个 key）
         const stats = event["stats"] as Record<string, unknown> | undefined;
         if (stats) {
           const models = stats["models"] as Record<string, unknown> | undefined;
           if (models) {
             const modelNames = Object.keys(models);
-            if (modelNames.length > 0) {
-              model = modelNames[0];
-              const ms = models[model] as Record<string, number> | undefined;
-              if (ms) {
-                contextTokens = (ms["input_tokens"] ?? 0) + (ms["output_tokens"] ?? 0);
-              }
-            }
+            if (modelNames.length > 0) model = modelNames[0];
           }
         }
+        // token 数不从 result.stats 取——有 tool call 时是累加值，不可靠。
+        // 统一从 session file 读取。
       }
     }
 
@@ -129,11 +124,58 @@ export default class GeminiBackend extends CliAgentBackend<GeminiSession> {
       return { text: `（Gemini 错误）${errorMsg}`, agentSessionId: sessionId, model };
     }
 
+    // token 数从 session file 取（精确值），不依赖 result.stats
+    if (sessionId) {
+      contextTokens = this.scanSessionFile(sessionId, _session);
+    }
+    this.log.info("parseOutput", {
+      sessionId: sessionId ?? null,
+      contextTokens: contextTokens ?? null,
+      model: model ?? null,
+    });
+
     return {
       text: text.trim() || stdout.trim() || "（Gemini 无输出）",
       agentSessionId: sessionId,
       contextTokens,
       model,
     };
+  }
+
+  /** Gemini session file 所在目录：~/.gemini/tmp/<dirname>/chats/ */
+  private getChatsDir(session: GeminiSession): string {
+    // Gemini CLI 用 cwd 的目录名（basename）作为 project key，不是完整路径
+    const projectKey = basename(resolve(session.workingDirectory));
+    return resolve(homedir(), ".gemini", "tmp", projectKey, "chats");
+  }
+
+  /**
+   * 从 Gemini session file 读取最后一条 gemini message 的 token 数据。
+   * 返回 input + output（不含 thoughts），即真实的上下文大小。
+   */
+  private scanSessionFile(sessionId: string, session: GeminiSession): number | undefined {
+    const chatsDir = this.getChatsDir(session);
+    const shortId = sessionId.split("-")[0]!;
+    try {
+      const match = readdirSync(chatsDir).find((name) => name.includes(shortId));
+      if (!match) return undefined;
+      const data = JSON.parse(readFileSync(resolve(chatsDir, match), "utf-8")) as {
+        messages?: Array<{
+          type?: string;
+          tokens?: { input?: number; output?: number };
+        }>;
+      };
+      if (!data.messages) return undefined;
+      // 取最后一条 gemini type message 的 tokens
+      for (let i = data.messages.length - 1; i >= 0; i--) {
+        const msg = data.messages[i]!;
+        if (msg.type === "gemini" && msg.tokens) {
+          const input = msg.tokens.input ?? 0;
+          const output = msg.tokens.output ?? 0;
+          return input + output;
+        }
+      }
+    } catch { /* file not found or parse error */ }
+    return undefined;
   }
 }
