@@ -305,6 +305,112 @@ Common causes: invalid Feishu credentials, missing permissions, agent CLI not wo
 
 ---
 
+## Adding a Bot
+
+This section is for adding a **new bot** to an existing NiuBot installation. If you haven't installed NiuBot yet, start from [Step 1](#step-1-install-niubot).
+
+There are two ways:
+- **CLI** (quick): `niubot add-bot` — interactive prompts, handles config and directory setup
+- **Manual** (agent-guided): follow the steps below
+
+### Quick: CLI Command
+
+```bash
+niubot add-bot
+```
+
+The CLI will walk through: backend selection → Bot ID → model config → Feishu credentials → update config.yaml → create data directory. If the service is running, it offers to restart.
+
+After the CLI finishes, continue to [Post-Setup: Feishu Permissions](#post-setup-feishu-permissions) below.
+
+### Manual: Step-by-Step
+
+#### 1. Choose a Bot ID
+
+Pick a unique ID (e.g. `MyBot`). This determines the data directory (`~/.niubot/<id>/`) and cannot be changed after setup.
+
+Check existing bots to avoid conflicts:
+```bash
+cat ~/.niubot/config.yaml   # look at the bots array
+```
+
+#### 2. Create Bot Directory and Persona
+
+```bash
+mkdir -p ~/.niubot/<BotID>
+```
+
+Write `~/.niubot/<BotID>/persona.md`:
+```markdown
+> This file defines the bot's personality. Admins can ask the bot to modify it.
+
+## Role
+None
+
+## Style
+Keep conversations natural and friendly.
+```
+
+#### 3. Append Bot to config.yaml
+
+Read existing `~/.niubot/config.yaml` and append a new entry to the `bots` array. **Do not modify or remove existing bot entries.**
+
+```yaml
+bots:
+  - id: ExistingBot          # ← keep existing entries untouched
+    backend: claude
+    appId: "cli_xxx"
+    appSecret: "xxx"
+
+  - id: NewBot                # ← append new bot
+    backend: claude            # claude / codex / traecli / custom plugin name
+    appId: "cli_yyy"          # from Feishu app (Step 4)
+    appSecret: "yyy"
+    # model: ""               # optional: main model
+    # liteModel: ""           # optional: lite model for background tasks
+    # workingDirectory: ~/niubot-workspace/NewBot  # optional
+```
+
+Recommended lite models by backend:
+| Backend | Suggested liteModel |
+|---------|-------------------|
+| claude | `haiku` |
+| codex | `gpt-5.4-mini` |
+| traecli | `Gemini-3-Flash-Preview` |
+| gemini | `gemini-2.5-flash` |
+
+For custom backends, also add a `backends:` section if not already present (see [Plugin API Reference](#plugin-api-reference)).
+
+#### 4. Create Feishu App (if new)
+
+Each bot needs its own Feishu app. If you already have one, skip to credentials.
+
+1. Open https://open.feishu.cn/app and create a new **Enterprise Self-Built App**
+2. **Credentials & Basic Info** → copy App ID + App Secret
+3. **Bot** page → enable Bot capability
+4. Fill the credentials into config.yaml
+
+**Important**: Do NOT add permissions or publish yet — that requires an active connection (see below).
+
+#### 5. Restart and Load
+
+```bash
+niubot start --restart
+```
+
+Wait for the health check to pass for the new bot.
+
+### Post-Setup: Feishu Permissions
+
+After the engine is running with the new bot:
+
+1. **权限管理** → batch-enable non-review permissions in: 消息与群组, 云文档, 应用信息
+2. **事件订阅** → add `im.message.receive_v1`
+3. **Create a version** → publish the app
+4. **Verify**: send a message to the bot in Feishu
+
+---
+
 ## Plugin API Reference
 
 NiuBot supports custom agent backends via plugins. A plugin is a JS file that extends `CliAgentBackend` and implements 4 required methods. The engine handles process management, cancellation, session resume, and all infrastructure — the plugin only defines how to talk to a specific CLI tool.

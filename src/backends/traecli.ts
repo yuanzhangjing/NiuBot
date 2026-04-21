@@ -111,6 +111,27 @@ export default class TraeCliBackend extends CliAgentBackend<TraeCliSession> {
     }
   }
 
+  protected probeSessionLastLine(session: TraeCliSession): string | null {
+    const jsonlPath = this.getJsonlPath(session);
+    if (!jsonlPath) return null;
+    try {
+      const stat = statSync(jsonlPath);
+      const tailSize = Math.min(stat.size, 2048);
+      if (tailSize === 0) return null;
+      const fd = openSync(jsonlPath, "r");
+      try {
+        const buf = Buffer.alloc(tailSize);
+        readSync(fd, buf, 0, tailSize, stat.size - tailSize);
+        const lines = buf.toString("utf-8").split("\n").filter((l) => l.trim());
+        return lines.length > 0 ? lines[lines.length - 1]! : null;
+      } finally {
+        closeSync(fd);
+      }
+    } catch {
+      return null;
+    }
+  }
+
   private scanJsonl(session: TraeCliSession): { model?: string; contextTokens?: number; errorMessage?: string } {
     const jsonlPath = this.getJsonlPath(session);
     if (!jsonlPath) return {};

@@ -99,6 +99,8 @@ export interface AgentSessionActivity {
   compacting?: boolean;
   /** 当前 exec 的子进程 PID（用于 watchdog kill） */
   pid?: number;
+  /** 最近一行有意义的 stdout 输出（供 watchdog 展示） */
+  lastLine?: string;
   /** 本轮已发送的通知次数（封顶 2 次） */
   notifyCount: number;
   /** 上次通知时间 */

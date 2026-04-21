@@ -2287,9 +2287,12 @@ export class Pipeline {
 
         if (idleMs > thresholdMs) {
           const idleMin = Math.round(idleMs / 60_000);
-          const text = a.notifyCount === 0
-            ? `已经 ${idleMin} 分钟没动静了，可能卡住了。发 /stop 停掉。`
-            : `已经 ${idleMin} 分钟没动静了，大概率卡住了。发 /stop 停掉吧。`;
+          let lastLine = a.lastLine;
+          if (!lastLine && s && typeof (cliAgent as any).probeSessionLastLine === "function") {
+            lastLine = (cliAgent as any).probeSessionLastLine(s) as string | null ?? undefined;
+          }
+          const lastHint = formatLastLine(lastLine);
+          const text = `已经 ${idleMin} 分钟没有新输出，有可能卡住了。可以发 /stop 停止当前任务。${lastHint}`;
 
           this.sendWatchdogNotification(chatId, text);
           a.notifyCount++;
@@ -2442,6 +2445,12 @@ function formatUptime(ms: number): string {
 
 function displayBackendType(type: AgentBackendType): string {
   return type;
+}
+
+function formatLastLine(lastLine: string | undefined): string {
+  if (!lastLine) return "";
+  const truncated = lastLine.length > 500 ? lastLine.slice(0, 500) + "…" : lastLine;
+  return `\n——\n最后输出：${truncated}`;
 }
 
 /** 格式化 lite model 显示：优先显示用户配置值，否则显示 backend 默认值 */

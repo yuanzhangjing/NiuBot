@@ -100,6 +100,9 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
   /** watchdog 调用：返回 session 文件的最新 mtime（毫秒时间戳），null 表示不支持或文件不存在 */
   protected probeSessionFileMtime?(_session: S): number | null;
 
+  /** watchdog 调用：从 session 文件尾部读取最后一行（用于无 stdout 流的 backend） */
+  protected probeSessionLastLine?(_session: S): string | null;
+
   /** 子类提供 exec hooks（onLine / isComplete / onStatus） */
   protected getExecHooks?(_session: S): ExecHooks;
 
@@ -278,10 +281,13 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
         const rl = createInterface({ input: child.stdout, crlfDelay: Infinity });
         rl.on("line", (line) => {
           lines.push(line);
-          // 更新活动时间
+          // 更新活动时间 + 最近一行输出
           if (sessionId) {
             const a = this.activityMap.get(sessionId);
-            if (a) a.lastActiveAt = Date.now();
+            if (a) {
+              a.lastActiveAt = Date.now();
+              if (line.trim()) a.lastLine = line;
+            }
           }
           // compact 检测（通用：所有 backend 共享）
           try {

@@ -4,12 +4,13 @@
  * NiuBot User CLI — 面向安装用户的服务管理命令。
  *
  * Commands:
- *   niubot init    — 环境检查 + 配置模板生成
- *   niubot start   — 校验 + 启动服务
- *   niubot stop    — 停止服务
- *   niubot status  — 查看运行状态
- *   niubot update  — 检查并安装最新版本
- *   niubot version — 显示版本号
+ *   niubot init     — 环境检查 + 配置模板生成
+ *   niubot add-bot  — 向已有配置添加新 bot
+ *   niubot start    — 校验 + 启动服务
+ *   niubot stop     — 停止服务
+ *   niubot status   — 查看运行状态
+ *   niubot update   — 检查并安装最新版本
+ *   niubot version  — 显示版本号
  */
 
 import { execFileSync, spawn } from "node:child_process";
@@ -18,6 +19,7 @@ import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
+import yaml from "yaml";
 import { AGENT_REGISTRY, DEFAULT_LITE_MODELS, loadConfig, type BuiltinBackendType, type NiuBotConfig } from "./config.js";
 
 // ── Paths ──────────────────────────────────────────────────
@@ -457,6 +459,225 @@ async function cmdInit(niubotHome: string, flags: CliFlags): Promise<void> {
   console.log("  2. \u4e8b\u4ef6\u8ba2\u9605 \u2192 add 'im.message.receive_v1'");
   console.log("  3. Create a version \u2192 publish the app");
   console.log("  4. Send a message to the bot to verify it works");
+  console.log();
+}
+
+// ── Add Bot ───────────────────────────────────────────────
+
+async function cmdAddBot(niubotHome: string): Promise<void> {
+  console.log();
+  console.log("Add Bot");
+  console.log("─".repeat(40));
+
+  // Must have an existing config
+  const configPath = path.join(niubotHome, "config.yaml");
+  if (!fs.existsSync(configPath)) {
+    fail("config.yaml not found");
+    hint("Run 'niubot init' first to create your initial setup");
+    console.log();
+    process.exit(1);
+  }
+
+  // Parse existing config (raw YAML, not the typed config — we need to preserve structure)
+  const rawYaml = fs.readFileSync(configPath, "utf-8");
+  const doc = yaml.parse(rawYaml) as Record<string, unknown>;
+
+  if (!Array.isArray(doc["bots"])) {
+    fail("config.yaml uses legacy format (no 'bots' array)");
+    hint("Run 'niubot init --force' to migrate to the new format first");
+    console.log();
+    process.exit(1);
+  }
+
+  const existingBots = doc["bots"] as Array<Record<string, unknown>>;
+  const existingIds = new Set(existingBots.map((b) => String(b["id"] ?? b["name"] ?? "")));
+
+  // ── Backend selection ───────────────────────────────────
+  console.log();
+  const customAnswer = await prompt("  Do you have a custom agent backend? (y/N): ");
+  const wantsCustom = customAnswer.toLowerCase() === "y" || customAnswer.toLowerCase() === "yes";
+
+  let backend: string;
+  let customBackendConfig: { name: string; plugin: string } | undefined;
+
+  if (wantsCustom) {
+    console.log();
+    console.log("  Custom backend setup");
+    console.log("  ─".repeat(36));
+    const backendName = await prompt("  Backend name (e.g. my-agent): ");
+    if (!backendName) {
+      fail("Backend name is required");
+      process.exit(1);
+    }
+    if (backendName in AGENT_REGISTRY) {
+      fail(`'${backendName}' is a built-in backend name, choose a different one`);
+      process.exit(1);
+    }
+    const existingBackends = (doc["backends"] as Record<string, unknown>) ?? {};
+    if (backendName in existingBackends) {
+      fail(`Backend '${backendName}' already defined in config.yaml`);
+      process.exit(1);
+    }
+    const defaultPlugin = `./backends/${backendName}.js`;
+    const pluginPath = (await prompt(`  Plugin path (default: ${defaultPlugin}): `)) || defaultPlugin;
+    customBackendConfig = { name: backendName, plugin: pluginPath };
+    backend = backendName;
+
+    const backendsDir = path.join(niubotHome, "backends");
+    fs.mkdirSync(backendsDir, { recursive: true });
+  } else {
+    console.log();
+    console.log("  Scanning agent backends...");
+    const { results: backendResults } = scanAllBackends();
+    for (const r of backendResults) {
+      if (r.available) ok(`${r.name} v${r.version}`);
+      else fail(`${r.name} — ${r.error}`);
+    }
+
+    const availableBackends = backendResults.filter((r) => r.available);
+    if (availableBackends.length === 0) {
+      fail("No agent backend found");
+      hint("Install claude, codex, or traecli CLI, or re-run with a custom backend");
+      console.log();
+      process.exit(1);
+    }
+
+    if (availableBackends.length === 1) {
+      backend = availableBackends[0]!.name;
+      info(`→ Using '${backend}' as bot backend`);
+    } else {
+      console.log();
+      console.log("  Available backends:");
+      for (let i = 0; i < availableBackends.length; i++) {
+        const r = availableBackends[i]!;
+        console.log(`    ${i + 1}) ${r.name} (v${r.version})`);
+      }
+      const answer = await prompt(`  Select backend [1-${availableBackends.length}] (default: 1): `);
+      const parsed = answer ? parseInt(answer, 10) : 1;
+      const idx = Number.isNaN(parsed) ? -1 : parsed - 1;
+      if (idx < 0 || idx >= availableBackends.length) {
+        fail("Invalid selection");
+        process.exit(1);
+      }
+      backend = availableBackends[idx]!.name;
+      info(`→ Using '${backend}' as bot backend`);
+    }
+  }
+
+  // ── Bot ID ──────────────────────────────────────────────
+  console.log();
+  console.log("Bot configuration");
+  console.log("─".repeat(40));
+  console.log();
+  console.log("  Bot ID determines the data directory and cannot be changed after setup.");
+  let botId: string;
+  while (true) {
+    botId = (await prompt("  Bot ID: ")).trim();
+    if (!botId) {
+      fail("Bot ID is required");
+      continue;
+    }
+    if (existingIds.has(botId)) {
+      fail(`Bot ID '${botId}' already exists in config.yaml`);
+      continue;
+    }
+    break;
+  }
+
+  // ── Model ───────────────────────────────────────────────
+  console.log();
+  console.log("Model configuration");
+  console.log("─".repeat(40));
+  console.log();
+  const model = (await prompt("  Main model (optional, press Enter to use CLI default): ")) || undefined;
+  const liteSuggestion = getSuggestedLiteModel(backend);
+  const liteHint = liteSuggestion ? `, suggested: ${liteSuggestion}` : "";
+  const liteModel = (await prompt(`  Lite model (optional, press Enter to reuse main model${liteHint}): `)) || undefined;
+
+  // ── Feishu credentials ──────────────────────────────────
+  console.log();
+  console.log("Feishu App Setup");
+  console.log("─".repeat(40));
+  console.log();
+  console.log("  Each bot needs its own Feishu app (separate App ID + App Secret).");
+  console.log("  Create one at https://open.feishu.cn/app if you haven't.");
+  console.log();
+
+  const appId = await prompt("  App ID: ");
+  const appSecret = await prompt("  App Secret: ");
+
+  if (!appId || !appSecret) {
+    info("Credentials skipped. Fill them in later:");
+    hint(`Edit ${configPath}`);
+  }
+
+  // ── Create bot directory + persona ──────────────────────
+  const botDir = path.join(niubotHome, botId);
+  fs.mkdirSync(botDir, { recursive: true });
+  const personaPath = path.join(botDir, "persona.md");
+  if (!fs.existsSync(personaPath)) {
+    fs.writeFileSync(personaPath, generatePersonaTemplate());
+    ok(`Created ${botId}/persona.md`);
+  } else {
+    info(`${botId}/persona.md already exists`);
+  }
+
+  // ── Update config.yaml ─────────────────────────────────
+  const newBot: Record<string, string> = {
+    id: botId,
+    backend,
+    appId: appId || "",
+    appSecret: appSecret || "",
+  };
+  if (model) newBot["model"] = model;
+  if (liteModel) newBot["liteModel"] = liteModel;
+
+  existingBots.push(newBot);
+  doc["bots"] = existingBots;
+
+  // Merge custom backend if needed
+  if (customBackendConfig) {
+    const backends = (doc["backends"] as Record<string, unknown>) ?? {};
+    backends[customBackendConfig.name] = { plugin: customBackendConfig.plugin };
+    doc["backends"] = backends;
+  }
+
+  fs.writeFileSync(configPath, yaml.stringify(doc, { lineWidth: 0 }));
+  ok("Updated config.yaml");
+
+  // ── Summary ─────────────────────────────────────────────
+  console.log();
+  console.log("Bot added");
+  console.log("─".repeat(40));
+  console.log(`  Bot ID:  ${botId}`);
+  console.log(`  Backend: ${backend}`);
+  console.log(`  Persona: ${personaPath}`);
+  if (model) console.log(`  Model:   ${model}`);
+  if (liteModel) console.log(`  Lite:    ${liteModel}`);
+
+  // Restart hint
+  const pidFile = path.join(niubotHome, "niubot.pid");
+  if (fs.existsSync(pidFile)) {
+    const pid = parseInt(fs.readFileSync(pidFile, "utf-8").trim(), 10);
+    if (isProcessRunning(pid)) {
+      console.log();
+      const restart = await prompt("  NiuBot is running. Restart to load the new bot? (Y/n): ");
+      if (!restart || restart.toLowerCase() === "y" || restart.toLowerCase() === "yes") {
+        console.log();
+        stopProcess(niubotHome);
+        cmdStart(niubotHome, {});
+      } else {
+        hint("Run 'niubot start --restart' when ready");
+      }
+    }
+  } else {
+    console.log();
+    if (!appId || !appSecret) {
+      console.log("  Fill in Feishu credentials, then run 'niubot start'.");
+    } else {
+      console.log("  Run 'niubot start' to launch.");
+    }
+  }
   console.log();
 }
 
@@ -914,6 +1135,7 @@ Usage: niubot <command> [options]
 
 Commands:
   init       Initialize NiuBot (environment check + config templates)
+  add-bot    Add a new bot to an existing installation
   start      Start the NiuBot service
   stop       Stop the NiuBot service
   status     Show service status
@@ -938,6 +1160,9 @@ async function main(): Promise<void> {
   switch (command) {
     case "init":
       await cmdInit(niubotHome, flags);
+      break;
+    case "add-bot":
+      await cmdAddBot(niubotHome);
       break;
     case "start":
       cmdStart(niubotHome, flags);
