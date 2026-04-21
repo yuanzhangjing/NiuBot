@@ -92,6 +92,7 @@ function createRecordingImStub() {
 function createImStubWithSendFailures(options: {
   cardError: Error;
   rawTextError?: Error;
+  fileError?: Error;
 }) {
   const sentTexts: string[] = [];
   const sentReplies: Array<{ chatId: string; text: string; replyToMsgId: string }> = [];
@@ -131,7 +132,10 @@ function createImStubWithSendFailures(options: {
     async editMessage() {},
     async addReaction() {},
     async removeReaction() {},
-    async sendFile() { return "pmid"; },
+    async sendFile() {
+      if (options.fileError) throw options.fileError;
+      return "pmid";
+    },
     async getBotOpenId() { return "bot-open-id"; },
     async getBotName() { return "NiuBot"; },
     async getChatName() { return "Admin"; },
@@ -729,7 +733,7 @@ describe("Pipeline.recover", () => {
         msg: "The messages do NOT pass the audit, ext=contain sensitive data: EMAIL_ADDRESS",
       },
     };
-    const { im, sentReplies, sentTexts } = createImStubWithSendFailures({ cardError: platformErr });
+    const { im, sentReplies, sentTexts } = createImStubWithSendFailures({ cardError: platformErr, fileError: platformErr });
 
     const pipeline = new Pipeline(
       db,
@@ -793,6 +797,7 @@ describe("Pipeline.recover", () => {
     const rawTextErr = new Error("raw platform error blocked");
     const { im, sentReplies, sentTexts } = createImStubWithSendFailures({
       cardError: platformErr,
+      fileError: platformErr,
       rawTextError: rawTextErr,
     });
 
