@@ -1,5 +1,7 @@
 import * as lark from "@larksuiteoapi/node-sdk";
 import fs from "node:fs";
+import { mkdtempSync, writeFileSync, unlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import type { NormalizedMessage, MessageHandler, PlatformAdapter, MentionInfo, MessageNode } from "../types.js";
 import { renderMessageNodes } from "../render.js";
@@ -7,8 +9,8 @@ import { createLogger } from "../../logger.js";
 
 const log = createLogger("feishu");
 
-/** 飞书单条消息长度限制（字符数） */
-const MAX_MESSAGE_LENGTH = 4000;
+/** 超过此字节数的消息转为文件发送 */
+const FILE_THRESHOLD_BYTES = 10_000;
 
 export class FeishuAdapter implements PlatformAdapter {
   private client: lark.Client;
@@ -156,27 +158,26 @@ export class FeishuAdapter implements PlatformAdapter {
   }
 
   async sendText(chatId: string, text: string): Promise<string> {
-    const chunks = splitMessage(text);
-
-    let firstMsgId = "";
-    for (const chunk of chunks) {
-      const resp = await this.client.im.message.create({
-        params: { receive_id_type: "chat_id" },
-        data: {
-          receive_id: chatId,
-          msg_type: "text",
-          content: JSON.stringify({ text: chunk }),
-        },
-      });
-      if (!firstMsgId) {
-        firstMsgId = resp?.data?.message_id ?? "";
-      }
+    if (Buffer.byteLength(text, "utf-8") > FILE_THRESHOLD_BYTES) {
+      log.info("sendText: content exceeds threshold, sending as file", { chatId, bytes: Buffer.byteLength(text, "utf-8") });
+      return this.sendContentAsFile(chatId, text);
     }
-
-    return firstMsgId;
+    const resp = await this.client.im.message.create({
+      params: { receive_id_type: "chat_id" },
+      data: {
+        receive_id: chatId,
+        msg_type: "text",
+        content: JSON.stringify({ text }),
+      },
+    });
+    return resp?.data?.message_id ?? "";
   }
 
   async sendReply(chatId: string, text: string, replyToMsgId: string): Promise<string> {
+    if (Buffer.byteLength(text, "utf-8") > FILE_THRESHOLD_BYTES) {
+      log.info("sendReply: content exceeds threshold, sending as file", { chatId, bytes: Buffer.byteLength(text, "utf-8") });
+      return this.sendContentAsFile(chatId, text);
+    }
     const resp = await this.client.im.message.reply({
       path: { message_id: replyToMsgId },
       data: {
@@ -192,6 +193,11 @@ export class FeishuAdapter implements PlatformAdapter {
   }
 
   async sendCard(chatId: string, header: string, content: string, footer?: string): Promise<string> {
+    if (Buffer.byteLength(content, "utf-8") > FILE_THRESHOLD_BYTES) {
+      log.info("sendCard: content exceeds threshold, sending as file", { chatId, bytes: Buffer.byteLength(content, "utf-8") });
+      const fileContent = footer ? `${content}\n\n---\n${footer}` : content;
+      return this.sendContentAsFile(chatId, fileContent);
+    }
     const cardJson = buildCardJSON(header, content, footer);
     const resp = await this.client.im.message.create({
       params: { receive_id_type: "chat_id" },
@@ -266,6 +272,18 @@ export class FeishuAdapter implements PlatformAdapter {
       }
     } catch (err) {
       log.warn("removeReaction failed", { chatId, msgId, emoji, error: String(err) });
+    }
+  }
+
+  /** 将文本内容写入临时 .md 文件并发送 */
+  private async sendContentAsFile(chatId: string, content: string): Promise<string> {
+    const dir = mkdtempSync(path.join(tmpdir(), "niubot-msg-"));
+    const filePath = path.join(dir, "reply.md");
+    writeFileSync(filePath, content, "utf-8");
+    try {
+      return await this.sendFile(chatId, filePath, "reply.md");
+    } finally {
+      try { unlinkSync(filePath); } catch { /* ignore */ }
     }
   }
 
@@ -926,26 +944,3 @@ function mimeToExt(mime: string): string {
   return ".bin";
 }
 
-/** 按自然段落边界分割超长消息 */
-function splitMessage(text: string): string[] {
-  if (text.length <= MAX_MESSAGE_LENGTH) return [text];
-
-  const chunks: string[] = [];
-  let remaining = text;
-
-  while (remaining.length > MAX_MESSAGE_LENGTH) {
-    let splitIdx = remaining.lastIndexOf("\n\n", MAX_MESSAGE_LENGTH);
-    if (splitIdx < MAX_MESSAGE_LENGTH * 0.3) {
-      splitIdx = remaining.lastIndexOf("\n", MAX_MESSAGE_LENGTH);
-    }
-    if (splitIdx < MAX_MESSAGE_LENGTH * 0.3) {
-      splitIdx = MAX_MESSAGE_LENGTH;
-    }
-
-    chunks.push(remaining.slice(0, splitIdx));
-    remaining = remaining.slice(splitIdx).replace(/^\n+/, "");
-  }
-
-  if (remaining) chunks.push(remaining);
-  return chunks;
-}

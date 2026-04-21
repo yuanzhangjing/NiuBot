@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { exec, execFileSync, spawn } from "node:child_process";
-import { readFileSync, writeFileSync, mkdtempSync, unlinkSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
@@ -40,9 +39,6 @@ const INTERRUPT_WORDS = new Set([
   "等等", "等一下", "稍等",
   "stop", "cancel", "abort",
 ]);
-/** 卡片内容超过此字节数时转为文件发送（飞书卡片 markdown 上限约 30KB，留余量） */
-const CARD_MAX_BYTES = 28_000;
-
 // ── Watchdog 常量 ──
 const AGENT_WATCHDOG_INTERVAL_MS = 15_000;     // 15 秒检测间隔
 const AGENT_IDLE_THRESHOLD_MS = 600_000;       // 10 分钟：第一次 idle 通知
@@ -1854,61 +1850,42 @@ export class Pipeline {
       }
 
       // 发送到 IM（始终用卡片，footer 带 session 信息）
-      // 超长内容转文件发送
+      // 超长内容由 adapter 层自动转文件发送
       let sentPlatformMsgId: string | undefined;
-      const contentBytes = Buffer.byteLength(displayText, "utf-8");
-      if (contentBytes > CARD_MAX_BYTES) {
-        this.log.info("content too long for card, sending as file", { chatId, contentBytes });
-        try {
-          sentPlatformMsgId = await this.sendAsFile(chatSession.platformChatId, displayText, footer);
-          deliveredText = response.text;
-        } catch (fileErr) {
-          this.log.error("failed to send response as file", { chatId, error: String(fileErr) });
+      const sendFallbackText = (text: string) => triggerMsgId
+        ? this.im.sendReply(chatSession.platformChatId, text, triggerMsgId)
+        : this.im.sendText(chatSession.platformChatId, text);
+      try {
+        const useReply = !!triggerMsgId;
+        this.log.info("send decision", { chatId, useReply, merged: isMerged, messageCount: messages.length, triggerMsgId: triggerMsgId ?? "none" });
+        if (useReply) {
+          sentPlatformMsgId = await this.im.replyCard(triggerMsgId!, "", displayText, footer);
+        } else {
+          sentPlatformMsgId = await this.im.sendCard(chatSession.platformChatId, "", displayText, footer);
         }
-      }
-
-      if (!sentPlatformMsgId) {
-        const sendFallbackText = (text: string) => triggerMsgId
-          ? this.im.sendReply(chatSession.platformChatId, text, triggerMsgId)
-          : this.im.sendText(chatSession.platformChatId, text);
+      } catch (sendErr) {
+        this.log.error("failed to send response to IM", {
+          chatId,
+          error: String(sendErr),
+          responseLength: response.text.length,
+        });
+        // 先把平台错误原样回给用户；若平台连这条也拦，再降级为稳定短句。
         try {
-          const useReply = !!triggerMsgId;
-          this.log.info("send decision", { chatId, useReply, merged: isMerged, messageCount: messages.length, triggerMsgId: triggerMsgId ?? "none" });
-          if (useReply) {
-            sentPlatformMsgId = await this.im.replyCard(triggerMsgId!, "", displayText, footer);
-          } else {
-            sentPlatformMsgId = await this.im.sendCard(chatSession.platformChatId, "", displayText, footer);
-          }
-        } catch (sendErr) {
-          this.log.error("failed to send response to IM", {
+          deliveredText = `发送失败：${extractPlatformErrorDetail(sendErr)}`;
+          sentPlatformMsgId = await sendFallbackText(deliveredText);
+        } catch (platformErrEchoErr) {
+          this.log.warn("failed to surface platform error to user", {
             chatId,
-            error: String(sendErr),
-            responseLength: response.text.length,
+            error: String(platformErrEchoErr),
           });
-          // 卡片发送失败：尝试转文件
           try {
-            sentPlatformMsgId = await this.sendAsFile(chatSession.platformChatId, displayText, footer);
-            deliveredText = response.text;
-          } catch (fileErr) {
-            this.log.warn("file fallback also failed, surfacing error", { chatId, error: String(fileErr) });
-            try {
-              deliveredText = `发送失败：${extractPlatformErrorDetail(sendErr)}`;
-              sentPlatformMsgId = await sendFallbackText(deliveredText);
-            } catch (platformErrEchoErr) {
-              this.log.warn("failed to surface platform error to user", {
-                chatId,
-                error: String(platformErrEchoErr),
-              });
-              try {
-                deliveredText = buildPlatformFailureFallback(sendErr);
-                sentPlatformMsgId = await sendFallbackText(deliveredText);
-              } catch (fallbackSendErr) {
-                this.log.error("failed to send degraded platform error", {
-                  chatId,
-                  error: String(fallbackSendErr),
-                });
-              }
-            }
+            deliveredText = buildPlatformFailureFallback(sendErr);
+            sentPlatformMsgId = await sendFallbackText(deliveredText);
+          } catch (fallbackSendErr) {
+            this.log.error("failed to send degraded platform error", {
+              chatId,
+              error: String(fallbackSendErr),
+            });
           }
         }
       }
@@ -2222,19 +2199,6 @@ export class Pipeline {
       this.log.warn("failed to generate archive summary", { chatId, sessionId, error: String(err) });
     } finally {
       await this.agent.closeSession(session).catch(() => {});
-    }
-  }
-
-  /** 将超长内容写入临时 .md 文件并通过 sendFile 发送 */
-  private async sendAsFile(platformChatId: string, content: string, footer?: string): Promise<string> {
-    const dir = mkdtempSync(path.join(tmpdir(), "niubot-msg-"));
-    const filePath = path.join(dir, "reply.md");
-    const fileContent = footer ? `${content}\n\n---\n${footer}` : content;
-    writeFileSync(filePath, fileContent, "utf-8");
-    try {
-      return await this.im.sendFile(platformChatId, filePath, "reply.md");
-    } finally {
-      try { unlinkSync(filePath); } catch { /* ignore */ }
     }
   }
 
