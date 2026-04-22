@@ -153,6 +153,7 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
       lastActiveAt: now,
       completionDetected: false,
       compacting: false,
+      recentLines: [],
       notifyCount: 0,
     });
 
@@ -281,12 +282,14 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
         const rl = createInterface({ input: child.stdout, crlfDelay: Infinity });
         rl.on("line", (line) => {
           lines.push(line);
-          // 更新活动时间 + 最近一行输出
           if (sessionId) {
             const a = this.activityMap.get(sessionId);
             if (a) {
               a.lastActiveAt = Date.now();
-              if (line.trim()) a.lastLine = line;
+              if (line.trim()) {
+                a.recentLines.push(line);
+                if (a.recentLines.length > 10) a.recentLines.shift();
+              }
             }
           }
           // compact 检测（通用：所有 backend 共享）

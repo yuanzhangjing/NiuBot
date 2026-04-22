@@ -898,6 +898,11 @@ export class Pipeline {
         });
         return true;
       }
+      case "/progress": {
+        this.log.info("builtin command: progress", { userId, chatId });
+        this.sendProgress(chatId, platformChatId, msgId);
+        return true;
+      }
     }
 
     // 2. 管理员 shell 命令：检查首个 token 是否在 PATH 中，是则执行，否则转发 agent
@@ -932,6 +937,35 @@ export class Pipeline {
   /**
    * /status：输出 bot 运行状态信息。
    */
+  private sendProgress(chatId: string, platformChatId: string, msgId?: string): void {
+    const session = this.chatSessions.get(chatId);
+    if (!session) {
+      this.replyText(chatId, platformChatId, msgId, "当前没有正在执行的任务。");
+      return;
+    }
+
+    const cliAgent = this.agent as CliAgentBackend<any>;
+    const a = typeof cliAgent.getActivity === "function"
+      ? cliAgent.getActivity(session.agentSession.id)
+      : undefined;
+
+    const elapsed = formatUptime(Date.now() - (a?.startedAt ?? Date.now()));
+    const lines: string[] = [`**运行时间：** ${elapsed}`];
+
+    if (a && a.recentLines.length > 0) {
+      lines.push("");
+      lines.push("**最近输出：**");
+      for (const l of a.recentLines) {
+        const truncated = l.length > 200 ? l.slice(0, 200) + "…" : l;
+        lines.push(truncated);
+      }
+    } else {
+      lines.push("\n暂无输出记录。");
+    }
+
+    this.replyText(chatId, platformChatId, msgId, lines.join("\n"));
+  }
+
   private sendStatus(chatId: string, platformChatId: string, msgId?: string): void {
     const uptimeMs = Date.now() - this.startedAt;
     const uptimeStr = formatUptime(uptimeMs);
@@ -1604,6 +1638,7 @@ export class Pipeline {
       "`/flush`　　跳过当前任务，优先处理排队消息",
       "`/task`　　独立执行任务（不影响当前会话）",
       "`/clear`　　仅清空排队消息（不停当前任务）",
+      "`/progress`　查看当前任务进度",
       "`/status`　查看运行状态",
       "`/cron`　　查看定时任务",
       "`/help`　　显示本帮助",
@@ -2369,7 +2404,7 @@ export class Pipeline {
 
         if (idleMs > thresholdMs) {
           const idleMin = Math.round(idleMs / 60_000);
-          let lastLine = a.lastLine;
+          let lastLine = a.recentLines.length > 0 ? a.recentLines[a.recentLines.length - 1] : undefined;
           if (!lastLine && s && typeof (cliAgent as any).probeSessionLastLine === "function") {
             lastLine = (cliAgent as any).probeSessionLastLine(s) as string | null ?? undefined;
           }
