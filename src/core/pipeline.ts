@@ -2393,6 +2393,14 @@ export class Pipeline {
     }).catch(() => {});
   }
 
+  private sendWatchdogCard(chatId: string, header: string, content: string): void {
+    const platformChatId = this.platformChatIds.get(chatId);
+    if (!platformChatId) return;
+    this.im.sendCard(platformChatId, header, content).then((pmid) => {
+      this.storeBotResponse(chatId, content, pmid);
+    }).catch(() => {});
+  }
+
   /** 发送 compact 中提示（仅通知一次） */
   notifyCompacting(chatId: string): void {
     const session = this.chatSessions.get(chatId);
@@ -2460,14 +2468,14 @@ export class Pipeline {
 
         if (idleMs > thresholdMs) {
           const idleMin = Math.round(idleMs / 60_000);
-          let lastLine = a.recentLines.length > 0 ? a.recentLines[a.recentLines.length - 1] : undefined;
-          if (!lastLine && s && typeof (cliAgent as any).probeSessionLastLine === "function") {
-            lastLine = (cliAgent as any).probeSessionLastLine(s) as string | null ?? undefined;
+          const header = `⚠️ ${idleMin} 分钟无输出`;
+          const parts = ["已经 " + idleMin + " 分钟没有新输出，有可能卡住了。可以发 /stop 停止当前任务。"];
+          if (a.recentLines.length > 0) {
+            const logBlock = a.recentLines.map((l) => l.replace(/`{3,}/g, "``")).join("\n");
+            parts.push(`**最近 ${a.recentLines.length} 条日志：**\n\`\`\`\n${logBlock}\n\`\`\``);
           }
-          const lastHint = formatLastLine(lastLine);
-          const text = `已经 ${idleMin} 分钟没有新输出，有可能卡住了。可以发 /stop 停止当前任务。${lastHint}`;
-
-          this.sendWatchdogNotification(chatId, text);
+          const content = parts.join("\n\n");
+          this.sendWatchdogCard(chatId, header, content);
           a.notifyCount++;
           a.lastNotifiedAt = now;
         }
@@ -2618,12 +2626,6 @@ function formatUptime(ms: number): string {
 
 function displayBackendType(type: AgentBackendType): string {
   return type;
-}
-
-function formatLastLine(lastLine: string | undefined): string {
-  if (!lastLine) return "";
-  const truncated = lastLine.length > 500 ? lastLine.slice(0, 500) + "…" : lastLine;
-  return `\n——\n最后输出：${truncated}`;
 }
 
 /** 格式化 lite model 显示：优先显示用户配置值，否则显示 backend 默认值 */
