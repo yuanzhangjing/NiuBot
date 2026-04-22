@@ -208,6 +208,7 @@ async function main(): Promise<void> {
     const { ApiServer } = await import("./core/api.js");
     const tempApi = new ApiServer(tempSocket, {
       sendMessage: async () => {},
+      sendCard: async () => {},
       sendFile: async () => {},
       resolveChatPlatformId: () => undefined,
       getDefaultPlatformChatId: () => undefined,

@@ -287,6 +287,16 @@ export class Pipeline {
     }
   }
 
+  /** 通过 IPC 发送卡片到指定 chat */
+  async sendCardToChat(platformChatId: string, header: string, content: string): Promise<void> {
+    const platformMsgId = await this.im.sendCard(platformChatId, header, content);
+    const chatRow = this.db.prepare("SELECT id FROM chats WHERE platform_id = ?")
+      .get(platformChatId) as { id: string } | undefined;
+    if (chatRow) {
+      this.storeBotResponse(chatRow.id, content, platformMsgId);
+    }
+  }
+
   /** 通过 IPC 发送文件到指定 chat */
   async sendFileToChat(platformChatId: string, filePath: string): Promise<void> {
     const platformMsgId = await this.im.sendFile(platformChatId, filePath);

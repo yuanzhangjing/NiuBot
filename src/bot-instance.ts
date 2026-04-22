@@ -99,6 +99,7 @@ export async function createBotInstance(
   const socketPath = path.join(path.dirname(botConfig.dbPath), "api.sock");
   const apiHandler: ApiHandler = {
     sendMessage: (chatId, text) => pipeline.sendToChat(chatId, text),
+    sendCard: (chatId, header, content) => pipeline.sendCardToChat(chatId, header, content),
     sendFile: (chatId, filePath) => pipeline.sendFileToChat(chatId, filePath),
     resolveChatPlatformId: (input: string) => {
       // Try as internal ID (c1, c2)

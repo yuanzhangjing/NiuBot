@@ -13,6 +13,8 @@ const log = createLogger("api");
 export interface ApiHandler {
   /** Send text message to a chat */
   sendMessage(chatId: string, text: string): Promise<void>;
+  /** Send card message to a chat */
+  sendCard(chatId: string, header: string, content: string): Promise<void>;
   /** Send file to a chat */
   sendFile(chatId: string, filePath: string): Promise<void>;
   /** Resolve chat platform_id from short ID or platform ID */
@@ -80,6 +82,7 @@ export class ApiServer {
     if (url === "/send" && req.method === "POST") {
       const chatId = data.chat_id;
       const text = data.text;
+      const cardHeader = data.card_header;
       if (!chatId || !text) {
         res.writeHead(400);
         res.end(JSON.stringify({ error: "Missing chat_id or text" }));
@@ -91,7 +94,11 @@ export class ApiServer {
         res.end(JSON.stringify({ error: "Chat not found" }));
         return;
       }
-      await this.handler.sendMessage(platformChatId, text);
+      if (cardHeader != null) {
+        await this.handler.sendCard(platformChatId, String(cardHeader), text);
+      } else {
+        await this.handler.sendMessage(platformChatId, text);
+      }
       res.writeHead(200);
       res.end(JSON.stringify({ status: "ok" }));
     } else if (url === "/send-file" && req.method === "POST") {
