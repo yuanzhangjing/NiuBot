@@ -901,17 +901,13 @@ export class Pipeline {
           this.sendTaskList(chatId, platformChatId, msgId);
           return true;
         }
-        if (taskSub === "progress") {
-          this.sendTaskProgress(chatId, platformChatId, msgId);
-          return true;
-        }
         if (taskSub === "stop") {
           this.stopAllTasks(chatId, platformChatId, msgId);
           return true;
         }
         const taskPrompt = parts.slice(1).join(" ").trim();
         if (!taskPrompt) {
-          this.replyText(chatId, platformChatId, msgId, "用法：/task <任务描述>\n子命令：/task list | progress | stop");
+          this.replyText(chatId, platformChatId, msgId, "用法：/task <任务描述>\n子命令：/task list | stop");
           return true;
         }
         this.log.info("builtin command: task", { userId, chatId, promptLength: taskPrompt.length });
@@ -1000,25 +996,6 @@ export class Pipeline {
   }
 
   private sendTaskList(chatId: string, platformChatId: string, msgId?: string): void {
-    const tasks = [...this.runningTasks.values()].filter((t) => t.chatId === chatId);
-    if (tasks.length === 0) {
-      this.replyText(chatId, platformChatId, msgId, "当前没有运行中的 task。");
-      return;
-    }
-    const lines = tasks.map((t) => {
-      const elapsed = formatUptime(Date.now() - t.startedAt);
-      return `- **${t.description}**（${elapsed}）`;
-    });
-    const content = lines.join("\n");
-    const sendPromise = msgId
-      ? this.im.replyCard(msgId, `Task · ${tasks.length} 个运行中`, content)
-      : this.im.sendCard(platformChatId, `Task · ${tasks.length} 个运行中`, content);
-    sendPromise
-      .then((pmid) => { this.storeBotResponse(chatId, content, pmid); })
-      .catch((err) => this.log.error("task list card send failed", { chatId, error: String(err) }));
-  }
-
-  private sendTaskProgress(chatId: string, platformChatId: string, msgId?: string): void {
     const tasks = [...this.runningTasks.entries()].filter(([, t]) => t.chatId === chatId);
     if (tasks.length === 0) {
       this.replyText(chatId, platformChatId, msgId, "当前没有运行中的 task。");
@@ -1037,13 +1014,13 @@ export class Pipeline {
       }
     }
     const content = sections.join("\n\n");
-    const header = `Task Progress · ${tasks.length} 个运行中`;
+    const header = `Task · ${tasks.length} 个运行中`;
     const sendPromise = msgId
       ? this.im.replyCard(msgId, header, content)
       : this.im.sendCard(platformChatId, header, content);
     sendPromise
       .then((pmid) => { this.storeBotResponse(chatId, content, pmid); })
-      .catch((err) => this.log.error("task progress card send failed", { chatId, error: String(err) }));
+      .catch((err) => this.log.error("task list card send failed", { chatId, error: String(err) }));
   }
 
   private stopAllTasks(chatId: string, platformChatId: string, msgId?: string): void {
@@ -1734,7 +1711,7 @@ export class Pipeline {
       "`/new`　　新会话（清空当前上下文）",
       "`/stop`　　停止当前任务并清空队列（全停）",
       "`/flush`　　中断当前回复，合并处理排队消息",
-      "`/task`　　独立执行任务（list / progress / stop）",
+      "`/task`　　独立执行任务（list / stop）",
       "`/clear`　　仅清空排队消息（不停当前任务）",
       "`/progress`　查看当前任务进度",
       "`/status`　查看运行状态",
