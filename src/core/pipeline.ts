@@ -897,17 +897,13 @@ export class Pipeline {
           return true;
         }
         const taskSub = parts[1]?.toLowerCase();
-        if (taskSub === "list") {
-          this.sendTaskList(chatId, platformChatId, msgId);
-          return true;
-        }
         if (taskSub === "stop") {
           this.stopAllTasks(chatId, platformChatId, msgId);
           return true;
         }
         const taskPrompt = parts.slice(1).join(" ").trim();
         if (!taskPrompt) {
-          this.replyText(chatId, platformChatId, msgId, "用法：/task <任务描述>\n子命令：/task list | stop");
+          this.replyText(chatId, platformChatId, msgId, "用法：/task <任务描述>\n子命令：/task stop");
           return true;
         }
         this.log.info("builtin command: task", { userId, chatId, promptLength: taskPrompt.length });
@@ -917,9 +913,9 @@ export class Pipeline {
         });
         return true;
       }
-      case "/progress": {
-        this.log.info("builtin command: progress", { userId, chatId });
-        this.sendProgress(chatId, platformChatId, msgId);
+      case "/list": {
+        this.log.info("builtin command: list", { userId, chatId });
+        this.sendRunningList(chatId, platformChatId, msgId);
         return true;
       }
     }
@@ -954,73 +950,58 @@ export class Pipeline {
   }
 
   /**
-   * /status：输出 bot 运行状态信息。
+   * /list：列出所有运行中的会话（主 session + 独立 task），含最近日志。
    */
-  private sendProgress(chatId: string, platformChatId: string, msgId?: string): void {
-    const session = this.chatSessions.get(chatId);
-    if (!session) {
-      this.replyText(chatId, platformChatId, msgId, "当前没有正在执行的任务。");
-      return;
-    }
-
-    const cliAgent = this.agent as CliAgentBackend<any>;
-    const a = typeof cliAgent.getActivity === "function"
-      ? cliAgent.getActivity(session.agentSession.id)
-      : undefined;
-
-    if (!a || a.status !== "running") {
-      this.replyText(chatId, platformChatId, msgId, "当前没有正在执行的任务。");
-      return;
-    }
-
-    const elapsed = formatUptime(Date.now() - a.startedAt);
-    const status = a.compacting ? "正在压缩上下文" : "处理中";
-    const header = `Progress · ${status} · ${elapsed}`;
-
-    let content: string;
-    if (a.recentLines.length > 0) {
-      const logBlock = a.recentLines
-        .map((l) => l.replace(/`{3,}/g, "``"))
-        .join("\n");
-      content = `**最近 ${a.recentLines.length} 条日志：**\n\`\`\`\n${logBlock}\n\`\`\``;
-    } else {
-      content = "暂无日志输出。";
-    }
-
-    const sendPromise = msgId
-      ? this.im.replyCard(msgId, header, content)
-      : this.im.sendCard(platformChatId, header, content);
-    sendPromise
-      .then((pmid) => { this.storeBotResponse(chatId, content, pmid); })
-      .catch((err) => this.log.error("progress card send failed", { chatId, error: String(err) }));
-  }
-
-  private sendTaskList(chatId: string, platformChatId: string, msgId?: string): void {
-    const tasks = [...this.runningTasks.entries()].filter(([, t]) => t.chatId === chatId);
-    if (tasks.length === 0) {
-      this.replyText(chatId, platformChatId, msgId, "当前没有运行中的 task。");
-      return;
-    }
+  private sendRunningList(chatId: string, platformChatId: string, msgId?: string): void {
     const cliAgent = this.agent as CliAgentBackend<any>;
     const sections: string[] = [];
+    let count = 0;
+
+    // 主 session
+    const session = this.chatSessions.get(chatId);
+    if (session) {
+      const a = typeof cliAgent.getActivity === "function"
+        ? cliAgent.getActivity(session.agentSession.id)
+        : undefined;
+      if (a?.status === "running") {
+        count++;
+        const elapsed = formatUptime(Date.now() - a.startedAt);
+        const status = a.compacting ? "压缩上下文" : "处理中";
+        sections.push(`**主会话**（${status} · ${elapsed}）`);
+        if (a.recentLines.length > 0) {
+          const logBlock = a.recentLines.map((l) => l.replace(/`{3,}/g, "``")).join("\n");
+          sections.push(`\`\`\`\n${logBlock}\n\`\`\``);
+        }
+      }
+    }
+
+    // 独立 task
+    const tasks = [...this.runningTasks.entries()].filter(([, t]) => t.chatId === chatId);
     for (const [sessionId, t] of tasks) {
+      count++;
       const elapsed = formatUptime(Date.now() - t.startedAt);
       const a = typeof cliAgent.getActivity === "function" ? cliAgent.getActivity(sessionId) : undefined;
       const status = a?.compacting ? "压缩上下文" : "处理中";
-      sections.push(`**${t.description}**（${status} · ${elapsed}）`);
+      sections.push(`**⚡ ${t.description}**（${status} · ${elapsed}）`);
       if (a && a.recentLines.length > 0) {
         const logBlock = a.recentLines.map((l) => l.replace(/`{3,}/g, "``")).join("\n");
         sections.push(`\`\`\`\n${logBlock}\n\`\`\``);
       }
     }
+
+    if (count === 0) {
+      this.replyText(chatId, platformChatId, msgId, "当前没有正在执行的任务。");
+      return;
+    }
+
     const content = sections.join("\n\n");
-    const header = `Task · ${tasks.length} 个运行中`;
+    const header = `Running · ${count} 个任务`;
     const sendPromise = msgId
       ? this.im.replyCard(msgId, header, content)
       : this.im.sendCard(platformChatId, header, content);
     sendPromise
       .then((pmid) => { this.storeBotResponse(chatId, content, pmid); })
-      .catch((err) => this.log.error("task list card send failed", { chatId, error: String(err) }));
+      .catch((err) => this.log.error("running list card send failed", { chatId, error: String(err) }));
   }
 
   private stopAllTasks(chatId: string, platformChatId: string, msgId?: string): void {
@@ -1711,9 +1692,9 @@ export class Pipeline {
       "`/new`　　新会话（清空当前上下文）",
       "`/stop`　　停止当前任务并清空队列（全停）",
       "`/flush`　　中断当前回复，合并处理排队消息",
-      "`/task`　　独立执行任务（list / stop）",
+      "`/task`　　独立执行任务（stop 停止）",
+      "`/list`　　查看所有运行中的任务",
       "`/clear`　　仅清空排队消息（不停当前任务）",
-      "`/progress`　查看当前任务进度",
       "`/status`　查看运行状态",
       "`/cron`　　查看定时任务",
       "`/help`　　显示本帮助",
