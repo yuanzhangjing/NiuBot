@@ -288,7 +288,7 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
               a.lastActiveAt = Date.now();
               if (line.trim()) {
                 a.recentLines.push(line);
-                if (a.recentLines.length > 10) a.recentLines.shift();
+                if (a.recentLines.length > 3) a.recentLines.shift();
               }
             }
           }

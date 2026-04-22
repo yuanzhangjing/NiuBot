@@ -949,21 +949,31 @@ export class Pipeline {
       ? cliAgent.getActivity(session.agentSession.id)
       : undefined;
 
-    const elapsed = formatUptime(Date.now() - (a?.startedAt ?? Date.now()));
-    const lines: string[] = [`**运行时间：** ${elapsed}`];
-
-    if (a && a.recentLines.length > 0) {
-      lines.push("");
-      lines.push("**最近输出：**");
-      for (const l of a.recentLines) {
-        const truncated = l.length > 200 ? l.slice(0, 200) + "…" : l;
-        lines.push(truncated);
-      }
-    } else {
-      lines.push("\n暂无输出记录。");
+    if (!a || a.status !== "running") {
+      this.replyText(chatId, platformChatId, msgId, "当前没有正在执行的任务。");
+      return;
     }
 
-    this.replyText(chatId, platformChatId, msgId, lines.join("\n"));
+    const elapsed = formatUptime(Date.now() - a.startedAt);
+    const status = a.compacting ? "正在压缩上下文" : "处理中";
+    const header = `Progress · ${status} · ${elapsed}`;
+
+    let content: string;
+    if (a.recentLines.length > 0) {
+      const logBlock = a.recentLines
+        .map((l) => (l.length > 500 ? l.slice(0, 500) + "…" : l).replace(/`{3,}/g, "``"))
+        .join("\n");
+      content = `**最近 ${a.recentLines.length} 条日志：**\n\`\`\`\n${logBlock}\n\`\`\``;
+    } else {
+      content = "暂无日志输出。";
+    }
+
+    const sendPromise = msgId
+      ? this.im.replyCard(msgId, header, content)
+      : this.im.sendCard(platformChatId, header, content);
+    sendPromise
+      .then((pmid) => { this.storeBotResponse(chatId, content, pmid); })
+      .catch((err) => this.log.error("progress card send failed", { chatId, error: String(err) }));
   }
 
   private sendStatus(chatId: string, platformChatId: string, msgId?: string): void {
