@@ -71,6 +71,13 @@ interface ChatSession {
   hasReplied: boolean;
 }
 
+interface RunningTask {
+  agentSession: AgentSession;
+  chatId: string;
+  description: string;
+  startedAt: number;
+}
+
 interface PendingTransitionMessage {
   msg: NormalizedMessage;
 }
@@ -100,6 +107,9 @@ export class Pipeline {
 
   /** admin 角色映射：userId → role */
   private adminRoles = new Map<string, AdminRole>();
+
+  /** 运行中的独立 task（agentSession.id → RunningTask） */
+  private runningTasks = new Map<string, RunningTask>();
 
   /** agent 工作目录 */
   private workingDirectory: string;
@@ -875,7 +885,7 @@ export class Pipeline {
           this.replyText(chatId, platformChatId, msgId, "队列是空的，没有需要 flush 的消息。");
         } else if (this.chatSessions.has(chatId)) {
           this.cancelChat(chatId).catch(() => {});
-          this.replyText(chatId, platformChatId, msgId, `跳过当前任务，开始处理队列中的 ${pending} 条消息。`);
+          this.replyText(chatId, platformChatId, msgId, `中断当前回复，合并处理队列中的 ${pending} 条消息。`);
         } else {
           this.replyText(chatId, platformChatId, msgId, `队列中有 ${pending} 条消息，即将处理。`);
         }
@@ -886,9 +896,22 @@ export class Pipeline {
           this.replyText(chatId, platformChatId, msgId, "/task 仅管理员可用。");
           return true;
         }
+        const taskSub = parts[1]?.toLowerCase();
+        if (taskSub === "list") {
+          this.sendTaskList(chatId, platformChatId, msgId);
+          return true;
+        }
+        if (taskSub === "progress") {
+          this.sendTaskProgress(chatId, platformChatId, msgId);
+          return true;
+        }
+        if (taskSub === "stop") {
+          this.stopAllTasks(chatId, platformChatId, msgId);
+          return true;
+        }
         const taskPrompt = parts.slice(1).join(" ").trim();
         if (!taskPrompt) {
-          this.replyText(chatId, platformChatId, msgId, "用法：/task <任务描述>");
+          this.replyText(chatId, platformChatId, msgId, "用法：/task <任务描述>\n子命令：/task list | progress | stop");
           return true;
         }
         this.log.info("builtin command: task", { userId, chatId, promptLength: taskPrompt.length });
@@ -961,7 +984,7 @@ export class Pipeline {
     let content: string;
     if (a.recentLines.length > 0) {
       const logBlock = a.recentLines
-        .map((l) => (l.length > 500 ? l.slice(0, 500) + "…" : l).replace(/`{3,}/g, "``"))
+        .map((l) => l.replace(/`{3,}/g, "``"))
         .join("\n");
       content = `**最近 ${a.recentLines.length} 条日志：**\n\`\`\`\n${logBlock}\n\`\`\``;
     } else {
@@ -974,6 +997,67 @@ export class Pipeline {
     sendPromise
       .then((pmid) => { this.storeBotResponse(chatId, content, pmid); })
       .catch((err) => this.log.error("progress card send failed", { chatId, error: String(err) }));
+  }
+
+  private sendTaskList(chatId: string, platformChatId: string, msgId?: string): void {
+    const tasks = [...this.runningTasks.values()].filter((t) => t.chatId === chatId);
+    if (tasks.length === 0) {
+      this.replyText(chatId, platformChatId, msgId, "当前没有运行中的 task。");
+      return;
+    }
+    const lines = tasks.map((t) => {
+      const elapsed = formatUptime(Date.now() - t.startedAt);
+      return `- **${t.description}**（${elapsed}）`;
+    });
+    const content = lines.join("\n");
+    const sendPromise = msgId
+      ? this.im.replyCard(msgId, `Task · ${tasks.length} 个运行中`, content)
+      : this.im.sendCard(platformChatId, `Task · ${tasks.length} 个运行中`, content);
+    sendPromise
+      .then((pmid) => { this.storeBotResponse(chatId, content, pmid); })
+      .catch((err) => this.log.error("task list card send failed", { chatId, error: String(err) }));
+  }
+
+  private sendTaskProgress(chatId: string, platformChatId: string, msgId?: string): void {
+    const tasks = [...this.runningTasks.entries()].filter(([, t]) => t.chatId === chatId);
+    if (tasks.length === 0) {
+      this.replyText(chatId, platformChatId, msgId, "当前没有运行中的 task。");
+      return;
+    }
+    const cliAgent = this.agent as CliAgentBackend<any>;
+    const sections: string[] = [];
+    for (const [sessionId, t] of tasks) {
+      const elapsed = formatUptime(Date.now() - t.startedAt);
+      const a = typeof cliAgent.getActivity === "function" ? cliAgent.getActivity(sessionId) : undefined;
+      const status = a?.compacting ? "压缩上下文" : "处理中";
+      sections.push(`**${t.description}**（${status} · ${elapsed}）`);
+      if (a && a.recentLines.length > 0) {
+        const logBlock = a.recentLines.map((l) => l.replace(/`{3,}/g, "``")).join("\n");
+        sections.push(`\`\`\`\n${logBlock}\n\`\`\``);
+      }
+    }
+    const content = sections.join("\n");
+    const header = `Task Progress · ${tasks.length} 个运行中`;
+    const sendPromise = msgId
+      ? this.im.replyCard(msgId, header, content)
+      : this.im.sendCard(platformChatId, header, content);
+    sendPromise
+      .then((pmid) => { this.storeBotResponse(chatId, content, pmid); })
+      .catch((err) => this.log.error("task progress card send failed", { chatId, error: String(err) }));
+  }
+
+  private stopAllTasks(chatId: string, platformChatId: string, msgId?: string): void {
+    const tasks = [...this.runningTasks.entries()].filter(([, t]) => t.chatId === chatId);
+    if (tasks.length === 0) {
+      this.replyText(chatId, platformChatId, msgId, "当前没有运行中的 task。");
+      return;
+    }
+    let stopped = 0;
+    for (const [, t] of tasks) {
+      this.agent.cancelSession(t.agentSession).catch(() => {});
+      stopped++;
+    }
+    this.replyText(chatId, platformChatId, msgId, `已停止 ${stopped} 个 task。`);
   }
 
   private sendStatus(chatId: string, platformChatId: string, msgId?: string): void {
@@ -1205,6 +1289,10 @@ export class Pipeline {
 
     this.log.info(`executing ${source} job`, { chatId, sessionId, userId, description });
 
+    if (source === "task") {
+      this.runningTasks.set(agentSession.id, { agentSession, chatId, description, startedAt: Date.now() });
+    }
+
     try {
       const response = await this.agent.sendMessage(agentSession, messageToSend);
 
@@ -1257,6 +1345,8 @@ export class Pipeline {
     } catch (err) {
       this.log.error(`${source} job execution failed`, { chatId, sessionId, error: String(err) });
     } finally {
+      this.runningTasks.delete(agentSession.id);
+
       // Archive session（turn=1，不触发 archive summary）
       this.db.prepare(`
         UPDATE sessions SET status = 'archived', ended_at = datetime('now'), last_active_at = datetime('now')
@@ -1645,8 +1735,8 @@ export class Pipeline {
     const lines = [
       "`/new`　　新会话（清空当前上下文）",
       "`/stop`　　停止当前任务并清空队列（全停）",
-      "`/flush`　　跳过当前任务，优先处理排队消息",
-      "`/task`　　独立执行任务（不影响当前会话）",
+      "`/flush`　　中断当前回复，合并处理排队消息",
+      "`/task`　　独立执行任务（list / progress / stop）",
       "`/clear`　　仅清空排队消息（不停当前任务）",
       "`/progress`　查看当前任务进度",
       "`/status`　查看运行状态",
