@@ -1,6 +1,6 @@
 {
   "name": "@yuanzhangjing/niubot",
-  "version": "0.1.49",
+  "version": "0.1.50",
   "description": "NiuBot Engine — AI Persona Runtime powering autonomous digital coworkers with memory and personality",
   "publishConfig": {
     "registry": "https://registry.npmjs.org"
