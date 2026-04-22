@@ -873,6 +873,8 @@ function cmdStart(niubotHome: string, flags: CliFlags): void {
 
   // Write PID (engine also writes it, but we write early for immediate status checks)
   fs.writeFileSync(pidFile, String(child.pid));
+  // Snapshot the version at startup so status shows the actual running version
+  fs.writeFileSync(path.join(niubotHome, "niubot.version"), getPkgVersion());
   ok(`Process started (PID ${child.pid})`);
   info(`Log: ${logFile}`);
 
@@ -981,8 +983,13 @@ function cmdStatus(niubotHome: string): void {
   const today = new Date().toISOString().slice(0, 10);
   const logFile = path.join(niubotHome, "logs", `niubot-${today}.log`);
 
+  // Read the version snapshot written at startup (reflects the actual running code)
+  const versionFile = path.join(niubotHome, "niubot.version");
+  let runningVersion = "unknown";
+  try { runningVersion = fs.readFileSync(versionFile, "utf-8").trim(); } catch { /* missing for old installs */ }
+
   console.log(`NiuBot is running (PID ${pid})`);
-  console.log(`  Version: ${getPkgVersion()}`);
+  console.log(`  Version: ${runningVersion}`);
   console.log(`  Path: ${__dirname}`);
   if (uptime) console.log(`  Uptime: ${uptime}`);
   console.log(`  Log: ${logFile}`);
@@ -1048,25 +1055,37 @@ function cmdUpdate(niubotHome: string): void {
 
   // Restart if running
   const pidFile = path.join(niubotHome, "niubot.pid");
-  if (fs.existsSync(pidFile)) {
-    const pid = parseInt(fs.readFileSync(pidFile, "utf-8").trim(), 10);
-    if (isProcessRunning(pid)) {
-      console.log();
-      info("Restarting service...");
-      stopProcess(niubotHome);
+  if (!fs.existsSync(pidFile)) {
+    console.log();
+    hint(`No running service found (looked in ${niubotHome}).`);
+    hint("Start it with: niubot start");
+    console.log();
+    return;
+  }
 
-      // Re-exec start with the NEW binary (the just-installed version)
-      try {
-        execFileSync("niubot", ["start"], {
-          encoding: "utf-8",
-          timeout: 30000,
-          stdio: "inherit",
-          env: { ...process.env, NIUBOT_HOME: niubotHome },
-        });
-      } catch {
-        hint("Auto-restart failed. Run 'niubot start' manually.");
-      }
-    }
+  const pid = parseInt(fs.readFileSync(pidFile, "utf-8").trim(), 10);
+  if (!isProcessRunning(pid)) {
+    fs.unlinkSync(pidFile);
+    console.log();
+    hint("Service is not running (stale PID file removed). Start it with: niubot start");
+    console.log();
+    return;
+  }
+
+  console.log();
+  info("Restarting service...");
+  stopProcess(niubotHome);
+
+  // Re-exec start with the NEW binary (the just-installed version)
+  try {
+    execFileSync("niubot", ["start"], {
+      encoding: "utf-8",
+      timeout: 30000,
+      stdio: "inherit",
+      env: { ...process.env, NIUBOT_HOME: niubotHome },
+    });
+  } catch {
+    hint("Auto-restart failed. Run 'niubot start' manually.");
   }
 
   console.log();

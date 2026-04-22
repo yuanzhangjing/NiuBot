@@ -120,6 +120,14 @@ export class Pipeline {
   /** 启动时间戳，用于 /status 计算 uptime */
   private startedAt = Date.now();
 
+  /** 启动时缓存的版本号，不受后续 update 影响 */
+  private readonly version: string = (() => {
+    try {
+      const pkgRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+      return JSON.parse(readFileSync(path.join(pkgRoot, "package.json"), "utf-8")).version ?? "unknown";
+    } catch { return "unknown"; }
+  })();
+
   /** 已处理的消息 ID 去重集合（有上限防内存泄漏） */
   private processedMsgIds = new Set<string>();
   private static readonly MAX_PROCESSED_IDS = 10000;
@@ -1037,16 +1045,9 @@ export class Pipeline {
     ).get() as { count: number } | undefined;
     const cronCount = cronRow?.count ?? 0;
 
-    let version = "unknown";
-    try {
-      const pkgRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
-      const pkg = JSON.parse(readFileSync(path.join(pkgRoot, "package.json"), "utf-8"));
-      version = pkg.version;
-    } catch { /* ignore */ }
-
     const content = [
       `**Bot:** ${this.botIdentity.name}`,
-      `**Version:** ${version}`,
+      `**Version:** ${this.version}`,
       `**Platform:** ${this.botIdentity.platform}`,
       `**Backend:** ${displayBackendType(this.backendType)}`,
       `**Model:** ${this.botIdentity.model ?? "default"}`,
@@ -1762,11 +1763,7 @@ export class Pipeline {
 
   private handleUpdate(chatId: string, platformChatId: string, msgId?: string): void {
     const PKG = "@yuanzhangjing/niubot";
-    let currentVersion = "unknown";
-    try {
-      const pkgRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
-      currentVersion = JSON.parse(readFileSync(path.join(pkgRoot, "package.json"), "utf-8")).version;
-    } catch { /* ignore */ }
+    const currentVersion = this.version;
 
     this.replyText(chatId, platformChatId, msgId, "正在检查更新...");
 
