@@ -1036,7 +1036,7 @@ export class Pipeline {
         sections.push(`\`\`\`\n${logBlock}\n\`\`\``);
       }
     }
-    const content = sections.join("\n");
+    const content = sections.join("\n\n");
     const header = `Task Progress · ${tasks.length} 个运行中`;
     const sendPromise = msgId
       ? this.im.replyCard(msgId, header, content)
@@ -1052,12 +1052,10 @@ export class Pipeline {
       this.replyText(chatId, platformChatId, msgId, "当前没有运行中的 task。");
       return;
     }
-    let stopped = 0;
     for (const [, t] of tasks) {
       this.agent.cancelSession(t.agentSession).catch(() => {});
-      stopped++;
     }
-    this.replyText(chatId, platformChatId, msgId, `已停止 ${stopped} 个 task。`);
+    this.replyText(chatId, platformChatId, msgId, `正在停止 ${tasks.length} 个 task。`);
   }
 
   private sendStatus(chatId: string, platformChatId: string, msgId?: string): void {
