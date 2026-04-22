@@ -786,6 +786,15 @@ export class Pipeline {
         this.triggerRestart({ platformChatId });
         return true;
       }
+      case "/update": {
+        if (!isAdmin) {
+          this.replyText(chatId, platformChatId, msgId, "/update 仅管理员可用。");
+          return true;
+        }
+        this.log.info("builtin command: update", { userId });
+        this.handleUpdate(chatId, platformChatId, msgId);
+        return true;
+      }
       case "/status": {
         this.log.info("builtin command: status", { userId });
         this.sendStatus(chatId, platformChatId, msgId);
@@ -830,21 +839,22 @@ export class Pipeline {
         return true;
       }
       case "/stop": {
-        const clearAll = parts.includes("-a");
-        this.log.info("builtin command: stop", { userId, chatId, clearAll });
+        this.log.info("builtin command: stop", { userId, chatId });
         if (this.chatSessions.has(chatId)) {
           this.cancelChat(chatId).catch(() => {});
-          const pending = this.queue.pendingCount(chatId);
-          if (clearAll && pending > 0) {
-            this.queue.drain(chatId);
-            this.replyText(chatId, platformChatId, msgId, `已停止，并清空 ${pending} 条排队消息。`);
-          } else if (pending > 0) {
-            this.replyText(chatId, platformChatId, msgId, `已停止当前任务，还有 ${pending} 条排队消息会继续处理。发 /stop -a 可全部停止并清空队列。`);
+          const dropped = this.queue.drain(chatId);
+          if (dropped > 0) {
+            this.replyText(chatId, platformChatId, msgId, `已停止当前任务，并清空 ${dropped} 条排队消息。`);
           } else {
-            this.replyText(chatId, platformChatId, msgId, "好的，已停止。");
+            this.replyText(chatId, platformChatId, msgId, "已停止当前任务。");
           }
         } else {
-          this.replyText(chatId, platformChatId, msgId, "当前没有正在执行的任务。");
+          const dropped = this.queue.drain(chatId);
+          if (dropped > 0) {
+            this.replyText(chatId, platformChatId, msgId, `当前没有正在执行的任务，已清空 ${dropped} 条排队消息。`);
+          } else {
+            this.replyText(chatId, platformChatId, msgId, "当前没有正在执行的任务。");
+          }
         }
         return true;
       }
@@ -856,6 +866,36 @@ export class Pipeline {
         } else {
           this.replyText(chatId, platformChatId, msgId, "队列是空的，没啥可清的。");
         }
+        return true;
+      }
+      case "/flush": {
+        this.log.info("builtin command: flush", { userId, chatId });
+        const pending = this.queue.pendingCount(chatId);
+        if (pending === 0) {
+          this.replyText(chatId, platformChatId, msgId, "队列是空的，没有需要 flush 的消息。");
+        } else if (this.chatSessions.has(chatId)) {
+          this.cancelChat(chatId).catch(() => {});
+          this.replyText(chatId, platformChatId, msgId, `跳过当前任务，开始处理队列中的 ${pending} 条消息。`);
+        } else {
+          this.replyText(chatId, platformChatId, msgId, `队列中有 ${pending} 条消息，即将处理。`);
+        }
+        return true;
+      }
+      case "/task": {
+        if (!isAdmin) {
+          this.replyText(chatId, platformChatId, msgId, "/task 仅管理员可用。");
+          return true;
+        }
+        const taskPrompt = parts.slice(1).join(" ").trim();
+        if (!taskPrompt) {
+          this.replyText(chatId, platformChatId, msgId, "用法：/task <任务描述>");
+          return true;
+        }
+        this.log.info("builtin command: task", { userId, chatId, promptLength: taskPrompt.length });
+        this.replyText(chatId, platformChatId, msgId, "任务已提交，完成后会发送结果。");
+        this.processIndependentSession(chatId, userId, taskPrompt, taskPrompt.slice(0, 40), "task").catch((err) => {
+          this.log.error("task execution failed", { chatId, error: String(err) });
+        });
         return true;
       }
     }
@@ -1024,13 +1064,20 @@ export class Pipeline {
    * 不走用户消息队列，不干扰当前对话 session。
    */
   async processCronJob(chatId: string, userId: string, prompt: string, description: string): Promise<void> {
+    return this.processIndependentSession(chatId, userId, prompt, description, "cron");
+  }
+
+  private async processIndependentSession(
+    chatId: string, userId: string, prompt: string, description: string,
+    source: "cron" | "task",
+  ): Promise<void> {
     // Resolve platform chat ID
     let platformChatId = this.platformChatIds.get(chatId);
     if (!platformChatId) {
       const row = this.db.prepare("SELECT platform_id FROM chats WHERE id = ?")
         .get(chatId) as { platform_id: string } | undefined;
       if (!row) {
-        this.log.warn("processCronJob: chat not found", { chatId });
+        this.log.warn(`${source} job: chat not found`, { chatId });
         return;
       }
       platformChatId = row.platform_id;
@@ -1081,14 +1128,14 @@ export class Pipeline {
       isAdmin,
     });
 
-    // Create session record with source='cron'
+    // Create session record
     const sessionId = randomUUID().slice(0, 8);
     this.db.prepare(`
       INSERT INTO sessions (id, chat_id, user_id, source, status, started_at, last_active_at, backend_type)
-      VALUES (?, ?, ?, 'cron', 'active', datetime('now'), datetime('now'), ?)
-    `).run(sessionId, chatId, userId, this.backendType);
+      VALUES (?, ?, ?, ?, 'active', datetime('now'), datetime('now'), ?)
+    `).run(sessionId, chatId, userId, source, this.backendType);
 
-    // Store cron prompt as user message
+    // Store prompt as user message
     storeMessage(this.db, {
       chatId,
       senderId: userId,
@@ -1112,13 +1159,13 @@ export class Pipeline {
       messageToSend = `${contextParts.join("\n\n")}\n\n${prompt}`;
     }
 
-    this.log.info("executing cron job", { chatId, sessionId, userId, description });
+    this.log.info(`executing ${source} job`, { chatId, sessionId, userId, description });
 
     try {
       const response = await this.agent.sendMessage(agentSession, messageToSend);
 
       if (response.cancelled) {
-        this.log.warn("cron job was cancelled", { chatId, sessionId });
+        this.log.warn(`${source} job was cancelled`, { chatId, sessionId });
         return;
       }
 
@@ -1154,17 +1201,17 @@ export class Pipeline {
         model: response.model,
       });
 
-      // Send card with ⏰ header（对齐 cc-connect: ⏰ + description）
-      const header = `⏰ ${description || prompt.slice(0, 40)}`;
+      const emoji = source === "cron" ? "⏰" : "⚡";
+      const header = `${emoji} ${description || prompt.slice(0, 40)}`;
       const sentPlatformMsgId = await this.im.sendCard(platformChatId, header, response.text, footer);
 
       if (sentPlatformMsgId) {
         updateMessagePlatformId(this.db, replyMsgId, sentPlatformMsgId);
       }
 
-      this.log.info("cron job completed", { chatId, sessionId, responseLength: response.text.length });
+      this.log.info(`${source} job completed`, { chatId, sessionId, responseLength: response.text.length });
     } catch (err) {
-      this.log.error("cron job execution failed", { chatId, sessionId, error: String(err) });
+      this.log.error(`${source} job execution failed`, { chatId, sessionId, error: String(err) });
     } finally {
       // Archive session（turn=1，不触发 archive summary）
       this.db.prepare(`
@@ -1173,7 +1220,7 @@ export class Pipeline {
       `).run(sessionId);
 
       await this.agent.closeSession(agentSession).catch((closeErr) => {
-        this.log.warn("failed to close cron session", { chatId, sessionId, error: String(closeErr) });
+        this.log.warn(`failed to close ${source} session`, { chatId, sessionId, error: String(closeErr) });
       });
     }
   }
@@ -1553,9 +1600,10 @@ export class Pipeline {
   private sendHelpCard(chatId: string, platformChatId: string, msgId: string | undefined, isAdmin: boolean): void {
     const lines = [
       "`/new`　　新会话（清空当前上下文）",
-      "`/stop`　　停止当前任务（排队消息继续处理）",
-      "`/stop -a`　全部停止并清空队列",
-      "`/clear`　　清空排队中的消息",
+      "`/stop`　　停止当前任务并清空队列（全停）",
+      "`/flush`　　跳过当前任务，优先处理排队消息",
+      "`/task`　　独立执行任务（不影响当前会话）",
+      "`/clear`　　仅清空排队消息（不停当前任务）",
       "`/status`　查看运行状态",
       "`/cron`　　查看定时任务",
       "`/help`　　显示本帮助",
@@ -1568,6 +1616,7 @@ export class Pipeline {
         "`/model`　　查看/切换模型",
         "`/agent`　　查看/切换 Agent backend",
         "`/restart`　重启引擎",
+        "`/update`　　检查更新并升级",
         "`/<cmd>`　　执行 shell 命令",
       );
     }
@@ -1607,6 +1656,39 @@ export class Pipeline {
       const output = ((execErr.stdout ?? "") + (execErr.stderr ?? "")).trim();
       const exitCode = execErr.code ?? 1;
       sendResult(formatShellOutput(this.workingDirectory, cmd, output, exitCode));
+    });
+  }
+
+  private handleUpdate(chatId: string, platformChatId: string, msgId?: string): void {
+    const PKG = "@yuanzhangjing/niubot";
+    let currentVersion = "unknown";
+    try {
+      const pkgRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+      currentVersion = JSON.parse(readFileSync(path.join(pkgRoot, "package.json"), "utf-8")).version;
+    } catch { /* ignore */ }
+
+    this.replyText(chatId, platformChatId, msgId, "正在检查更新...");
+
+    execAsync(`npm view ${PKG}@latest version`, { timeout: 15_000 }).then(({ stdout }) => {
+      const latest = stdout.trim();
+      if (!/^\d+\.\d+\.\d+(-[\w.]+)?$/.test(latest)) {
+        this.replyText(chatId, platformChatId, undefined, `版本号格式异常：${latest.slice(0, 50)}`);
+        return;
+      }
+      if (!latest || latest === currentVersion) {
+        this.replyText(chatId, platformChatId, undefined, `已是最新版本 (${currentVersion})。`);
+        return;
+      }
+
+      this.replyText(chatId, platformChatId, undefined, `发现新版本：${currentVersion} → ${latest}，正在安装...`);
+
+      return execAsync(`npm install -g ${PKG}@${latest}`, { timeout: 120_000 }).then(() => {
+        this.replyText(chatId, platformChatId, undefined, `${latest} 安装完成，正在重启...`);
+        this.triggerRestart({ platformChatId });
+      });
+    }).catch((err: unknown) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.replyText(chatId, platformChatId, undefined, `更新失败：${msg.slice(0, 500)}`);
     });
   }
 
