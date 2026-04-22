@@ -357,7 +357,7 @@ describe("Pipeline.recover", () => {
 
     const db = initDatabase(path.join(dir, "niubot.db"));
     const agent = new RecordingAgent();
-    const { im, sentCards } = createRecordingImStub();
+    const { im, sentTexts } = createRecordingImStub();
     const pipeline = new Pipeline(
       db,
       im,
@@ -372,7 +372,7 @@ describe("Pipeline.recover", () => {
     const handled = (pipeline as any).handleBuiltinCommand("//status", "u2", "c1", "chat-open-id");
 
     expect(handled).toBe(false);
-    expect(sentCards).toHaveLength(0);
+    expect(sentTexts).toHaveLength(0);
   });
 
   test("normalizes double-slash commands before forwarding to agent", () => {
@@ -604,6 +604,66 @@ describe("Pipeline.recover", () => {
     expect(handled).toBe(true);
     expect(row.status).toBe("active");
     expect(sentTexts).toContain("队列是空的，没啥可清的。");
+  });
+
+  test("replies with accurate /flush copy when interrupting current work", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const agent = new DeferredAgent();
+    const { im, sentTexts } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db,
+      im,
+      agent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+    await pipeline.start();
+
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "first",
+      platformMsgId: "m1",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "second",
+      platformMsgId: "m2",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const handled = (pipeline as any).handleBuiltinCommand("/flush", "u2", "c1", "chat-open-id");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(handled).toBe(true);
+    expect(sentTexts).toContain("中断当前回复，合并处理队列中的 1 条消息。");
+  });
+
+  test("shows accurate /flush help copy", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const { im, sentCards } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db,
+      im,
+      new RecordingAgent(),
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+
+    (pipeline as any).sendHelpCard("c1", "chat-open-id", undefined, true);
+
+    expect(sentCards.some((card) => card.content.includes("`/flush`　　中断当前回复，合并处理排队消息"))).toBe(true);
   });
 
   test("surfaces structured agent errors to the user", async () => {
