@@ -86,11 +86,12 @@ Basic info about users and chats (name, platform, type, etc.). Use when you need
 | Set name | `nb-agent contacts set-name <id> <name>` |
 
 ### Send message
-Send a text message to the current or specified chat.
+Send a text or card message to the current or specified chat.
 
 | Action | Command |
 |--------|---------|
-| Current chat | `nb-agent send <text>` |
+| Text | `nb-agent send <text>` |
+| Card | `nb-agent send --card <header> <content>` |
 | Specific chat | `nb-agent send --chat-id <id> <text>` |
 
 ### Send file
