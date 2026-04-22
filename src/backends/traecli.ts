@@ -7,7 +7,7 @@ import { existsSync, openSync, readSync, closeSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { CliAgentBackend, buildNiubotEnv, type BaseCliSession, type ParsedOutput } from "../agent/cli-base.js";
-import type { SessionConfig } from "../agent/types.js";
+import type { AgentSessionActivity, SessionConfig } from "../agent/types.js";
 import { DEFAULT_LITE_MODELS } from "../config.js";
 
 interface TraeCliSession extends BaseCliSession {
@@ -99,6 +99,27 @@ export default class TraeCliBackend extends CliAgentBackend<TraeCliSession> {
     } catch {
       return { text: stdout.trim() };
     }
+  }
+
+  protected refreshActivity(sessionId: string, activity: AgentSessionActivity): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    const jsonlPath = this.getJsonlPath(session);
+    if (!jsonlPath) return;
+    try {
+      const stat = statSync(jsonlPath);
+      const tailSize = Math.min(stat.size, 4096);
+      if (tailSize === 0) return;
+      const fd = openSync(jsonlPath, "r");
+      try {
+        const buf = Buffer.alloc(tailSize);
+        readSync(fd, buf, 0, tailSize, stat.size - tailSize);
+        const lines = buf.toString("utf-8").split("\n").filter((l) => l.trim());
+        activity.recentLines = lines.slice(-3);
+      } finally {
+        closeSync(fd);
+      }
+    } catch { /* ignore */ }
   }
 
   protected probeSessionFileMtime(session: TraeCliSession): number | null {

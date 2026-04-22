@@ -52,10 +52,15 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
     this.log = createLogger(name);
   }
 
-  /** 获取指定 session 的活动状态（供 watchdog 读取） */
+  /** 获取指定 session 的活动状态（供 watchdog / /list 读取） */
   getActivity(sessionId: string): AgentSessionActivity | undefined {
-    return this.activityMap.get(sessionId);
+    const a = this.activityMap.get(sessionId);
+    if (a?.status === "running") this.refreshActivity(sessionId, a);
+    return a;
   }
+
+  /** 子类可 override，在 getActivity 返回前刷新 recentLines 等字段 */
+  protected refreshActivity(_sessionId: string, _activity: AgentSessionActivity): void {}
 
   /** 获取所有活动状态（供 watchdog 遍历） */
   getAllActivities(): ReadonlyMap<string, AgentSessionActivity> {
@@ -267,7 +272,6 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
 
       if (sessionId) {
         this.activeProcesses.set(sessionId, child);
-        // 记录 PID 到 activity（供 watchdog 使用）
         const activity = this.activityMap.get(sessionId);
         if (activity) activity.pid = child.pid;
       }
