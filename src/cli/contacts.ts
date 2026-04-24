@@ -3,6 +3,19 @@
  */
 
 import type Database from "better-sqlite3";
+import {
+  assertContactsAccess,
+  countChatMessages,
+  countChatSessions,
+  countUserMemories,
+  getChat as getChatContact,
+  getUser as getUserContact,
+  listChats as listChatContacts,
+  listUsers as listUserContacts,
+  resolveChatId,
+  resolveUserId,
+  setUserManualName,
+} from "../contacts/store.js";
 
 export function handleContacts(
   db: Database.Database,
@@ -12,6 +25,12 @@ export function handleContacts(
   parseArgs: (args: string[]) => { positional: string[]; flags: Record<string, string> },
 ): void {
   const sub = args[0];
+  try {
+    assertContactsAccess({ chatType });
+  } catch (err) {
+    console.error(`Error: ${(err as Error).message}`);
+    process.exit(1);
+  }
 
   switch (sub) {
     case "list-users":
@@ -43,33 +62,7 @@ function listUsers(
   const { flags } = parseArgs(args);
   const nameFilter = flags["name"];
 
-  let sql = "SELECT id, name, name_source, platform, platform_id, is_bot, created_at FROM users";
-  const conditions: string[] = [];
-  const params: unknown[] = [];
-
-  if (nameFilter) {
-    conditions.push("name LIKE ?");
-    params.push(`%${nameFilter}%`);
-  }
-  if (flags["platform"]) {
-    conditions.push("platform = ?");
-    params.push(flags["platform"]);
-  }
-
-  if (conditions.length > 0) {
-    sql += " WHERE " + conditions.join(" AND ");
-  }
-  sql += " ORDER BY CAST(SUBSTR(id, 2) AS INTEGER)";
-
-  const rows = db.prepare(sql).all(...params) as Array<{
-    id: string;
-    name: string | null;
-    name_source: string | null;
-    platform: string;
-    platform_id: string;
-    is_bot: number;
-    created_at: string;
-  }>;
+  const rows = listUserContacts(db, { name: nameFilter, platform: flags["platform"] });
 
   if (rows.length === 0) {
     console.log("No users found.");
@@ -91,38 +84,7 @@ function listChats(
 ): void {
   const { flags } = parseArgs(args);
 
-  let sql = "SELECT id, type, name, platform, platform_id, user_id, created_at FROM chats";
-  const conditions: string[] = [];
-  const params: unknown[] = [];
-
-  if (flags["type"]) {
-    conditions.push("type = ?");
-    params.push(flags["type"]);
-  }
-  if (flags["name"]) {
-    conditions.push("name LIKE ?");
-    params.push(`%${flags["name"]}%`);
-  }
-  if (flags["user-id"]) {
-    // Find chats associated with a user (p2p chats)
-    conditions.push("user_id = (SELECT platform_id FROM users WHERE id = ?)");
-    params.push(flags["user-id"].toLowerCase());
-  }
-
-  if (conditions.length > 0) {
-    sql += " WHERE " + conditions.join(" AND ");
-  }
-  sql += " ORDER BY CAST(SUBSTR(id, 2) AS INTEGER)";
-
-  const rows = db.prepare(sql).all(...params) as Array<{
-    id: string;
-    type: string;
-    name: string | null;
-    platform: string;
-    platform_id: string;
-    user_id: string | null;
-    created_at: string;
-  }>;
+  const rows = listChatContacts(db, { type: flags["type"], name: flags["name"], userId: flags["user-id"] });
 
   if (rows.length === 0) {
     console.log("No chats found.");
@@ -155,17 +117,7 @@ function getUser(
     process.exit(1);
   }
 
-  const row = db.prepare(
-    "SELECT id, name, name_source, platform, platform_id, is_bot, created_at FROM users WHERE id = ?",
-  ).get(userId) as {
-    id: string;
-    name: string | null;
-    name_source: string | null;
-    platform: string;
-    platform_id: string;
-    is_bot: number;
-    created_at: string;
-  } | undefined;
+  const row = getUserContact(db, userId);
 
   if (!row) {
     console.error(`User "${idArg}" not found`);
@@ -181,10 +133,7 @@ function getUser(
   console.log(`  Created:     ${row.created_at}`);
 
   // Memory count
-  const memCount = db.prepare(
-    "SELECT COUNT(*) as n FROM user_memory WHERE user_id = ?",
-  ).get(row.id) as { n: number };
-  console.log(`  Memories:    ${memCount.n}`);
+  console.log(`  Memories:    ${countUserMemories(db, row.id)}`);
 }
 
 function getChat(
@@ -205,17 +154,7 @@ function getChat(
     process.exit(1);
   }
 
-  const row = db.prepare(
-    "SELECT id, type, name, platform, platform_id, user_id, created_at FROM chats WHERE id = ?",
-  ).get(chatId) as {
-    id: string;
-    type: string;
-    name: string | null;
-    platform: string;
-    platform_id: string;
-    user_id: string | null;
-    created_at: string;
-  } | undefined;
+  const row = getChatContact(db, chatId);
 
   if (!row) {
     console.error(`Chat "${idArg}" not found`);
@@ -233,16 +172,8 @@ function getChat(
   console.log(`  Created:     ${row.created_at}`);
 
   // Message count
-  const msgCount = db.prepare(
-    "SELECT COUNT(*) as n FROM messages WHERE chat_id = ?",
-  ).get(row.id) as { n: number };
-  console.log(`  Messages:    ${msgCount.n}`);
-
-  // Session count
-  const sessionCount = db.prepare(
-    "SELECT COUNT(*) as n FROM sessions WHERE chat_id = ?",
-  ).get(row.id) as { n: number };
-  console.log(`  Sessions:    ${sessionCount.n}`);
+  console.log(`  Messages:    ${countChatMessages(db, row.id)}`);
+  console.log(`  Sessions:    ${countChatSessions(db, row.id)}`);
 }
 
 function setName(
@@ -264,30 +195,6 @@ function setName(
     process.exit(1);
   }
 
-  db.prepare("UPDATE users SET name = ?, name_source = 'manual' WHERE id = ?").run(name, userId);
+  setUserManualName(db, userId, name);
   console.log(`Updated name for ${userId.toUpperCase()}: ${name}`);
-}
-
-/** Resolve user ID: accepts short ID (U1, u1) or internal ID */
-function resolveUserId(db: Database.Database, input: string): string | null {
-  // Try as short ID (U1 → u1)
-  const lower = input.toLowerCase();
-  if (/^u\d+$/.test(lower)) {
-    const row = db.prepare("SELECT id FROM users WHERE id = ?").get(lower) as { id: string } | undefined;
-    return row?.id ?? null;
-  }
-  // Try as platform ID
-  const row = db.prepare("SELECT id FROM users WHERE platform_id = ?").get(input) as { id: string } | undefined;
-  return row?.id ?? null;
-}
-
-/** Resolve chat ID: accepts short ID (C1, c1) or internal ID */
-function resolveChatId(db: Database.Database, input: string): string | null {
-  const lower = input.toLowerCase();
-  if (/^c\d+$/.test(lower)) {
-    const row = db.prepare("SELECT id FROM chats WHERE id = ?").get(lower) as { id: string } | undefined;
-    return row?.id ?? null;
-  }
-  const row = db.prepare("SELECT id FROM chats WHERE platform_id = ?").get(input) as { id: string } | undefined;
-  return row?.id ?? null;
 }

@@ -3,39 +3,29 @@
  */
 
 import type Database from "better-sqlite3";
+import {
+  getSessionForAccess,
+  listSessions,
+  searchSessions,
+  type SessionRow,
+} from "../sessions/store.js";
 import { utcToLocalDateTime } from "../tz.js";
-
-interface SessionRow {
-  id: string;
-  chat_id: string;
-  user_id: string | null;
-  source: string;
-  status: string;
-  summary: string | null;
-  topics: string | null;
-  started_at: string;
-  ended_at: string | null;
-  start_msg_id: number | null;
-  end_msg_id: number | null;
-  message_count: number | null;
-}
-
-const SESSION_COLUMNS = "id, chat_id, user_id, source, status, summary, topics, started_at, ended_at, start_msg_id, end_msg_id, message_count";
 
 export function handleSession(
   db: Database.Database,
   args: string[],
   chatId: string | undefined,
+  chatType: "p2p" | "group",
   parseArgs: (args: string[]) => { positional: string[]; flags: Record<string, string> },
 ): void {
   const sub = args[0];
 
   if (sub === "list") {
-    sessionList(db, args.slice(1), chatId, parseArgs);
+    sessionList(db, args.slice(1), chatId, chatType, parseArgs);
   } else if (sub === "search") {
-    sessionSearch(db, args.slice(1), chatId, parseArgs);
+    sessionSearch(db, args.slice(1), chatId, chatType, parseArgs);
   } else if (sub === "get") {
-    sessionGet(db, args.slice(1), parseArgs);
+    sessionGet(db, args.slice(1), chatId, chatType, parseArgs);
   } else {
     console.log("Usage: nb-agent sessions <list|search|get>");
   }
@@ -45,6 +35,7 @@ function sessionList(
   db: Database.Database,
   args: string[],
   currentChatId: string | undefined,
+  chatType: "p2p" | "group",
   parseArgs: (args: string[]) => { positional: string[]; flags: Record<string, string> },
 ): void {
   const { flags } = parseArgs(args);
@@ -59,35 +50,13 @@ function sessionList(
   const before = flags["before"];
   const offset = flags["offset"];
 
-  const conditions = ["chat_id = ?", "summary IS NOT NULL"];
-  const params: (string | number)[] = [chatId];
-
-  if (since) {
-    conditions.push("ended_at >= ?");
-    params.push(since);
+  let rows: SessionRow[];
+  try {
+    rows = listSessions(db, { currentChatId, chatType, targetChatId: chatId, limit, since, before, offset });
+  } catch (err) {
+    console.error(`Error: ${(err as Error).message}`);
+    process.exit(1);
   }
-  if (before) {
-    conditions.push("ended_at < ?");
-    params.push(before);
-  }
-  if (offset) {
-    // offset 是 session ID，找到其 ended_at 作为分页游标
-    const offsetRow = db.prepare("SELECT ended_at FROM sessions WHERE id = ?").get(offset) as { ended_at: string | null } | undefined;
-    if (offsetRow?.ended_at) {
-      conditions.push("ended_at < ?");
-      params.push(offsetRow.ended_at);
-    }
-  }
-
-  params.push(Math.abs(limit));
-
-  const rows = db.prepare(`
-    SELECT ${SESSION_COLUMNS}
-    FROM sessions
-    WHERE ${conditions.join(" AND ")}
-    ORDER BY ended_at DESC
-    LIMIT ?
-  `).all(...params) as SessionRow[];
 
   if (rows.length === 0) {
     console.log("(无归档 session)");
@@ -104,6 +73,7 @@ function sessionSearch(
   db: Database.Database,
   args: string[],
   currentChatId: string | undefined,
+  chatType: "p2p" | "group",
   parseArgs: (args: string[]) => { positional: string[]; flags: Record<string, string> },
 ): void {
   const { positional, flags } = parseArgs(args);
@@ -124,39 +94,13 @@ function sessionSearch(
   const before = flags["before"];
   const offset = flags["offset"];
 
-  const conditions = ["chat_id = ?", "summary IS NOT NULL"];
-  const params: (string | number)[] = [chatId];
-
-  // LIKE 搜索 summary 和 topics 字段
-  const likePattern = `%${query}%`;
-  conditions.push("(summary LIKE ? OR topics LIKE ?)");
-  params.push(likePattern, likePattern);
-
-  if (since) {
-    conditions.push("ended_at >= ?");
-    params.push(since);
+  let rows: SessionRow[];
+  try {
+    rows = searchSessions(db, { currentChatId, chatType, targetChatId: chatId, query, limit, since, before, offset });
+  } catch (err) {
+    console.error(`Error: ${(err as Error).message}`);
+    process.exit(1);
   }
-  if (before) {
-    conditions.push("ended_at < ?");
-    params.push(before);
-  }
-  if (offset) {
-    const offsetRow = db.prepare("SELECT ended_at FROM sessions WHERE id = ?").get(offset) as { ended_at: string | null } | undefined;
-    if (offsetRow?.ended_at) {
-      conditions.push("ended_at < ?");
-      params.push(offsetRow.ended_at);
-    }
-  }
-
-  params.push(Math.abs(limit));
-
-  const rows = db.prepare(`
-    SELECT ${SESSION_COLUMNS}
-    FROM sessions
-    WHERE ${conditions.join(" AND ")}
-    ORDER BY ended_at DESC
-    LIMIT ?
-  `).all(...params) as SessionRow[];
 
   if (rows.length === 0) {
     console.log("(无匹配 session)");
@@ -172,6 +116,8 @@ function sessionSearch(
 function sessionGet(
   db: Database.Database,
   args: string[],
+  currentChatId: string | undefined,
+  chatType: "p2p" | "group",
   parseArgs: (args: string[]) => { positional: string[]; flags: Record<string, string> },
 ): void {
   const { positional } = parseArgs(args);
@@ -181,8 +127,13 @@ function sessionGet(
     process.exit(1);
   }
 
-  const row = db.prepare(`SELECT ${SESSION_COLUMNS} FROM sessions WHERE id = ?`)
-    .get(idArg) as SessionRow | undefined;
+  let row: SessionRow | undefined;
+  try {
+    row = getSessionForAccess(db, idArg, { currentChatId, chatType });
+  } catch (err) {
+    console.error(`Error: ${(err as Error).message}`);
+    process.exit(1);
+  }
 
   if (!row) {
     console.error(`Session not found: ${idArg}`);

@@ -1,10 +1,10 @@
-import fs from "node:fs";
-import path from "node:path";
 import type Database from "better-sqlite3";
-import yaml from "yaml";
 import { listUserMemory } from "./user-memory.js";
 import { formatShortLabel, formatSenderLabel } from "../database/schema.js";
+import { listContinuationMessages } from "../messages/store.js";
+import { hasUserArchivedSession, listRecentUserArchivedSessions } from "../sessions/store.js";
 import { loadStaticContextTemplate } from "../static-context.js";
+import { listTasks, type TaskEntry } from "../tasks/store.js";
 import { utcToLocalDateTime } from "../tz.js";
 
 /** 冷启动注入最近 session 的时间窗口（小时） */
@@ -172,11 +172,12 @@ export function buildNormalContext(
   workingDirectory: string,
   beforeMsgId?: number,
   chatType: "p2p" | "group" = "p2p",
+  userId?: string,
 ): string {
   const parts: string[] = [];
 
-  // 1. 活跃任务索引（实时从 tasks/index.yaml 读取，群聊仅 public）
-  const taskBriefs = buildTaskIndex(workingDirectory, chatType);
+  // 1. 活跃任务索引（统一走 task 管理接口做可见性过滤）
+  const taskBriefs = buildTaskIndex(workingDirectory, chatType, userId);
   if (taskBriefs.length > 0) {
     parts.push(`<active-tasks>\n${taskBriefs.join("\n")}\n</active-tasks>`);
   }
@@ -278,26 +279,13 @@ function getRecentArchivedSessions(
   maxCount: number,
 ): ArchivedSessionInfo[] {
   const since = new Date(Date.now() - hours * 3600_000).toISOString();
-  const rows = db.prepare(`
-    SELECT id, summary, started_at, ended_at, start_msg_id, end_msg_id
-    FROM sessions
-    WHERE chat_id = ? AND status = 'archived' AND summary IS NOT NULL AND source = 'user'
-      AND ended_at >= ?
-    ORDER BY ended_at DESC
-    LIMIT ?
-  `).all(chatId, since, maxCount) as Array<{
-    id: string;
-    summary: string;
-    started_at: string;
-    ended_at: string;
-    start_msg_id: number | null;
-    end_msg_id: number | null;
-  }>;
+  const rows = listRecentUserArchivedSessions(db, { chatId, since, limit: maxCount });
 
   const results: ArchivedSessionInfo[] = [];
   for (const r of rows) {
+    if (!r.ended_at) continue;
     try {
-      const parsed = JSON.parse(r.summary) as ParsedSessionSummary;
+      const parsed = JSON.parse(r.summary ?? "") as ParsedSessionSummary;
       const msgCount = (r.start_msg_id != null && r.end_msg_id != null)
         ? r.end_msg_id - r.start_msg_id + 1
         : 0;
@@ -327,36 +315,12 @@ function buildContinuationContext(
   beforeMsgId?: number,
 ): string | null {
   // 确认该 chat 存在已归档的 session（没有历史 session 则不需要续接）
-  const hasArchived = db.prepare(`
-    SELECT 1 FROM sessions
-    WHERE chat_id = ? AND status = 'archived' AND source = 'user'
-    LIMIT 1
-  `).get(chatId);
-
-  if (!hasArchived) return null;
+  if (!hasUserArchivedSession(db, chatId)) return null;
 
   // 捞该 chat 最近 N 条消息（截止到当前消息之前，避免把用户刚发的消息当历史注入）
-  const cutoff = beforeMsgId != null ? `AND m.id < ?` : "";
-  const params: (string | number)[] = [chatId];
-  if (beforeMsgId != null) params.push(beforeMsgId);
-  params.push(CONTINUATION_TAIL_COUNT);
-  const rows = db.prepare(`
-    SELECT m.sender_id, m.role, u.name AS sender_name, m.content_text
-    FROM messages m
-    LEFT JOIN users u ON m.sender_id = u.id
-    WHERE m.chat_id = ? AND m.content_text IS NOT NULL ${cutoff}
-    ORDER BY m.id DESC
-    LIMIT ?
-  `).all(...params) as Array<{
-    sender_id: string | null;
-    role: string;
-    sender_name: string | null;
-    content_text: string;
-  }>;
+  const rows = listContinuationMessages(db, { chatId, beforeMsgId, limit: CONTINUATION_TAIL_COUNT });
 
   if (rows.length === 0) return null;
-
-  rows.reverse();
 
   const lines = rows.map((r) => {
     const sender = formatSenderLabel(r.sender_id, r.sender_name, r.role);
@@ -372,41 +336,17 @@ function buildContinuationContext(
 
 // ── Task index ─────────────────────────────────────────────
 
-interface TaskEntry {
-  name: string;
-  description: string;
-  path: string;
-  owner: string;
-  visibility: "public" | "private";
-  status?: string;
+/**
+ * 通过 task 管理接口读取活跃任务列表，生成简要索引。
+ */
+function buildTaskIndex(workingDirectory: string, chatType: "p2p" | "group" = "p2p", userId?: string): string[] {
+  const active = listTasks({ workingDirectory, chatType, userId });
+  return active.map(formatTaskBrief);
 }
 
-/**
- * 从 tasks/index.yaml 实时读取活跃任务列表，生成简要索引。
- * 只展示非 archived、非 inactive 的任务（名称 + 描述）。
- * 群聊时只展示 public 任务。
- */
-function buildTaskIndex(workingDirectory: string, chatType: "p2p" | "group" = "p2p"): string[] {
-  const indexPath = path.join(workingDirectory, "tasks", "index.yaml");
-  try {
-    if (!fs.existsSync(indexPath)) return [];
-    const content = fs.readFileSync(indexPath, "utf-8");
-    const parsed = yaml.parse(content) as { tasks?: TaskEntry[] } | null;
-    if (!parsed?.tasks?.length) return [];
-
-    let active = parsed.tasks.filter((t) => !t.status || t.status === "active");
-    if (chatType === "group") {
-      active = active.filter((t) => t.visibility === "public");
-    }
-    if (active.length === 0) return [];
-
-    return active.map((t) => {
-      const desc = t.description
-        ? ` — ${t.description.length > 200 ? t.description.slice(0, 200) + "…" : t.description}`
-        : "";
-      return `- ${t.name} (${t.path})${desc}`;
-    });
-  } catch {
-    return [];
-  }
+function formatTaskBrief(t: TaskEntry): string {
+  const desc = t.description
+    ? ` — ${t.description.length > 200 ? t.description.slice(0, 200) + "…" : t.description}`
+    : "";
+  return `- ${t.name} (${t.path})${desc}`;
 }

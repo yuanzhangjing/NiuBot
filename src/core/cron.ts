@@ -6,6 +6,7 @@
 
 import type Database from "better-sqlite3";
 import { createLogger } from "../logger.js";
+import { assertChatAccess, type ChatAccessContext } from "./access.js";
 
 const log = createLogger("cron");
 
@@ -216,10 +217,53 @@ export function listCronJobs(
   return rows.map((r) => ({ ...toJob(r), createdAt: r.created_at }));
 }
 
+/** List active cron jobs visible from the current access context */
+export function listCronJobsForAccess(
+  db: Database.Database,
+  options: ChatAccessContext & { targetChatId?: string },
+): Array<CronJob & { createdAt: string }> {
+  if (options.targetChatId) {
+    assertChatAccess({
+      currentChatId: options.currentChatId,
+      chatType: options.chatType,
+      targetChatId: options.targetChatId,
+    });
+  } else if (options.chatType === "group") {
+    if (!options.currentChatId) {
+      throw new Error("NIUBOT_CHAT_ID not set");
+    }
+    return listCronJobs(db, options.currentChatId);
+  }
+  return listCronJobs(db, options.targetChatId);
+}
+
 /** Delete a cron job */
 export function deleteCronJob(db: Database.Database, id: number): boolean {
   const result = db.prepare("DELETE FROM cron_jobs WHERE id = ?").run(id);
   return result.changes > 0;
+}
+
+/** Delete a cron job after checking chat visibility and creator ownership. */
+export function deleteCronJobForAccess(
+  db: Database.Database,
+  id: number,
+  ctx: ChatAccessContext & { userId?: string },
+): CronJob & { createdAt: string } | undefined {
+  const job = getCronJob(db, id);
+  if (!job) return undefined;
+  assertChatAccess({
+    currentChatId: ctx.currentChatId,
+    chatType: ctx.chatType,
+    targetChatId: job.chatId,
+  });
+  if (!ctx.userId) {
+    throw new Error("NIUBOT_USER_ID not set");
+  }
+  if (job.creatorUserId !== ctx.userId) {
+    throw new Error("can only delete your own cron jobs");
+  }
+  deleteCronJob(db, id);
+  return job;
 }
 
 /** Get a cron job by ID */

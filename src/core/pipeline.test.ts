@@ -395,6 +395,80 @@ describe("Pipeline.recover", () => {
     expect((pipeline as any).normalizeUserTextForAgent("hello")).toBe("hello");
   });
 
+  test("updates the active chat session model without starting a new session", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const agent = new RecordingAgent();
+    const { im, sentCards } = createRecordingImStub();
+    const identity = createBotIdentity();
+    const pipeline = new Pipeline(
+      db,
+      im,
+      agent,
+      identity,
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+    const activeAgentSession = { id: "agent_1", model: "old-model", liteModel: "old-lite" };
+    (pipeline as any).chatSessions.set("c1", {
+      agentSession: activeAgentSession,
+      sessionId: "s1",
+      platformChatId: "chat-open-id",
+      userId: "u2",
+      hasReplied: false,
+    });
+
+    (pipeline as any).handleModelCommand(["new-model"], "c1", "chat-open-id");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(identity.model).toBe("new-model");
+    expect(activeAgentSession.model).toBe("new-model");
+    expect(activeAgentSession.liteModel).toBe("old-lite");
+    expect((pipeline as any).chatSessions.has("c1")).toBe(true);
+    expect(agent.closeSessionCalls).toHaveLength(0);
+    expect(sentCards[0]?.content).toContain("主模型已切换为 **new-model**");
+    expect(sentCards[0]?.content).not.toContain("下次会话生效");
+  });
+
+  test("updates the active chat session lite model without starting a new session", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const agent = new RecordingAgent();
+    const identity = createBotIdentity();
+    const pipeline = new Pipeline(
+      db,
+      createImStub(),
+      agent,
+      identity,
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+    const activeAgentSession = { id: "agent_1", model: "old-model", liteModel: "old-lite" };
+    (pipeline as any).chatSessions.set("c1", {
+      agentSession: activeAgentSession,
+      sessionId: "s1",
+      platformChatId: "chat-open-id",
+      userId: "u2",
+      hasReplied: false,
+    });
+
+    (pipeline as any).handleModelCommand(["lite", "new-lite"], "c1", "chat-open-id");
+
+    expect(identity.liteModel).toBe("new-lite");
+    expect(activeAgentSession.model).toBe("old-model");
+    expect(activeAgentSession.liteModel).toBe("new-lite");
+    expect((pipeline as any).chatSessions.has("c1")).toBe(true);
+    expect(agent.closeSessionCalls).toHaveLength(0);
+  });
+
   test("archives the current session on /new", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);

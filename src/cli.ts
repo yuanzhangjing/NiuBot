@@ -112,17 +112,6 @@ function parseArgs(args: string[]): { positional: string[]; flags: Record<string
   return { positional, flags };
 }
 
-// ─── Access control helpers ────────────────────────────────
-
-function checkChatAccess(targetChatId: string): void {
-  if (!CHAT_ID) return;
-  if (targetChatId === CHAT_ID) return;
-  if (CHAT_TYPE === "group") {
-    console.error("Error: cross-chat query is not allowed in group chat");
-    process.exit(1);
-  }
-}
-
 // ─── Main ──────────────────────────────────────────────────
 
 async function main(): Promise<void> {
@@ -134,7 +123,7 @@ async function main(): Promise<void> {
       handleUserMemory(args.slice(1));
       break;
     case "messages":
-      handleMessages(openDb(), args.slice(1), CHAT_ID, CHAT_TYPE, USER_ID, checkChatAccess, parseArgs);
+      handleMessages(openDb(), args.slice(1), CHAT_ID, CHAT_TYPE, parseArgs);
       break;
     case "contacts":
       handleContacts(openDb(), args.slice(1), CHAT_ID, CHAT_TYPE, parseArgs);
@@ -146,13 +135,13 @@ async function main(): Promise<void> {
       handleSendFile(args.slice(1), CHAT_ID, parseArgs);
       break;
     case "cron":
-      handleCron(openDb(), args.slice(1), CHAT_ID, USER_ID, parseArgs);
+      handleCron(openDb(), args.slice(1), CHAT_ID, CHAT_TYPE, USER_ID, parseArgs);
       break;
     case "task":
       handleTask(args.slice(1), WORK_DIR, CHAT_ID, CHAT_TYPE, USER_ID, parseArgs);
       break;
     case "sessions":
-      handleSession(openDb(), args.slice(1), CHAT_ID, parseArgs);
+      handleSession(openDb(), args.slice(1), CHAT_ID, CHAT_TYPE, parseArgs);
       break;
     case "whoami":
       handleWhoami();

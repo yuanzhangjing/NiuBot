@@ -1212,7 +1212,7 @@ export class Pipeline {
     await this.pendingSummary.get(chatId);
 
     // Build normal context（会话定位 + task 索引 + 最近 session summaries）
-    const normalContext = buildNormalContext(this.db, chatId, this.workingDirectory, undefined, chatType);
+    const normalContext = buildNormalContext(this.db, chatId, this.workingDirectory, undefined, chatType, userId);
 
     // Create independent agent session
     const supportsSystemPrompt = this.agent.supportsSystemPrompt === true;
@@ -1566,9 +1566,13 @@ export class Pipeline {
       const cached = this.backendModelCache.get(this.backendType);
       this.botIdentity.model = cached?.model;
       this.botIdentity.liteModel = cached?.liteModel;
+      this.updateActiveChatSessionModels(chatId, {
+        model: this.botIdentity.model,
+        liteModel: this.botIdentity.liteModel,
+      });
       const model = this.botIdentity.model ?? "default";
       const lite = formatLiteModel(this.botIdentity.liteModel, this.backendType);
-      this.sendAgentCard(chatId, platformChatId, msgId, "Model", `已恢复为初始配置 (Model: ${model}, Lite: ${lite})\n下次会话生效，发 /new 立即生效。`);
+      this.sendAgentCard(chatId, platformChatId, msgId, "Model", `已恢复为初始配置 (Model: ${model}, Lite: ${lite})\n当前会话立即生效，重启恢复配置值。`);
       this.log.info("model reset to config defaults", { backend: this.backendType });
       return;
     }
@@ -1587,14 +1591,33 @@ export class Pipeline {
 
     if (isLite) {
       this.botIdentity.liteModel = resolvedModel;
+      this.updateActiveChatSessionModels(chatId, { liteModel: resolvedModel });
       this.recordModelHistory(this.backendType, resolvedModel);
-      this.sendAgentCard(chatId, platformChatId, msgId, "Model", `Lite 模型已切换为 **${resolvedModel}**\n下次会话生效，发 /new 立即生效。重启恢复初始值。`);
+      this.sendAgentCard(chatId, platformChatId, msgId, "Model", `Lite 模型已切换为 **${resolvedModel}**\n当前会话立即生效，重启恢复初始值。`);
       this.log.info("lite model switched (runtime)", { model: resolvedModel, backend: this.backendType });
     } else {
       this.botIdentity.model = resolvedModel;
+      this.updateActiveChatSessionModels(chatId, { model: resolvedModel });
       this.recordModelHistory(this.backendType, resolvedModel);
-      this.sendAgentCard(chatId, platformChatId, msgId, "Model", `主模型已切换为 **${resolvedModel}**\n下次会话生效，发 /new 立即生效。重启恢复初始值。`);
+      this.sendAgentCard(chatId, platformChatId, msgId, "Model", `主模型已切换为 **${resolvedModel}**\n当前会话立即生效，重启恢复初始值。`);
       this.log.info("model switched (runtime)", { model: resolvedModel, backend: this.backendType });
+    }
+  }
+
+  /** 同步当前 chat 已存在的 backend session；各 backend resume 时会从 session 对象读取 model。 */
+  private updateActiveChatSessionModels(chatId: string, models: { model?: string; liteModel?: string }): void {
+    const chatSession = this.chatSessions.get(chatId);
+    if (!chatSession) return;
+
+    const agentSession = chatSession.agentSession as AgentSession & {
+      model?: string;
+      liteModel?: string;
+    };
+    if ("model" in models) {
+      agentSession.model = models.model;
+    }
+    if ("liteModel" in models) {
+      agentSession.liteModel = models.liteModel;
     }
   }
 
@@ -2166,7 +2189,7 @@ export class Pipeline {
     await this.pendingSummary.get(chatId);
 
     // 构建 normal 上下文（会话定位 + task 索引 + 最近 session summaries）— 后续拼到首条消息前缀
-    const normalContext = buildNormalContext(this.db, chatId, this.workingDirectory, beforeMsgId, chatType);
+    const normalContext = buildNormalContext(this.db, chatId, this.workingDirectory, beforeMsgId, chatType, userId);
     if (normalContext) {
       this.pendingNormalContext.set(chatId, normalContext);
     }

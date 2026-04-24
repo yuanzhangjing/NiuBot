@@ -3,12 +3,13 @@
  */
 
 import type Database from "better-sqlite3";
-import { addCronJob, listCronJobs, deleteCronJob, getCronJob } from "../core/cron.js";
+import { addCronJob, deleteCronJobForAccess, listCronJobsForAccess } from "../core/cron.js";
 
 export function handleCron(
   db: Database.Database,
   args: string[],
   chatId: string | undefined,
+  chatType: "p2p" | "group",
   userId: string | undefined,
   parseArgs: (args: string[]) => { positional: string[]; flags: Record<string, string> },
 ): void {
@@ -20,12 +21,12 @@ export function handleCron(
       break;
     case "list":
     case "ls":
-      cronList(db, args.slice(1), chatId, parseArgs);
+      cronList(db, args.slice(1), chatId, chatType, parseArgs);
       break;
     case "del":
     case "delete":
     case "rm":
-      cronDel(db, args.slice(1), parseArgs);
+      cronDel(db, args.slice(1), chatId, chatType, userId, parseArgs);
       break;
     default:
       console.log("Usage: nb-agent cron <add|list|del>");
@@ -89,12 +90,19 @@ function cronList(
   db: Database.Database,
   args: string[],
   chatId: string | undefined,
+  chatType: "p2p" | "group",
   parseArgs: (args: string[]) => { positional: string[]; flags: Record<string, string> },
 ): void {
   const { flags } = parseArgs(args);
   const targetChatId = flags["chat-id"] ?? chatId;
 
-  const jobs = listCronJobs(db, targetChatId ?? undefined);
+  let jobs;
+  try {
+    jobs = listCronJobsForAccess(db, { currentChatId: chatId, targetChatId: targetChatId ?? undefined, chatType });
+  } catch (err) {
+    console.error(`Error: ${(err as Error).message}`);
+    process.exit(1);
+  }
 
   if (jobs.length === 0) {
     console.log("No active cron jobs.");
@@ -113,6 +121,9 @@ function cronList(
 function cronDel(
   db: Database.Database,
   args: string[],
+  chatId: string | undefined,
+  chatType: "p2p" | "group",
+  userId: string | undefined,
   parseArgs: (args: string[]) => { positional: string[]; flags: Record<string, string> },
 ): void {
   const { positional } = parseArgs(args);
@@ -122,13 +133,17 @@ function cronDel(
     process.exit(1);
   }
 
-  const job = getCronJob(db, id);
+  let job;
+  try {
+    job = deleteCronJobForAccess(db, id, { currentChatId: chatId, chatType, userId });
+  } catch (err) {
+    console.error(`Error: ${(err as Error).message}`);
+    process.exit(1);
+  }
   if (!job) {
     console.error(`Cron job #${id} not found`);
     process.exit(1);
   }
-
-  deleteCronJob(db, id);
   console.log(`Deleted cron job #${id}${job.description ? ` (${job.description})` : ""}`);
 }
 
