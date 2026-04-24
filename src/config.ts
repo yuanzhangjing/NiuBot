@@ -47,8 +47,8 @@ export interface BotConfig {
   id: string;
   appId: string;
   appSecret: string;
-  /** agent backend（必填） */
-  backend: string;
+  /** agent backend（可选，运行时从 DB 恢复或自动选择第一个可用 backend） */
+  backend?: string;
   /** agent 工作目录（默认 ~/niubot-workspace/<id>） */
   workingDirectory: string;
   /** 数据库路径（默认 ~/.niubot/<id>/niubot.db） */
@@ -74,7 +74,7 @@ export interface NiuBotConfig {
 export const BUILTIN_BACKENDS = new Set<BuiltinBackendType>(Object.keys(AGENT_REGISTRY) as BuiltinBackendType[]);
 export const BUILTIN_BACKEND_LIST = Object.keys(AGENT_REGISTRY) as BuiltinBackendType[];
 
-/** 内置 backend 默认轻量模型，用户未配置 liteModel 时自动使用 */
+/** 内置 backend 默认轻量模型 */
 export const DEFAULT_LITE_MODELS: Partial<Record<BuiltinBackendType, string>> = {
   claude: "haiku",
   codex: "gpt-5.4-mini",
@@ -170,7 +170,7 @@ export function loadConfig(configPath?: string): NiuBotConfig {
       id: "NiuBot",
       appId,
       appSecret,
-      backend: legacyDefaultBackend ?? "claude",
+      backend: legacyDefaultBackend,
       workingDirectory: path.resolve(legacyWorkDir),
       dbPath: legacyDbPath,
       personaPath: path.join(NIUBOT_HOME, "persona.md"),
@@ -215,14 +215,6 @@ function parseBotConfig(raw: Record<string, string>, legacyDefaultBackend?: stri
   const botDir = path.join(NIUBOT_HOME, id);
 
   const backend = normalizeBackend(raw["backend"]) ?? legacyDefaultBackend;
-  if (!backend) {
-    throw new Error(
-      `Config error: bot '${id}' missing 'backend'. ` +
-      `Set backend on the bot entry (e.g. backend: claude). ` +
-      `Run 'niubot init' to detect available backends.`,
-    );
-  }
-
   return {
     id,
     appId,

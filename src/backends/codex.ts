@@ -240,6 +240,48 @@ export default class CodexBackend extends CliAgentBackend<CodexSession> {
     }
   }
 
+  async validateModel(modelName: string): Promise<{ valid: boolean; error?: string }> {
+    try {
+      const stdout = await this.exec("codex", [
+        "exec",
+        "--json",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--skip-git-repo-check",
+        "-m", modelName,
+        "-",
+      ], { stdin: "." });
+
+      for (const line of stdout.split("\n")) {
+        try {
+          const event = JSON.parse(line) as { type?: string; message?: string };
+          if (event.type === "error") {
+            return { valid: false, error: "模型不存在或不支持" };
+          }
+        } catch { /* skip non-JSON */ }
+      }
+      return { valid: true };
+    } catch (err: any) {
+      const stdout = err.stdout as string | undefined;
+      if (stdout) {
+        for (const line of stdout.split("\n")) {
+          try {
+            const event = JSON.parse(line) as { type?: string; message?: string };
+            if (event.type === "error" && event.message?.includes("not supported")) {
+              return { valid: false, error: "模型不存在或不支持" };
+            }
+            if (event.type === "turn.failed") {
+              const msg = (event as any).error?.message as string | undefined;
+              if (msg?.includes("not supported")) {
+                return { valid: false, error: "模型不存在或不支持" };
+              }
+            }
+          } catch { /* skip non-JSON */ }
+        }
+      }
+      return { valid: true };
+    }
+  }
+
   private getJsonlPath(session: CodexSession): string | null {
     if (session.sessionLogPath && existsSync(session.sessionLogPath)) {
       return session.sessionLogPath;

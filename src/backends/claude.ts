@@ -236,6 +236,53 @@ export default class ClaudeBackend extends CliAgentBackend<ClaudeSession> {
     }
   }
 
+  async validateModel(modelName: string): Promise<{ valid: boolean; error?: string }> {
+    try {
+      const stdout = await this.exec("claude", [
+        "-p",
+        "--model", modelName,
+        "--output-format", "stream-json",
+        "--verbose",
+        "--no-session-persistence",
+        "--max-budget-usd", "0.001",
+        ".",
+      ], undefined, undefined, undefined);
+
+      for (const line of stdout.split("\n")) {
+        try {
+          const event = JSON.parse(line) as {
+            type?: string;
+            is_error?: boolean;
+            api_error_status?: number;
+          };
+          if (event.type === "result" && event.is_error) {
+            if (event.api_error_status === 404) {
+              return { valid: false, error: "模型不存在或无权限" };
+            }
+          }
+        } catch { /* skip non-JSON */ }
+      }
+      return { valid: true };
+    } catch (err: any) {
+      const stdout = err.stdout as string | undefined;
+      if (stdout) {
+        for (const line of stdout.split("\n")) {
+          try {
+            const event = JSON.parse(line) as {
+              type?: string;
+              is_error?: boolean;
+              api_error_status?: number;
+            };
+            if (event.type === "result" && event.is_error && event.api_error_status === 404) {
+              return { valid: false, error: "模型不存在或无权限" };
+            }
+          } catch { /* skip non-JSON */ }
+        }
+      }
+      return { valid: true };
+    }
+  }
+
   protected agentEnv(): Record<string, string> {
     return {
       CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1",

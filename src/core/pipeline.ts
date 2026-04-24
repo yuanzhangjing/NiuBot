@@ -16,6 +16,7 @@ import {
   getUserShortLabel, getChatShortLabel, formatSenderLabel, getMessageByPlatformId, updateMessageContent, updateMessagePlatformId,
   getUnseenMessages, markMessagesSeen,
   setUserAdminRole, getAdminUserIds, getUserAdminRole, type AdminRole,
+  getBotBackendModelState, setBotBackendModelState, setBotRuntimeState, clearBotRuntimeModels,
 } from "../database/schema.js";
 import { buildImportantContext, buildNormalContext, buildSpeakerContext, NEW_SESSION_SEARCH_REMINDER, type SceneInfo, type SpeakerInfo } from "../memory/inject.js";
 import { loadPersona } from "../persona.js";
@@ -56,6 +57,8 @@ export interface BotIdentity {
   model?: string;
   /** 轻量模型 ID（可选，覆盖 backend 默认值） */
   liteModel?: string;
+  /** 当前 backend 的默认轻量模型，用于 reset */
+  defaultLiteModel?: string;
   /** 人设文件路径（注入到 admin 的场景信息中） */
   personaPath?: string;
 }
@@ -1529,10 +1532,14 @@ export class Pipeline {
       this.agent = newBackend;
       this.backendType = target;
 
-      // 恢复目标 backend 的模型配置（如有），否则清空走默认
-      const cached = this.backendModelCache.get(target);
+      // 恢复目标 backend 的模型配置（如有），否则不指定，让 backend 用自己的默认
+      const cached = this.backendModelCache.get(target)
+        ?? getBotBackendModelState(this.db, this.botIdentity.name, target);
+      const backendDefaultLiteModel = DEFAULT_LITE_MODELS[target as BuiltinBackendType];
       this.botIdentity.model = cached?.model;
-      this.botIdentity.liteModel = cached?.liteModel;
+      this.botIdentity.liteModel = cached?.liteModel ?? backendDefaultLiteModel;
+      this.botIdentity.defaultLiteModel = backendDefaultLiteModel;
+      this.persistRuntimeState();
     };
 
     doSwitch()
@@ -1540,7 +1547,7 @@ export class Pipeline {
         const model = this.botIdentity.model ?? "default";
         const lite = formatLiteModel(this.botIdentity.liteModel, target);
         this.sendAgentCard(chatId, platformChatId, msgId, "Agent",
-          `已切换到 **${displayBackendType(target)}** (Model: ${model}, Lite: ${lite})\n上下文已重置，重启后恢复为配置值。`);
+          `已切换到 **${displayBackendType(target)}** (Model: ${model}, Lite: ${lite})\n上下文已重置，重启后仍保持当前选择。`);
         this.log.info("agent backend switched (runtime only)", {
           backend: target,
           model: this.botIdentity.model ?? null,
@@ -1560,24 +1567,29 @@ export class Pipeline {
    * - /model lite <name|index> → 切 lite 模型
    * - /model reset        → 恢复为配置初始值
    */
-  private handleModelCommand(args: string[], chatId: string, platformChatId: string, msgId?: string): void {
+  private async handleModelCommand(args: string[], chatId: string, platformChatId: string, msgId?: string): Promise<void> {
     if (args.length === 0) {
       this.sendModelList(chatId, platformChatId, msgId);
       return;
     }
 
     if (args[0] === "reset") {
-      const cached = this.backendModelCache.get(this.backendType);
-      this.botIdentity.model = cached?.model;
-      this.botIdentity.liteModel = cached?.liteModel;
-      this.updateActiveChatSessionModels(chatId, {
-        model: this.botIdentity.model,
-        liteModel: this.botIdentity.liteModel,
+      const defaultLiteModel = DEFAULT_LITE_MODELS[this.backendType as BuiltinBackendType];
+      this.botIdentity.model = undefined;
+      this.botIdentity.liteModel = defaultLiteModel;
+      this.botIdentity.defaultLiteModel = defaultLiteModel;
+      this.backendModelCache.set(this.backendType, {
+        model: undefined,
+        liteModel: defaultLiteModel,
       });
-      const model = this.botIdentity.model ?? "default";
-      const lite = formatLiteModel(this.botIdentity.liteModel, this.backendType);
-      this.sendAgentCard(chatId, platformChatId, msgId, "Model", `已恢复为初始配置 (Model: ${model}, Lite: ${lite})\n当前会话立即生效，重启恢复配置值。`);
-      this.log.info("model reset to config defaults", { backend: this.backendType });
+      this.updateActiveChatSessionModels(chatId, {
+        model: undefined,
+        liteModel: defaultLiteModel,
+      });
+      this.clearRuntimeModels();
+      const lite = formatLiteModel(defaultLiteModel, this.backendType);
+      this.sendAgentCard(chatId, platformChatId, msgId, "Model", `已恢复为默认 (Model: default, Lite: ${lite})\n当前会话立即生效。`);
+      this.log.info("model reset to backend defaults", { backend: this.backendType });
       return;
     }
 
@@ -1593,18 +1605,71 @@ export class Pipeline {
     const candidates = this.buildModelCandidates();
     const resolvedModel = this.resolveModelArg(modelArg, candidates);
 
+    // 新模型名不在候选列表中 → 探测验证
+    if (!candidates.includes(resolvedModel) && this.agent.validateModel) {
+      this.log.info("probing unknown model", { model: resolvedModel, backend: this.backendType });
+      try {
+        const result = await this.agent.validateModel(resolvedModel);
+        if (!result.valid) {
+          this.log.info("model probe failed", { model: resolvedModel, error: result.error });
+          const lines = [`模型 **${resolvedModel}** 不可用（${result.error ?? "未知错误"}）`, ""];
+          if (candidates.length > 0) {
+            lines.push("可用模型：");
+            for (let i = 0; i < candidates.length; i++) {
+              lines.push(`  ${i + 1}. ${candidates[i]}`);
+            }
+            lines.push("");
+            lines.push("`/model <名字或编号>` 切换");
+          }
+          this.sendAgentCard(chatId, platformChatId, msgId, "Model", lines.join("\n"));
+          return;
+        }
+      } catch (err) {
+        this.log.warn("model probe error, allowing switch", { model: resolvedModel, error: String(err) });
+      }
+    }
+
     if (isLite) {
       this.botIdentity.liteModel = resolvedModel;
       this.updateActiveChatSessionModels(chatId, { liteModel: resolvedModel });
       this.recordModelHistory(this.backendType, resolvedModel);
-      this.sendAgentCard(chatId, platformChatId, msgId, "Model", `Lite 模型已切换为 **${resolvedModel}**\n当前会话立即生效，重启恢复初始值。`);
+      this.persistRuntimeState();
+      this.sendAgentCard(chatId, platformChatId, msgId, "Model", `Lite 模型已切换为 **${resolvedModel}**\n当前会话立即生效，重启后仍保持当前选择。`);
       this.log.info("lite model switched (runtime)", { model: resolvedModel, backend: this.backendType });
     } else {
       this.botIdentity.model = resolvedModel;
       this.updateActiveChatSessionModels(chatId, { model: resolvedModel });
       this.recordModelHistory(this.backendType, resolvedModel);
-      this.sendAgentCard(chatId, platformChatId, msgId, "Model", `主模型已切换为 **${resolvedModel}**\n当前会话立即生效，重启恢复初始值。`);
+      this.persistRuntimeState();
+      this.sendAgentCard(chatId, platformChatId, msgId, "Model", `主模型已切换为 **${resolvedModel}**\n当前会话立即生效，重启后仍保持当前选择。`);
       this.log.info("model switched (runtime)", { model: resolvedModel, backend: this.backendType });
+    }
+  }
+
+  /** 保存当前 agent/model 运行时选择；失败不影响当前命令执行。 */
+  private persistRuntimeState(): void {
+    try {
+      setBotRuntimeState(this.db, this.botIdentity.name, {
+        backendType: this.backendType,
+        model: this.botIdentity.model,
+        liteModel: this.botIdentity.liteModel,
+      });
+      setBotBackendModelState(this.db, this.botIdentity.name, this.backendType, {
+        model: this.botIdentity.model,
+        liteModel: this.botIdentity.liteModel,
+      });
+    } catch (err) {
+      this.log.warn("failed to persist bot runtime state", { error: String(err) });
+    }
+  }
+
+  /** 清除运行时模型选择，保留当前 backend。 */
+  private clearRuntimeModels(): void {
+    try {
+      setBotRuntimeState(this.db, this.botIdentity.name, { backendType: this.backendType });
+      clearBotRuntimeModels(this.db, this.botIdentity.name);
+    } catch (err) {
+      this.log.warn("failed to clear bot runtime models", { error: String(err) });
     }
   }
 
@@ -1623,6 +1688,8 @@ export class Pipeline {
     if ("liteModel" in models) {
       agentSession.liteModel = models.liteModel;
     }
+
+    this.agent.updateSessionModels?.(chatSession.agentSession.id, models);
   }
 
   /** 构建模型候选列表：初始配置 → 默认 lite → 历史 → 运行时新增，顺序稳定 */

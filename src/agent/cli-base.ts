@@ -232,6 +232,18 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
     this.log.info("session closed", { sessionId: session.id });
   }
 
+  updateSessionModels(sessionId: string, models: { model?: string; liteModel?: string }): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+
+    if ("model" in models) {
+      session.model = models.model;
+    }
+    if ("liteModel" in models) {
+      (session as S & { liteModel?: string }).liteModel = models.liteModel;
+    }
+  }
+
   getAgentSessionId(sessionId: string): string | undefined {
     return this.sessions.get(sessionId)?.agentSessionId;
   }

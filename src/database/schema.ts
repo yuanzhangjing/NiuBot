@@ -262,6 +262,37 @@ const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 12,
+    description: "Persist runtime model choices per bot",
+    up: (db) => {
+      db.exec("ALTER TABLE bot_runtime_state ADD COLUMN model TEXT");
+      db.exec("ALTER TABLE bot_runtime_state ADD COLUMN lite_model TEXT");
+    },
+  },
+  {
+    version: 13,
+    description: "Persist per-backend runtime model cache per bot",
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS bot_backend_model_state (
+          bot_name      TEXT NOT NULL,
+          backend_type  TEXT NOT NULL,
+          model         TEXT,
+          lite_model    TEXT,
+          updated_at    TEXT DEFAULT (datetime('now')),
+          PRIMARY KEY (bot_name, backend_type)
+        )
+      `);
+      db.exec(`
+        INSERT INTO bot_backend_model_state (bot_name, backend_type, model, lite_model, updated_at)
+        SELECT bot_name, backend_type, model, lite_model, updated_at
+        FROM bot_runtime_state
+        WHERE backend_type IS NOT NULL
+        ON CONFLICT(bot_name, backend_type) DO NOTHING
+      `);
+    },
+  },
 ];
 
 const LATEST_VERSION = migrations[migrations.length - 1]!.version;
@@ -281,12 +312,58 @@ export function initDatabase(dbPath: string): Database.Database {
 }
 
 export function getBotRuntimeBackend(db: Database.Database, botName: string): AgentBackendType | undefined {
+  return getBotRuntimeState(db, botName)?.backendType;
+}
+
+export interface BotRuntimeState {
+  backendType?: AgentBackendType;
+  model?: string;
+  liteModel?: string;
+}
+
+export interface BotBackendModelState {
+  model?: string;
+  liteModel?: string;
+}
+
+export function getBotRuntimeState(db: Database.Database, botName: string): BotRuntimeState | undefined {
   const row = db.prepare(
-    "SELECT backend_type FROM bot_runtime_state WHERE bot_name = ?",
-  ).get(botName) as { backend_type: string } | undefined;
+    "SELECT backend_type, model, lite_model FROM bot_runtime_state WHERE bot_name = ?",
+  ).get(botName) as { backend_type: string | null; model: string | null; lite_model: string | null } | undefined;
 
   if (!row) return undefined;
-  return normalizeBackend(row.backend_type);
+  return {
+    backendType: normalizeBackend(row.backend_type ?? undefined),
+    model: row.model ?? undefined,
+    liteModel: row.lite_model ?? undefined,
+  };
+}
+
+export function setBotRuntimeState(
+  db: Database.Database,
+  botName: string,
+  state: BotRuntimeState,
+): void {
+  const existing = getBotRuntimeState(db, botName);
+  const next = {
+    backendType: state.backendType ?? existing?.backendType,
+    model: "model" in state ? state.model : existing?.model,
+    liteModel: "liteModel" in state ? state.liteModel : existing?.liteModel,
+  };
+
+  if (!next.backendType) {
+    throw new Error("Cannot persist bot runtime state without backendType");
+  }
+
+  db.prepare(`
+    INSERT INTO bot_runtime_state (bot_name, backend_type, model, lite_model, updated_at)
+    VALUES (?, ?, ?, ?, datetime('now'))
+    ON CONFLICT(bot_name) DO UPDATE SET
+      backend_type = excluded.backend_type,
+      model = excluded.model,
+      lite_model = excluded.lite_model,
+      updated_at = excluded.updated_at
+  `).run(botName, next.backendType, next.model ?? null, next.liteModel ?? null);
 }
 
 export function setBotRuntimeBackend(
@@ -294,13 +371,59 @@ export function setBotRuntimeBackend(
   botName: string,
   backendType: AgentBackendType,
 ): void {
+  setBotRuntimeState(db, botName, { backendType });
+}
+
+export function getBotBackendModelState(
+  db: Database.Database,
+  botName: string,
+  backendType: AgentBackendType,
+): BotBackendModelState | undefined {
+  const row = db.prepare(
+    "SELECT model, lite_model FROM bot_backend_model_state WHERE bot_name = ? AND backend_type = ?",
+  ).get(botName, backendType) as { model: string | null; lite_model: string | null } | undefined;
+
+  if (!row) return undefined;
+  return {
+    model: row.model ?? undefined,
+    liteModel: row.lite_model ?? undefined,
+  };
+}
+
+export function setBotBackendModelState(
+  db: Database.Database,
+  botName: string,
+  backendType: AgentBackendType,
+  state: BotBackendModelState,
+): void {
+  const existing = getBotBackendModelState(db, botName, backendType);
+  const next = {
+    model: "model" in state ? state.model : existing?.model,
+    liteModel: "liteModel" in state ? state.liteModel : existing?.liteModel,
+  };
+
   db.prepare(`
-    INSERT INTO bot_runtime_state (bot_name, backend_type, updated_at)
-    VALUES (?, ?, datetime('now'))
-    ON CONFLICT(bot_name) DO UPDATE SET
-      backend_type = excluded.backend_type,
+    INSERT INTO bot_backend_model_state (bot_name, backend_type, model, lite_model, updated_at)
+    VALUES (?, ?, ?, ?, datetime('now'))
+    ON CONFLICT(bot_name, backend_type) DO UPDATE SET
+      model = excluded.model,
+      lite_model = excluded.lite_model,
       updated_at = excluded.updated_at
-  `).run(botName, backendType);
+  `).run(botName, backendType, next.model ?? null, next.liteModel ?? null);
+}
+
+export function clearBotRuntimeModels(db: Database.Database, botName: string): void {
+  const existing = getBotRuntimeState(db, botName);
+  if (!existing?.backendType) return;
+  setBotRuntimeState(db, botName, {
+    backendType: existing.backendType,
+    model: undefined,
+    liteModel: undefined,
+  });
+  setBotBackendModelState(db, botName, existing.backendType, {
+    model: undefined,
+    liteModel: undefined,
+  });
 }
 
 export function loadPersistedBotBackend(dbPath: string, botName: string): AgentBackendType | undefined {
@@ -309,6 +432,25 @@ export function loadPersistedBotBackend(dbPath: string, botName: string): AgentB
   const db = initDatabase(dbPath);
   try {
     return getBotRuntimeBackend(db, botName);
+  } finally {
+    db.close();
+  }
+}
+
+export function loadPersistedBotRuntimeState(dbPath: string, botName: string): BotRuntimeState | undefined {
+  if (!existsSync(dbPath)) return undefined;
+
+  const db = initDatabase(dbPath);
+  try {
+    const runtime = getBotRuntimeState(db, botName);
+    if (!runtime?.backendType) return runtime;
+    const backendModels = getBotBackendModelState(db, botName, runtime.backendType);
+    if (!backendModels) return runtime;
+    return {
+      backendType: runtime.backendType,
+      model: backendModels.model,
+      liteModel: backendModels.liteModel,
+    };
   } finally {
     db.close();
   }

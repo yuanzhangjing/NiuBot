@@ -191,7 +191,7 @@ async function cmdInit(niubotHome: string, flags: CliFlags): Promise<void> {
         checkBotCredentials(config, issues);
 
         // Validate backend availability for each bot
-        const backendsToCheck = new Set(config.bots.map((b) => b.backend));
+        const backendsToCheck = new Set(config.bots.map((b) => b.backend).filter((b): b is string => !!b));
         for (const be of backendsToCheck) {
           const customDef = config.backends[be];
           if (customDef) {
@@ -782,7 +782,7 @@ function cmdStart(niubotHome: string, flags: CliFlags): void {
   checkBotCredentials(config, issues);
 
   // Check backend availability (deduplicate across bots)
-  const backendsToCheck = new Set(config.bots.map((b) => b.backend));
+  const backendsToCheck = new Set(config.bots.map((b) => b.backend).filter((b): b is string => !!b));
   for (const be of backendsToCheck) {
     const customDef = config.backends[be];
     if (customDef) {

@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 import type { AgentBackend, AgentResponse, AgentSession, SessionConfig } from "../agent/types.js";
-import { initDatabase } from "../database/schema.js";
+import { getBotBackendModelState, getBotRuntimeState, initDatabase, setBotBackendModelState } from "../database/schema.js";
 import type { NormalizedMessage, PlatformAdapter } from "../im/types.js";
 import { Pipeline, type BotIdentity } from "./pipeline.js";
 
@@ -12,13 +12,19 @@ class RecordingAgent implements AgentBackend {
   readonly createSessionCalls: SessionConfig[] = [];
   readonly sendMessageCalls: string[] = [];
   readonly closeSessionCalls: string[] = [];
+  readonly backendSessions = new Map<string, { model?: string; liteModel?: string }>();
 
   async start(): Promise<void> {}
   async stop(): Promise<void> {}
 
   async createSession(config: SessionConfig): Promise<AgentSession> {
     this.createSessionCalls.push(config);
-    return { id: `agent_${this.createSessionCalls.length}` };
+    const id = `agent_${this.createSessionCalls.length}`;
+    this.backendSessions.set(id, {
+      model: config.model,
+      liteModel: config.liteModel,
+    });
+    return { id };
   }
 
   async sendMessage(_session: AgentSession, message: string): Promise<AgentResponse> {
@@ -29,6 +35,14 @@ class RecordingAgent implements AgentBackend {
   async cancelSession(): Promise<void> {}
   async closeSession(session: AgentSession): Promise<void> {
     this.closeSessionCalls.push(session.id);
+  }
+
+  updateSessionModels(sessionId: string, models: { model?: string; liteModel?: string }): void {
+    const current = this.backendSessions.get(sessionId) ?? {};
+    this.backendSessions.set(sessionId, {
+      model: "model" in models ? models.model : current.model,
+      liteModel: "liteModel" in models ? models.liteModel : current.liteModel,
+    });
   }
 }
 
@@ -414,6 +428,7 @@ describe("Pipeline.recover", () => {
       "codex",
     );
     const activeAgentSession = { id: "agent_1", model: "old-model", liteModel: "old-lite" };
+    agent.backendSessions.set("agent_1", { model: "old-model", liteModel: "old-lite" });
     (pipeline as any).chatSessions.set("c1", {
       agentSession: activeAgentSession,
       sessionId: "s1",
@@ -428,10 +443,19 @@ describe("Pipeline.recover", () => {
     expect(identity.model).toBe("new-model");
     expect(activeAgentSession.model).toBe("new-model");
     expect(activeAgentSession.liteModel).toBe("old-lite");
+    expect(agent.backendSessions.get("agent_1")).toEqual({
+      model: "new-model",
+      liteModel: "old-lite",
+    });
     expect((pipeline as any).chatSessions.has("c1")).toBe(true);
     expect(agent.closeSessionCalls).toHaveLength(0);
     expect(sentCards[0]?.content).toContain("主模型已切换为 **new-model**");
     expect(sentCards[0]?.content).not.toContain("下次会话生效");
+    expect(getBotRuntimeState(db, "NiuBot")).toEqual({
+      backendType: "codex",
+      model: "new-model",
+      liteModel: undefined,
+    });
   });
 
   test("updates the active chat session lite model without starting a new session", async () => {
@@ -452,6 +476,7 @@ describe("Pipeline.recover", () => {
       "codex",
     );
     const activeAgentSession = { id: "agent_1", model: "old-model", liteModel: "old-lite" };
+    agent.backendSessions.set("agent_1", { model: "old-model", liteModel: "old-lite" });
     (pipeline as any).chatSessions.set("c1", {
       agentSession: activeAgentSession,
       sessionId: "s1",
@@ -465,8 +490,130 @@ describe("Pipeline.recover", () => {
     expect(identity.liteModel).toBe("new-lite");
     expect(activeAgentSession.model).toBe("old-model");
     expect(activeAgentSession.liteModel).toBe("new-lite");
+    expect(agent.backendSessions.get("agent_1")).toEqual({
+      model: "old-model",
+      liteModel: "new-lite",
+    });
     expect((pipeline as any).chatSessions.has("c1")).toBe(true);
     expect(agent.closeSessionCalls).toHaveLength(0);
+    expect(getBotRuntimeState(db, "NiuBot")).toEqual({
+      backendType: "codex",
+      model: undefined,
+      liteModel: "new-lite",
+    });
+  });
+
+  test("clears runtime models on /model reset while keeping backend", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const identity = createBotIdentity();
+    identity.model = "runtime-model";
+    identity.liteModel = "runtime-lite";
+    const pipeline = new Pipeline(
+      db,
+      createImStub(),
+      new RecordingAgent(),
+      identity,
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+
+    (pipeline as any).handleModelCommand(["reset"], "c1", "chat-open-id");
+
+    expect(identity.model).toBeUndefined();
+    expect(identity.liteModel).toBe("gpt-5.4-mini");
+    expect(getBotRuntimeState(db, "NiuBot")).toEqual({
+      backendType: "codex",
+      model: undefined,
+      liteModel: undefined,
+    });
+  });
+
+  test("persists backend and restored models after /agent switch", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const identity = createBotIdentity();
+    identity.model = "codex-model";
+    identity.liteModel = "codex-lite";
+    const { im, sentCards } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db,
+      im,
+      new RecordingAgent(),
+      identity,
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+      async () => new RecordingAgent(),
+      () => ["codex", "claude"],
+    );
+
+    (pipeline as any).backendModelCache.set("claude", {
+      model: "claude-model",
+      liteModel: "claude-lite",
+    });
+
+    (pipeline as any).handleAgentCommand(["claude"], "c1", "chat-open-id");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(identity.model).toBe("claude-model");
+    expect(identity.liteModel).toBe("claude-lite");
+    expect(getBotRuntimeState(db, "NiuBot")).toEqual({
+      backendType: "claude",
+      model: "claude-model",
+      liteModel: "claude-lite",
+    });
+    expect(sentCards[0]?.content).toContain("重启后仍保持当前选择");
+  });
+
+  test("restores persisted backend-specific models on /agent switch after restart", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    setBotBackendModelState(db, "NiuBot", "claude", {
+      model: "claude-opus-4-6",
+      liteModel: "haiku",
+    });
+
+    const identity = createBotIdentity();
+    identity.model = "gpt-5.4";
+    const { im, sentCards } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db,
+      im,
+      new RecordingAgent(),
+      identity,
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+      async () => new RecordingAgent(),
+      () => ["codex", "claude"],
+    );
+
+    (pipeline as any).handleAgentCommand(["claude"], "c1", "chat-open-id");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(identity.model).toBe("claude-opus-4-6");
+    expect(identity.liteModel).toBe("haiku");
+    expect(getBotRuntimeState(db, "NiuBot")).toEqual({
+      backendType: "claude",
+      model: "claude-opus-4-6",
+      liteModel: "haiku",
+    });
+    expect(getBotBackendModelState(db, "NiuBot", "claude")).toEqual({
+      model: "claude-opus-4-6",
+      liteModel: "haiku",
+    });
+    expect(sentCards[0]?.content).toContain("claude-opus-4-6");
   });
 
   test("archives the current session on /new", async () => {

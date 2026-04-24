@@ -16,6 +16,7 @@ import { CronScheduler } from "./core/cron.js";
 import { ensurePersonaFile } from "./persona.js";
 import { loadStaticContextTemplate } from "./static-context.js";
 import { createLogger } from "./logger.js";
+import type { ResolvedBotRuntimeConfig } from "./runtime-config.js";
 import type Database from "better-sqlite3";
 
 export interface BotInstance {
@@ -38,6 +39,7 @@ export async function createBotInstance(
   backendType?: AgentBackendType,
   backendResolver?: (type: AgentBackendType) => Promise<AgentBackend>,
   getAvailableBackends?: () => string[],
+  runtimeConfig?: ResolvedBotRuntimeConfig,
 ): Promise<BotInstance> {
   const log = createLogger("bot-instance", botConfig.id);
 
@@ -77,8 +79,9 @@ export async function createBotInstance(
     name: botConfig.id,
     platform: "feishu",
     platformBotId: `_bot_${botConfig.id}_`,
-    model: botConfig.model,
-    liteModel: botConfig.liteModel,
+    model: runtimeConfig?.model,
+    liteModel: runtimeConfig?.liteModel,
+    defaultLiteModel: runtimeConfig?.defaultLiteModel,
     personaPath: botConfig.personaPath,
   };
 

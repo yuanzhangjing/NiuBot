@@ -12,8 +12,10 @@ import {
 import type { AgentBackend } from "./agent/types.js";
 import type { CliAgentBackend } from "./agent/cli-base.js";
 import { createBotInstance, type BotInstance } from "./bot-instance.js";
+import { loadPersistedBotRuntimeState } from "./database/schema.js";
 import { createLogger, setLogLevel } from "./logger.js";
 import { prependNiubotBinToPath } from "./niubot-cli.js";
+import { resolveBotRuntimeConfig } from "./runtime-config.js";
 
 const log = createLogger("main");
 
@@ -183,13 +185,27 @@ async function main(): Promise<void> {
   const bots: BotInstance[] = [];
   for (const botConfig of config.bots) {
     try {
-      const backendType = botConfig.backend;
+      const runtimeState = loadPersistedBotRuntimeState(botConfig.dbPath, botConfig.id);
+      const runtimeConfig = resolveBotRuntimeConfig(botConfig.backend, runtimeState, getAvailableBackends());
+      const backendType = runtimeConfig.backendType;
       const agent = await getOrCreateBackend(backendType);
-      const instance = await createBotInstance(botConfig, agent, config.queue, backendType, getOrCreateBackend, getAvailableBackends);
+      const instance = await createBotInstance(
+        botConfig,
+        agent,
+        config.queue,
+        backendType,
+        getOrCreateBackend,
+        getAvailableBackends,
+        runtimeConfig,
+      );
       bots.push(instance);
       log.info("bot backend assigned", {
         bot: botConfig.id,
         backend: backendType,
+        configBackend: botConfig.backend,
+        runtimeBackend: runtimeState?.backendType,
+        model: runtimeConfig.model,
+        liteModel: runtimeConfig.liteModel,
       });
     } catch (err) {
       log.error("failed to create bot instance", { bot: botConfig.id, error: String(err) });

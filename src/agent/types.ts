@@ -75,6 +75,12 @@ export interface AgentBackend {
   /** 关闭 session */
   closeSession(session: AgentSession): Promise<void>;
 
+  /** 更新已存在 session 的模型配置（可选，用于运行时 /model 切换） */
+  updateSessionModels?(
+    sessionId: string,
+    models: { model?: string; liteModel?: string },
+  ): void;
+
   /** 获取 session 累计字节数（可选，用于统计） */
   getCumulativeBytes?(sessionId: string): number;
 
@@ -83,6 +89,9 @@ export interface AgentBackend {
 
   /** 是否支持 system prompt 注入 */
   supportsSystemPrompt?: boolean;
+
+  /** 探测模型名是否可用（可选，不支持时视为通过） */
+  validateModel?(modelName: string): Promise<{ valid: boolean; error?: string }>;
 }
 
 // ── Activity Watchdog 相关类型 ──────────────────────────────
