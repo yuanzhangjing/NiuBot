@@ -25,9 +25,11 @@ interface ChatQueue {
   pending: QueuedMessage[];
   /** agent 是否正在处理 */
   busy: boolean;
+  /** 当前 process 调用的取消控制器 */
+  abortController: AbortController | null;
 }
 
-type ProcessFn = (chatId: string, mergedText: string, messages: QueuedMessage[]) => Promise<void>;
+type ProcessFn = (chatId: string, mergedText: string, messages: QueuedMessage[], signal: AbortSignal) => Promise<void>;
 
 export class MessageQueue {
   private queues = new Map<string, ChatQueue>();
@@ -115,12 +117,25 @@ export class MessageQueue {
     return false;
   }
 
+  /** 指定 chat 是否正在处理 */
+  isBusy(chatId: string): boolean {
+    return this.queues.get(chatId)?.busy ?? false;
+  }
+
+  /** 取消指定 chat 正在进行的 process 调用 */
+  cancel(chatId: string): boolean {
+    const q = this.queues.get(chatId);
+    if (!q?.busy || !q.abortController) return false;
+    q.abortController.abort();
+    return true;
+  }
+
   private getQueue(chatId: string): ChatQueue {
     let q = this.queues.get(chatId);
     if (!q) {
       q = {
         buffer: [], bufferTimer: null, pending: [],
-        busy: false,
+        busy: false, abortController: null,
       };
       this.queues.set(chatId, q);
     }
@@ -156,6 +171,8 @@ export class MessageQueue {
     q.buffer = [];
     q.bufferTimer = null;
     q.busy = true;
+    q.abortController = new AbortController();
+    const { signal } = q.abortController;
 
     const mergedText = messages.length === 1
       ? messages[0].text
@@ -170,10 +187,11 @@ export class MessageQueue {
     log.info("flush", { chatId, messageCount: messages.length, textLength: mergedText.length });
 
     try {
-      await this.processFn?.(chatId, mergedText, messages);
+      await this.processFn?.(chatId, mergedText, messages, signal);
     } catch (err) {
       log.error("process error", { chatId, error: String(err) });
     } finally {
+      q.abortController = null;
       this.processNext(q, chatId);
     }
   }

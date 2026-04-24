@@ -189,7 +189,7 @@ export class Pipeline {
       liteModel: botIdentity.liteModel,
     });
 
-    this.queue.onProcess((chatId, mergedText, messages) => this.process(chatId, mergedText, messages));
+    this.queue.onProcess((chatId, mergedText, messages, signal) => this.process(chatId, mergedText, messages, signal));
   }
 
   /** 启动管道：注册 IM 消息回调 */
@@ -868,16 +868,22 @@ export class Pipeline {
       }
       case "/stop": {
         this.log.info("builtin command: stop", { userId, chatId });
-        if (this.chatSessions.has(chatId)) {
+        const hasSession = this.chatSessions.has(chatId);
+        const isBusy = this.queue.isBusy(chatId);
+        if (hasSession) {
           this.cancelChat(chatId).catch(() => {});
-          const dropped = this.queue.drain(chatId);
+        }
+        if (isBusy) {
+          this.queue.cancel(chatId);
+        }
+        const dropped = this.queue.drain(chatId);
+        if (hasSession || isBusy) {
           if (dropped > 0) {
             this.replyText(chatId, platformChatId, msgId, `已停止当前任务，并清空 ${dropped} 条排队消息。`);
           } else {
             this.replyText(chatId, platformChatId, msgId, "已停止当前任务。");
           }
         } else {
-          const dropped = this.queue.drain(chatId);
           if (dropped > 0) {
             this.replyText(chatId, platformChatId, msgId, `当前没有正在执行的任务，已清空 ${dropped} 条排队消息。`);
           } else {
@@ -1854,7 +1860,7 @@ export class Pipeline {
     });
   }
 
-  private async process(chatId: string, mergedText: string, messages: import("./queue.js").QueuedMessage[] = []): Promise<void> {
+  private async process(chatId: string, mergedText: string, messages: import("./queue.js").QueuedMessage[] = [], signal?: AbortSignal): Promise<void> {
     const platformChatId = this.chatSessions.get(chatId)?.platformChatId
       ?? this.platformChatIds.get(chatId);
 
@@ -1880,6 +1886,11 @@ export class Pipeline {
     try {
       // M3: 路由决策 — 判断是否需要切换 session
       await this.maybeRouteSession(chatId, mergedText);
+
+      if (signal?.aborted) {
+        this.log.info("process cancelled before session creation", { chatId });
+        return;
+      }
 
       const msgIds = messages.map((m) => m.dbMsgId).filter((id): id is number => id != null);
       const firstMsgId = msgIds.length > 0 ? Math.min(...msgIds) : undefined;
@@ -1947,6 +1958,12 @@ export class Pipeline {
           markMessagesSeen(this.db, unseen.map((m) => m.id));
           this.log.info("injected unseen messages", { chatId, count: unseen.length });
         }
+      }
+
+      if (signal?.aborted) {
+        this.log.info("process cancelled before sending to agent", { chatId });
+        await this.archiveSession(chatId);
+        return;
       }
 
       this.log.info("sending to agent", {
