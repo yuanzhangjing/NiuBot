@@ -458,6 +458,64 @@ describe("Pipeline.recover", () => {
     });
   });
 
+  test("orders model candidates deterministically when history timestamps tie", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare(
+      "INSERT INTO model_history (backend, model_name, last_used_at) VALUES (?, ?, ?)",
+    ).run("codex", "history-old", "2026-04-25 10:00:00");
+    db.prepare(
+      "INSERT INTO model_history (backend, model_name, last_used_at) VALUES (?, ?, ?)",
+    ).run("codex", "history-new", "2026-04-25 10:00:00");
+
+    const identity = createBotIdentity();
+    identity.model = "gpt-5.4";
+    identity.liteModel = "gpt-5.4-mini";
+    const pipeline = new Pipeline(
+      db,
+      createImStub(),
+      new RecordingAgent(),
+      identity,
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+
+    expect((pipeline as any).buildModelCandidates()).toEqual([
+      "gpt-5.4",
+      "gpt-5.4-mini",
+      "history-new",
+      "history-old",
+    ]);
+  });
+
+  test("records model history with sub-second timestamps", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const pipeline = new Pipeline(
+      db,
+      createImStub(),
+      new RecordingAgent(),
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+
+    (pipeline as any).recordModelHistory("codex", "gpt-5.5");
+
+    const row = db.prepare(
+      "SELECT last_used_at FROM model_history WHERE backend = ? AND model_name = ?",
+    ).get("codex", "gpt-5.5") as { last_used_at: string };
+    expect(row.last_used_at).toMatch(/\.\d{3}$/);
+  });
+
   test("updates the active chat session lite model without starting a new session", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);

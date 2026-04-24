@@ -1715,7 +1715,7 @@ export class Pipeline {
     // 3. 历史记录
     try {
       const rows = this.db.prepare(
-        "SELECT model_name FROM model_history WHERE backend = ? ORDER BY last_used_at DESC LIMIT 10",
+        "SELECT model_name FROM model_history WHERE backend = ? ORDER BY last_used_at DESC, id DESC LIMIT 10",
       ).all(this.backendType) as Array<{ model_name: string }>;
       for (const row of rows) {
         add(row.model_name);
@@ -1742,8 +1742,8 @@ export class Pipeline {
   private recordModelHistory(backend: string, modelName: string): void {
     try {
       this.db.prepare(
-        "INSERT INTO model_history (backend, model_name, last_used_at) VALUES (?, ?, datetime('now')) " +
-        "ON CONFLICT(backend, model_name) DO UPDATE SET last_used_at = datetime('now')",
+        "INSERT INTO model_history (backend, model_name, last_used_at) VALUES (?, ?, strftime('%Y-%m-%d %H:%M:%f', 'now')) " +
+        "ON CONFLICT(backend, model_name) DO UPDATE SET last_used_at = strftime('%Y-%m-%d %H:%M:%f', 'now')",
       ).run(backend, modelName);
     } catch { /* ignore if table doesn't exist */ }
   }
