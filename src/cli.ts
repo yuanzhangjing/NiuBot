@@ -5,12 +5,15 @@
  * 命令和权限逻辑对齐 cc-connect。
  *
  * 环境变量：
- *   NIUBOT_HOME       — 配置/数据目录（默认 ~/.niubot）
+ *   NIUBOT_HOME       — 配置/数据目录（必须设置）
  *   NIUBOT_DB_PATH    — 数据库路径
  *   NIUBOT_USER_ID    — 当前用户 ID
  *   NIUBOT_CHAT_ID    — 当前会话 ID
  *   NIUBOT_CHAT_TYPE  — 当前会话类型（p2p / group）
  *   NIUBOT_WORK_DIR   — 工作目录（用于 task 操作）
+ *   NIUBOT_PLATFORM   — IM 平台标识（如 feishu）
+ *   NIUBOT_BOT_ID     — Bot 平台 ID
+ *   NIUBOT_IS_ADMIN   — 是否管理员（"true" 时生效）
  */
 
 import path from "node:path";
@@ -36,8 +39,11 @@ import { handleSession } from "./cli/session.js";
 
 // ─── Context ───────────────────────────────────────────────
 
-const NIUBOT_HOME = process.env["NIUBOT_HOME"] ?? path.join(os.homedir(), ".niubot");
-// Load global defaults from NIUBOT_HOME/.env
+const NIUBOT_HOME = process.env["NIUBOT_HOME"];
+if (!NIUBOT_HOME) {
+  console.error("NIUBOT_HOME is not set. nbt must run inside a NiuBot session.");
+  process.exit(1);
+}
 dotenv.config({ path: path.join(NIUBOT_HOME, ".env"), quiet: true });
 
 // 命令行参数解析（全局 flags 优先于环境变量）
@@ -51,6 +57,9 @@ const USER_ID = globalFlags["user-id"] ?? process.env["NIUBOT_USER_ID"];
 const CHAT_ID = globalFlags["chat-id"] ?? process.env["NIUBOT_CHAT_ID"];
 const CHAT_TYPE = (globalFlags["chat-type"] ?? process.env["NIUBOT_CHAT_TYPE"] ?? "p2p") as "p2p" | "group";
 const WORK_DIR = process.env["NIUBOT_WORK_DIR"] ?? ".";
+const PLATFORM = process.env["NIUBOT_PLATFORM"];
+const BOT_ID = process.env["NIUBOT_BOT_ID"];
+const IS_ADMIN = process.env["NIUBOT_IS_ADMIN"] === "true";
 
 /** 提取全局 flags 并从 argv 中移除 */
 function extractGlobalFlags(args: string[]): Record<string, string> {
@@ -180,7 +189,7 @@ function handleUserMemory(args: string[]): void {
       userMemoryDel(db, userId, rest);
       break;
     default:
-      console.log("Usage: nb-agent user-memory <add|list|get|update|del>");
+      console.log("Usage: nbt user-memory <add|list|get|update|del>");
       break;
   }
   db.close();
@@ -190,7 +199,7 @@ function userMemoryAdd(db: Database.Database, userId: string, args: string[]): v
   const { flags } = parseArgs(args);
   const summary = flags["summary"] ?? flags["s"];
   if (!summary) {
-    console.error("Usage: nb-agent user-memory add --summary \"...\" [--detail \"...\"] [--visibility private|public]");
+    console.error("Usage: nbt user-memory add --summary \"...\" [--detail \"...\"] [--visibility private|public]");
     process.exit(1);
   }
   const detail = flags["detail"] ?? flags["d"] ?? "";
@@ -237,7 +246,7 @@ function userMemoryList(db: Database.Database, userId: string, args: string[]): 
 function userMemoryGet(db: Database.Database, userId: string, args: string[]): void {
   const { positional } = parseArgs(args);
   const id = Number(positional[0]);
-  if (!id) { console.error("Usage: nb-agent user-memory get <id>"); process.exit(1); }
+  if (!id) { console.error("Usage: nbt user-memory get <id>"); process.exit(1); }
 
   const m = getUserMemory(db, id);
   if (!m) { console.error(`Memory #${id} not found`); process.exit(1); }
@@ -265,7 +274,7 @@ function userMemoryUpdate(db: Database.Database, userId: string, args: string[])
   const { positional, flags } = parseArgs(args);
   const id = Number(positional[0]);
   if (!id) {
-    console.error("Usage: nb-agent user-memory update <id> [--summary \"...\"] [--detail \"...\"] [--visibility private|public]");
+    console.error("Usage: nbt user-memory update <id> [--summary \"...\"] [--detail \"...\"] [--visibility private|public]");
     process.exit(1);
   }
 
@@ -299,7 +308,7 @@ function userMemoryUpdate(db: Database.Database, userId: string, args: string[])
 function userMemoryDel(db: Database.Database, userId: string, args: string[]): void {
   const { positional } = parseArgs(args);
   const id = Number(positional[0]);
-  if (!id) { console.error("Usage: nb-agent user-memory del <id>"); process.exit(1); }
+  if (!id) { console.error("Usage: nbt user-memory del <id>"); process.exit(1); }
 
   const m = getUserMemory(db, id);
   if (!m) { console.error(`Memory #${id} not found`); process.exit(1); }
@@ -314,8 +323,6 @@ function userMemoryDel(db: Database.Database, userId: string, args: string[]): v
 function handleWhoami(): void {
   const db = openDb();
   const botName = "Bot";
-  const botId = process.env["NIUBOT_BOT_ID"];
-  const isAdmin = process.env["NIUBOT_IS_ADMIN"] === "true";
 
   // 构建 persona 路径并读取内容（从 DB_PATH 所在目录推导，与 daemon 一致）
   const personaPath = path.join(path.dirname(DB_PATH), "persona.md");
@@ -323,10 +330,10 @@ function handleWhoami(): void {
 
   // 构建 bot label
   let botLabel: string | undefined;
-  if (botId) {
+  if (BOT_ID) {
     const row = db.prepare(
       "SELECT id FROM users WHERE platform_id = ? OR id = ?",
-    ).get(botId, botId) as { id: string } | undefined;
+    ).get(BOT_ID, BOT_ID) as { id: string } | undefined;
     if (row) {
       botLabel = getUserShortLabel(db, row.id);
     }
@@ -342,16 +349,18 @@ function handleWhoami(): void {
     userName = row?.name ?? undefined;
   }
 
+  const isGroup = CHAT_TYPE === "group";
   const scene: SceneInfo = {
     botName: botLabel ?? botName,
     botLabel,
+    platform: PLATFORM,
     userName,
-    userId: USER_ID ?? "unknown",
+    userId: isGroup ? undefined : (USER_ID ?? "unknown"),
     chatId: CHAT_ID ?? "unknown",
     chatType: CHAT_TYPE as "p2p" | "group",
     chatLabel,
-    isAdmin,
-    personaPath: isAdmin ? personaPath : undefined,
+    isAdmin: IS_ADMIN,
+    personaPath: IS_ADMIN ? personaPath : undefined,
     personaContent,
   };
 
@@ -364,9 +373,9 @@ function handleWhoami(): void {
 // ─── Usage ─────────────────────────────────────────────────
 
 function printUsage(): void {
-  console.log(`NiuBot Agent CLI
+  console.log(`NiuBot Tool (nbt)
 
-Usage: nb-agent <command> <subcommand> [options]
+Usage: nbt <command> <subcommand> [options]
 
 Commands:
   user-memory   add|list|get|update|del     Manage user memories

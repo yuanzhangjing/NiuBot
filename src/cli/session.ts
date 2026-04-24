@@ -27,7 +27,7 @@ export function handleSession(
   } else if (sub === "get") {
     sessionGet(db, args.slice(1), chatId, chatType, parseArgs);
   } else {
-    console.log("Usage: nb-agent sessions <list|search|get>");
+    console.log("Usage: nbt sessions <list|search|get>");
   }
 }
 
@@ -79,7 +79,7 @@ function sessionSearch(
   const { positional, flags } = parseArgs(args);
   const query = positional[0];
   if (!query) {
-    console.error("Usage: nb-agent sessions search <query> [--since <date>] [--before <date>] [-n <count>] [--offset <id>]");
+    console.error("Usage: nbt sessions search <query> [--since <date>] [--before <date>] [-n <count>] [--offset <id>]");
     process.exit(1);
   }
 
@@ -123,7 +123,7 @@ function sessionGet(
   const { positional } = parseArgs(args);
   const idArg = positional[0];
   if (!idArg) {
-    console.error("Usage: nb-agent sessions get <id>");
+    console.error("Usage: nbt sessions get <id>");
     process.exit(1);
   }
 

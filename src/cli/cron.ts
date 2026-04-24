@@ -29,7 +29,7 @@ export function handleCron(
       cronDel(db, args.slice(1), chatId, chatType, userId, parseArgs);
       break;
     default:
-      console.log("Usage: nb-agent cron <add|list|del>");
+      console.log("Usage: nbt cron <add|list|del>");
       break;
   }
 }
@@ -50,8 +50,8 @@ function cronAdd(
   const untilTime = flags["until"];
 
   if (!prompt) {
-    console.error("Usage: nb-agent cron add --cron <expr> --prompt <task> [--desc <label>]");
-    console.error("   or: nb-agent cron add --at <datetime> --prompt <task> [--desc <label>]");
+    console.error("Usage: nbt cron add --cron <expr> --prompt <task> [--desc <label>]");
+    console.error("   or: nbt cron add --at <datetime> --prompt <task> [--desc <label>]");
     process.exit(1);
   }
   if (!cronExpr && !runAt) {
@@ -129,7 +129,7 @@ function cronDel(
   const { positional } = parseArgs(args);
   const id = Number(positional[0]);
   if (!id) {
-    console.error("Usage: nb-agent cron del <id>");
+    console.error("Usage: nbt cron del <id>");
     process.exit(1);
   }
 

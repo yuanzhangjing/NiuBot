@@ -24,10 +24,10 @@ export const NEW_SESSION_SEARCH_REMINDER =
 如果用户的消息涉及之前讨论过的内容、历史决策、或你不确定的背景信息，请先使用工具检索再回答，不要凭记忆猜测。
 
 可用的检索工具：
-- \`nb-agent sessions list [--since <date>]\` — 查看历史会话列表
-- \`nb-agent sessions search <query>\` — 按关键词搜索历史会话
-- \`nb-agent messages search <query> [-C <n>]\` — 搜索历史消息（支持上下文）
-- \`nb-agent task list\` — 查看全部任务（含 inactive），活跃任务已在上方注入
+- \`nbt sessions list [--since <date>]\` — 查看历史会话列表
+- \`nbt sessions search <query>\` — 按关键词搜索历史会话
+- \`nbt messages search <query> [-C <n>]\` — 搜索历史消息（支持上下文）
+- \`nbt task list\` — 查看全部任务（含 inactive），活跃任务已在上方注入
 - 读取 <path>/README.md — 查看具体任务进展（path 见活跃任务列表）
 
 不需要每次都检索。如果用户的意图清晰且不依赖历史上下文（如简单问答、新话题），直接回答即可。
@@ -39,6 +39,8 @@ export interface SceneInfo {
   botName: string;
   /** Bot 的 short label，如 "U2(NiuBot)" */
   botLabel?: string;
+  /** IM 平台标识，如 "feishu" */
+  platform?: string;
   userName?: string;
   /** 群聊时可省略（身份信息改为消息级注入） */
   userId?: string;
@@ -73,6 +75,7 @@ export function buildImportantContext(
   const sceneLines: string[] = [];
   const botDisplay = scene.botLabel ?? scene.botName;
   sceneLines.push(`Bot：${botDisplay}（即你自己，消息历史中显示为 assistant 角色。${botDisplay} 是你的平台注册标识）`);
+  if (scene.platform) sceneLines.push(`平台：${scene.platform}（用户通过此 IM 平台远程与你对话，你的回复会自动投递到该平台）`);
   const chatDisplay = scene.chatLabel ?? scene.chatId;
   sceneLines.push(`会话：${chatDisplay}（${isGroup ? "群聊" : "私聊"}）`);
 
@@ -99,14 +102,14 @@ export function buildImportantContext(
     if (memories.length > 0) {
       const label = scene.userName ? `关于 ${scene.userName} 的记忆` : "关于用户的记忆";
       const lines = memories.map((m) => `  #${m.id}  ${m.summary}`);
-      lines.push("用 nb-agent user-memory get <id> 查看详情。");
+      lines.push("用 nbt user-memory get <id> 查看详情。");
       const safeLabel = label.replace(/["<>&]/g, "");
       parts.push(`<user-memory label="${safeLabel}">\n${lines.join("\n")}\n</user-memory>`);
     }
   }
 
   const inner = parts.join("\n\n");
-  return `<session-profile desc="上下文压缩时必须保留，丢失后用 nb-agent whoami 恢复">\n${inner}\n</session-profile>`;
+  return `<session-profile desc="上下文压缩时必须保留，丢失后用 nbt whoami 恢复">\n${inner}\n</session-profile>`;
 }
 
 // ── Speaker context (群聊消息级注入) ────────────────────────

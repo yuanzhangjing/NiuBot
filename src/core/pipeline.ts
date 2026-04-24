@@ -8,7 +8,7 @@ import type Database from "better-sqlite3";
 import type { PlatformAdapter, NormalizedMessage } from "../im/types.js";
 import { escapeYamlContent, renderMessageNodes } from "../im/render.js";
 import type { AgentBackend, AgentSession, AgentSessionActivity } from "../agent/types.js";
-import { CliAgentBackend } from "../agent/cli-base.js";
+import { CliAgentBackend, buildNiubotEnv } from "../agent/cli-base.js";
 import { BUILTIN_BACKEND_LIST, DEFAULT_LITE_MODELS, NIUBOT_HOME, normalizeBackend, type AgentBackendType, type BuiltinBackendType } from "../config.js";
 import { MessageQueue } from "./queue.js";
 import {
@@ -417,6 +417,7 @@ export class Pipeline {
       const importantContext = buildImportantContext(this.db, {
         botName: this.botIdentity.name,
         botLabel: this.botUserId ? getUserShortLabel(this.db, this.botUserId) : undefined,
+        platform: this.botIdentity.platform,
         userName: userRow?.name ?? undefined,
         userId: isGroup ? undefined : (row.user_id ?? undefined),
         chatId: row.chat_id,
@@ -438,6 +439,7 @@ export class Pipeline {
           chatType,
           dbPath: this.dbPath,
           botId: this.botIdentity.platformBotId,
+          platform: this.botIdentity.platform,
           model: this.botIdentity.model,
           liteModel: this.botIdentity.liteModel,
           isAdmin,
@@ -638,7 +640,7 @@ export class Pipeline {
     }
 
     // 内置命令拦截：/xxx 开头的消息先匹配内置命令，命中则不传给 agent
-    if (this.handleBuiltinCommand(msg.contentText.trim(), userId, chatId, msg.chatPlatformId, msg.platformMsgId)) {
+    if (this.handleBuiltinCommand(msg.contentText.trim(), userId, chatId, msg.chatPlatformId, msg.chatType, msg.platformMsgId)) {
       return;
     }
 
@@ -796,7 +798,7 @@ export class Pipeline {
    *   2. 管理员 shell 命令（tryShellCommand）
    *   3. return false → 转发给 agent
    */
-  private handleBuiltinCommand(text: string, userId: string, chatId: string, platformChatId: string, msgId?: string): boolean {
+  private handleBuiltinCommand(text: string, userId: string, chatId: string, platformChatId: string, chatType: string, msgId?: string): boolean {
     if (!text.startsWith("/") || text.startsWith("//")) return false;
 
     const parts = text.split(/\s+/);
@@ -949,7 +951,7 @@ export class Pipeline {
       const shellCmd = text.slice(1); // 去掉 / 前缀
       const firstToken = shellCmd.split(/\s+/)[0];
       if (firstToken && commandExistsSync(firstToken)) {
-        this.tryShellCommand(shellCmd, chatId, platformChatId, msgId);
+        this.tryShellCommand(shellCmd, userId, chatId, chatType, platformChatId, msgId);
         return true;
       }
     }
@@ -1198,6 +1200,7 @@ export class Pipeline {
     const importantContext = buildImportantContext(this.db, {
       botName: this.botIdentity.name,
       botLabel: this.botUserId ? getUserShortLabel(this.db, this.botUserId) : undefined,
+      platform: this.botIdentity.platform,
       userName: userRow?.name ?? undefined,
       userId: isGroup ? undefined : userId,
       chatId,
@@ -1224,6 +1227,7 @@ export class Pipeline {
       chatType,
       dbPath: this.dbPath,
       botId: this.botIdentity.platformBotId,
+      platform: this.botIdentity.platform,
       model: this.botIdentity.model,
       liteModel: this.botIdentity.liteModel,
       isAdmin,
@@ -1764,7 +1768,7 @@ export class Pipeline {
    * 管理员 shell 命令执行（对齐 cc-connect tryShellCommand）。
    * 通过 sh -c 执行，30s 超时。调用前已由 commandExistsSync 确认命令存在。
    */
-  private tryShellCommand(cmd: string, chatId: string, platformChatId: string, msgId?: string): void {
+  private tryShellCommand(cmd: string, userId: string, chatId: string, chatType: string, platformChatId: string, msgId?: string): void {
     this.log.info("shell command", { cmd });
 
     const sendResult = (content: string) => {
@@ -1776,9 +1780,21 @@ export class Pipeline {
       }).catch(() => {});
     };
 
+    const env = buildNiubotEnv({
+      workingDirectory: this.workingDirectory,
+      userId,
+      chatId,
+      chatType: chatType as "p2p" | "group",
+      dbPath: this.dbPath,
+      botId: this.botIdentity.platformBotId,
+      platform: this.botIdentity.platform,
+      isAdmin: true,
+    });
+
     execAsync(cmd, {
       timeout: 30_000,
       cwd: this.workingDirectory,
+      env: { ...process.env, ...env },
     }).then(({ stdout, stderr }) => {
       const output = (stdout + stderr).trim();
       sendResult(formatShellOutput(this.workingDirectory, cmd, output, 0));
@@ -2175,6 +2191,7 @@ export class Pipeline {
     const importantContext = buildImportantContext(this.db, {
       botName: this.botIdentity.name,
       botLabel: this.botUserId ? getUserShortLabel(this.db, this.botUserId) : undefined,
+      platform: this.botIdentity.platform,
       userName: userRow?.name ?? undefined,
       userId: isGroup ? undefined : userId,
       chatId,
@@ -2205,6 +2222,7 @@ export class Pipeline {
       chatType,
       dbPath: this.dbPath,
       botId: this.botIdentity.platformBotId,
+      platform: this.botIdentity.platform,
       model: this.botIdentity.model,
       liteModel: this.botIdentity.liteModel,
       isAdmin,

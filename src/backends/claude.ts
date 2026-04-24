@@ -64,7 +64,7 @@ export default class ClaudeBackend extends CliAgentBackend<ClaudeSession> {
       args.push("--resume", session.agentSessionId);
     }
 
-    // 禁用 Claude Code 云端定时任务，避免与 nb-agent cron 冲突
+    // 禁用 Claude Code 云端定时任务，避免与 nbt cron 冲突
     args.push("--disallowedTools", "RemoteTrigger");
 
     const stdin = JSON.stringify({

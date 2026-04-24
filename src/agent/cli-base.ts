@@ -500,6 +500,7 @@ export function buildNiubotEnv(config: SessionConfig): Record<string, string> {
   if (config.chatType) env["NIUBOT_CHAT_TYPE"] = config.chatType;
   if (config.dbPath) env["NIUBOT_DB_PATH"] = config.dbPath;
   if (config.botId) env["NIUBOT_BOT_ID"] = config.botId;
+  if (config.platform) env["NIUBOT_PLATFORM"] = config.platform;
   if (config.isAdmin) env["NIUBOT_IS_ADMIN"] = "true";
   if (config.workingDirectory) env["NIUBOT_WORK_DIR"] = config.workingDirectory;
   return env;

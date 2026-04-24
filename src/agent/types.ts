@@ -27,6 +27,8 @@ export interface SessionConfig {
   dbPath?: string;
   /** Bot ID（传递给 agent 环境变量） */
   botId?: string;
+  /** IM 平台标识（传递给 agent 环境变量） */
+  platform?: string;
   /** 是否为管理员（传递给 agent 环境变量） */
   isAdmin?: boolean;
   /** Agent 侧 session ID（用于 recover 时 resume） */

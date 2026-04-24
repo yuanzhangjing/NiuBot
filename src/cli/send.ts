@@ -6,7 +6,12 @@ import http from "node:http";
 import path from "node:path";
 import os from "node:os";
 
-const NIUBOT_HOME = process.env["NIUBOT_HOME"] ?? path.join(os.homedir(), ".niubot");
+function requireEnv(name: string): string {
+  const v = process.env[name];
+  if (!v) { console.error(`${name} is not set. nbt must run inside a NiuBot session.`); process.exit(1); }
+  return v;
+}
+const NIUBOT_HOME = requireEnv("NIUBOT_HOME");
 const DB_PATH = process.env["NIUBOT_DB_PATH"];
 
 function getSocketPath(): string {
@@ -64,7 +69,7 @@ export function handleSend(
   if (cardHeader != null) {
     const content = positional.join(" ");
     if (!content) {
-      console.error("Usage: nb-agent send --card <header> <content>");
+      console.error("Usage: nbt send --card <header> <content>");
       process.exit(1);
     }
     const socketPath = getSocketPath();
@@ -77,7 +82,7 @@ export function handleSend(
   } else {
     const text = positional.join(" ");
     if (!text) {
-      console.error("Usage: nb-agent send <text>");
+      console.error("Usage: nbt send <text>");
       process.exit(1);
     }
     const socketPath = getSocketPath();
@@ -104,7 +109,7 @@ export function handleSendFile(
     process.exit(1);
   }
   if (!filePath) {
-    console.error("Usage: nb-agent send-file <file-path>");
+    console.error("Usage: nbt send-file <file-path>");
     process.exit(1);
   }
 
