@@ -36,6 +36,7 @@ import { handleSend, handleSendFile } from "./cli/send.js";
 import { handleCron } from "./cli/cron.js";
 import { handleTask } from "./cli/task.js";
 import { handleSession } from "./cli/session.js";
+import { formatLocalDateTimeWithTZ } from "./tz.js";
 
 // ─── Context ───────────────────────────────────────────────
 
@@ -266,8 +267,8 @@ function userMemoryGet(db: Database.Database, userId: string, args: string[]): v
   console.log(`Summary:    ${m.summary}`);
   if (m.detail) console.log(`Detail:     ${m.detail}`);
   console.log(`Visibility: ${m.visibility}`);
-  console.log(`Created:    ${m.createdAt}`);
-  console.log(`Updated:    ${m.updatedAt}`);
+  console.log(`Created:    ${formatLocalDateTimeWithTZ(m.createdAt)}`);
+  console.log(`Updated:    ${formatLocalDateTimeWithTZ(m.updatedAt)}`);
 }
 
 function userMemoryUpdate(db: Database.Database, userId: string, args: string[]): void {

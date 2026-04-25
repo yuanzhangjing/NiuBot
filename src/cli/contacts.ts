@@ -16,6 +16,11 @@ import {
   resolveUserId,
   setUserManualName,
 } from "../contacts/store.js";
+import { formatLocalDateTimeWithTZ } from "../tz.js";
+
+export function formatContactCreatedAt(createdAt: string): string {
+  return formatLocalDateTimeWithTZ(createdAt);
+}
 
 export function handleContacts(
   db: Database.Database,
@@ -130,7 +135,7 @@ function getUser(
   console.log(`  Platform:    ${row.platform}`);
   console.log(`  Platform ID: ${row.platform_id}`);
   console.log(`  Is bot:      ${row.is_bot ? "yes" : "no"}`);
-  console.log(`  Created:     ${row.created_at}`);
+  console.log(`  Created:     ${formatContactCreatedAt(row.created_at)}`);
 
   // Memory count
   console.log(`  Memories:    ${countUserMemories(db, row.id)}`);
@@ -169,7 +174,7 @@ function getChat(
   if (row.user_id) {
     console.log(`  User ID:     ${row.user_id}`);
   }
-  console.log(`  Created:     ${row.created_at}`);
+  console.log(`  Created:     ${formatContactCreatedAt(row.created_at)}`);
 
   // Message count
   console.log(`  Messages:    ${countChatMessages(db, row.id)}`);

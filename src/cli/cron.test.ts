@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { initDatabase } from "../database/schema.js";
 import { addCronJob, deleteCronJobForAccess, listCronJobsForAccess } from "../core/cron.js";
+import { formatCronScheduleForDisplay } from "./cron.js";
 
 const tempDirs: string[] = [];
 
@@ -41,6 +42,11 @@ function setupDb() {
 }
 
 describe("cron access rules", () => {
+  it("labels cron schedules as local time", () => {
+    expect(formatCronScheduleForDisplay({ cronExpr: "0 10 * * *", runAt: null })).toContain("0 10 * * * (local time, ");
+    expect(formatCronScheduleForDisplay({ cronExpr: null, runAt: "2026-04-25 10:00" })).toContain("at 2026-04-25 10:00 (");
+  });
+
   it("blocks group list for another chat", () => {
     const { db } = setupDb();
 

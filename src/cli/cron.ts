@@ -4,6 +4,13 @@
 
 import type Database from "better-sqlite3";
 import { addCronJob, deleteCronJobForAccess, listCronJobsForAccess } from "../core/cron.js";
+import { labelLocalDateTime, labelLocalTime } from "../tz.js";
+
+export function formatCronScheduleForDisplay(job: { cronExpr: string | null; runAt: string | null }): string {
+  if (job.cronExpr) return labelLocalTime(job.cronExpr);
+  if (job.runAt) return `at ${labelLocalDateTime(job.runAt)}`;
+  return "unknown";
+}
 
 export function handleCron(
   db: Database.Database,
@@ -79,11 +86,11 @@ function cronAdd(
   });
 
   console.log(`Created cron job #${id}`);
-  if (cronExpr) console.log(`  Schedule: ${cronExpr}`);
-  if (runAt) console.log(`  Run at: ${runAt}`);
+  if (cronExpr) console.log(`  Schedule: ${labelLocalTime(cronExpr)}`);
+  if (runAt) console.log(`  Run at: ${labelLocalDateTime(runAt)}`);
   if (desc) console.log(`  Description: ${desc}`);
   if (maxTimes) console.log(`  Max runs: ${maxTimes}`);
-  if (untilTime) console.log(`  Until: ${untilTime}`);
+  if (untilTime) console.log(`  Until: ${labelLocalDateTime(untilTime)}`);
 }
 
 function cronList(
@@ -110,7 +117,7 @@ function cronList(
   }
 
   for (const j of jobs) {
-    const schedule = j.cronExpr ?? (j.runAt ? `at ${j.runAt}` : "unknown");
+    const schedule = formatCronScheduleForDisplay(j);
     const desc = j.description ? ` — ${j.description}` : "";
     const runsStr = j.maxTimes ? ` (${j.runCount}/${j.maxTimes})` : j.runCount > 0 ? ` (ran ${j.runCount}x)` : "";
     console.log(`  #${j.id}  [${schedule}]${desc}${runsStr}`);

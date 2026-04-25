@@ -21,6 +21,7 @@ import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 import yaml from "yaml";
 import { AGENT_REGISTRY, DEFAULT_LITE_MODELS, loadConfig, type BuiltinBackendType, type NiuBotConfig } from "./config.js";
+import { localToday } from "./tz.js";
 
 // ── Paths ──────────────────────────────────────────────────
 
@@ -34,6 +35,10 @@ function getPkgVersion(): string {
   } catch {
     return "0.0.0";
   }
+}
+
+export function getTodayLogFilePath(niubotHome: string): string {
+  return path.join(niubotHome, "logs", `niubot-${localToday()}.log`);
 }
 
 // ── CLI arg helpers ────────────────────────────────────────
@@ -852,8 +857,7 @@ function cmdStart(niubotHome: string, flags: CliFlags): void {
 
   const logDir = path.join(niubotHome, "logs");
   fs.mkdirSync(logDir, { recursive: true });
-  const today = new Date().toISOString().slice(0, 10);
-  const logFile = path.join(logDir, `niubot-${today}.log`);
+  const logFile = getTodayLogFilePath(niubotHome);
 
   const logFd = fs.openSync(logFile, "a");
 
@@ -980,8 +984,7 @@ function cmdStatus(niubotHome: string): void {
   } catch { /* ignore */ }
 
   const configPath = path.join(niubotHome, "config.yaml");
-  const today = new Date().toISOString().slice(0, 10);
-  const logFile = path.join(niubotHome, "logs", `niubot-${today}.log`);
+  const logFile = getTodayLogFilePath(niubotHome);
 
   // Read the version snapshot written at startup (reflects the actual running code)
   const versionFile = path.join(niubotHome, "niubot.version");

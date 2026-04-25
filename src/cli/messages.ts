@@ -10,7 +10,7 @@ import {
   searchMessages,
   type MessageRow,
 } from "../messages/store.js";
-import { utcToLocalDateTime } from "../tz.js";
+import { formatLocalDateTimeWithTZ } from "../tz.js";
 
 export function handleMessages(
   db: Database.Database,
@@ -171,7 +171,7 @@ function messagesGet(
     ? `${row.sender_id.toUpperCase()}(${row.sender_name})`
     : row.sender_id.toUpperCase();
   const roleLabel = row.role === "assistant" ? "assistant" : "user";
-  const ts = utcToLocalDateTime(row.created_at);
+  const ts = formatLocalDateTimeWithTZ(row.created_at);
 
   console.log(`[#${row.id}] [${ts}] ${senderLabel} (${roleLabel}):`);
   console.log(row.content_text ?? "");
@@ -182,7 +182,7 @@ function formatMessage(r: MessageRow, prefix = ""): void {
     ? `${r.sender_id.toUpperCase()}(${r.sender_name})`
     : r.sender_id.toUpperCase();
   const roleLabel = r.role === "assistant" ? "assistant" : "user";
-  const ts = utcToLocalDateTime(r.created_at);
+  const ts = formatLocalDateTimeWithTZ(r.created_at);
   const content = (r.content_text ?? "").replaceAll("\n", " ");
   const text = truncate(content, 200);
 

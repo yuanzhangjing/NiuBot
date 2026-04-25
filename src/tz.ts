@@ -34,6 +34,26 @@ export function utcToLocalDateTime(utcDatetime: string): string {
   return `${date} ${time}`;
 }
 
+/** Convert a UTC datetime from DB to local display text with timezone label. */
+export function formatLocalDateTimeWithTZ(utcDatetime: string): string {
+  return `${utcToLocalDateTime(utcDatetime)} (${TZ})`;
+}
+
+/** Label an already-local datetime string with the configured timezone. */
+export function labelLocalDateTime(localDatetime: string): string {
+  return `${localDatetime} (${TZ})`;
+}
+
+/** Label a cron expression or schedule as using local time. */
+export function labelLocalTime(text: string): string {
+  return `${text} (local time, ${TZ})`;
+}
+
+/** Format a Date as UTC "YYYY-MM-DD HH:MM:SS" for SQLite datetime columns. */
+export function utcDateTimeForSql(date: Date): string {
+  return date.toISOString().slice(0, 19).replace("T", " ");
+}
+
 /**
  * Get the UTC datetime string for the start of a local date (00:00 local → UTC).
  * Used for SQL range queries against UTC timestamps in the database.

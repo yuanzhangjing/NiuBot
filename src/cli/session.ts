@@ -9,7 +9,7 @@ import {
   searchSessions,
   type SessionRow,
 } from "../sessions/store.js";
-import { utcToLocalDateTime } from "../tz.js";
+import { formatLocalDateTimeWithTZ } from "../tz.js";
 
 export function handleSession(
   db: Database.Database,
@@ -145,8 +145,8 @@ function sessionGet(
 
 function printMeta(row: SessionRow): void {
   const sid = row.id;
-  const startTime = row.started_at ? utcToLocalDateTime(row.started_at) : "?";
-  const endTime = row.ended_at ? utcToLocalDateTime(row.ended_at) : "ongoing";
+  const startTime = row.started_at ? formatLocalDateTimeWithTZ(row.started_at) : "?";
+  const endTime = row.ended_at ? formatLocalDateTimeWithTZ(row.ended_at) : "ongoing";
   const msgRange = row.start_msg_id != null && row.end_msg_id != null
     ? `, #${row.start_msg_id}~#${row.end_msg_id}`
     : "";

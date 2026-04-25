@@ -5,7 +5,7 @@ import { listContinuationMessages } from "../messages/store.js";
 import { hasUserArchivedSession, listRecentUserArchivedSessions } from "../sessions/store.js";
 import { loadStaticContextTemplate } from "../static-context.js";
 import { listTasks, type TaskEntry } from "../tasks/store.js";
-import { utcToLocalDateTime } from "../tz.js";
+import { utcDateTimeForSql, utcToLocalDateTime } from "../tz.js";
 
 /** 冷启动注入最近 session 的时间窗口（小时） */
 const RECENT_SESSION_HOURS = 168;
@@ -284,7 +284,7 @@ function getRecentArchivedSessions(
   hours: number,
   maxCount: number,
 ): ArchivedSessionInfo[] {
-  const since = new Date(Date.now() - hours * 3600_000).toISOString();
+  const since = utcDateTimeForSql(new Date(Date.now() - hours * 3600_000));
   const rows = listRecentUserArchivedSessions(db, { chatId, since, limit: maxCount });
 
   const results: ArchivedSessionInfo[] = [];

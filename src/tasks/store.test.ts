@@ -2,12 +2,13 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import yaml from "yaml";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createTask, listTasks, updateTask } from "./store.js";
 
 const tempDirs: string[] = [];
 
 afterEach(() => {
+  vi.useRealTimers();
   for (const dir of tempDirs.splice(0)) {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -94,6 +95,23 @@ describe("listTasks", () => {
       description: "",
       visibility: "public",
     })).toThrow("NIUBOT_USER_ID not set");
+  });
+
+  it("uses the local calendar date for new task metadata", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 3, 25, 0, 30, 0));
+    const workingDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-task-store-"));
+    tempDirs.push(workingDirectory);
+
+    const task = createTask({
+      workingDirectory,
+      name: "local-date-task",
+      description: "",
+      visibility: "private",
+      owner: "u2",
+    });
+
+    expect(task.created_at).toBe("2026-04-25");
   });
 
   it("rejects task update without a user", () => {

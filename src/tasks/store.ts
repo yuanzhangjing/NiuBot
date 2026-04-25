@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import yaml from "yaml";
+import { localToday } from "../tz.js";
 
 export interface TaskEntry {
   name: string;
@@ -136,7 +137,7 @@ export function createTask(options: {
     owner: options.owner,
     visibility: options.visibility,
     source_chat: options.sourceChat,
-    created_at: new Date().toISOString().slice(0, 10),
+    created_at: localToday(),
   };
   index.tasks.push(entry);
   saveTaskIndex(options.workingDirectory, index);

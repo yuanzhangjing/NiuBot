@@ -21,6 +21,7 @@ import {
 } from "../database/schema.js";
 import { buildImportantContext, buildNormalContext, buildSpeakerContext, NEW_SESSION_SEARCH_REMINDER, type SceneInfo, type SpeakerInfo } from "../memory/inject.js";
 import { loadPersona } from "../persona.js";
+import { labelLocalDateTime, labelLocalTime, utcDateTimeForSql } from "../tz.js";
 import { buildArchiveSummaryPrompt } from "./prompts.js";
 import { decideRoute, type RouteDecision } from "./routing.js";
 import { listCronJobs, deleteCronJob, getCronJob } from "./cron.js";
@@ -599,7 +600,7 @@ export class Pipeline {
 
     // Store platform_ts as ISO string
     const platformTsStr = msg.platformTs
-      ? new Date(msg.platformTs).toISOString().slice(0, 19).replace("T", " ")
+      ? utcDateTimeForSql(new Date(msg.platformTs))
       : undefined;
 
     const sessionId = this.chatSessions.get(chatId)?.sessionId;
@@ -713,7 +714,7 @@ export class Pipeline {
     const chatId = ensureChat(this.db, platform, msg.chatPlatformId, msg.chatType, msg.chatName);
 
     const platformTsStr = msg.platformTs
-      ? new Date(msg.platformTs).toISOString().slice(0, 19).replace("T", " ")
+      ? utcDateTimeForSql(new Date(msg.platformTs))
       : undefined;
 
     storeMessage(this.db, {
@@ -1158,18 +1159,18 @@ export class Pipeline {
       lines.push(`Prompt: ${job.prompt}`);
       lines.push(`ID: ${job.id}`);
       if (job.runAt) {
-        lines.push(`Schedule: ${job.runAt} (一次性)`);
+        lines.push(`Schedule: ${labelLocalDateTime(job.runAt)} (一次性)`);
       } else if (job.cronExpr) {
-        lines.push(`Schedule: \`${job.cronExpr}\``);
+        lines.push(`Schedule: ${labelLocalTime(`\`${job.cronExpr}\``)}`);
       }
       if (job.maxTimes) {
         lines.push(`Progress: ${job.runCount}/${job.maxTimes}`);
       }
       if (job.untilTime) {
-        lines.push(`Until: ${job.untilTime}`);
+        lines.push(`Until: ${labelLocalDateTime(job.untilTime)}`);
       }
       if (job.lastRunAt) {
-        lines.push(`Last run: ${job.lastRunAt}`);
+        lines.push(`Last run: ${labelLocalDateTime(job.lastRunAt)}`);
       }
       lines.push(""); // blank separator
     }
