@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import type { AgentBackend, AgentResponse, AgentSession, SessionConfig } from "../agent/types.js";
 import { getBotBackendModelState, getBotRuntimeState, initDatabase, setBotBackendModelState } from "../database/schema.js";
 import type { NormalizedMessage, PlatformAdapter } from "../im/types.js";
@@ -210,6 +210,7 @@ function createMessage(overrides: Partial<NormalizedMessage>): NormalizedMessage
 const tempDirs: string[] = [];
 
 afterEach(() => {
+  vi.useRealTimers();
   while (tempDirs.length > 0) {
     rmSync(tempDirs.pop()!, { recursive: true, force: true });
   }
@@ -387,6 +388,148 @@ describe("Pipeline.recover", () => {
 
     expect(handled).toBe(false);
     expect(sentTexts).toHaveLength(0);
+  });
+
+  test("/update reports a newer version without installing or restarting", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const agent = new RecordingAgent();
+    const { im, sentTexts } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db,
+      im,
+      agent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+    const updateCommands: string[] = [];
+    (pipeline as any).runUpdateCommand = async (cmd: string) => {
+      updateCommands.push(cmd);
+      return { stdout: "9.9.9\n", stderr: "" };
+    };
+    let restarted = false;
+    (pipeline as any).triggerRestart = () => { restarted = true; };
+
+    await (pipeline as any).handleUpdate("c1", "chat-open-id", undefined, false);
+
+    expect(updateCommands).toEqual(["npm view @yuanzhangjing/niubot@latest version"]);
+    expect(restarted).toBe(false);
+    expect(sentTexts).toHaveLength(2);
+    expect(sentTexts[0]).toBe("正在检查更新...");
+    expect(sentTexts[1]).toContain("发现新版本");
+    expect(sentTexts[1]).toContain("9.9.9");
+    expect(sentTexts[1]).toContain("/update confirm");
+  });
+
+  test("/update confirm installs the newer version and restarts", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const agent = new RecordingAgent();
+    const { im, sentTexts } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db,
+      im,
+      agent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+    const updateCommands: string[] = [];
+    (pipeline as any).runUpdateCommand = async (cmd: string) => {
+      updateCommands.push(cmd);
+      if (cmd.startsWith("npm view ")) return { stdout: "9.9.9\n", stderr: "" };
+      return { stdout: "", stderr: "" };
+    };
+    let restarted = false;
+    (pipeline as any).triggerRestart = () => { restarted = true; };
+
+    await (pipeline as any).handleUpdate("c1", "chat-open-id", undefined, true);
+
+    expect(updateCommands).toEqual([
+      "npm view @yuanzhangjing/niubot@latest version",
+      "npm install -g @yuanzhangjing/niubot@9.9.9",
+    ]);
+    expect(restarted).toBe(true);
+    expect(sentTexts.at(-2)).toContain("正在安装");
+    expect(sentTexts.at(-1)).toContain("正在重启");
+  });
+
+  test("notifies admins about the same newer version only once", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare(`
+      INSERT INTO users (id, name, platform, platform_id, is_admin)
+      VALUES ('u2', 'admin', 'feishu', 'user-open-id', 'owner')
+    `).run();
+    db.prepare(`
+      INSERT INTO chats (id, type, platform, platform_id, user_id)
+      VALUES ('c1', 'p2p', 'feishu', 'chat-open-id', 'user-open-id')
+    `).run();
+
+    const agent = new RecordingAgent();
+    const { im, sentTexts } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db,
+      im,
+      agent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+    (pipeline as any).runUpdateCommand = async () => ({ stdout: "9.9.9\n", stderr: "" });
+    await pipeline.start();
+
+    await (pipeline as any).checkForUpdatesAndNotifyAdmins();
+    await (pipeline as any).checkForUpdatesAndNotifyAdmins();
+
+    expect(sentTexts).toHaveLength(1);
+    expect(sentTexts[0]).toContain("发现新版本");
+    expect(sentTexts[0]).toContain("9.9.9");
+    expect(sentTexts[0]).toContain("/update");
+  });
+
+  test("checks for updates periodically after startup", async () => {
+    vi.useFakeTimers();
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const agent = new RecordingAgent();
+    const pipeline = new Pipeline(
+      db,
+      createImStub(),
+      agent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+    let checks = 0;
+    (pipeline as any).checkForUpdatesAndNotifyAdmins = async () => { checks++; };
+
+    await pipeline.start();
+    expect(checks).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(24 * 60 * 60 * 1000);
+    expect(checks).toBe(2);
+
+    pipeline.stop();
+    await vi.advanceTimersByTimeAsync(24 * 60 * 60 * 1000);
+    expect(checks).toBe(2);
   });
 
   test("uses the standard empty-response fallback for cron jobs", async () => {

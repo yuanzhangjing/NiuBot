@@ -17,6 +17,7 @@ import {
   getUnseenMessages, markMessagesSeen,
   setUserAdminRole, getAdminUserIds, getUserAdminRole, type AdminRole,
   getBotBackendModelState, setBotBackendModelState, setBotRuntimeState, clearBotRuntimeModels,
+  hasUpdateNotification, recordUpdateNotification,
 } from "../database/schema.js";
 import { buildImportantContext, buildNormalContext, buildSpeakerContext, NEW_SESSION_SEARCH_REMINDER, type SceneInfo, type SpeakerInfo } from "../memory/inject.js";
 import { loadPersona } from "../persona.js";
@@ -45,6 +46,7 @@ const INTERRUPT_WORDS = new Set([
 const AGENT_WATCHDOG_INTERVAL_MS = 15_000;     // 15 秒检测间隔
 const AGENT_IDLE_THRESHOLD_MS = 600_000;       // 10 分钟：第一次 idle 通知
 const AGENT_IDLE_THRESHOLD_2_MS = 1_800_000;   // 30 分钟：第二次 idle 通知
+const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000; // 每天检查一次 npm latest
 
 /** Bot 身份信息，由外部传入 */
 export interface BotIdentity {
@@ -160,6 +162,9 @@ export class Pipeline {
   /** Watchdog 定时器 */
   private watchdogTimer: ReturnType<typeof setInterval> | null = null;
 
+  /** 更新检查定时器 */
+  private updateCheckTimer: ReturnType<typeof setInterval> | null = null;
+
   /** 已发送 compact 通知的 session（避免重复通知） */
   private compactNotifiedSessions = new Set<string>();
 
@@ -228,6 +233,11 @@ export class Pipeline {
     this.im.onMessage((msg) => this.handleMessage(msg));
     // 启动 watchdog 定时器
     this.watchdogTimer = setInterval(() => this.runIdleWatchdog(), AGENT_WATCHDOG_INTERVAL_MS);
+    this.updateCheckTimer = setInterval(() => {
+      this.checkForUpdatesAndNotifyAdmins().catch((err) => {
+        this.log.warn("scheduled update check failed", { error: String(err) });
+      });
+    }, UPDATE_CHECK_INTERVAL_MS);
 
     this.log.info("pipeline started", {
       botUserId: this.botUserId,
@@ -237,6 +247,10 @@ export class Pipeline {
       model: this.botIdentity.model ?? "default",
       liteModel: this.botIdentity.liteModel ?? "default",
     });
+
+    this.checkForUpdatesAndNotifyAdmins().catch((err) => {
+      this.log.warn("startup update check failed", { error: String(err) });
+    });
   }
 
   /** 停止管道：清除队列计时器 */
@@ -244,6 +258,10 @@ export class Pipeline {
     if (this.watchdogTimer) {
       clearInterval(this.watchdogTimer);
       this.watchdogTimer = null;
+    }
+    if (this.updateCheckTimer) {
+      clearInterval(this.updateCheckTimer);
+      this.updateCheckTimer = null;
     }
     this.queue.stop();
     this.log.info("pipeline stopped");
@@ -254,6 +272,10 @@ export class Pipeline {
     if (this.watchdogTimer) {
       clearInterval(this.watchdogTimer);
       this.watchdogTimer = null;
+    }
+    if (this.updateCheckTimer) {
+      clearInterval(this.updateCheckTimer);
+      this.updateCheckTimer = null;
     }
     for (const [chatId, session] of this.chatSessions) {
       try {
@@ -826,7 +848,7 @@ export class Pipeline {
           return true;
         }
         this.log.info("builtin command: update", { userId });
-        this.handleUpdate(chatId, platformChatId, msgId);
+        this.handleUpdate(chatId, platformChatId, msgId, parts[1]?.toLowerCase() === "confirm");
         return true;
       }
       case "/status": {
@@ -1824,7 +1846,7 @@ export class Pipeline {
         "`/model`　　查看/切换模型",
         "`/agent`　　查看/切换 Agent backend",
         "`/restart`　重启引擎",
-        "`/update`　　检查更新并升级",
+        "`/update`　　检查更新",
         "`/<cmd>`　　执行 shell 命令",
       );
     }
@@ -1879,33 +1901,106 @@ export class Pipeline {
     });
   }
 
-  private handleUpdate(chatId: string, platformChatId: string, msgId?: string): void {
+  private async runUpdateCommand(cmd: string, timeout: number): Promise<{ stdout: string; stderr: string }> {
+    return execAsync(cmd, { timeout });
+  }
+
+  private isValidVersion(version: string): boolean {
+    return /^\d+\.\d+\.\d+(-[\w.]+)?$/.test(version);
+  }
+
+  private async fetchLatestVersion(): Promise<string | null> {
+    const PKG = "@yuanzhangjing/niubot";
+    const { stdout } = await this.runUpdateCommand(`npm view ${PKG}@latest version`, 15_000);
+    const latest = stdout.trim();
+    if (!this.isValidVersion(latest)) {
+      throw new Error(`版本号格式异常：${latest.slice(0, 50)}`);
+    }
+    return latest;
+  }
+
+  private async handleUpdate(chatId: string, platformChatId: string, msgId?: string, confirmed = false): Promise<void> {
     const PKG = "@yuanzhangjing/niubot";
     const currentVersion = this.version;
 
     this.replyText(chatId, platformChatId, msgId, "正在检查更新...");
 
-    execAsync(`npm view ${PKG}@latest version`, { timeout: 15_000 }).then(({ stdout }) => {
-      const latest = stdout.trim();
-      if (!/^\d+\.\d+\.\d+(-[\w.]+)?$/.test(latest)) {
-        this.replyText(chatId, platformChatId, undefined, `版本号格式异常：${latest.slice(0, 50)}`);
-        return;
-      }
+    try {
+      const latest = await this.fetchLatestVersion();
       if (!latest || latest === currentVersion) {
         this.replyText(chatId, platformChatId, undefined, `已是最新版本 (${currentVersion})。`);
         return;
       }
 
+      if (!confirmed) {
+        this.replyText(
+          chatId,
+          platformChatId,
+          undefined,
+          [
+            `发现新版本：${currentVersion} → ${latest}。`,
+            "当前不会自动安装或重启。",
+            "确认要升级并重启，请发送 `/update confirm`。",
+          ].join("\n"),
+        );
+        return;
+      }
+
       this.replyText(chatId, platformChatId, undefined, `发现新版本：${currentVersion} → ${latest}，正在安装...`);
 
-      return execAsync(`npm install -g ${PKG}@${latest}`, { timeout: 120_000 }).then(() => {
-        this.replyText(chatId, platformChatId, undefined, `${latest} 安装完成，正在重启...`);
-        this.triggerRestart({ platformChatId });
-      });
-    }).catch((err: unknown) => {
+      await this.runUpdateCommand(`npm install -g ${PKG}@${latest}`, 120_000);
+      this.replyText(chatId, platformChatId, undefined, `${latest} 安装完成，正在重启...`);
+      this.triggerRestart({ platformChatId });
+    } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       this.replyText(chatId, platformChatId, undefined, `更新失败：${msg.slice(0, 500)}`);
-    });
+    }
+  }
+
+  private getAdminPrivatePlatformChatIds(): string[] {
+    const rows = this.db.prepare(`
+      SELECT DISTINCT c.platform_id
+      FROM chats c
+      JOIN users u ON u.platform = c.platform AND u.platform_id = c.user_id
+      WHERE c.type = 'p2p'
+        AND u.is_admin IN ('admin', 'owner')
+        AND c.platform = ?
+    `).all(this.botIdentity.platform) as Array<{ platform_id: string }>;
+    return rows.map((row) => row.platform_id);
+  }
+
+  private async checkForUpdatesAndNotifyAdmins(): Promise<void> {
+    const platformChatIds = this.getAdminPrivatePlatformChatIds();
+    if (platformChatIds.length === 0) return;
+
+    let latest: string | null = null;
+    try {
+      latest = await this.fetchLatestVersion();
+    } catch (err) {
+      this.log.warn("update check failed", { error: String(err) });
+      return;
+    }
+    if (!latest || latest === this.version) return;
+    if (hasUpdateNotification(this.db, this.botIdentity.name, latest)) return;
+
+    const text = [
+      `发现新版本：${this.version} → ${latest}。`,
+      "不会自动安装或重启。",
+      "发送 `/update` 查看详情，确认升级时再发送 `/update confirm`。",
+    ].join("\n");
+
+    let delivered = false;
+    for (const platformChatId of platformChatIds) {
+      try {
+        await this.im.sendText(platformChatId, text);
+        delivered = true;
+      } catch (err) {
+        this.log.warn("failed to send update notification", { platformChatId, error: String(err) });
+      }
+    }
+    if (delivered) {
+      recordUpdateNotification(this.db, this.botIdentity.name, latest);
+    }
   }
 
   /**

@@ -293,6 +293,20 @@ const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 14,
+    description: "Track update notifications to avoid duplicate version alerts",
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS update_notifications (
+          bot_name    TEXT NOT NULL,
+          version     TEXT NOT NULL,
+          notified_at TEXT DEFAULT (datetime('now')),
+          PRIMARY KEY (bot_name, version)
+        )
+      `);
+    },
+  },
 ];
 
 const LATEST_VERSION = migrations[migrations.length - 1]!.version;
@@ -835,4 +849,19 @@ export function getUserAdminRole(db: Database.Database, userId: string): AdminRo
 export function getAdminUserIds(db: Database.Database): Array<{ id: string; role: AdminRole }> {
   const rows = db.prepare("SELECT id, is_admin FROM users WHERE is_admin IN ('admin', 'owner')").all() as { id: string; is_admin: string }[];
   return rows.map((r) => ({ id: r.id, role: r.is_admin as AdminRole }));
+}
+
+export function hasUpdateNotification(db: Database.Database, botName: string, version: string): boolean {
+  const row = db.prepare(
+    "SELECT 1 FROM update_notifications WHERE bot_name = ? AND version = ?",
+  ).get(botName, version);
+  return !!row;
+}
+
+export function recordUpdateNotification(db: Database.Database, botName: string, version: string): void {
+  db.prepare(
+    `INSERT INTO update_notifications (bot_name, version, notified_at)
+     VALUES (?, ?, datetime('now'))
+     ON CONFLICT(bot_name, version) DO UPDATE SET notified_at = excluded.notified_at`,
+  ).run(botName, version);
 }
