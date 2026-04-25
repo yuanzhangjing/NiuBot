@@ -389,6 +389,41 @@ describe("Pipeline.recover", () => {
     expect(sentTexts).toHaveLength(0);
   });
 
+  test("uses the standard empty-response fallback for cron jobs", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare(`
+      INSERT INTO users (id, name, platform, platform_id)
+      VALUES ('u2', 'admin', 'feishu', 'user-open-id')
+    `).run();
+    db.prepare(`
+      INSERT INTO chats (id, type, platform, platform_id, user_id)
+      VALUES ('c1', 'p2p', 'feishu', 'chat-open-id', 'user-open-id')
+    `).run();
+
+    const agent = new RecordingAgent();
+    const { im, sentCards } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db,
+      im,
+      agent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+    await pipeline.start();
+
+    await pipeline.processCronJob("c1", "u2", "check release status", "每日发版状态检查");
+
+    expect(sentCards).toHaveLength(1);
+    expect(sentCards[0]?.header).toBe("⏰ 每日发版状态检查");
+    expect(sentCards[0]?.content).toBe("（处理完成，但未生成回复。如果没收到预期结果，请重试）");
+  });
+
   test("normalizes double-slash commands before forwarding to agent", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);

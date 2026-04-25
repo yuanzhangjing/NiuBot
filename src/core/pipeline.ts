@@ -30,6 +30,7 @@ const execAsync = promisify(exec);
 
 const PROCESSING_EMOJI = "Get";
 const MERGED_EMOJI = "Pin";
+const EMPTY_RESPONSE_FALLBACK = "（处理完成，但未生成回复。如果没收到预期结果，请重试）";
 
 /** 过期消息阈值（ms）：超过 2 分钟的消息丢弃 */
 const STALE_MESSAGE_THRESHOLD_MS = 2 * 60 * 1000;
@@ -1281,6 +1282,11 @@ export class Pipeline {
         return;
       }
 
+      if (!response.text.trim()) {
+        this.log.warn(`empty response from ${source} agent`, { chatId, sessionId });
+        response.text = EMPTY_RESPONSE_FALLBACK;
+      }
+
       // Store response
       const replyMsgId = storeMessage(this.db, {
         chatId,
@@ -2093,7 +2099,7 @@ export class Pipeline {
       // 非 cancel 的空响应：发兜底提示，防止用户等半天没反应
       if (!response.text.trim()) {
         this.log.warn("empty response from agent", { chatId });
-        response.text = "（处理完成，但未生成回复。如果没收到预期结果，请重试）";
+        response.text = EMPTY_RESPONSE_FALLBACK;
       }
 
       // 存储 agent 回复并标记已见
