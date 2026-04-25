@@ -46,7 +46,8 @@ const INTERRUPT_WORDS = new Set([
 const AGENT_WATCHDOG_INTERVAL_MS = 15_000;     // 15 秒检测间隔
 const AGENT_IDLE_THRESHOLD_MS = 600_000;       // 10 分钟：第一次 idle 通知
 const AGENT_IDLE_THRESHOLD_2_MS = 1_800_000;   // 30 分钟：第二次 idle 通知
-const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000; // 每天检查一次 npm latest
+const UPDATE_CHECK_HOUR = 10;                  // 本地时间 10:00 检查 npm latest
+const UPDATE_NOTIFY_END_HOUR = 18;             // 10:00-18:00 启动时允许立即通知
 
 /** Bot 身份信息，由外部传入 */
 export interface BotIdentity {
@@ -163,7 +164,7 @@ export class Pipeline {
   private watchdogTimer: ReturnType<typeof setInterval> | null = null;
 
   /** 更新检查定时器 */
-  private updateCheckTimer: ReturnType<typeof setInterval> | null = null;
+  private updateCheckTimer: ReturnType<typeof setTimeout> | null = null;
 
   /** 已发送 compact 通知的 session（避免重复通知） */
   private compactNotifiedSessions = new Set<string>();
@@ -233,11 +234,12 @@ export class Pipeline {
     this.im.onMessage((msg) => this.handleMessage(msg));
     // 启动 watchdog 定时器
     this.watchdogTimer = setInterval(() => this.runIdleWatchdog(), AGENT_WATCHDOG_INTERVAL_MS);
-    this.updateCheckTimer = setInterval(() => {
+    if (this.isUpdateNotificationWindow(new Date())) {
       this.checkForUpdatesAndNotifyAdmins().catch((err) => {
-        this.log.warn("scheduled update check failed", { error: String(err) });
+        this.log.warn("startup update check failed", { error: String(err) });
       });
-    }, UPDATE_CHECK_INTERVAL_MS);
+    }
+    this.scheduleNextUpdateCheck();
 
     this.log.info("pipeline started", {
       botUserId: this.botUserId,
@@ -248,9 +250,6 @@ export class Pipeline {
       liteModel: this.botIdentity.liteModel ?? "default",
     });
 
-    this.checkForUpdatesAndNotifyAdmins().catch((err) => {
-      this.log.warn("startup update check failed", { error: String(err) });
-    });
   }
 
   /** 停止管道：清除队列计时器 */
@@ -260,7 +259,7 @@ export class Pipeline {
       this.watchdogTimer = null;
     }
     if (this.updateCheckTimer) {
-      clearInterval(this.updateCheckTimer);
+      clearTimeout(this.updateCheckTimer);
       this.updateCheckTimer = null;
     }
     this.queue.stop();
@@ -274,7 +273,7 @@ export class Pipeline {
       this.watchdogTimer = null;
     }
     if (this.updateCheckTimer) {
-      clearInterval(this.updateCheckTimer);
+      clearTimeout(this.updateCheckTimer);
       this.updateCheckTimer = null;
     }
     for (const [chatId, session] of this.chatSessions) {
@@ -1967,6 +1966,33 @@ export class Pipeline {
         AND c.platform = ?
     `).all(this.botIdentity.platform) as Array<{ platform_id: string }>;
     return rows.map((row) => row.platform_id);
+  }
+
+  private isUpdateNotificationWindow(now: Date): boolean {
+    const hour = now.getHours();
+    return hour >= UPDATE_CHECK_HOUR && hour < UPDATE_NOTIFY_END_HOUR;
+  }
+
+  private getNextUpdateCheckDelayMs(now: Date): number {
+    const next = new Date(now);
+    next.setHours(UPDATE_CHECK_HOUR, 0, 0, 0);
+    if (next.getTime() <= now.getTime()) {
+      next.setDate(next.getDate() + 1);
+    }
+    return next.getTime() - now.getTime();
+  }
+
+  private scheduleNextUpdateCheck(): void {
+    if (this.updateCheckTimer) {
+      clearTimeout(this.updateCheckTimer);
+    }
+    this.updateCheckTimer = setTimeout(() => {
+      this.checkForUpdatesAndNotifyAdmins()
+        .catch((err) => {
+          this.log.warn("scheduled update check failed", { error: String(err) });
+        })
+        .finally(() => this.scheduleNextUpdateCheck());
+    }, this.getNextUpdateCheckDelayMs(new Date()));
   }
 
   private async checkForUpdatesAndNotifyAdmins(): Promise<void> {

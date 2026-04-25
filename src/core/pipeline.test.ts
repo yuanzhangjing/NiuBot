@@ -501,8 +501,9 @@ describe("Pipeline.recover", () => {
     expect(sentTexts[0]).toContain("/update");
   });
 
-  test("checks for updates periodically after startup", async () => {
+  test("checks for updates immediately when startup is inside the daytime window", async () => {
     vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 3, 25, 11, 0, 0));
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
@@ -524,12 +525,42 @@ describe("Pipeline.recover", () => {
     await pipeline.start();
     expect(checks).toBe(1);
 
-    await vi.advanceTimersByTimeAsync(24 * 60 * 60 * 1000);
+    await vi.advanceTimersByTimeAsync(23 * 60 * 60 * 1000);
     expect(checks).toBe(2);
 
     pipeline.stop();
     await vi.advanceTimersByTimeAsync(24 * 60 * 60 * 1000);
     expect(checks).toBe(2);
+  });
+
+  test("defers update notifications to the next daytime check when startup is at night", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 3, 25, 23, 0, 0));
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const agent = new RecordingAgent();
+    const pipeline = new Pipeline(
+      db,
+      createImStub(),
+      agent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+    let checks = 0;
+    (pipeline as any).checkForUpdatesAndNotifyAdmins = async () => { checks++; };
+
+    await pipeline.start();
+    expect(checks).toBe(0);
+
+    await vi.advanceTimersByTimeAsync(11 * 60 * 60 * 1000);
+    expect(checks).toBe(1);
+
+    pipeline.stop();
   });
 
   test("uses the standard empty-response fallback for cron jobs", async () => {
