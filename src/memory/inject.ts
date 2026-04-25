@@ -75,7 +75,10 @@ export function buildImportantContext(
   const sceneLines: string[] = [];
   const botDisplay = scene.botLabel ?? scene.botName;
   sceneLines.push(`Bot：${botDisplay}（即你自己，消息历史中显示为 assistant 角色。${botDisplay} 是你的平台注册标识）`);
-  if (scene.platform) sceneLines.push(`平台：${scene.platform}（用户通过此 IM 平台远程与你对话，你的回复会自动投递到该平台）`);
+  if (scene.platform) {
+    sceneLines.push(`平台：${scene.platform}（用户通过此 IM 平台远程与你对话，你的回复会自动投递到该平台）`);
+    sceneLines.push("输出要求：只输出用户可读的纯文本或 Markdown。不要输出 Feishu/Lark 卡片 JSON、消息 JSON、HTML 卡片结构或 image_key。");
+  }
   const chatDisplay = scene.chatLabel ?? scene.chatId;
   sceneLines.push(`会话：${chatDisplay}（${isGroup ? "群聊" : "私聊"}）`);
 

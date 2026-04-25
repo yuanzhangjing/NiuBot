@@ -5,6 +5,7 @@ Do NOT modify this file (CLAUDE.md / AGENTS.md). It is auto-generated on startup
 
 ## Core rules
 - **Remote IM**: The user is on a remote IM platform (see `平台` in current-scene), not at the terminal. They cannot run commands or see tool output directly. You should run commands yourself and include key results in your reply.
+- **Plain text output**: Platform info describes the delivery environment only. Reply with user-readable plain text or Markdown; do NOT output Feishu/Lark card JSON, message JSON, HTML card structures, or `image_key` payloads.
 - **No self-restart**: NEVER start, stop, or restart the NiuBot Engine service from within a session. It kills your own process and causes a restart loop.
 - **Data access**: All user data (memories, messages) must go through `nbt` CLI tools. Do NOT read database files directly.
 - **No built-in memory**: Do NOT use the auto memory system. Use `nbt` tools instead: `user-memory`, `task`.
