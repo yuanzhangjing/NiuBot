@@ -5,6 +5,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { initDatabase } from "../database/schema.js";
 import { getMessageForAccess, searchMessages } from "../messages/store.js";
+import { TZ, utcToLocalDateTime } from "../tz.js";
 import { formatMessagesForList } from "./messages.js";
 
 const tempDirs: string[] = [];
@@ -54,10 +55,12 @@ describe("message access rules", () => {
       },
     ]);
 
-    expect(lines[0]).toBe("Timezone: Asia/Shanghai");
-    expect(lines).toContain("2026-04-25");
-    expect(lines.join("\n")).toContain("[#1] [00:12] U2(Zen) (user): first");
-    expect(lines.join("\n")).not.toContain("[#1] [2026-04-25 00:12");
+    const [date, time] = utcToLocalDateTime("2026-04-24 16:12:00").split(" ");
+
+    expect(lines[0]).toBe(`Timezone: ${TZ}`);
+    expect(lines).toContain(date);
+    expect(lines.join("\n")).toContain(`[#1] [${time}] U2(Zen) (user): first`);
+    expect(lines.join("\n")).not.toContain(`[#1] [${date} ${time}`);
   });
 
   it("blocks group all-chat search", () => {
