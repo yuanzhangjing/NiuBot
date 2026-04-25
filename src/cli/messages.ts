@@ -10,7 +10,12 @@ import {
   searchMessages,
   type MessageRow,
 } from "../messages/store.js";
-import { formatLocalDateTimeWithTZ } from "../tz.js";
+import { formatLocalDateTimeWithTZ, TZ, utcToLocalDateTime } from "../tz.js";
+
+interface MessageListItem {
+  row: MessageRow;
+  prefix?: string;
+}
 
 export function handleMessages(
   db: Database.Database,
@@ -72,9 +77,7 @@ function messagesList(
     return;
   }
 
-  for (const r of rows) {
-    formatMessage(r);
-  }
+  printMessagesForList(rows.map((row) => ({ row })));
 }
 
 function messagesSearch(
@@ -125,18 +128,24 @@ function messagesSearch(
     return;
   }
 
-  for (const r of rows) {
-    if (contextCount > 0) {
-      const contextRows = getMessageContextRows(db, r.chat_id, r.id, contextCount);
+  if (contextCount === 0) {
+    printMessagesForList(rows.map((row) => ({ row })));
+    return;
+  }
 
-      for (const cr of contextRows) {
-        const prefix = cr.id === r.id ? ">>> " : "    ";
-        formatMessage(cr, prefix);
-      }
-      console.log("---");
-    } else {
-      formatMessage(r);
-    }
+  console.log(`Timezone: ${TZ}`);
+  for (const r of rows) {
+    const contextRows = getMessageContextRows(db, r.chat_id, r.id, contextCount);
+    const lines = formatMessagesForList(
+      contextRows.map((row) => ({
+        row,
+        prefix: row.id === r.id ? ">>> " : "    ",
+      })),
+      { includeTimezone: false },
+    );
+
+    for (const line of lines) console.log(line);
+    console.log("---");
   }
 }
 
@@ -177,16 +186,50 @@ function messagesGet(
   console.log(row.content_text ?? "");
 }
 
-function formatMessage(r: MessageRow, prefix = ""): void {
+function printMessagesForList(items: MessageListItem[]): void {
+  for (const line of formatMessagesForList(items)) console.log(line);
+}
+
+export function formatMessagesForList(
+  input: MessageRow[] | MessageListItem[],
+  options: { includeTimezone?: boolean } = {},
+): string[] {
+  const includeTimezone = options.includeTimezone ?? true;
+  const items = normalizeMessageListItems(input);
+  const lines: string[] = [];
+  let currentDate: string | null = null;
+
+  if (includeTimezone) {
+    lines.push(`Timezone: ${TZ}`);
+  }
+
+  for (const item of items) {
+    const localTs = utcToLocalDateTime(item.row.created_at);
+    const [date = "", time = ""] = localTs.split(" ");
+    if (date !== currentDate) {
+      if (currentDate !== null) lines.push("");
+      lines.push(date);
+      currentDate = date;
+    }
+    lines.push(formatMessageListLine(item.row, time, item.prefix ?? ""));
+  }
+
+  return lines;
+}
+
+function normalizeMessageListItems(input: MessageRow[] | MessageListItem[]): MessageListItem[] {
+  return input.map((item) => "row" in item ? item : { row: item });
+}
+
+function formatMessageListLine(r: MessageRow, time: string, prefix = ""): string {
   const senderLabel = r.sender_name
     ? `${r.sender_id.toUpperCase()}(${r.sender_name})`
     : r.sender_id.toUpperCase();
   const roleLabel = r.role === "assistant" ? "assistant" : "user";
-  const ts = formatLocalDateTimeWithTZ(r.created_at);
   const content = (r.content_text ?? "").replaceAll("\n", " ");
   const text = truncate(content, 200);
 
-  console.log(`${prefix}[#${r.id}] [${ts}] ${senderLabel} (${roleLabel}): ${text}`);
+  return `${prefix}[#${r.id}] [${time}] ${senderLabel} (${roleLabel}): ${text}`;
 }
 
 /** Rune-safe truncation (对齐 cc-connect: []rune 截断) */

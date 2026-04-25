@@ -5,6 +5,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { initDatabase } from "../database/schema.js";
 import { getMessageForAccess, searchMessages } from "../messages/store.js";
+import { formatMessagesForList } from "./messages.js";
 
 const tempDirs: string[] = [];
 
@@ -29,6 +30,36 @@ function setupDb(): Database.Database {
 }
 
 describe("message access rules", () => {
+  it("groups message list output by local date and only labels timezone once", () => {
+    const lines = formatMessagesForList([
+      {
+        id: 1,
+        chat_id: "c1",
+        sender_id: "u2",
+        sender_name: "Zen",
+        role: "user",
+        content_text: "first",
+        content_type: "text",
+        created_at: "2026-04-24 16:12:00",
+      },
+      {
+        id: 2,
+        chat_id: "c1",
+        sender_id: "u3",
+        sender_name: "NiuBot",
+        role: "assistant",
+        content_text: "second",
+        content_type: "text",
+        created_at: "2026-04-24 16:13:00",
+      },
+    ]);
+
+    expect(lines[0]).toBe("Timezone: Asia/Shanghai");
+    expect(lines).toContain("2026-04-25");
+    expect(lines.join("\n")).toContain("[#1] [00:12] U2(Zen) (user): first");
+    expect(lines.join("\n")).not.toContain("[#1] [2026-04-25 00:12");
+  });
+
   it("blocks group all-chat search", () => {
     const db = setupDb();
 
