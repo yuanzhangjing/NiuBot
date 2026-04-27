@@ -32,8 +32,11 @@ export function handleMessages(
     messagesSearch(db, args.slice(1), chatId, chatType, parseArgs);
   } else if (sub === "get") {
     messagesGet(db, args.slice(1), chatId, chatType, parseArgs);
+  } else if (sub === "--help" || sub === "help") {
+    printHelp();
   } else {
     console.log("Usage: nbt messages <list|search|get>");
+    console.log("       nbt messages --help");
   }
 }
 
@@ -237,4 +240,20 @@ function truncate(text: string, max: number): string {
   const runes = [...text];
   if (runes.length <= max) return text;
   return runes.slice(0, max).join("") + "...";
+}
+
+function printHelp(): void {
+  console.log(`Query message history. Raw record of every chat message.
+
+Commands:
+  list    List recent messages [default: -n 20]
+          Options: -n <count> | --offset <id> | --since/--before <datetime>
+                   --role user|assistant | --user-id <id> | --content-type <t>
+
+  search  <query>  Search messages by keyword [default: -n 10]
+          Options: -n <count> | --all (all chats) | --chat-type p2p|group
+                   -C <count> (context lines around match) | --since/--before <datetime>
+                   --role user|assistant | --user-id <id>
+
+  get     <id>     Show full content of a single message`);
 }

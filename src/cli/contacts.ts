@@ -53,8 +53,13 @@ export function handleContacts(
     case "set-name":
       setName(db, args.slice(1), parseArgs);
       break;
+    case "--help":
+    case "help":
+      printHelp();
+      break;
     default:
       console.log("Usage: nbt contacts <list-users|list-chats|get-user|get-chat|set-name>");
+      console.log("       nbt contacts --help");
       break;
   }
 }
@@ -202,4 +207,17 @@ function setName(
 
   setUserManualName(db, userId, name);
   console.log(`Updated name for ${userId.toUpperCase()}: ${name}`);
+}
+
+function printHelp(): void {
+  console.log(`Manage users and chats directory. Look up contacts, check details, set display names.
+
+Commands:
+  list-users  [--name <keyword>] [--platform <name>]
+  list-chats  [--type p2p|group] [--user-id <id>] [--name <keyword>]
+  get-user    <id>
+  get-chat    <id>
+  set-name    <user-id> <name>
+
+IDs can be short form (U1, C1) or platform IDs.`);
 }

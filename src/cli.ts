@@ -32,7 +32,7 @@ import { buildImportantContext, type SceneInfo } from "./memory/inject.js";
 import { loadPersona } from "./persona.js";
 import { handleMessages } from "./cli/messages.js";
 import { handleContacts } from "./cli/contacts.js";
-import { handleSend, handleSendFile } from "./cli/send.js";
+import { handleSend } from "./cli/send.js";
 import { handleCron } from "./cli/cron.js";
 import { handleTask } from "./cli/task.js";
 import { handleSession } from "./cli/session.js";
@@ -141,9 +141,6 @@ async function main(): Promise<void> {
     case "send":
       handleSend(args.slice(1), CHAT_ID, parseArgs);
       break;
-    case "send-file":
-      handleSendFile(args.slice(1), CHAT_ID, parseArgs);
-      break;
     case "cron":
       handleCron(openDb(), args.slice(1), CHAT_ID, CHAT_TYPE, USER_ID, parseArgs);
       break;
@@ -189,8 +186,13 @@ function handleUserMemory(args: string[]): void {
     case "rm":
       userMemoryDel(db, userId, rest);
       break;
+    case "--help":
+    case "help":
+      printUserMemoryHelp();
+      break;
     default:
       console.log("Usage: nbt user-memory <add|list|get|update|del>");
+      console.log("       nbt user-memory --help");
       break;
   }
   db.close();
@@ -319,9 +321,33 @@ function userMemoryDel(db: Database.Database, userId: string, args: string[]): v
   console.log(`Deleted memory #${id}`);
 }
 
+function printUserMemoryHelp(): void {
+  console.log(`Manage user memories (preferences, background, experiences).
+Max 20 entries per user. Task/project content belongs in "task", not here.
+
+Commands:
+  add     --summary <text> [--detail <text>] [--visibility private|public]
+  list    [--user-id <id>]       Filter by user (own if omitted)
+  get     <id>                   Show full detail
+  update  <id> [--summary <text>] [--detail <text>] [--visibility private|public]
+  del     <id>
+
+Visibility: private (default, p2p only) | public (also visible in groups)
+
+Examples:
+  nbt user-memory add --summary "Prefers dark mode" --detail "Asks for it on every project"
+  nbt user-memory list --user-id U3`);
+}
+
 // ─── whoami ───────────────────────────────────────────────
 
 function handleWhoami(): void {
+  const args = cliArgs.slice(1);
+  if (args[0] === "--help" || args[0] === "help") {
+    console.log(`Show current session context: bot identity, chat info, user info, memories.
+Use when context is lost or uncertain.`);
+    return;
+  }
   const db = openDb();
   const botName = "Bot";
 
@@ -380,16 +406,18 @@ Usage: nbt <command> <subcommand> [options]
 
 Commands:
   user-memory   add|list|get|update|del     Manage user memories
-  messages      list|search                 Query message history
+  messages      list|search|get             Query message history
   sessions      list|search|get             Query session history
   contacts      list-users|list-chats|get-user|get-chat|set-name
-  send          <text>                      Send message via IPC
-  send-file     <file-path>                 Send file via IPC
+               Manage users and chats directory
+  send          <text>                      Send text, card, or file
   cron          add|list|del                Manage scheduled tasks
   task          create|list|update|delete   Manage task projects
   whoami                                    Show current scene info
 
-Global flags (apply to all commands):
+Use "nbt <command> --help" for detailed syntax.
+
+Global flags:
   --user-id <id>     Override NIUBOT_USER_ID
   --chat-id <id>     Override NIUBOT_CHAT_ID
   --chat-type <type> Override NIUBOT_CHAT_TYPE (p2p/group)

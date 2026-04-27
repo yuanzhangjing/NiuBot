@@ -31,8 +31,13 @@ export function handleTask(
     case "rm":
       taskDelete(args.slice(1), workingDirectory, userId, parseArgs);
       break;
+    case "--help":
+    case "help":
+      printHelp();
+      break;
     default:
       console.log("Usage: nbt task <create|list|update|delete>");
+      console.log("       nbt task --help");
       break;
   }
 }
@@ -180,4 +185,18 @@ function taskDelete(
   }
 
   console.log(`Deleted (archived) task "${name}"`);
+}
+
+function printHelp(): void {
+  console.log(`Manage tasks and projects with visibility control. Tasks are organized in the tasks/ directory.
+
+Commands:
+  create  <name> [--desc "..."] [--private|--public]
+  list    [<name>]                          Filter by name (substring)
+
+  update  <name> [--name <new>] [--desc "..."] [--private|--public] [--active|--inactive]
+  delete  <name>                            Archive to tasks/.archive/
+
+Visibility: private chat defaults to --private, group chat defaults to --public.
+Status: active (default) | inactive | archived. Only active tasks are injected into session context.`);
 }

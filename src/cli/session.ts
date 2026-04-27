@@ -26,8 +26,11 @@ export function handleSession(
     sessionSearch(db, args.slice(1), chatId, chatType, parseArgs);
   } else if (sub === "get") {
     sessionGet(db, args.slice(1), chatId, chatType, parseArgs);
+  } else if (sub === "--help" || sub === "help") {
+    printHelp();
   } else {
     console.log("Usage: nbt sessions <list|search|get>");
+    console.log("       nbt sessions --help");
   }
 }
 
@@ -263,4 +266,17 @@ function printSessionFull(row: SessionRow): void {
   } catch {
     console.log(`  ${row.summary}`);
   }
+}
+
+function printHelp(): void {
+  console.log(`Query session history. Structured summaries auto-generated when sessions are archived.
+
+Commands:
+  list    List archived sessions [default: -n 10]
+          Options: -n <count> | --since/--before <datetime> | --offset <id>
+
+  search  <query>  Search sessions by keyword [default: -n 5]
+          Options: -n <count> | --since/--before <datetime> | --offset <id>
+
+  get     <id>     Show full session details`);
 }

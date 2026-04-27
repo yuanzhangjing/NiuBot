@@ -359,14 +359,14 @@ describe("Pipeline.recover", () => {
       "codex",
     );
 
-    const handled = (pipeline as any).handleBuiltinCommand("/status", "u2", "c1", "chat-open-id");
+    const handled = (pipeline as any).handleBuiltinCommand("/service", "u2", "c1", "chat-open-id");
 
     expect(handled).toBe(true);
     expect(sentCards).toHaveLength(1);
     expect(sentCards[0]?.header).toBe("Status");
   });
 
-  test("leaves double-slash status for agent passthrough", () => {
+  test("leaves double-slash service for agent passthrough", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
@@ -384,7 +384,7 @@ describe("Pipeline.recover", () => {
       "codex",
     );
 
-    const handled = (pipeline as any).handleBuiltinCommand("//status", "u2", "c1", "chat-open-id");
+    const handled = (pipeline as any).handleBuiltinCommand("//service", "u2", "c1", "chat-open-id");
 
     expect(handled).toBe(false);
     expect(sentTexts).toHaveLength(0);

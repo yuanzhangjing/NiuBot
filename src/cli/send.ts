@@ -1,5 +1,5 @@
 /**
- * CLI: send / send-file — send messages and files via IPC to the running daemon.
+ * CLI: send — send messages and files via IPC to the running daemon.
  */
 
 import http from "node:http";
@@ -59,13 +59,38 @@ export function handleSend(
 ): void {
   const { positional, flags } = parseArgs(args);
   const targetChatId = flags["chat-id"] ?? chatId;
-  const cardHeader = flags["card"];
+
+  if (flags["help"] === "true" || positional[0] === "help") {
+    printHelp();
+    return;
+  }
 
   if (!targetChatId) {
     console.error("Error: NIUBOT_CHAT_ID not set and --chat-id not provided");
     process.exit(1);
   }
 
+  // Send file
+  const fileFlag = flags["file"];
+  if (fileFlag !== undefined) {
+    const filePath = fileFlag === "true" ? positional[0] : fileFlag;
+    if (!filePath) {
+      console.error("Usage: nbt send --file <path>");
+      process.exit(1);
+    }
+    const socketPath = getSocketPath();
+    const absPath = path.resolve(filePath);
+    ipcRequest(socketPath, "/send-file", { chat_id: targetChatId, file_path: absPath })
+      .then(() => console.log("File sent."))
+      .catch((err) => {
+        console.error(`Error: ${err.message}`);
+        process.exit(1);
+      });
+    return;
+  }
+
+  // Send card
+  const cardHeader = flags["card"];
   if (cardHeader != null) {
     const content = positional.join(" ");
     if (!content) {
@@ -79,46 +104,29 @@ export function handleSend(
         console.error(`Error: ${err.message}`);
         process.exit(1);
       });
-  } else {
-    const text = positional.join(" ");
-    if (!text) {
-      console.error("Usage: nbt send <text>");
-      process.exit(1);
-    }
-    const socketPath = getSocketPath();
-    ipcRequest(socketPath, "/send", { chat_id: targetChatId, text })
-      .then(() => console.log("Message sent."))
-      .catch((err) => {
-        console.error(`Error: ${err.message}`);
-        process.exit(1);
-      });
+    return;
   }
-}
 
-export function handleSendFile(
-  args: string[],
-  chatId: string | undefined,
-  parseArgs: (args: string[]) => { positional: string[]; flags: Record<string, string> },
-): void {
-  const { positional, flags } = parseArgs(args);
-  const targetChatId = flags["chat-id"] ?? chatId;
-  const filePath = positional[0];
-
-  if (!targetChatId) {
-    console.error("Error: NIUBOT_CHAT_ID not set and --chat-id not provided");
+  // Send text
+  const text = positional.join(" ");
+  if (!text) {
+    console.error("Usage: nbt send <text>");
     process.exit(1);
   }
-  if (!filePath) {
-    console.error("Usage: nbt send-file <file-path>");
-    process.exit(1);
-  }
-
   const socketPath = getSocketPath();
-  const absPath = path.resolve(filePath);
-  ipcRequest(socketPath, "/send-file", { chat_id: targetChatId, file_path: absPath })
-    .then(() => console.log("File sent."))
+  ipcRequest(socketPath, "/send", { chat_id: targetChatId, text })
+    .then(() => console.log("Message sent."))
     .catch((err) => {
       console.error(`Error: ${err.message}`);
       process.exit(1);
     });
+}
+
+function printHelp(): void {
+  console.log(`Send messages or files to the current or specified chat.
+
+  nbt send <text>                        Text message
+  nbt send --card <header> <content>     Card message
+  nbt send --file <path>                 Send a file
+  nbt send --chat-id <id> <text>         Send to a specific chat`);
 }

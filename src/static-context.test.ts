@@ -12,8 +12,10 @@ describe("loadStaticContextTemplate", () => {
 
     expect(content).toContain("## Task management");
     expect(content).toContain("do NOT manually create directories under `tasks/`.");
-    expect(content).toContain("Each task is a directory `tasks/<name>/` with `README.md` as the single entrypoint.");
+    expect(content).toContain("Each task has a `README.md` with sections:");
     expect(content).toContain("## In Progress` / `## Todo` / `## Bug` / `## Idea` / `## Done`.");
+    expect(content).toContain("nbt whoami");
+    expect(content).toContain("For full syntax: `nbt <command> --help`.");
   });
 
   it("AGENTS.template.md is included in package.json files", () => {

@@ -49,23 +49,3 @@ describe("buildNormalContext task injection", () => {
     expect(context).not.toContain("other-private");
   });
 });
-
-describe("buildImportantContext delivery rules", () => {
-  it("tells the agent not to output platform message payloads", () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-inject-"));
-    tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
-
-    const context = buildImportantContext(db, {
-      botName: "NiuBot",
-      platform: "feishu",
-      userId: "u2",
-      userName: "Zen",
-      chatId: "c1",
-      chatType: "p2p",
-    });
-
-    expect(context).toContain("只输出用户可读的纯文本或 Markdown");
-    expect(context).toContain("不要输出 Feishu/Lark 卡片 JSON");
-  });
-});

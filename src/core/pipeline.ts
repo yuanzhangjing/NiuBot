@@ -47,6 +47,7 @@ const INTERRUPT_WORDS = new Set([
 const AGENT_WATCHDOG_INTERVAL_MS = 15_000;     // 15 秒检测间隔
 const AGENT_IDLE_THRESHOLD_MS = 600_000;       // 10 分钟：第一次 idle 通知
 const AGENT_IDLE_THRESHOLD_2_MS = 1_800_000;   // 30 分钟：第二次 idle 通知
+const SUMMARY_TIMEOUT_MS = 60_000;             // 归档摘要最长等待 60 秒
 const UPDATE_CHECK_HOUR = 10;                  // 本地时间 10:00 检查 npm latest
 const UPDATE_NOTIFY_END_HOUR = 18;             // 10:00-18:00 启动时允许立即通知
 
@@ -125,7 +126,7 @@ export class Pipeline {
   /** 数据库路径（传递给 agent 子进程） */
   private dbPath: string;
 
-  /** 启动时间戳，用于 /status 计算 uptime */
+  /** 启动时间戳，用于 /service 计算 uptime */
   private startedAt = Date.now();
 
   /** 启动时缓存的版本号，不受后续 update 影响 */
@@ -820,7 +821,7 @@ export class Pipeline {
    * 未命中返回 false，消息继续走 agent 流程。
    *
    * 分发顺序（对齐 cc-connect）：
-   *   1. 内置命令 switch（/restart, /status, /new, /clear, /stop, /cron）
+   *   1. 内置命令 switch（/restart, /service, /new, /clear, /stop, /cron）
    *   2. 管理员 shell 命令（tryShellCommand）
    *   3. return false → 转发给 agent
    */
@@ -851,8 +852,8 @@ export class Pipeline {
         this.handleUpdate(chatId, platformChatId, msgId, parts[1]?.toLowerCase() === "confirm");
         return true;
       }
-      case "/status": {
-        this.log.info("builtin command: status", { userId });
+      case "/service": {
+        this.log.info("builtin command: service", { userId });
         this.sendStatus(chatId, platformChatId, msgId);
         return true;
       }
@@ -965,8 +966,8 @@ export class Pipeline {
         });
         return true;
       }
-      case "/list": {
-        this.log.info("builtin command: list", { userId, chatId });
+      case "/status": {
+        this.log.info("builtin command: status", { userId, chatId });
         this.sendRunningList(chatId, platformChatId, msgId);
         return true;
       }
@@ -1237,8 +1238,13 @@ export class Pipeline {
       personaContent: persona,
     });
 
-    // 等待上一个 session 的归档摘要完成，确保 context 注入拿到最新 summary
-    await this.pendingSummary.get(chatId);
+    // 等待上一个 session 的归档摘要完成，超时后放行
+    const _pendingSummary = this.pendingSummary.get(chatId);
+    if (_pendingSummary) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([_pendingSummary, new Promise<void>((r) => { timer = setTimeout(r, SUMMARY_TIMEOUT_MS); })]);
+      clearTimeout(timer);
+    }
 
     // Build normal context（会话定位 + task 索引 + 最近 session summaries）
     const normalContext = buildNormalContext(this.db, chatId, this.workingDirectory, undefined, chatType, userId);
@@ -1832,9 +1838,9 @@ export class Pipeline {
       "`/stop`　　停止当前任务并清空队列（全停）",
       "`/flush`　　中断当前回复，合并处理排队消息",
       "`/task`　　独立执行任务（stop 停止）",
-      "`/list`　　查看所有运行中的任务",
+      "`/status`　查看运行中的任务",
       "`/clear`　　仅清空排队消息（不停当前任务）",
-      "`/status`　查看运行状态",
+      "`/service`　查看服务信息",
       "`/cron`　　查看定时任务",
       "`/help`　　显示本帮助",
     ];
@@ -2128,7 +2134,7 @@ export class Pipeline {
 
       const msgIds = messages.map((m) => m.dbMsgId).filter((id): id is number => id != null);
       const firstMsgId = msgIds.length > 0 ? Math.min(...msgIds) : undefined;
-      const chatSession = await this.getOrCreateSession(chatId, firstMsgId);
+      const chatSession = await this.getOrCreateSession(chatId, firstMsgId, signal);
 
       // 拼接上下文前缀（新 session 的首条消息）
       let messageToSend = mergedText;
@@ -2357,7 +2363,7 @@ export class Pipeline {
     }
   }
 
-  private async getOrCreateSession(chatId: string, beforeMsgId?: number): Promise<ChatSession> {
+  private async getOrCreateSession(chatId: string, beforeMsgId?: number, signal?: AbortSignal): Promise<ChatSession> {
     const existing = this.chatSessions.get(chatId);
     if (existing) return existing;
 
@@ -2398,7 +2404,24 @@ export class Pipeline {
     });
 
     // 等待上一个 session 的归档摘要完成，确保 context 注入拿到最新 summary
-    await this.pendingSummary.get(chatId);
+    // 超时或 /stop 中断时放行，不阻塞新会话
+    const _pendingSummary = this.pendingSummary.get(chatId);
+    if (_pendingSummary) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let abortHandler: (() => void) | undefined;
+      await Promise.race([
+        _pendingSummary,
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, SUMMARY_TIMEOUT_MS);
+          if (signal) {
+            abortHandler = () => { clearTimeout(timer); resolve(); };
+            signal.addEventListener("abort", abortHandler, { once: true });
+          }
+        }),
+      ]);
+      clearTimeout(timer);
+      if (abortHandler) signal?.removeEventListener("abort", abortHandler);
+    }
 
     // 构建 normal 上下文（会话定位 + task 索引 + 最近 session summaries）— 后续拼到首条消息前缀
     const normalContext = buildNormalContext(this.db, chatId, this.workingDirectory, beforeMsgId, chatType, userId);
@@ -2604,8 +2627,19 @@ export class Pipeline {
       return;
     }
 
+    const killTimer = setTimeout(() => {
+      this.log.warn("archive summary timeout, cancelling session", { chatId, sessionId });
+      this.agent.cancelSession(session).catch(() => {});
+    }, SUMMARY_TIMEOUT_MS);
+
     try {
       const response = await this.agent.sendMessage(session, prompt);
+
+      if (response.cancelled) {
+        this.log.warn("archive summary cancelled (timeout or stop)", { chatId, sessionId });
+        return;
+      }
+
       const text = response.text.trim();
 
       if (text === "null") {
@@ -2631,6 +2665,7 @@ export class Pipeline {
     } catch (err) {
       this.log.warn("failed to generate archive summary", { chatId, sessionId, error: String(err) });
     } finally {
+      clearTimeout(killTimer);
       await this.agent.closeSession(session).catch(() => {});
     }
   }

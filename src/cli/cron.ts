@@ -35,8 +35,13 @@ export function handleCron(
     case "rm":
       cronDel(db, args.slice(1), chatId, chatType, userId, parseArgs);
       break;
+    case "--help":
+    case "help":
+      printHelp();
+      break;
     default:
       console.log("Usage: nbt cron <add|list|del>");
+      console.log("       nbt cron --help");
       break;
   }
 }
@@ -157,4 +162,22 @@ function cronDel(
 function truncate(text: string, max: number): string {
   if (text.length <= max) return text;
   return text.slice(0, max) + "...";
+}
+
+function printHelp(): void {
+  console.log(`Manage scheduled tasks (recurring cron or one-time at).
+
+Commands:
+  add   Recurring: nbt cron add --cron "<expr>" --prompt "<task>" --desc "<label>"
+                 [--times <n>] [--until "<datetime>"]
+        One-time:  nbt cron add --at "<datetime>" --prompt "<task>" --desc "<label>"
+
+  list  List active jobs
+
+  del   <id>  Delete a job
+
+Datetime formats: "2026-03-17T10:52:00", "2026-03-17 10:52", "2026-03-17"
+
+Example:
+  nbt cron add --cron "0 9 * * 1-5" --prompt "Send daily standup summary" --desc "standup"`);
 }
