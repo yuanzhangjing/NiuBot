@@ -38,6 +38,8 @@ export interface ParsedOutput {
   model?: string;
   /** 累计 compact 次数 */
   compactCount?: number;
+  /** 错误信息（如模型不存在），parseOutput 中设置 */
+  error?: string;
 }
 
 export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession> implements AgentBackend {
@@ -84,6 +86,38 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
 
   /** 解析 CLI 输出 → 结构化结果（可访问 session 获取额外信息） */
   abstract parseOutput(stdout: string, session: S): ParsedOutput;
+
+  /** 探测模型名是否可用：用 CLI 发送最小请求，检查 parseOutput 是否报错 */
+  async validateModel(modelName: string): Promise<{ valid: boolean; error?: string }> {
+    const session = this.buildProbeSession(modelName);
+    const { args, stdin } = this.buildInput(session, "ok");
+    try {
+      const stdout = await this.exec(this.command(), args, { stdin });
+      const parsed = this.parseOutput(stdout, session);
+      if (parsed.error) return { valid: false, error: parsed.error };
+      return { valid: true };
+    } catch (err: any) {
+      if (this.isProbeError(err)) return { valid: false, error: "模型不存在或无权限" };
+      // 有些 backend 非零退出但错误信息在 stdout 里，用 parseOutput 再试一次
+      if (typeof err.stdout === "string") {
+        try {
+          const parsed = this.parseOutput(err.stdout, session);
+          if (parsed.error) return { valid: false, error: parsed.error };
+        } catch { /* ignore */ }
+      }
+      return { valid: true };
+    }
+  }
+
+  /** 构造 probe 用的最小 session（不注册到 sessions Map，不走 activity） */
+  protected buildProbeSession(modelName: string): S {
+    return this.buildSession({ workingDirectory: process.cwd(), model: modelName });
+  }
+
+  /** 判断 exec 抛出的错误是否表示模型不存在（默认否，子类可 override） */
+  protected isProbeError(_err: any): boolean {
+    return false;
+  }
 
   // ── 可选 override ───────────────────────────────────────────
 

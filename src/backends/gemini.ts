@@ -127,7 +127,7 @@ export default class GeminiBackend extends CliAgentBackend<GeminiSession> {
 
     const text = textParts.join("");
     if (!text && errorMsg) {
-      return { text: `（Gemini 错误）${errorMsg}`, agentSessionId: sessionId, model };
+      return { text: `（Gemini 错误）${errorMsg}`, agentSessionId: sessionId, model, error: errorMsg };
     }
 
     // token 数从 session file 取（精确值），不依赖 result.stats
@@ -145,6 +145,7 @@ export default class GeminiBackend extends CliAgentBackend<GeminiSession> {
       agentSessionId: sessionId,
       contextTokens,
       model,
+      error: errorMsg,
     };
   }
 

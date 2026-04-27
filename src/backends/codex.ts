@@ -84,6 +84,7 @@ export default class CodexBackend extends CliAgentBackend<CodexSession> {
   parseOutput(stdout: string, session: CodexSession): ParsedOutput {
     let threadId: string | undefined;
     let lastAgentText = "";
+    let errorMsg: string | undefined;
 
     for (const line of stdout.split("\n")) {
       if (!line) continue;
@@ -100,13 +101,22 @@ export default class CodexBackend extends CliAgentBackend<CodexSession> {
             output_tokens?: number;
             cached_input_tokens?: number;
           };
+          error?: { message?: string };
+          message?: string;
         };
 
         if (event.type === "thread.started" && event.thread_id) {
           threadId = event.thread_id;
         }
 
-        // 取最后一条 agent_message 的 text 作为回复
+        if (event.type === "error") {
+          errorMsg = "模型不存在或不支持";
+        } else if (event.type === "turn.failed") {
+          if (event.error?.message?.includes("not supported")) {
+            errorMsg = "模型不存在或不支持";
+          }
+        }
+
         if (event.type === "item.completed" && event.item?.type === "agent_message" && event.item.text) {
           lastAgentText = event.item.text;
         }
@@ -133,6 +143,7 @@ export default class CodexBackend extends CliAgentBackend<CodexSession> {
       contextTokens,
       contextWindow,
       compactCount: session.compactCount > 0 ? session.compactCount : undefined,
+      error: errorMsg,
     };
   }
 
@@ -237,48 +248,6 @@ export default class CodexBackend extends CliAgentBackend<CodexSession> {
       return statSync(jsonlPath).mtimeMs;
     } catch {
       return null;
-    }
-  }
-
-  async validateModel(modelName: string): Promise<{ valid: boolean; error?: string }> {
-    try {
-      const stdout = await this.exec("codex", [
-        "exec",
-        "--json",
-        "--dangerously-bypass-approvals-and-sandbox",
-        "--skip-git-repo-check",
-        "-m", modelName,
-        "-",
-      ], { stdin: "." });
-
-      for (const line of stdout.split("\n")) {
-        try {
-          const event = JSON.parse(line) as { type?: string; message?: string };
-          if (event.type === "error") {
-            return { valid: false, error: "模型不存在或不支持" };
-          }
-        } catch { /* skip non-JSON */ }
-      }
-      return { valid: true };
-    } catch (err: any) {
-      const stdout = err.stdout as string | undefined;
-      if (stdout) {
-        for (const line of stdout.split("\n")) {
-          try {
-            const event = JSON.parse(line) as { type?: string; message?: string };
-            if (event.type === "error" && event.message?.includes("not supported")) {
-              return { valid: false, error: "模型不存在或不支持" };
-            }
-            if (event.type === "turn.failed") {
-              const msg = (event as any).error?.message as string | undefined;
-              if (msg?.includes("not supported")) {
-                return { valid: false, error: "模型不存在或不支持" };
-              }
-            }
-          } catch { /* skip non-JSON */ }
-        }
-      }
-      return { valid: true };
     }
   }
 

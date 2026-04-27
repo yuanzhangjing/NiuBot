@@ -90,8 +90,8 @@ export interface AgentBackend {
   /** 是否支持 system prompt 注入 */
   supportsSystemPrompt?: boolean;
 
-  /** 探测模型名是否可用（可选，不支持时视为通过） */
-  validateModel?(modelName: string): Promise<{ valid: boolean; error?: string }>;
+  /** 探测模型名是否可用 */
+  validateModel(modelName: string): Promise<{ valid: boolean; error?: string }>;
 }
 
 // ── Activity Watchdog 相关类型 ──────────────────────────────

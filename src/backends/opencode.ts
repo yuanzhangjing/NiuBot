@@ -102,6 +102,7 @@ export default class OpencodeBackend extends CliAgentBackend<OpencodeSession> {
     let text = "";
     let sessionId: string | undefined;
     let contextTokens = 0;
+    let errorMsg: string | undefined;
 
     for (const line of stdout.split("\n")) {
       if (!line.trim()) continue;
@@ -116,11 +117,14 @@ export default class OpencodeBackend extends CliAgentBackend<OpencodeSession> {
               total?: number;
             };
           };
+          error?: { data?: { message?: string } };
         };
 
         if (event.sessionID) sessionId = event.sessionID;
 
-        if (event.type === "text" && event.part?.text) {
+        if (event.type === "error" && event.error?.data?.message?.includes("Model not found")) {
+          errorMsg = "模型不存在";
+        } else if (event.type === "text" && event.part?.text) {
           text += event.part.text;
         }
 
@@ -138,6 +142,7 @@ export default class OpencodeBackend extends CliAgentBackend<OpencodeSession> {
       agentSessionId: sessionId,
       contextTokens: contextTokens > 0 ? contextTokens : undefined,
       model,
+      error: errorMsg,
     };
   }
 

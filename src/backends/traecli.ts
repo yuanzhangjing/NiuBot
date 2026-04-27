@@ -45,6 +45,11 @@ export default class TraeCliBackend extends CliAgentBackend<TraeCliSession> {
     return { args };
   }
 
+  protected isProbeError(err: any): boolean {
+    const stderr = err.stderr as string | undefined;
+    return !!(stderr?.includes("model") || stderr?.includes("Model"));
+  }
+
   parseOutput(stdout: string, session: TraeCliSession): ParsedOutput {
     try {
       const data = JSON.parse(stdout) as {
