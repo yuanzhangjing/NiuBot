@@ -122,6 +122,10 @@ export default class OpencodeBackend extends CliAgentBackend<OpencodeSession> {
 
         if (event.sessionID) sessionId = event.sessionID;
 
+        if (event.type === "step_start") {
+          text = "";
+        }
+
         if (event.type === "error" && event.error?.data?.message?.includes("Model not found")) {
           errorMsg = "模型不存在";
         } else if (event.type === "text" && event.part?.text) {
