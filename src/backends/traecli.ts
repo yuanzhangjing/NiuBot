@@ -112,19 +112,33 @@ export default class TraeCliBackend extends CliAgentBackend<TraeCliSession> {
     const jsonlPath = this.getJsonlPath(session);
     if (!jsonlPath) return;
     try {
-      const stat = statSync(jsonlPath);
-      const tailSize = Math.min(stat.size, 4096);
-      if (tailSize === 0) return;
-      const fd = openSync(jsonlPath, "r");
-      try {
-        const buf = Buffer.alloc(tailSize);
-        readSync(fd, buf, 0, tailSize, stat.size - tailSize);
-        const lines = buf.toString("utf-8").split("\n").filter((l) => l.trim());
-        activity.recentLines = lines.slice(-3);
-      } finally {
-        closeSync(fd);
-      }
+      const size = statSync(jsonlPath).size;
+      if (size === 0) return;
+      const lines = this.readLastLines(jsonlPath, size, 3);
+      activity.recentLines = lines;
     } catch { /* ignore */ }
+  }
+
+  /** 从文件尾部倒读，获取最后 N 个完整行（每行可能很长，不限 chunk 大小） */
+  private readLastLines(filePath: string, fileSize: number, count: number): string[] {
+    const CHUNK = 65536;
+    const fd = openSync(filePath, "r");
+    try {
+      let offset = fileSize;
+      let collected = "";
+      while (offset > 0) {
+        const readSize = Math.min(CHUNK, offset);
+        offset -= readSize;
+        const buf = Buffer.alloc(readSize);
+        readSync(fd, buf, 0, readSize, offset);
+        collected = buf.toString("utf-8") + collected;
+        const lines = collected.split("\n").filter((l) => l.trim());
+        if (lines.length > count) return lines.slice(-count);
+      }
+      return collected.split("\n").filter((l) => l.trim()).slice(-count);
+    } finally {
+      closeSync(fd);
+    }
   }
 
   protected probeSessionFileMtime(session: TraeCliSession): number | null {
