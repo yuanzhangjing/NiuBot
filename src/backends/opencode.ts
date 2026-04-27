@@ -126,9 +126,11 @@ export default class OpencodeBackend extends CliAgentBackend<OpencodeSession> {
           text = "";
         }
 
-        if (event.type === "error" && event.error?.data?.message?.includes("Model not found")) {
-          errorMsg = "模型不存在";
-        } else if (event.type === "text" && event.part?.text) {
+        if (event.type === "error") {
+          const detail = event.error?.data?.message;
+          errorMsg = detail || "（OpenCode 错误）";
+        }
+        if (event.type === "text" && event.part?.text) {
           text += event.part.text;
         }
 
@@ -142,7 +144,7 @@ export default class OpencodeBackend extends CliAgentBackend<OpencodeSession> {
     const model = session.model ?? (sessionId ? this.queryModelId(sessionId) : undefined);
 
     return {
-      text: text.trim() || stdout.trim(),
+      text: text.trim(),
       agentSessionId: sessionId,
       contextTokens: contextTokens > 0 ? contextTokens : undefined,
       model,

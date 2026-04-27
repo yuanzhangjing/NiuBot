@@ -2776,6 +2776,17 @@ function extractAgentErrorDetail(err: unknown): string | null {
         if (event.type === "error" && typeof event.message === "string" && event.message.trim()) {
           parts.push(event.message.trim());
         }
+        // Opencode format: {type:"error", error:{name:"...", data:{message:"..."}}}
+        if (event.type === "error" && typeof event.error === "object" && event.error !== null) {
+          const errObj = event.error as Record<string, unknown>;
+          if (typeof errObj.message === "string" && (errObj.message as string).trim()) {
+            parts.push((errObj.message as string).trim());
+          }
+          const dataObj = errObj.data as Record<string, unknown> | undefined;
+          if (typeof dataObj?.message === "string" && (dataObj.message as string).trim()) {
+            parts.push((dataObj.message as string).trim());
+          }
+        }
       } catch {
         // Not JSON — keep raw non-empty lines as-is
         const trimmed = line.trim();

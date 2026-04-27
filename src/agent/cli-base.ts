@@ -225,6 +225,12 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
         s.agentSessionId = parsed.agentSessionId;
       }
 
+      if (parsed.error) {
+        const err: Error & { stdout?: string } = new Error(parsed.error);
+        err.stdout = stdout;
+        throw err;
+      }
+
       this.log.info("prompt completed", {
         sessionId: agentSession.id,
         responseLength: parsed.text.length,
