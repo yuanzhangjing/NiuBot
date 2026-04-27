@@ -101,7 +101,7 @@ export default class ClaudeBackend extends CliAgentBackend<ClaudeSession> {
     }
 
     if (!resultEvent) {
-      return { text: stdout.trim() };
+      return { text: "（Claude 无输出）" };
     }
 
     let contextTokens: number | undefined;

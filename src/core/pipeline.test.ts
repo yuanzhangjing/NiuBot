@@ -1223,11 +1223,11 @@ describe("Pipeline.recover", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(sentTexts).toContain(
-      "处理出错了：Error: conversation not found for session thread_123\nCommand failed: codex exec resume thread_123",
+      "处理出错了：Command failed: codex exec resume thread_123",
     );
   });
 
-  test("falls back to the latest raw error line when stderr is JSON text", async () => {
+  test("skips raw non-JSON lines and only shows structured errors", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
@@ -1259,7 +1259,7 @@ describe("Pipeline.recover", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(sentTexts).toContain(
-      "处理出错了：warning: retrying request\nsession expired\nCommand failed: codex exec resume thread_123",
+      "处理出错了：session expired\nCommand failed: codex exec resume thread_123",
     );
   });
 

@@ -2788,9 +2788,7 @@ function extractAgentErrorDetail(err: unknown): string | null {
           }
         }
       } catch {
-        // Not JSON — keep raw non-empty lines as-is
-        const trimmed = line.trim();
-        if (trimmed) parts.push(trimmed);
+        // Not JSON — skip to avoid leaking raw log lines
       }
     }
   }

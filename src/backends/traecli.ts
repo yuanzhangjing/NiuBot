@@ -102,7 +102,9 @@ export default class TraeCliBackend extends CliAgentBackend<TraeCliSession> {
 
       return result;
     } catch {
-      return { text: stdout.trim() };
+      const err: Error & { stdout?: string } = new Error("Coco CLI 输出解析失败");
+      err.stdout = stdout;
+      throw err;
     }
   }
 

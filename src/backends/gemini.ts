@@ -141,7 +141,7 @@ export default class GeminiBackend extends CliAgentBackend<GeminiSession> {
     });
 
     return {
-      text: text.trim() || stdout.trim() || "（Gemini 无输出）",
+      text: text.trim() || "（Gemini 无输出）",
       agentSessionId: sessionId,
       contextTokens,
       model,
