@@ -1190,7 +1190,7 @@ describe("Pipeline.recover", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(sentTexts).toContain(
-      "处理出错了：API Error: 500 internal server error (request_id=req_123)\nCommand failed",
+      "处理出错了：\n```\nAPI Error: 500 internal server error (request_id=req_123)\nCommand failed\n```",
     );
   });
 
@@ -1223,7 +1223,7 @@ describe("Pipeline.recover", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(sentTexts).toContain(
-      "处理出错了：Command failed: codex exec resume thread_123",
+      "处理出错了：\n```\nCommand failed: codex exec resume thread_123\n```",
     );
   });
 
@@ -1259,7 +1259,7 @@ describe("Pipeline.recover", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(sentTexts).toContain(
-      "处理出错了：session expired\nCommand failed: codex exec resume thread_123",
+      "处理出错了：\n```\nsession expired\nCommand failed: codex exec resume thread_123\n```",
     );
   });
 

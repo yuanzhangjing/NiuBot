@@ -128,7 +128,7 @@ export default class OpencodeBackend extends CliAgentBackend<OpencodeSession> {
 
         if (event.type === "error") {
           const detail = event.error?.data?.message;
-          errorMsg = detail || "（OpenCode 错误）";
+          errorMsg = String(detail || "（OpenCode 错误）").slice(0, 2000);
         }
         if (event.type === "text" && event.part?.text) {
           text += event.part.text;

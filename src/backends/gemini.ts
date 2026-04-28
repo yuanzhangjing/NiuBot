@@ -109,7 +109,8 @@ export default class GeminiBackend extends CliAgentBackend<GeminiSession> {
       if (event["type"] === "result") {
         if (event["status"] === "error") {
           const err = event["error"] as Record<string, unknown> | undefined;
-          errorMsg = (err?.["message"] as string) ?? JSON.stringify(err);
+          const raw = String(err?.["message"] ?? JSON.stringify(err) ?? "");
+          errorMsg = raw.slice(0, 2000) || "unknown error";
         }
         // model 从 stats 里取（result.stats.models 的第一个 key）
         const stats = event["stats"] as Record<string, unknown> | undefined;
@@ -127,7 +128,7 @@ export default class GeminiBackend extends CliAgentBackend<GeminiSession> {
 
     const text = textParts.join("");
     if (!text && errorMsg) {
-      return { text: `（Gemini 错误）${errorMsg}`, agentSessionId: sessionId, model, error: errorMsg };
+      return { text: `（Gemini 错误）\n\`\`\`\n${errorMsg.replace(/`{3,}/g, "``")}\n\`\`\``, agentSessionId: sessionId, model, error: errorMsg };
     }
 
     // token 数从 session file 取（精确值），不依赖 result.stats

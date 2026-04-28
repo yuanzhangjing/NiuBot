@@ -1022,7 +1022,7 @@ export class Pipeline {
         const status = a.compacting ? "压缩上下文" : "处理中";
         sections.push(`**主会话**（${status} · ${elapsed}）`);
         if (a.recentLines.length > 0) {
-          const logBlock = a.recentLines.map((l) => l.replace(/`{3,}/g, "``")).join("\n");
+          const logBlock = a.recentLines.map((l) => l.replace(/`{3,}/g, "``").slice(0, 2000)).join("\n");
           sections.push(`\`\`\`\n${logBlock}\n\`\`\``);
         }
       }
@@ -1037,7 +1037,7 @@ export class Pipeline {
       const status = a?.compacting ? "压缩上下文" : "处理中";
       sections.push(`**⚡ ${t.description}**（${status} · ${elapsed}）`);
       if (a && a.recentLines.length > 0) {
-        const logBlock = a.recentLines.map((l) => l.replace(/`{3,}/g, "``")).join("\n");
+        const logBlock = a.recentLines.map((l) => l.replace(/`{3,}/g, "``").slice(0, 2000)).join("\n");
         sections.push(`\`\`\`\n${logBlock}\n\`\`\``);
       }
     }
@@ -2091,10 +2091,10 @@ export class Pipeline {
         this.log.info("restart script detached, pipeline stopped", { pid: child.pid, chatId, socketPath });
       } else {
         // restart.sh failed to start (guard blocked, missing deps, etc.)
-        const errMsg = stderr.trim() || `restart.sh exited with code ${code}`;
+        const errMsg = (stderr.trim() || `restart.sh exited with code ${code}`).slice(0, 2000);
         this.log.error("restart script failed", { code, stderr: errMsg });
         if (platformChatId) {
-          this.im.sendText(platformChatId, `重启失败：${errMsg}`).catch(() => {});
+          this.im.sendText(platformChatId, `重启失败：\n\`\`\`\n${errMsg.replace(/`{3,}/g, "``")}\n\`\`\``).catch(() => {});
         }
       }
     });
@@ -2353,7 +2353,7 @@ export class Pipeline {
       if (platformChatId) {
         const detail = extractAgentErrorDetail(err);
         const errorText = detail
-          ? `处理出错了：${detail}`
+          ? `处理出错了：\n\`\`\`\n${detail.replace(/`{3,}/g, "``")}\n\`\`\``
           : "处理出错了，请稍后再试。";
         try {
           const pmid = await this.im.sendText(platformChatId, errorText);
@@ -2766,7 +2766,7 @@ export class Pipeline {
           const header = `⚠️ ${idleMin} 分钟无输出`;
           const parts = ["已经 " + idleMin + " 分钟没有新输出，有可能卡住了。可以发 /stop 停止当前任务。"];
           if (a.recentLines.length > 0) {
-            const logBlock = a.recentLines.map((l) => l.replace(/`{3,}/g, "``")).join("\n");
+            const logBlock = a.recentLines.map((l) => l.replace(/`{3,}/g, "``").slice(0, 2000)).join("\n");
             parts.push(`**最近 ${a.recentLines.length} 条日志：**\n\`\`\`\n${logBlock}\n\`\`\``);
           }
           const content = parts.join("\n\n");
