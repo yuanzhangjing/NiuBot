@@ -7,6 +7,7 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve, basename } from "node:path";
 import { CliAgentBackend, buildNiubotEnv, type BaseCliSession, type ParsedOutput } from "../agent/cli-base.js";
+import { ERROR_DISPLAY_MAX_LEN } from "../agent/types.js";
 import type { SessionConfig, ExecHooks } from "../agent/types.js";
 import { DEFAULT_LITE_MODELS } from "../config.js";
 
@@ -110,7 +111,7 @@ export default class GeminiBackend extends CliAgentBackend<GeminiSession> {
         if (event["status"] === "error") {
           const err = event["error"] as Record<string, unknown> | undefined;
           const raw = String(err?.["message"] ?? JSON.stringify(err) ?? "");
-          errorMsg = raw.slice(0, 2000) || "unknown error";
+          errorMsg = raw.slice(0, ERROR_DISPLAY_MAX_LEN) || "unknown error";
         }
         // model 从 stats 里取（result.stats.models 的第一个 key）
         const stats = event["stats"] as Record<string, unknown> | undefined;

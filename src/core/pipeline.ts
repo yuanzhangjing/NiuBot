@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import type Database from "better-sqlite3";
 import type { PlatformAdapter, NormalizedMessage } from "../im/types.js";
 import { escapeYamlContent, renderMessageNodes } from "../im/render.js";
+import { ERROR_DISPLAY_MAX_LEN } from "../agent/types.js";
 import type { AgentBackend, AgentSession, AgentSessionActivity } from "../agent/types.js";
 import { CliAgentBackend, buildNiubotEnv } from "../agent/cli-base.js";
 import { BUILTIN_BACKEND_LIST, DEFAULT_LITE_MODELS, NIUBOT_HOME, normalizeBackend, type AgentBackendType, type BuiltinBackendType } from "../config.js";
@@ -1022,7 +1023,7 @@ export class Pipeline {
         const status = a.compacting ? "压缩上下文" : "处理中";
         sections.push(`**主会话**（${status} · ${elapsed}）`);
         if (a.recentLines.length > 0) {
-          const logBlock = a.recentLines.map((l) => l.replace(/`{3,}/g, "``").slice(0, 2000)).join("\n");
+          const logBlock = a.recentLines.map((l) => l.replace(/`{3,}/g, "``").slice(0, ERROR_DISPLAY_MAX_LEN)).join("\n");
           sections.push(`\`\`\`\n${logBlock}\n\`\`\``);
         }
       }
@@ -1037,7 +1038,7 @@ export class Pipeline {
       const status = a?.compacting ? "压缩上下文" : "处理中";
       sections.push(`**⚡ ${t.description}**（${status} · ${elapsed}）`);
       if (a && a.recentLines.length > 0) {
-        const logBlock = a.recentLines.map((l) => l.replace(/`{3,}/g, "``").slice(0, 2000)).join("\n");
+        const logBlock = a.recentLines.map((l) => l.replace(/`{3,}/g, "``").slice(0, ERROR_DISPLAY_MAX_LEN)).join("\n");
         sections.push(`\`\`\`\n${logBlock}\n\`\`\``);
       }
     }
@@ -2091,7 +2092,7 @@ export class Pipeline {
         this.log.info("restart script detached, pipeline stopped", { pid: child.pid, chatId, socketPath });
       } else {
         // restart.sh failed to start (guard blocked, missing deps, etc.)
-        const errMsg = (stderr.trim() || `restart.sh exited with code ${code}`).slice(0, 2000);
+        const errMsg = (stderr.trim() || `restart.sh exited with code ${code}`).slice(0, ERROR_DISPLAY_MAX_LEN);
         this.log.error("restart script failed", { code, stderr: errMsg });
         if (platformChatId) {
           this.im.sendText(platformChatId, `重启失败：\n\`\`\`\n${errMsg.replace(/`{3,}/g, "``")}\n\`\`\``).catch(() => {});
@@ -2766,7 +2767,7 @@ export class Pipeline {
           const header = `⚠️ ${idleMin} 分钟无输出`;
           const parts = ["已经 " + idleMin + " 分钟没有新输出，有可能卡住了。可以发 /stop 停止当前任务。"];
           if (a.recentLines.length > 0) {
-            const logBlock = a.recentLines.map((l) => l.replace(/`{3,}/g, "``").slice(0, 2000)).join("\n");
+            const logBlock = a.recentLines.map((l) => l.replace(/`{3,}/g, "``").slice(0, ERROR_DISPLAY_MAX_LEN)).join("\n");
             parts.push(`**最近 ${a.recentLines.length} 条日志：**\n\`\`\`\n${logBlock}\n\`\`\``);
           }
           const content = parts.join("\n\n");
@@ -2845,9 +2846,8 @@ function extractAgentErrorDetail(err: unknown): string | null {
   // Safety cap: even with cleaner extraction, some error paths may still
   // produce multi-KB output. Cap total length so user-facing errors stay
   // readable and don't flood IM.
-  const MAX_LEN = 2000;
   const joined = unique.join("\n");
-  return joined.length > MAX_LEN ? joined.slice(0, MAX_LEN) + "…" : joined;
+  return joined.length > ERROR_DISPLAY_MAX_LEN ? joined.slice(0, ERROR_DISPLAY_MAX_LEN) + "…" : joined;
 }
 
 function extractPlatformErrorDetail(err: unknown): string {

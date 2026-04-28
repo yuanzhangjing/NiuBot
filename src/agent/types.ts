@@ -6,6 +6,9 @@
 /** 模型档位：default 用主力模型，lite 用轻量模型（成本低、速度快） */
 export type ModelTier = "default" | "lite";
 
+/** 用户可见错误信息最大长度（字符数），超出则截断 */
+export const ERROR_DISPLAY_MAX_LEN = 2000;
+
 export interface SessionConfig {
   /** agent 工作目录 */
   workingDirectory?: string;

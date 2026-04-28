@@ -8,6 +8,7 @@ import { homedir } from "node:os";
 import { resolve } from "node:path";
 import Database from "better-sqlite3";
 import { CliAgentBackend, buildNiubotEnv, type BaseCliSession, type ParsedOutput } from "../agent/cli-base.js";
+import { ERROR_DISPLAY_MAX_LEN } from "../agent/types.js";
 import type { SessionConfig, ExecHooks } from "../agent/types.js";
 
 interface OpencodeSession extends BaseCliSession {}
@@ -128,7 +129,7 @@ export default class OpencodeBackend extends CliAgentBackend<OpencodeSession> {
 
         if (event.type === "error") {
           const detail = event.error?.data?.message;
-          errorMsg = String(detail || "（OpenCode 错误）").slice(0, 2000);
+          errorMsg = String(detail || "（OpenCode 错误）").slice(0, ERROR_DISPLAY_MAX_LEN);
         }
         if (event.type === "text" && event.part?.text) {
           text += event.part.text;

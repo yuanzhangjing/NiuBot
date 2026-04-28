@@ -7,6 +7,7 @@ import { existsSync, openSync, readSync, closeSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { CliAgentBackend, buildNiubotEnv, type BaseCliSession, type ParsedOutput } from "../agent/cli-base.js";
+import { ERROR_DISPLAY_MAX_LEN } from "../agent/types.js";
 import type { AgentSessionActivity, SessionConfig } from "../agent/types.js";
 import { DEFAULT_LITE_MODELS } from "../config.js";
 
@@ -97,7 +98,7 @@ export default class TraeCliBackend extends CliAgentBackend<TraeCliSession> {
       // Coco CLI bug workaround: exit 0 + empty content when LLM API errors.
       // The error is only in events.jsonl agent_end.error_message.
       if (!result.text && meta.errorMessage) {
-        result.text = `（Coco 错误）\n\`\`\`\n${String(meta.errorMessage).slice(0, 2000).replace(/`{3,}/g, "``")}\n\`\`\``;
+        result.text = `（Coco 错误）\n\`\`\`\n${String(meta.errorMessage).slice(0, ERROR_DISPLAY_MAX_LEN).replace(/`{3,}/g, "``")}\n\`\`\``;
       }
 
       return result;
