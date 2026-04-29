@@ -49,7 +49,7 @@ DEBUG_LOG="$LOG_DIR/restart-debug.log"
 # Unset session-specific env vars so they don't leak into the new daemon
 # or its agent subprocesses. BOT_NAME / CHAT_ID / SOCKET_PATH are captured
 # above before we unset them, so the rest of this script is unaffected.
-unset NIUBOT_CHAT_ID NIUBOT_API_SOCKET NIUBOT_RESTART_NOTIFY_CHAT_ID NIUBOT_AGENT_SESSION
+unset NIUBOT_CHAT_ID NIUBOT_API_SOCKET NIUBOT_RESTART_NOTIFY_CHAT_ID
 
 DIST_DIR="$SCRIPT_DIR/dist"
 BACKUP_DIR="$SCRIPT_DIR/dist.bak"
