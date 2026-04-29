@@ -819,6 +819,12 @@ function cmdStart(niubotHome: string, flags: CliFlags): void {
     const pid = parseInt(fs.readFileSync(pidFile, "utf-8").trim(), 10);
     if (isProcessRunning(pid)) {
       if (flags.restart) {
+        // Guard: refuse to restart from within an agent session.
+        // Agent processes have NIUBOT_CHAT_ID set in their environment.
+        if (process.env["NIUBOT_CHAT_ID"]) {
+          fail("Cannot restart from within a bot session. Use /restart in Feishu or run directly in your terminal.");
+          process.exit(1);
+        }
         info("Existing process found, stopping first...");
         stopProcess(niubotHome);
       } else {

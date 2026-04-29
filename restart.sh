@@ -7,9 +7,8 @@
 set -eo pipefail
 
 # Block agent sessions from running this script directly.
-# Only the /restart Feishu builtin command (which sets NIUBOT_INTERNAL_RESTART=1)
-# or an interactive terminal are allowed.
-if [ "${NIUBOT_INTERNAL_RESTART:-}" != "1" ] && [ ! -t 0 ]; then
+# Agent processes have NIUBOT_CHAT_ID set in their environment.
+if [ -n "${NIUBOT_CHAT_ID:-}" ]; then
     echo "Error: restart.sh cannot be run from an agent session." >&2
     echo "Use the /restart command in Feishu instead." >&2
     exit 1
@@ -35,7 +34,7 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BOT_NAME="${NIUBOT_BOT_NAME:-NiuBot}"
-CHAT_ID="${NIUBOT_CHAT_ID:-}"
+CHAT_ID="${NIUBOT_RESTART_NOTIFY_CHAT_ID:-}"
 if [ -z "${NIUBOT_HOME:-}" ]; then
     echo "Error: NIUBOT_HOME is not set." >&2
     exit 1
@@ -47,14 +46,10 @@ mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/niubot-$(date '+%Y-%m-%d').log"
 DEBUG_LOG="$LOG_DIR/restart-debug.log"
 
-# Prevent internal restart state from leaking into child processes.
-# Without this, the new daemon — and every agent subprocess it later
-# spawns — inherits NIUBOT_INTERNAL_RESTART=1, which lets agents bypass
-# the guard at the top of this script and restart the service from
-# inside their own session (killing themselves in the process).
-# The env vars are captured into BOT_NAME / CHAT_ID / SOCKET_PATH above
-# before we unset them, so the rest of this script is unaffected.
-unset NIUBOT_INTERNAL_RESTART NIUBOT_CHAT_ID NIUBOT_API_SOCKET
+# Unset session-specific env vars so they don't leak into the new daemon
+# or its agent subprocesses. BOT_NAME / CHAT_ID / SOCKET_PATH are captured
+# above before we unset them, so the rest of this script is unaffected.
+unset NIUBOT_CHAT_ID NIUBOT_API_SOCKET NIUBOT_RESTART_NOTIFY_CHAT_ID
 
 DIST_DIR="$SCRIPT_DIR/dist"
 BACKUP_DIR="$SCRIPT_DIR/dist.bak"
