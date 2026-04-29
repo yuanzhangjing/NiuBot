@@ -1930,26 +1930,23 @@ export class Pipeline {
     const PKG = "@yuanzhangjing/niubot";
     const currentVersion = this.version;
 
-    this.replyText(chatId, platformChatId, msgId, "正在检查更新...");
-
     try {
       const latest = await this.fetchLatestVersion();
       if (!latest || latest === currentVersion) {
-        this.replyText(chatId, platformChatId, undefined, `已是最新版本 (${currentVersion})。`);
+        const text = `已是最新版本 (${currentVersion})。`;
+        const send = msgId
+          ? this.im.replyCard(msgId, "Update", text)
+          : this.im.sendCard(platformChatId, "Update", text);
+        send.then((pmid) => { this.storeBotResponse(chatId, text, pmid); }).catch((err) => this.log.warn("update card send failed", { error: String(err) }));
         return;
       }
 
       if (!confirmed) {
-        this.replyText(
-          chatId,
-          platformChatId,
-          undefined,
-          [
-            `发现新版本：${currentVersion} → ${latest}。`,
-            "当前不会自动安装或重启。",
-            "确认要升级并重启，请发送 `/update confirm`。",
-          ].join("\n"),
-        );
+        const text = `发现新版本：${currentVersion} → ${latest}\n发送 \`/update confirm\` 升级并重启。`;
+        const send = msgId
+          ? this.im.replyCard(msgId, "Update", text)
+          : this.im.sendCard(platformChatId, "Update", text);
+        send.then((pmid) => { this.storeBotResponse(chatId, text, pmid); }).catch((err) => this.log.warn("update card send failed", { error: String(err) }));
         return;
       }
 
@@ -2017,16 +2014,12 @@ export class Pipeline {
     if (!latest || latest === this.version) return;
     if (hasUpdateNotification(this.db, this.botIdentity.name, latest)) return;
 
-    const text = [
-      `发现新版本：${this.version} → ${latest}。`,
-      "不会自动安装或重启。",
-      "发送 `/update` 查看详情，确认升级时再发送 `/update confirm`。",
-    ].join("\n");
+    const text = `发现新版本：${this.version} → ${latest}\n发送 \`/update confirm\` 升级并重启。`;
 
     let delivered = false;
     for (const platformChatId of platformChatIds) {
       try {
-        await this.im.sendText(platformChatId, text);
+        await this.im.sendCard(platformChatId, "Update", text);
         delivered = true;
       } catch (err) {
         this.log.warn("failed to send update notification", { platformChatId, error: String(err) });

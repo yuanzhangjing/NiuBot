@@ -396,7 +396,7 @@ describe("Pipeline.recover", () => {
 
     const db = initDatabase(path.join(dir, "niubot.db"));
     const agent = new RecordingAgent();
-    const { im, sentTexts } = createRecordingImStub();
+    const { im, sentTexts, sentCards } = createRecordingImStub();
     const pipeline = new Pipeline(
       db,
       im,
@@ -419,11 +419,11 @@ describe("Pipeline.recover", () => {
 
     expect(updateCommands).toEqual(["npm view @yuanzhangjing/niubot@latest version"]);
     expect(restarted).toBe(false);
-    expect(sentTexts).toHaveLength(2);
-    expect(sentTexts[0]).toBe("正在检查更新...");
-    expect(sentTexts[1]).toContain("发现新版本");
-    expect(sentTexts[1]).toContain("9.9.9");
-    expect(sentTexts[1]).toContain("/update confirm");
+    expect(sentTexts).toHaveLength(0);
+    expect(sentCards).toHaveLength(1);
+    expect(sentCards[0]?.content).toContain("发现新版本");
+    expect(sentCards[0]?.content).toContain("9.9.9");
+    expect(sentCards[0]?.content).toContain("/update confirm");
   });
 
   test("/update confirm installs the newer version and restarts", async () => {
@@ -478,7 +478,7 @@ describe("Pipeline.recover", () => {
     `).run();
 
     const agent = new RecordingAgent();
-    const { im, sentTexts } = createRecordingImStub();
+    const { im, sentCards } = createRecordingImStub();
     const pipeline = new Pipeline(
       db,
       im,
@@ -495,10 +495,10 @@ describe("Pipeline.recover", () => {
     await (pipeline as any).checkForUpdatesAndNotifyAdmins();
     await (pipeline as any).checkForUpdatesAndNotifyAdmins();
 
-    expect(sentTexts).toHaveLength(1);
-    expect(sentTexts[0]).toContain("发现新版本");
-    expect(sentTexts[0]).toContain("9.9.9");
-    expect(sentTexts[0]).toContain("/update");
+    expect(sentCards).toHaveLength(1);
+    expect(sentCards[0]?.content).toContain("发现新版本");
+    expect(sentCards[0]?.content).toContain("9.9.9");
+    expect(sentCards[0]?.content).toContain("/update confirm");
   });
 
   test("checks for updates immediately when startup is inside the daytime window", async () => {
