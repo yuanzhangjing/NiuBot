@@ -555,5 +555,6 @@ export function buildNiubotEnv(config: SessionConfig): Record<string, string> {
   if (config.platform) env["NIUBOT_PLATFORM"] = config.platform;
   if (config.isAdmin) env["NIUBOT_IS_ADMIN"] = "true";
   if (config.workingDirectory) env["NIUBOT_WORK_DIR"] = config.workingDirectory;
+  env["NIUBOT_AGENT_SESSION"] = "1";
   return env;
 }

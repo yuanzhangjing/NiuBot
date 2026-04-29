@@ -7,8 +7,8 @@
 set -eo pipefail
 
 # Block agent sessions from running this script directly.
-# Agent processes have NIUBOT_CHAT_ID set in their environment.
-if [ -n "${NIUBOT_CHAT_ID:-}" ]; then
+# Agent processes have NIUBOT_AGENT_SESSION set in their environment.
+if [ -n "${NIUBOT_AGENT_SESSION:-}" ]; then
     echo "Error: restart.sh cannot be run from an agent session." >&2
     echo "Use the /restart command in Feishu instead." >&2
     exit 1
@@ -49,7 +49,7 @@ DEBUG_LOG="$LOG_DIR/restart-debug.log"
 # Unset session-specific env vars so they don't leak into the new daemon
 # or its agent subprocesses. BOT_NAME / CHAT_ID / SOCKET_PATH are captured
 # above before we unset them, so the rest of this script is unaffected.
-unset NIUBOT_CHAT_ID NIUBOT_API_SOCKET NIUBOT_RESTART_NOTIFY_CHAT_ID
+unset NIUBOT_CHAT_ID NIUBOT_API_SOCKET NIUBOT_RESTART_NOTIFY_CHAT_ID NIUBOT_AGENT_SESSION
 
 DIST_DIR="$SCRIPT_DIR/dist"
 BACKUP_DIR="$SCRIPT_DIR/dist.bak"
