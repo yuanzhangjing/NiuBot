@@ -80,6 +80,7 @@ export const DEFAULT_LITE_MODELS: Partial<Record<BuiltinBackendType, string>> = 
   codex: "gpt-5.4-mini",
   traecli: "Gemini-3-Flash-Preview",
   gemini: "gemini-2.5-flash",
+  opencode: "opencode-go/deepseek-v4-flash",
 };
 
 const BACKEND_ALIAS_MAP = new Map<string, BuiltinBackendType>(

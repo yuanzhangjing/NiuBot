@@ -1,6 +1,8 @@
 import * as lark from "@larksuiteoapi/node-sdk";
 import fs from "node:fs";
 import { mkdtempSync, writeFileSync, unlinkSync } from "node:fs";
+import { type Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { NormalizedMessage, MessageHandler, PlatformAdapter, MentionInfo, MessageNode } from "../types.js";
@@ -11,6 +13,19 @@ const log = createLogger("feishu");
 
 /** 超过此字节数的消息转为文件发送 */
 const FILE_THRESHOLD_BYTES = 10_000;
+
+function describeDownloadError(code: number | undefined, status: number | string | undefined): string | null {
+  switch (code) {
+    case 234037: return "文件超过飞书 API 100MB 下载上限";
+    case 234038: return "消息处于防泄漏保护模式，无法下载";
+    case 234043: return "不支持的消息类型（合并转发/卡片等）";
+    case 234004: return "Bot 不在该会话中，无法下载";
+  }
+  const s = Number(status);
+  if (s === 400) return "下载失败（飞书 API 400，可能文件超过 100MB 上限）";
+  if (s >= 400) return `下载失败（HTTP ${s}）`;
+  return null;
+}
 
 export class FeishuAdapter implements PlatformAdapter {
   private client: lark.Client;
@@ -74,6 +89,22 @@ export class FeishuAdapter implements PlatformAdapter {
     this.storageDir = dir;
   }
 
+  private async streamDownload(resp: { headers: any; getReadableStream: () => Readable }, filePath: string, label: string): Promise<boolean> {
+    const writable = fs.createWriteStream(filePath);
+    try {
+      const readable = resp.getReadableStream();
+      await pipeline(readable, writable);
+      const { size } = fs.statSync(filePath);
+      log.info(`${label}: downloaded ${size} bytes to ${filePath}`);
+      return true;
+    } catch (err) {
+      writable.destroy();
+      try { unlinkSync(filePath); } catch {}
+      log.warn(`${label}: stream download failed`, { error: String(err) });
+      return false;
+    }
+  }
+
   /**
    * 下载图片资源到本地，返回绝对路径。失败返回 null。
    * 存储路径：{storageDir}/images/{imageKey}.{ext}
@@ -87,14 +118,14 @@ export class FeishuAdapter implements PlatformAdapter {
         params: { type: "image" },
         path: { message_id: messageId, file_key: imageKey },
       });
-      // 从 Content-Type header 推断扩展名
       const contentType: string = resp?.headers?.["content-type"] ?? "";
       const ext = mimeToExt(contentType);
       const filePath = path.join(dir, `${imageKey}${ext}`);
-      await resp.writeFile(filePath);
+      if (!await this.streamDownload(resp, filePath, `downloadImage(${imageKey})`)) return null;
       return filePath;
     } catch (err) {
-      log.warn("downloadImage failed", { messageId, imageKey, error: String(err) });
+      const status: number | undefined = (err as any)?.response?.status;
+      log.warn("downloadImage failed", { messageId, imageKey, error: String(err), status });
       return null;
     }
   }
@@ -103,7 +134,7 @@ export class FeishuAdapter implements PlatformAdapter {
    * 下载文件资源到本地，返回绝对路径。失败返回 null。
    * 存储路径：{storageDir}/files/{fileKey}_{fileName}
    */
-  private async downloadFile(messageId: string, fileKey: string, fileName?: string): Promise<string | null> {
+  private async downloadFile(messageId: string, fileKey: string, fileName?: string): Promise<{ path: string } | { error: string } | null> {
     if (!this.storageDir) return null;
     const dir = path.join(this.storageDir, "files");
     fs.mkdirSync(dir, { recursive: true });
@@ -112,13 +143,17 @@ export class FeishuAdapter implements PlatformAdapter {
         params: { type: "file" },
         path: { message_id: messageId, file_key: fileKey },
       });
-      // sanitize fileName to prevent path traversal
       const safeName = (fileName || fileKey).replace(/[/\\]/g, "_");
       const filePath = path.join(dir, `${fileKey}_${safeName}`);
-      await resp.writeFile(filePath);
-      return filePath;
+      if (!await this.streamDownload(resp, filePath, `downloadFile(${fileKey})`)) return null;
+      return { path: filePath };
     } catch (err) {
-      log.warn("downloadFile failed", { messageId, fileKey, error: String(err) });
+      const resp = (err as any)?.response;
+      const status: number | undefined = resp?.status;
+      const code: number | undefined = typeof resp?.data === "object" && resp?.data !== null && !Buffer.isBuffer(resp.data) ? resp.data.code : undefined;
+      const reason = describeDownloadError(code, status);
+      log.warn("downloadFile failed", { messageId, fileKey, error: String(err), status, code, reason });
+      if (reason) return { error: reason };
       return null;
     }
   }
@@ -463,7 +498,16 @@ export class FeishuAdapter implements PlatformAdapter {
     }
 
     // Parse content based on message type (async: may download resources)
-    let { text, contentType } = await this.parseContent(msgType, msg.content, mentions, msg.message_id);
+    let { text, contentType, downloadError } = await this.parseContent(msgType, msg.content, mentions, msg.message_id);
+
+    if (downloadError) {
+      log.info("file download error, notifying user", { downloadError, messageId: msg.message_id, chatId: msg.chat_id });
+      if (msg.message_id && msg.chat_id) {
+        this.sendReply(msg.chat_id, downloadError, msg.message_id).catch((e) =>
+          log.warn("failed to send download error reply", { error: String(e) }),
+        );
+      }
+    }
 
     // For merge_forward, parse into structured tree + render to text
     let children: MessageNode[] | undefined;
@@ -506,7 +550,7 @@ export class FeishuAdapter implements PlatformAdapter {
     rawContent: string,
     mentions: MentionInfo[],
     messageId?: string,
-  ): Promise<{ text: string; contentType: NormalizedMessage["contentType"] }> {
+  ): Promise<{ text: string; contentType: NormalizedMessage["contentType"]; downloadError?: string }> {
     // merge_forward: content 是纯文本占位符（非 JSON），须在 JSON.parse 前处理
     if (msgType === "merge_forward") {
       return { text: "[合并转发消息]", contentType: "merge_forward" };
@@ -557,9 +601,12 @@ export class FeishuAdapter implements PlatformAdapter {
         const fileKey: string = parsed.file_key ?? "";
         const fileName: string = parsed.file_name ?? "未知文件";
         if (fileKey && messageId) {
-          const filePath = await this.downloadFile(messageId, fileKey, fileName);
-          if (filePath) {
-            return { text: `用户发送了文件，请查看：${filePath}`, contentType: "file" };
+          const result = await this.downloadFile(messageId, fileKey, fileName);
+          if (result && "path" in result) {
+            return { text: `用户发送了文件，请查看：${result.path}`, contentType: "file" };
+          }
+          if (result && "error" in result) {
+            return { text: `[文件: ${fileName}]`, contentType: "file", downloadError: result.error };
           }
         }
         return { text: `[文件: ${fileName}]`, contentType: "file" };

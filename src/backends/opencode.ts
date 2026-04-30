@@ -10,6 +10,7 @@ import Database from "better-sqlite3";
 import { CliAgentBackend, buildNiubotEnv, type BaseCliSession, type ParsedOutput } from "../agent/cli-base.js";
 import { ERROR_DISPLAY_MAX_LEN } from "../agent/types.js";
 import type { SessionConfig, ExecHooks } from "../agent/types.js";
+import { DEFAULT_LITE_MODELS } from "../config.js";
 
 interface OpencodeSession extends BaseCliSession {}
 
@@ -27,7 +28,7 @@ export default class OpencodeBackend extends CliAgentBackend<OpencodeSession> {
   buildSession(config: SessionConfig): OpencodeSession {
     return {
       workingDirectory: config.workingDirectory ?? process.cwd(),
-      model: config.model,
+      model: config.modelTier === "lite" ? (config.liteModel ?? DEFAULT_LITE_MODELS.opencode ?? config.model) : config.model,
       importantContext: config.importantContext,
       extraEnv: buildNiubotEnv(config),
       cumulativeBytes: 0,
