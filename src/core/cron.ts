@@ -104,6 +104,8 @@ export class CronScheduler {
       "SELECT * FROM cron_jobs WHERE status = 'active'",
     ).all() as RawCronRow[];
 
+    const pending: Array<() => Promise<void>> = [];
+
     for (const raw of jobs) {
       const job = toJob(raw);
 
@@ -138,27 +140,33 @@ export class CronScheduler {
       }
 
       if (shouldRun) {
-        log.info("executing cron job", { id: job.id, desc: job.description });
-        try {
-          await this.executor(job.chatId, job.creatorUserId, job.prompt, job.description);
+        pending.push(async () => {
+          log.info("executing cron job", { id: job.id, desc: job.description });
+          try {
+            await this.executor(job.chatId, job.creatorUserId, job.prompt, job.description);
 
-          this.db.prepare(
-            "UPDATE cron_jobs SET run_count = run_count + 1, last_run_at = ? WHERE id = ?",
-          ).run(nowStr, job.id);
+            this.db.prepare(
+              "UPDATE cron_jobs SET run_count = run_count + 1, last_run_at = ? WHERE id = ?",
+            ).run(nowStr, job.id);
 
-          // Complete one-time jobs
-          if (job.runAt) {
-            this.db.prepare("UPDATE cron_jobs SET status = 'completed' WHERE id = ?").run(job.id);
+            // Complete one-time jobs
+            if (job.runAt) {
+              this.db.prepare("UPDATE cron_jobs SET status = 'completed' WHERE id = ?").run(job.id);
+            }
+
+            // Check if max_times reached after this run
+            if (job.maxTimes && job.runCount + 1 >= job.maxTimes) {
+              this.db.prepare("UPDATE cron_jobs SET status = 'completed' WHERE id = ?").run(job.id);
+            }
+          } catch (err) {
+            log.error("cron job execution failed", { id: job.id, error: String(err) });
           }
-
-          // Check if max_times reached after this run
-          if (job.maxTimes && job.runCount + 1 >= job.maxTimes) {
-            this.db.prepare("UPDATE cron_jobs SET status = 'completed' WHERE id = ?").run(job.id);
-          }
-        } catch (err) {
-          log.error("cron job execution failed", { id: job.id, error: String(err) });
-        }
+        });
       }
+    }
+
+    if (pending.length > 0) {
+      await Promise.allSettled(pending.map((fn) => fn()));
     }
   }
 }

@@ -48,6 +48,7 @@ const INTERRUPT_WORDS = new Set([
 const AGENT_WATCHDOG_INTERVAL_MS = 15_000;     // 15 秒检测间隔
 const AGENT_IDLE_THRESHOLD_MS = 600_000;       // 10 分钟：第一次 idle 通知
 const AGENT_IDLE_THRESHOLD_2_MS = 1_800_000;   // 30 分钟：第二次 idle 通知
+const INDEPENDENT_IDLE_KILL_MS = 3_600_000;    // 1 小时：独立 session 无活动自动 kill
 const SUMMARY_TIMEOUT_MS = 60_000;             // 归档摘要最长等待 60 秒
 const UPDATE_CHECK_HOUR = 10;                  // 本地时间 10:00 检查 npm latest
 const UPDATE_NOTIFY_END_HOUR = 18;             // 10:00-18:00 启动时允许立即通知
@@ -1299,9 +1300,7 @@ export class Pipeline {
 
     this.log.info(`executing ${source} job`, { chatId, sessionId, userId, description });
 
-    if (source === "task") {
-      this.runningTasks.set(agentSession.id, { agentSession, chatId, description, startedAt: Date.now() });
-    }
+    this.runningTasks.set(agentSession.id, { agentSession, chatId, description, startedAt: Date.now() });
 
     try {
       const response = await this.agent.sendMessage(agentSession, messageToSend);
@@ -2767,6 +2766,41 @@ export class Pipeline {
           a.notifyCount++;
           a.lastNotifiedAt = now;
         }
+      }
+    }
+
+    // ── 独立 session（cron/task）idle 检测 ──
+    for (const [sessionId, task] of this.runningTasks) {
+      const a = cliAgent.getActivity(sessionId);
+      if (!a || a.status !== "running") continue;
+
+      const idleMs = now - a.lastActiveAt;
+      const runningMs = now - task.startedAt;
+
+      // completion 已检测到但进程没退出 → 自动 kill
+      if (a.completionDetected && idleMs > 5_000) {
+        this.log.info("watchdog: auto-kill independent session, completion + idle", {
+          sessionId, chatId: task.chatId, description: task.description, idleMs,
+        });
+        this.agent.cancelSession(task.agentSession).catch(() => {});
+        continue;
+      }
+
+      // 1 小时无活动 → 通知用户 + kill（重试最多 3 次）
+      if (!a.completionDetected && a.notifyCount < 3 && idleMs > INDEPENDENT_IDLE_KILL_MS) {
+        const idleMin = Math.round(idleMs / 60_000);
+        const totalMin = Math.round(runningMs / 60_000);
+        this.log.error("watchdog: independent session idle, killing", {
+          sessionId, chatId: task.chatId, description: task.description, idleMs, runningMs,
+          attempt: a.notifyCount + 1,
+        });
+        if (a.notifyCount === 0) {
+          const header = `⚠️ 定时任务卡住已终止`;
+          const content = `「${task.description}」运行 ${totalMin} 分钟，其中 ${idleMin} 分钟无输出，已自动终止。`;
+          this.sendWatchdogCard(task.chatId, header, content);
+        }
+        this.agent.cancelSession(task.agentSession).catch(() => {});
+        a.notifyCount++;
       }
     }
   }
