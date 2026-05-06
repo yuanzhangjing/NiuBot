@@ -3,9 +3,9 @@
  * 通过 `claude` 命令驱动 agent，stream-json 模式。
  */
 
-import { statSync, openSync, readSync, closeSync } from "node:fs";
+import { statSync, openSync, readSync, closeSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { resolve, sep } from "node:path";
+import { resolve } from "node:path";
 import { CliAgentBackend, buildNiubotEnv, type BaseCliSession, type ParsedOutput } from "../agent/cli-base.js";
 import type { SessionConfig, ExecHooks } from "../agent/types.js";
 import { DEFAULT_LITE_MODELS } from "../config.js";
@@ -215,12 +215,17 @@ export default class ClaudeBackend extends CliAgentBackend<ClaudeSession> {
     return { model, contextTokens };
   }
 
-  /** 构造 Claude Code session JSONL 文件路径 */
+  /** 构造 Claude Code session JSONL 文件路径（需与 Claude Code 的 project key 算法一致） */
   private getJsonlPath(session: ClaudeSession): string | null {
     if (!session.agentSessionId) return null;
     const home = homedir();
-    const absWorkDir = resolve(session.workingDirectory);
-    const projectKey = absWorkDir.split(sep).join("-");
+    let absWorkDir: string;
+    try {
+      absWorkDir = realpathSync(resolve(session.workingDirectory));
+    } catch {
+      absWorkDir = resolve(session.workingDirectory);
+    }
+    const projectKey = absWorkDir.replace(/[/\\_]/g, "-");
     const dir = resolve(home, ".claude", "projects", projectKey);
     return resolve(dir, `${session.agentSessionId}.jsonl`);
   }

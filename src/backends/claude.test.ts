@@ -19,9 +19,12 @@ describe("ClaudeBackend session metadata", () => {
     const sessionId = "019d6888-07e1-7c91-8439-ef53ce51f973";
     const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "claude-home-"));
     const workingDirectory = path.join(tempHome, "workspace");
+    fs.mkdirSync(workingDirectory, { recursive: true });
     process.env["HOME"] = tempHome;
 
-    const projectKey = path.resolve(workingDirectory).split(path.sep).join("-");
+    // Match getJsonlPath: realpathSync + replace /\_ with -
+    const realWorkDir = fs.realpathSync(path.resolve(workingDirectory));
+    const projectKey = realWorkDir.replace(/[/\\_]/g, "-");
     const logDir = path.join(tempHome, ".claude", "projects", projectKey);
     fs.mkdirSync(logDir, { recursive: true });
     fs.writeFileSync(
@@ -47,21 +50,11 @@ describe("ClaudeBackend session metadata", () => {
       workingDirectory,
       agentSessionId: sessionId,
     });
-    // parseOutput now takes session and does JSONL scan internally
     const parsed = backend.parseOutput([
       JSON.stringify({
         type: "result",
         result: "ok",
         session_id: sessionId,
-        usage: {
-          input_tokens: 20504,
-          cache_creation_input_tokens: 512,
-          cache_read_input_tokens: 5641152,
-          output_tokens: 19,
-        },
-        modelUsage: {
-          "claude-sonnet-4-5-20250929": {},
-        },
       }),
     ].join("\n"), session);
 
