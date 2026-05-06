@@ -115,6 +115,12 @@ export default class ClaudeBackend extends CliAgentBackend<ClaudeSession> {
       if (meta.contextTokens) contextTokens = meta.contextTokens;
     }
 
+    // JSONL 读不到时用 stdout 兜底（注意：stdout 的 usage 是累计值，多轮 tool call 会虚高）
+    if (!contextTokens && resultEvent.usage) {
+      const total = estimateVisibleContextTokens(resultEvent.usage);
+      if (total > 0) contextTokens = total;
+    }
+
     return {
       text: (resultEvent.result ?? "").trim(),
       agentSessionId,
