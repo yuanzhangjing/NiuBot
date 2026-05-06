@@ -81,13 +81,6 @@ export default class ClaudeBackend extends CliAgentBackend<ClaudeSession> {
       result?: string;
       session_id?: string;
       is_error?: boolean;
-      usage?: {
-        input_tokens?: number;
-        cache_creation_input_tokens?: number;
-        cache_read_input_tokens?: number;
-        output_tokens?: number;
-      };
-      modelUsage?: Record<string, unknown>;
     } | undefined;
 
     for (const line of stdout.split("\n")) {
@@ -105,20 +98,17 @@ export default class ClaudeBackend extends CliAgentBackend<ClaudeSession> {
     }
 
     let contextTokens: number | undefined;
-    let model = resultEvent.modelUsage ? Object.keys(resultEvent.modelUsage)[0] : undefined;
+    let model: string | undefined;
 
     const agentSessionId = resultEvent.session_id;
     if (agentSessionId) {
       session.agentSessionId = agentSessionId;
       const meta = this.scanJsonl(session);
-      if (meta.model) model = meta.model;
-      if (meta.contextTokens) contextTokens = meta.contextTokens;
-    }
-
-    // JSONL 读不到时用 stdout 兜底（注意：stdout 的 usage 是累计值，多轮 tool call 会虚高）
-    if (!contextTokens && resultEvent.usage) {
-      const total = estimateVisibleContextTokens(resultEvent.usage);
-      if (total > 0) contextTokens = total;
+      model = meta.model;
+      contextTokens = meta.contextTokens;
+      this.log.info("parseOutput: jsonl scan done", { agentSessionId, model, contextTokens });
+    } else {
+      this.log.info("parseOutput: no session_id in result event");
     }
 
     return {
@@ -136,7 +126,17 @@ export default class ClaudeBackend extends CliAgentBackend<ClaudeSession> {
    */
   private scanJsonl(session: ClaudeSession): { model?: string; contextTokens?: number } {
     const jsonlPath = this.getJsonlPath(session);
-    if (!jsonlPath) return {};
+    if (!jsonlPath) {
+      this.log.info("scanJsonl: skip, no agentSessionId");
+      return {};
+    }
+
+    this.log.info("scanJsonl: start", {
+      jsonlPath,
+      workingDirectory: session.workingDirectory,
+      agentSessionId: session.agentSessionId,
+      currentOffset: session.jsonlOffset,
+    });
 
     let model: string | undefined;
     let contextTokens: number | undefined;
@@ -144,7 +144,10 @@ export default class ClaudeBackend extends CliAgentBackend<ClaudeSession> {
     try {
       const stat = statSync(jsonlPath);
       const fileSize = stat.size;
-      if (fileSize <= session.jsonlOffset) return {};
+      if (fileSize <= session.jsonlOffset) {
+        this.log.info("scanJsonl: no new data", { fileSize, offset: session.jsonlOffset });
+        return {};
+      }
 
       const fd = openSync(jsonlPath, "r");
       try {
@@ -154,8 +157,12 @@ export default class ClaudeBackend extends CliAgentBackend<ClaudeSession> {
         session.jsonlOffset = fileSize;
 
         const chunk = buf.toString("utf-8");
+        let lineCount = 0;
+        let assistantCount = 0;
+        let lastAssistantHasUsage = false;
         for (const line of chunk.split("\n")) {
           if (!line) continue;
+          lineCount++;
           try {
             const entry = JSON.parse(line) as {
               type?: string;
@@ -179,21 +186,30 @@ export default class ClaudeBackend extends CliAgentBackend<ClaudeSession> {
                 model = entry.model;
               }
             } else if (entry.type === "assistant") {
+              assistantCount++;
               if (entry.message?.model) {
                 model = entry.message.model;
               }
               if (entry.message?.usage) {
                 const total = estimateVisibleContextTokens(entry.message.usage);
+                lastAssistantHasUsage = true;
                 if (total > 0) contextTokens = total;
+              } else {
+                lastAssistantHasUsage = false;
               }
             }
           } catch { /* skip malformed lines */ }
         }
+        this.log.info("scanJsonl: read done", {
+          readLen, lineCount, assistantCount, lastAssistantHasUsage,
+          model: model ?? null, contextTokens: contextTokens ?? null,
+          newOffset: session.jsonlOffset,
+        });
       } finally {
         closeSync(fd);
       }
-    } catch {
-      // JSONL file not found or not readable — skip silently
+    } catch (err) {
+      this.log.warn("scanJsonl: read error", { jsonlPath, error: String(err) });
     }
 
     return { model, contextTokens };
