@@ -1051,10 +1051,7 @@ export class Pipeline {
 
     const content = sections.join("\n\n");
     const header = `Running · ${count} 个任务`;
-    const sendPromise = msgId
-      ? this.im.replyCard(msgId, header, content)
-      : this.im.sendCard(platformChatId, header, content);
-    sendPromise
+    this.im.sendCard(platformChatId, header, content, undefined, msgId)
       .then((pmid) => { this.storeBotResponse(chatId, content, pmid); })
       .catch((err) => this.log.error("running list card send failed", { chatId, error: String(err) }));
   }
@@ -1096,9 +1093,7 @@ export class Pipeline {
       `**Working directory:** \`${this.workingDirectory}\``,
     ].join("\n");
 
-    const send = msgId
-      ? this.im.replyCard(msgId, "Status", content)
-      : this.im.sendCard(platformChatId, "Status", content);
+    const send = this.im.sendCard(platformChatId, "Status", content, undefined, msgId);
     send
       .then((pmid) => {
         this.storeBotResponse(chatId, content, pmid);
@@ -1179,9 +1174,7 @@ export class Pipeline {
     }
 
     const content = lines.join("\n");
-    const send = msgId
-      ? this.im.replyCard(msgId, "Cron", content)
-      : this.im.sendCard(platformChatId, "Cron", content);
+    const send = this.im.sendCard(platformChatId, "Cron", content, undefined, msgId);
     send
       .then((pmid) => {
         this.storeBotResponse(chatId, content, pmid);
@@ -1813,9 +1806,7 @@ export class Pipeline {
     }
 
     const content = lines.join("\n");
-    const send = msgId
-      ? this.im.replyCard(msgId, "Model", content)
-      : this.im.sendCard(platformChatId, "Model", content);
+    const send = this.im.sendCard(platformChatId, "Model", content, undefined, msgId);
     send
       .then((pmid) => { this.storeBotResponse(chatId, content, pmid); })
       .catch(() => {});
@@ -1823,9 +1814,7 @@ export class Pipeline {
 
   /** 发送 Agent 命令卡片回复 */
   private sendAgentCard(chatId: string, platformChatId: string, msgId: string | undefined, header: string, content: string): void {
-    const send = msgId
-      ? this.im.replyCard(msgId, header, content)
-      : this.im.sendCard(platformChatId, header, content);
+    const send = this.im.sendCard(platformChatId, header, content, undefined, msgId);
     send
       .then((pmid) => { this.storeBotResponse(chatId, content, pmid); })
       .catch(() => {});
@@ -1857,9 +1846,7 @@ export class Pipeline {
       );
     }
     const content = lines.join("\n");
-    const send = msgId
-      ? this.im.replyCard(msgId, "Help", content)
-      : this.im.sendCard(platformChatId, "Help", content);
+    const send = this.im.sendCard(platformChatId, "Help", content, undefined, msgId);
     send
       .then((pmid) => { this.storeBotResponse(chatId, content, pmid); })
       .catch(() => {});
@@ -1873,9 +1860,7 @@ export class Pipeline {
     this.log.info("shell command", { cmd });
 
     const sendResult = (content: string) => {
-      const sendPromise = msgId
-        ? this.im.replyCard(msgId, "Shell", content)
-        : this.im.sendCard(platformChatId, "Shell", content);
+      const sendPromise = this.im.sendCard(platformChatId, "Shell", content, undefined, msgId);
       sendPromise.then((pmid) => {
         this.storeBotResponse(chatId, content, pmid);
       }).catch(() => {});
@@ -1933,18 +1918,14 @@ export class Pipeline {
       const latest = await this.fetchLatestVersion();
       if (!latest || latest === currentVersion) {
         const text = `已是最新版本 (${currentVersion})。`;
-        const send = msgId
-          ? this.im.replyCard(msgId, "Update", text)
-          : this.im.sendCard(platformChatId, "Update", text);
+        const send = this.im.sendCard(platformChatId, "Update", text, undefined, msgId);
         send.then((pmid) => { this.storeBotResponse(chatId, text, pmid); }).catch((err) => this.log.warn("update card send failed", { error: String(err) }));
         return;
       }
 
       if (!confirmed) {
         const text = `发现新版本：${currentVersion} → ${latest}\n发送 \`/update confirm\` 升级并重启。`;
-        const send = msgId
-          ? this.im.replyCard(msgId, "Update", text)
-          : this.im.sendCard(platformChatId, "Update", text);
+        const send = this.im.sendCard(platformChatId, "Update", text, undefined, msgId);
         send.then((pmid) => { this.storeBotResponse(chatId, text, pmid); }).catch((err) => this.log.warn("update card send failed", { error: String(err) }));
         return;
       }
@@ -2285,13 +2266,8 @@ export class Pipeline {
         ? this.im.sendReply(chatSession.platformChatId, text, triggerMsgId)
         : this.im.sendText(chatSession.platformChatId, text);
       try {
-        const useReply = !!triggerMsgId;
-        this.log.info("send decision", { chatId, useReply, merged: isMerged, messageCount: messages.length, triggerMsgId: triggerMsgId ?? "none" });
-        if (useReply) {
-          sentPlatformMsgId = await this.im.replyCard(triggerMsgId!, "", displayText, footer);
-        } else {
-          sentPlatformMsgId = await this.im.sendCard(chatSession.platformChatId, "", displayText, footer);
-        }
+        this.log.info("send decision", { chatId, useReply: !!triggerMsgId, merged: isMerged, messageCount: messages.length, triggerMsgId: triggerMsgId ?? "none" });
+        sentPlatformMsgId = await this.im.sendCard(chatSession.platformChatId, "", displayText, footer, triggerMsgId);
       } catch (sendErr) {
         this.log.error("failed to send response to IM", {
           chatId,

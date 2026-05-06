@@ -377,7 +377,6 @@ Recommended lite models by backend:
 | claude | `haiku` |
 | codex | `gpt-5.4-mini` |
 | traecli | `Gemini-3-Flash-Preview` |
-| gemini | `gemini-2.5-flash` |
 
 For custom backends, also add a `backends:` section if not already present (see [Plugin API Reference](#plugin-api-reference)).
 

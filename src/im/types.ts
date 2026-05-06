@@ -73,10 +73,7 @@ export interface PlatformAdapter {
   sendMarkdownCard(chatId: string, markdown: string): Promise<string>;
 
   /** 发送富文本卡片（header + markdown content + optional footer） */
-  sendCard(chatId: string, header: string, content: string, footer?: string): Promise<string>;
-
-  /** 回复富文本卡片（引用原消息） */
-  replyCard(msgId: string, header: string, content: string, footer?: string): Promise<string>;
+  sendCard(chatId: string, header: string, content: string, footer?: string, replyToMsgId?: string): Promise<string>;
 
   /** 编辑已发送的消息 */
   editMessage(msgId: string, text: string): Promise<void>;

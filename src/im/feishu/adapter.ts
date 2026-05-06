@@ -227,34 +227,38 @@ export class FeishuAdapter implements PlatformAdapter {
     return this.sendCard(chatId, "", markdown);
   }
 
-  async sendCard(chatId: string, header: string, content: string, footer?: string): Promise<string> {
+  async sendCard(chatId: string, header: string, content: string, footer?: string, replyToMsgId?: string): Promise<string> {
     if (Buffer.byteLength(content, "utf-8") > FILE_THRESHOLD_BYTES) {
       log.info("sendCard: content exceeds threshold, sending as file", { chatId, bytes: Buffer.byteLength(content, "utf-8") });
       const fileContent = footer ? `${content}\n\n---\n${footer}` : content;
       return this.sendContentAsFile(chatId, fileContent);
     }
     const cardJson = buildCardJSON(header, content, footer);
-    const resp = await this.client.im.message.create({
-      params: { receive_id_type: "chat_id" },
-      data: {
-        receive_id: chatId,
-        msg_type: "interactive",
-        content: cardJson,
-      },
-    });
-    return resp?.data?.message_id ?? "";
-  }
-
-  async replyCard(msgId: string, header: string, content: string, footer?: string): Promise<string> {
-    const cardJson = buildCardJSON(header, content, footer);
-    const resp = await this.client.im.message.reply({
-      path: { message_id: msgId },
-      data: {
-        msg_type: "interactive",
-        content: cardJson,
-      },
-    });
-    return resp?.data?.message_id ?? "";
+    try {
+      if (replyToMsgId) {
+        const resp = await this.client.im.message.reply({
+          path: { message_id: replyToMsgId },
+          data: {
+            msg_type: "interactive",
+            content: cardJson,
+          },
+        });
+        return resp?.data?.message_id ?? "";
+      }
+      const resp = await this.client.im.message.create({
+        params: { receive_id_type: "chat_id" },
+        data: {
+          receive_id: chatId,
+          msg_type: "interactive",
+          content: cardJson,
+        },
+      });
+      return resp?.data?.message_id ?? "";
+    } catch (err) {
+      log.warn("sendCard: card API failed, fallback to file", { chatId, error: String(err) });
+      const fileContent = footer ? `${content}\n\n---\n${footer}` : content;
+      return this.sendContentAsFile(chatId, fileContent);
+    }
   }
 
   async editMessage(msgId: string, text: string): Promise<void> {

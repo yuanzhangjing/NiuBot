@@ -55,7 +55,6 @@ function createImStub(): PlatformAdapter {
     async sendReply() { return "pmid"; },
     async sendMarkdownCard() { return "pmid"; },
     async sendCard() { return "pmid"; },
-    async replyCard() { return "pmid"; },
     async editMessage() {},
     async addReaction() {},
     async removeReaction() {},
@@ -82,10 +81,6 @@ function createRecordingImStub() {
     async sendReply(_chatId, text) { sentTexts.push(text); return "pmid"; },
     async sendMarkdownCard() { return "pmid"; },
     async sendCard(_chatId, header, content, footer) {
-      sentCards.push({ header, content, footer });
-      return "pmid";
-    },
-    async replyCard(_msgId, header, content, footer) {
       sentCards.push({ header, content, footer });
       return "pmid";
     },
@@ -135,10 +130,6 @@ function createImStubWithSendFailures(options: {
     },
     async sendMarkdownCard() { return "pmid"; },
     async sendCard(_chatId, header, content, footer) {
-      sentCards.push({ header, content, footer });
-      throw options.cardError;
-    },
-    async replyCard(_msgId, header, content, footer) {
       sentCards.push({ header, content, footer });
       throw options.cardError;
     },

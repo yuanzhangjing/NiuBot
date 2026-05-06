@@ -28,7 +28,6 @@ const BUILTIN_BACKEND_PATHS: Record<string, () => Promise<{ default: new (option
   claude: () => import("./backends/claude.js"),
   codex: () => import("./backends/codex.js"),
   traecli: () => import("./backends/traecli.js"),
-  gemini: () => import("./backends/gemini.js"),
   opencode: () => import("./backends/opencode.js"),
 };
 
