@@ -105,14 +105,8 @@ export default class ClaudeBackend extends CliAgentBackend<ClaudeSession> {
     }
 
     let contextTokens: number | undefined;
-    if (resultEvent.usage) {
-      const total = estimateVisibleContextTokens(resultEvent.usage);
-      if (total > 0) contextTokens = total;
-    }
-
     let model = resultEvent.modelUsage ? Object.keys(resultEvent.modelUsage)[0] : undefined;
 
-    // 增量扫描 JSONL，用更精确的 model/token 信息覆盖 stdout 的摘要值
     const agentSessionId = resultEvent.session_id;
     if (agentSessionId) {
       session.agentSessionId = agentSessionId;
