@@ -85,6 +85,7 @@ export default class CodexBackend extends CliAgentBackend<CodexSession> {
     let threadId: string | undefined;
     let lastAgentText = "";
     let errorMsg: string | undefined;
+    let stdoutContextTokens: number | undefined;
 
     for (const line of stdout.split("\n")) {
       if (!line) continue;
@@ -120,10 +121,15 @@ export default class CodexBackend extends CliAgentBackend<CodexSession> {
         if (event.type === "item.completed" && event.item?.type === "agent_message" && event.item.text) {
           lastAgentText = event.item.text;
         }
+
+        if (event.usage) {
+          const total = (event.usage.input_tokens ?? 0) + (event.usage.output_tokens ?? 0);
+          if (total > 0) stdoutContextTokens = total;
+        }
       } catch { /* skip non-JSON lines */ }
     }
 
-    // 增量扫描 JSONL，补充 model/token/compact 信息
+    // stdout 优先，JSONL 兜底
     let model: string | undefined;
     let contextTokens: number | undefined;
     let contextWindow: number | undefined;
@@ -132,8 +138,15 @@ export default class CodexBackend extends CliAgentBackend<CodexSession> {
       session.agentSessionId = resolvedThreadId;
       const meta = this.scanJsonl(session);
       model = meta.model;
-      contextTokens = meta.contextTokens;
+      contextTokens = stdoutContextTokens ?? meta.contextTokens;
       contextWindow = meta.contextWindow;
+      const tokensSource = stdoutContextTokens ? "stdout" : meta.contextTokens ? "jsonl" : "none";
+      this.log.info("parseOutput: done", {
+        agentSessionId: resolvedThreadId, model, contextTokens,
+        modelSource: meta.model ? "jsonl" : "none",
+        tokensSource,
+        stdoutContextTokens: stdoutContextTokens ?? null,
+      });
     }
 
     return {

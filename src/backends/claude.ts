@@ -76,19 +76,28 @@ export default class ClaudeBackend extends CliAgentBackend<ClaudeSession> {
   }
 
   parseOutput(stdout: string, session: ClaudeSession): ParsedOutput {
-    // stream-json 模式：stdout 是多行 JSONL 事件流，找 type=result 那行
+    // stream-json 模式：stdout 是多行 JSONL 事件流
+    // 同时从 result 和 assistant 事件提取信息（assistant 作为 JSONL 的 fallback）
     let resultEvent: {
       result?: string;
       session_id?: string;
       is_error?: boolean;
     } | undefined;
+    let stdoutModel: string | undefined;
+    let stdoutContextTokens: number | undefined;
 
     for (const line of stdout.split("\n")) {
       if (!line) continue;
       try {
-        const event = JSON.parse(line) as { type?: string; [k: string]: unknown };
+        const event = JSON.parse(line) as { type?: string; message?: { model?: string; usage?: { input_tokens?: number; cache_creation_input_tokens?: number; cache_read_input_tokens?: number; output_tokens?: number } }; [k: string]: unknown };
         if (event.type === "result") {
           resultEvent = event as typeof resultEvent;
+        } else if (event.type === "assistant" && event.message) {
+          if (event.message.model) stdoutModel = event.message.model;
+          if (event.message.usage) {
+            const total = estimateVisibleContextTokens(event.message.usage);
+            if (total > 0) stdoutContextTokens = total;
+          }
         }
       } catch { /* skip non-JSON lines */ }
     }
@@ -104,11 +113,20 @@ export default class ClaudeBackend extends CliAgentBackend<ClaudeSession> {
     if (agentSessionId) {
       session.agentSessionId = agentSessionId;
       const meta = this.scanJsonl(session);
-      model = meta.model;
-      contextTokens = meta.contextTokens;
-      this.log.info("parseOutput: jsonl scan done", { agentSessionId, model, contextTokens });
+      model = meta.model ?? stdoutModel;
+      contextTokens = meta.contextTokens ?? stdoutContextTokens;
+      const modelSource = meta.model ? "jsonl" : stdoutModel ? "stdout" : "none";
+      const tokensSource = meta.contextTokens ? "jsonl" : stdoutContextTokens ? "stdout" : "none";
+      this.log.info("parseOutput: done", {
+        agentSessionId, model, contextTokens,
+        modelSource, tokensSource,
+        stdoutModel: stdoutModel ?? null,
+        stdoutContextTokens: stdoutContextTokens ?? null,
+      });
     } else {
-      this.log.info("parseOutput: no session_id in result event");
+      model = stdoutModel;
+      contextTokens = stdoutContextTokens;
+      this.log.info("parseOutput: no session_id, stdout only", { model, contextTokens });
     }
 
     return {

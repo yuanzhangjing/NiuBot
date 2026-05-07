@@ -234,6 +234,9 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
       this.log.info("prompt completed", {
         sessionId: agentSession.id,
         responseLength: parsed.text.length,
+        model: parsed.model ?? null,
+        contextTokens: parsed.contextTokens ?? null,
+        compactCount: s.compactCount || 0,
         cumulativeBytes: s.cumulativeBytes,
       });
 
@@ -322,10 +325,12 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
         stdio: ["pipe", "pipe", "pipe"],
       });
 
+      // 抓住当前 activity 引用，回调里直接用，避免旧进程 rl 通过 Map 污染新 activity
+      const myActivity = sessionId ? this.activityMap.get(sessionId) : undefined;
+
       if (sessionId) {
         this.activeProcesses.set(sessionId, child);
-        const activity = this.activityMap.get(sessionId);
-        if (activity) activity.pid = child.pid;
+        if (myActivity) myActivity.pid = child.pid;
       }
 
       const lines: string[] = [];
@@ -338,47 +343,30 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
         const rl = createInterface({ input: child.stdout, crlfDelay: Infinity });
         rl.on("line", (line) => {
           lines.push(line);
-          if (sessionId) {
-            const a = this.activityMap.get(sessionId);
-            if (a) {
-              a.lastActiveAt = Date.now();
-              if (line.trim()) {
-                a.recentLines.push(line);
-                if (a.recentLines.length > 3) a.recentLines.shift();
-              }
+          if (myActivity) {
+            myActivity.lastActiveAt = Date.now();
+            if (line.trim()) {
+              myActivity.recentLines.push(line);
+              if (myActivity.recentLines.length > 3) myActivity.recentLines.shift();
             }
           }
           // compact 检测（通用：所有 backend 共享）
           try {
             const parsed = JSON.parse(line);
             if (parsed.type === "system" && parsed.subtype === "status" && parsed.status === "compacting") {
-              if (sessionId) {
-                const a = this.activityMap.get(sessionId);
-                if (a) a.compacting = true;
-              }
+              if (myActivity) myActivity.compacting = true;
               hooks.onStatus?.("compacting");
             } else {
-              // 收到非 compact 事件，清除 compacting 标记
-              if (sessionId) {
-                const a = this.activityMap.get(sessionId);
-                if (a && a.compacting) a.compacting = false;
-              }
+              if (myActivity && myActivity.compacting) myActivity.compacting = false;
             }
           } catch {
-            // 非 JSON 行，清除 compacting
-            if (sessionId) {
-              const a = this.activityMap.get(sessionId);
-              if (a && a.compacting) a.compacting = false;
-            }
+            if (myActivity && myActivity.compacting) myActivity.compacting = false;
           }
           // 回调
           hooks.onLine?.(line);
           // 完成检测 → 立即 resolve，不等进程退出
           if (hooks.isComplete?.(line)) {
-            if (sessionId) {
-              const a = this.activityMap.get(sessionId);
-              if (a) a.completionDetected = true;
-            }
+            if (myActivity) myActivity.completionDetected = true;
             if (!settled) {
               settled = true;
               earlyResolveAt = Date.now();
@@ -401,11 +389,7 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
 
       child.stderr.on("data", (chunk: Buffer) => {
         stderrChunks.push(chunk);
-        // stderr 也更新活动时间
-        if (sessionId) {
-          const a = this.activityMap.get(sessionId);
-          if (a) a.lastActiveAt = Date.now();
-        }
+        if (myActivity) myActivity.lastActiveAt = Date.now();
       });
 
       child.on("close", (code, signal) => {
