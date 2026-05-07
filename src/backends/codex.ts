@@ -138,9 +138,9 @@ export default class CodexBackend extends CliAgentBackend<CodexSession> {
       session.agentSessionId = resolvedThreadId;
       const meta = this.scanJsonl(session);
       model = meta.model;
-      contextTokens = stdoutContextTokens ?? meta.contextTokens;
+      contextTokens = meta.contextTokens ?? stdoutContextTokens;
       contextWindow = meta.contextWindow;
-      const tokensSource = stdoutContextTokens ? "stdout" : meta.contextTokens ? "jsonl" : "none";
+      const tokensSource = meta.contextTokens ? "jsonl" : stdoutContextTokens ? "stdout" : "none";
       this.log.info("parseOutput: done", {
         agentSessionId: resolvedThreadId, model, contextTokens,
         modelSource: meta.model ? "jsonl" : "none",
