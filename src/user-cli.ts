@@ -20,7 +20,7 @@ import path from "node:path";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 import yaml from "yaml";
-import { AGENT_REGISTRY, DEFAULT_LITE_MODELS, loadConfig, type BuiltinBackendType, type NiuBotConfig } from "./config.js";
+import { AGENT_REGISTRY, DEFAULT_LITE_MODELS, expandHome, loadConfig, type BuiltinBackendType, type NiuBotConfig } from "./config.js";
 import { localToday } from "./tz.js";
 
 // ── Paths ──────────────────────────────────────────────────
@@ -200,7 +200,7 @@ async function cmdInit(niubotHome: string, flags: CliFlags): Promise<void> {
         for (const be of backendsToCheck) {
           const customDef = config.backends[be];
           if (customDef) {
-            const pluginPath = path.resolve(niubotHome, customDef.plugin);
+            const pluginPath = path.resolve(niubotHome, expandHome(customDef.plugin));
             if (fs.existsSync(pluginPath)) {
               ok(`${be} plugin found (${customDef.plugin})`);
             } else {
@@ -742,8 +742,8 @@ function generateEnvTemplate(): string {
 `;
 }
 
-function generatePersonaTemplate(): string {
-  return `> 此文件定义 bot 的行为风格，管理员可要求 bot 自行修改。
+export function generatePersonaTemplate(): string {
+  return `> 此文件定义 bot 的行为风格，用户可要求 bot 自行修改。
 
 ## 角色
 无
@@ -792,7 +792,7 @@ function cmdStart(niubotHome: string, flags: CliFlags): void {
     const customDef = config.backends[be];
     if (customDef) {
       // Custom plugin backend — check plugin file exists
-      const pluginPath = path.resolve(niubotHome, customDef.plugin);
+      const pluginPath = path.resolve(niubotHome, expandHome(customDef.plugin));
       if (fs.existsSync(pluginPath)) {
         ok(`${be} plugin found (${customDef.plugin})`);
       } else {

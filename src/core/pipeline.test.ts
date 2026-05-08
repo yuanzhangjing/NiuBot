@@ -916,6 +916,51 @@ describe("Pipeline.recover", () => {
     expect((pipeline as any).chatSessions.has("c1")).toBe(false);
   });
 
+  test("refreshes agent context files before creating a new chat session", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const events: string[] = [];
+    class OrderedAgent extends RecordingAgent {
+      override async createSession(config: SessionConfig): Promise<AgentSession> {
+        events.push("create");
+        return super.createSession(config);
+      }
+    }
+
+    const agent = new OrderedAgent();
+    const pipeline = new Pipeline(
+      db,
+      createImStub(),
+      agent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+      undefined,
+      undefined,
+      () => { events.push("refresh"); },
+    );
+
+    await pipeline.start();
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "first",
+      platformMsgId: "m1",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "second",
+      platformMsgId: "m2",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(events).toEqual(["refresh", "create"]);
+    expect(agent.createSessionCalls).toHaveLength(1);
+  });
+
   test("defers later messages until /new reset finishes", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);

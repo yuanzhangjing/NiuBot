@@ -174,7 +174,7 @@ mkdir -p ~/.niubot/NiuBot
 
 Write `~/.niubot/NiuBot/persona.md`:
 ```markdown
-> This file defines the bot's personality. Admins can ask the bot to modify it.
+> This file defines the bot's personality. Users can ask the bot to modify it.
 
 ## Role
 None
@@ -342,7 +342,7 @@ mkdir -p ~/.niubot/<BotID>
 
 Write `~/.niubot/<BotID>/persona.md`:
 ```markdown
-> This file defines the bot's personality. Admins can ask the bot to modify it.
+> This file defines the bot's personality. Users can ask the bot to modify it.
 
 ## Role
 None

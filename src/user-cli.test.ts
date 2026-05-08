@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { generateConfigTemplate, getTodayLogFilePath, getSuggestedLiteModel } from "./user-cli.js";
+import { generateConfigTemplate, generatePersonaTemplate, getTodayLogFilePath, getSuggestedLiteModel } from "./user-cli.js";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -27,5 +27,12 @@ describe("user-cli init model configuration", () => {
     vi.setSystemTime(new Date(2026, 3, 25, 0, 30, 0));
 
     expect(getTodayLogFilePath("/tmp/niubot")).toBe("/tmp/niubot/logs/niubot-2026-04-25.log");
+  });
+
+  it("does not limit persona updates to admins in the default template", () => {
+    const persona = generatePersonaTemplate();
+
+    expect(persona).toContain("用户可要求 bot 自行修改");
+    expect(persona).not.toContain("管理员");
   });
 });

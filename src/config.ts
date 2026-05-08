@@ -52,6 +52,10 @@ export interface BotConfig {
   dbPath: string;
   /** 人格文件路径（默认 ~/.niubot/<id>/persona.md） */
   personaPath: string;
+  /** Bot 级长期做事规则（默认 ~/.niubot/<id>/instructions.md） */
+  instructionsPath?: string;
+  /** 项目级长期背景（默认 <workingDirectory>/.niubot/project.md） */
+  projectContextPath?: string;
   /** 主模型（可选，覆盖 backend 默认值） */
   model?: string;
   /** 轻量模型（可选，覆盖 backend 默认值） */
@@ -163,14 +167,17 @@ export function loadConfig(configPath?: string): NiuBotConfig {
       ?? ((fileConfig["database"] as Record<string, string>)?.["path"])
       ?? path.join(NIUBOT_HOME, "niubot.db");
 
+    const legacyWorkingDirectory = path.resolve(expandHome(legacyWorkDir));
     bots = [{
       id: "NiuBot",
       appId,
       appSecret,
       backend: legacyDefaultBackend,
-      workingDirectory: path.resolve(legacyWorkDir),
-      dbPath: legacyDbPath,
+      workingDirectory: legacyWorkingDirectory,
+      dbPath: path.resolve(expandHome(legacyDbPath)),
       personaPath: path.join(NIUBOT_HOME, "persona.md"),
+      instructionsPath: path.join(NIUBOT_HOME, "instructions.md"),
+      projectContextPath: path.join(legacyWorkingDirectory, ".niubot", "project.md"),
       liteModel: process.env["NIUBOT_LITE_MODEL"] ?? (legacyAgentFile["liteModel"] as string | undefined) ?? undefined,
     }];
   }
@@ -212,16 +219,19 @@ function parseBotConfig(raw: Record<string, string>, legacyDefaultBackend?: stri
   const botDir = path.join(NIUBOT_HOME, id);
 
   const backend = normalizeBackend(raw["backend"]) ?? legacyDefaultBackend;
+  const workingDirectory = raw["workingDirectory"]
+    ? path.resolve(expandHome(raw["workingDirectory"]))
+    : path.join(os.homedir(), "niubot-workspace", id);
   return {
     id,
     appId,
     appSecret,
     backend,
-    workingDirectory: raw["workingDirectory"]
-      ? path.resolve(raw["workingDirectory"])
-      : path.join(os.homedir(), "niubot-workspace", id),
-    dbPath: raw["dbPath"] ?? path.join(botDir, "niubot.db"),
-    personaPath: raw["personaPath"] ?? path.join(botDir, "persona.md"),
+    workingDirectory,
+    dbPath: raw["dbPath"] ? path.resolve(expandHome(raw["dbPath"])) : path.join(botDir, "niubot.db"),
+    personaPath: raw["personaPath"] ? path.resolve(expandHome(raw["personaPath"])) : path.join(botDir, "persona.md"),
+    instructionsPath: raw["instructionsPath"] ? path.resolve(expandHome(raw["instructionsPath"])) : path.join(botDir, "instructions.md"),
+    projectContextPath: raw["projectContextPath"] ? path.resolve(expandHome(raw["projectContextPath"])) : path.join(workingDirectory, ".niubot", "project.md"),
     model: raw["model"] ?? undefined,
     liteModel: raw["liteModel"] ?? undefined,
   };
@@ -233,6 +243,13 @@ function findConfigFile(): string | undefined {
     path.join(NIUBOT_HOME, "config.json"),
   ];
   return candidates.find((f) => fs.existsSync(f));
+}
+
+/** 展开路径中的 ~ 为用户 home 目录 */
+export function expandHome(p: string): string {
+  if (p === "~") return os.homedir();
+  if (p.startsWith("~/") || p.startsWith("~\\")) return path.join(os.homedir(), p.slice(2));
+  return p;
 }
 
 /** 解析数字环境变量，undefined 或 NaN 返回 undefined（不会把 0 当 falsy） */

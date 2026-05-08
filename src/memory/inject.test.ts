@@ -49,3 +49,30 @@ describe("buildNormalContext task injection", () => {
     expect(context).not.toContain("other-private");
   });
 });
+
+describe("buildImportantContext", () => {
+  it("keeps only dynamic scene and memory data in the session profile", () => {
+    const workingDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-inject-"));
+    tempDirs.push(workingDirectory);
+
+    const db = initDatabase(path.join(workingDirectory, "niubot.db"));
+    const context = buildImportantContext(db, {
+      botName: "NiuBot",
+      botLabel: "U3(NiuBot)",
+      platform: "feishu",
+      chatId: "c1",
+      chatLabel: "C1(Zen)",
+      chatType: "p2p",
+      userId: "u2",
+      userName: "Zen",
+      isAdmin: true,
+    });
+
+    expect(context).toContain("Bot：U3(NiuBot)");
+    expect(context).toContain("平台：feishu");
+    expect(context).toContain("会话：C1(Zen)（私聊）");
+    expect(context).toContain("用户：U2(Zen)（admin）");
+    expect(context).not.toContain("用户通过此 IM 平台远程与你对话");
+    expect(context).not.toContain("Bot 人设配置");
+  });
+});

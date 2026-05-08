@@ -14,7 +14,7 @@ import { Pipeline, type BotIdentity } from "./core/pipeline.js";
 import { ApiServer, type ApiHandler } from "./core/api.js";
 import { CronScheduler } from "./core/cron.js";
 import { ensurePersonaFile } from "./persona.js";
-import { loadStaticContextTemplate } from "./static-context.js";
+import { buildStaticContext, ensureStaticContextFiles } from "./static-context.js";
 import { createLogger } from "./logger.js";
 import type { ResolvedBotRuntimeConfig } from "./runtime-config.js";
 import type Database from "better-sqlite3";
@@ -47,13 +47,18 @@ export async function createBotInstance(
   fs.mkdirSync(path.dirname(botConfig.dbPath), { recursive: true });
   fs.mkdirSync(botConfig.workingDirectory, { recursive: true });
   ensurePersonaFile(botConfig.personaPath);
+  ensureStaticContextFiles({
+    instructionsPath: botConfig.instructionsPath,
+    projectContextPath: botConfig.projectContextPath,
+  });
 
   // 2. 初始化数据库
   const db = initDatabase(botConfig.dbPath);
   log.info("database initialized", { dbPath: botConfig.dbPath });
 
   // 3. 生成 AGENTS.md + CLAUDE.md symlink
-  generateAgentFiles(botConfig, log);
+  const refreshAgentContextFiles = () => generateAgentFiles(botConfig, log);
+  refreshAgentContextFiles();
 
   // 4. 创建 IM adapter（注入 DB resolver 用于 merge_forward 等场景）
   const im = new FeishuAdapter(botConfig.appId, botConfig.appSecret);
@@ -82,7 +87,6 @@ export async function createBotInstance(
     model: runtimeConfig?.model,
     liteModel: runtimeConfig?.liteModel,
     defaultLiteModel: runtimeConfig?.defaultLiteModel,
-    personaPath: botConfig.personaPath,
   };
 
   const pipeline = new Pipeline(
@@ -96,6 +100,7 @@ export async function createBotInstance(
     backendType,
     backendResolver,
     getAvailableBackends,
+    refreshAgentContextFiles,
   );
 
   // 6. 创建 API Server
@@ -150,7 +155,11 @@ function generateAgentFiles(
 ): void {
   const agentsPath = path.join(botConfig.workingDirectory, "AGENTS.md");
 
-  const content = loadStaticContextTemplate();
+  const content = buildStaticContext({
+    personaPath: botConfig.personaPath,
+    instructionsPath: botConfig.instructionsPath,
+    projectContextPath: botConfig.projectContextPath,
+  });
   fs.writeFileSync(agentsPath, content, "utf-8");
 
   // 各 CLI backend 的指令文件名 → 统一指向 AGENTS.md

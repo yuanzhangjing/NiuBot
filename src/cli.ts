@@ -29,7 +29,6 @@ import {
 } from "./memory/user-memory.js";
 import { getUserShortLabel, getChatShortLabel } from "./database/schema.js";
 import { buildImportantContext, type SceneInfo } from "./memory/inject.js";
-import { loadPersona } from "./persona.js";
 import { handleMessages } from "./cli/messages.js";
 import { handleContacts } from "./cli/contacts.js";
 import { handleSend } from "./cli/send.js";
@@ -351,10 +350,6 @@ Use when context is lost or uncertain.`);
   const db = openDb();
   const botName = "Bot";
 
-  // 构建 persona 路径并读取内容（从 DB_PATH 所在目录推导，与 daemon 一致）
-  const personaPath = path.join(path.dirname(DB_PATH), "persona.md");
-  const personaContent = loadPersona(personaPath);
-
   // 构建 bot label
   let botLabel: string | undefined;
   if (BOT_ID) {
@@ -387,8 +382,6 @@ Use when context is lost or uncertain.`);
     chatType: CHAT_TYPE as "p2p" | "group",
     chatLabel,
     isAdmin: IS_ADMIN,
-    personaPath: IS_ADMIN ? personaPath : undefined,
-    personaContent,
   };
 
   const output = buildImportantContext(db, scene);

@@ -3,6 +3,7 @@ import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   loadConfig,
+  expandHome,
   NIUBOT_HOME,
   BUILTIN_BACKENDS,
   BUILTIN_BACKEND_LIST,
@@ -98,7 +99,7 @@ async function loadBackendClass(
         `Custom backends must be declared in config.yaml 'backends' section.`,
       );
     }
-    const pluginPath = resolve(NIUBOT_HOME, def.plugin);
+    const pluginPath = resolve(NIUBOT_HOME, expandHome(def.plugin));
     log.info("loading custom backend plugin", { name: type, path: pluginPath });
     const mod = await import(pluginPath);
     BackendClass = mod.default;

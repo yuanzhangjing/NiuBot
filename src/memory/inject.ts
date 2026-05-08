@@ -3,7 +3,6 @@ import { listUserMemory } from "./user-memory.js";
 import { formatShortLabel, formatSenderLabel } from "../database/schema.js";
 import { listContinuationMessages } from "../messages/store.js";
 import { hasUserArchivedSession, listRecentUserArchivedSessions } from "../sessions/store.js";
-import { loadStaticContextTemplate } from "../static-context.js";
 import { listTasks, type TaskEntry } from "../tasks/store.js";
 import { utcDateTimeForSql, utcToLocalDateTime } from "../tz.js";
 
@@ -19,18 +18,7 @@ const CONTINUATION_MSG_MAX_LEN = 200;
 /** 新 session 首条消息：引导 agent 按需检索历史上下文 */
 export const NEW_SESSION_SEARCH_REMINDER =
 `<system-reminder>
-这是一个全新的对话 session。你当前的上下文有限，仅包含活跃任务列表和最近一次会话摘要。
-
-如果用户的消息涉及之前讨论过的内容、历史决策、或你不确定的背景信息，请先使用工具检索再回答，不要凭记忆猜测。
-
-可用的检索工具：
-- \`nbt sessions list [--since <date>]\` — 查看历史会话列表
-- \`nbt sessions search <query>\` — 按关键词搜索历史会话
-- \`nbt messages search <query> [-C <n>]\` — 搜索历史消息（支持上下文）
-- \`nbt task list\` — 查看全部任务（含 inactive），活跃任务已在上方注入
-- 读取 <path>/README.md — 查看具体任务进展（path 见活跃任务列表）
-
-不需要每次都检索。如果用户的意图清晰且不依赖历史上下文（如简单问答、新话题），直接回答即可。
+这是一个全新的对话 session。如果用户提到历史决策、旧任务或你不确定的背景，先用 nbt 检索再回答，不要凭记忆猜测。
 </system-reminder>`;
 
 // ── Important context (不能被 compact 丢失) ──────────────────
@@ -49,10 +37,6 @@ export interface SceneInfo {
   /** Chat 的 short label，如 "C1(U1(Zen))" */
   chatLabel?: string;
   isAdmin?: boolean;
-  /** 人设文件路径（仅 admin 可见） */
-  personaPath?: string;
-  /** 人设内容（每次 session 启动时从文件读取，支持热更新） */
-  personaContent?: string;
 }
 
 /**
@@ -66,17 +50,12 @@ export function buildImportantContext(
   const parts: string[] = [];
   const isGroup = scene.chatType === "group";
 
-  // 0. Persona（每次 session 启动时从文件读取，支持不重启热更新）
-  if (scene.personaContent) {
-    parts.push(`<persona label="你（Bot）的人设">\n${scene.personaContent}\n</persona>`);
-  }
-
   // 1. 当前场景
   const sceneLines: string[] = [];
   const botDisplay = scene.botLabel ?? scene.botName;
-  sceneLines.push(`Bot：${botDisplay}（即你自己，消息历史中显示为 assistant 角色。${botDisplay} 是你的平台注册标识）`);
+  sceneLines.push(`Bot：${botDisplay}`);
   if (scene.platform) {
-    sceneLines.push(`平台：${scene.platform}（用户通过此 IM 平台远程与你对话，你的回复会自动投递到该平台）`);
+    sceneLines.push(`平台：${scene.platform}`);
   }
   const chatDisplay = scene.chatLabel ?? scene.chatId;
   sceneLines.push(`会话：${chatDisplay}（${isGroup ? "群聊" : "私聊"}）`);
@@ -90,9 +69,6 @@ export function buildImportantContext(
       sceneLines.push(`用户：${userDisplay}（admin）`);
     } else {
       sceneLines.push(`用户：${userDisplay}`);
-    }
-    if (scene.isAdmin && scene.personaPath) {
-      sceneLines.push(`Bot 人设配置：${scene.personaPath}（管理员可要求修改）`);
     }
   }
   parts.push(`<current-scene>\n${sceneLines.join("\n")}\n</current-scene>`);
@@ -206,15 +182,6 @@ export function buildNormalContext(
   }
 
   return parts.join("\n\n");
-}
-
-// ── Static context (写入 AGENTS.md) ─────────────────────────
-
-/**
- * 生成 AGENTS.md 的内容：行为规则 + 工具文档。
- */
-export function buildStaticContext(): string {
-  return loadStaticContextTemplate();
 }
 
 // ── Internal helpers ────────────────────────────────────────

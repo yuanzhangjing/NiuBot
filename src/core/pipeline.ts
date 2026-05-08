@@ -8,7 +8,7 @@ import type Database from "better-sqlite3";
 import type { PlatformAdapter, NormalizedMessage } from "../im/types.js";
 import { escapeYamlContent, renderMessageNodes } from "../im/render.js";
 import { ERROR_DISPLAY_MAX_LEN } from "../agent/types.js";
-import type { AgentBackend, AgentSession, AgentSessionActivity } from "../agent/types.js";
+import type { AgentBackend, AgentSession, AgentSessionActivity, SessionConfig } from "../agent/types.js";
 import { CliAgentBackend, buildNiubotEnv } from "../agent/cli-base.js";
 import { BUILTIN_BACKEND_LIST, DEFAULT_LITE_MODELS, NIUBOT_HOME, normalizeBackend, type AgentBackendType, type BuiltinBackendType } from "../config.js";
 import { MessageQueue } from "./queue.js";
@@ -21,7 +21,6 @@ import {
   hasUpdateNotification, recordUpdateNotification,
 } from "../database/schema.js";
 import { buildImportantContext, buildNormalContext, buildSpeakerContext, NEW_SESSION_SEARCH_REMINDER, type SceneInfo, type SpeakerInfo } from "../memory/inject.js";
-import { loadPersona } from "../persona.js";
 import { labelLocalDateTime, labelLocalTime, utcDateTimeForSql } from "../tz.js";
 import { buildArchiveSummaryPrompt } from "./prompts.js";
 import { decideRoute, type RouteDecision } from "./routing.js";
@@ -67,8 +66,6 @@ export interface BotIdentity {
   liteModel?: string;
   /** 当前 backend 的默认轻量模型，用于 reset */
   defaultLiteModel?: string;
-  /** 人设文件路径（注入到 admin 的场景信息中） */
-  personaPath?: string;
 }
 
 interface ChatSession {
@@ -173,6 +170,9 @@ export class Pipeline {
   /** 已发送 compact 通知的 session（避免重复通知） */
   private compactNotifiedSessions = new Set<string>();
 
+  /** 创建新 agent session 前刷新 AGENTS.md / CLAUDE.md 等静态上下文文件 */
+  private refreshAgentContextFiles?: () => void;
+
   constructor(
     db: Database.Database,
     im: PlatformAdapter,
@@ -184,6 +184,7 @@ export class Pipeline {
     backendType: AgentBackendType = "claude",
     backendResolver?: (type: AgentBackendType) => Promise<AgentBackend>,
     getAvailableBackends?: () => string[],
+    refreshAgentContextFiles?: () => void,
   ) {
     this.db = db;
     this.im = im;
@@ -194,6 +195,7 @@ export class Pipeline {
     this.botIdentity = botIdentity;
     this.workingDirectory = workingDirectory;
     this.dbPath = dbPath;
+    this.refreshAgentContextFiles = refreshAgentContextFiles;
     this.log = createLogger("pipeline", botIdentity.name);
     this.queue = new MessageQueue(bufferMs);
 
@@ -204,6 +206,15 @@ export class Pipeline {
     });
 
     this.queue.onProcess((chatId, mergedText, messages, signal) => this.process(chatId, mergedText, messages, signal));
+  }
+
+  private async createAgentSession(config: SessionConfig): Promise<AgentSession> {
+    try {
+      this.refreshAgentContextFiles?.();
+    } catch (err) {
+      this.log.warn("failed to refresh agent context files", { error: String(err) });
+    }
+    return this.agent.createSession(config);
   }
 
   /** 启动管道：注册 IM 消息回调 */
@@ -442,7 +453,6 @@ export class Pipeline {
         ? this.db.prepare("SELECT name FROM users WHERE id = ?").get(row.user_id) as { name: string | null } | undefined
         : undefined;
       const isAdmin = row.user_id ? this.adminRoles.has(row.user_id) : false;
-      const persona = this.botIdentity.personaPath ? loadPersona(this.botIdentity.personaPath) : undefined;
       const importantContext = buildImportantContext(this.db, {
         botName: this.botIdentity.name,
         botLabel: this.botUserId ? getUserShortLabel(this.db, this.botUserId) : undefined,
@@ -453,14 +463,12 @@ export class Pipeline {
         chatLabel: getChatShortLabel(this.db, row.chat_id),
         chatType,
         isAdmin,
-        personaPath: isAdmin ? this.botIdentity.personaPath : undefined,
-        personaContent: persona,
       });
 
       try {
         const supportsSystemPrompt = this.agent.supportsSystemPrompt === true;
 
-        const agentSession = await this.agent.createSession({
+        const agentSession = await this.createAgentSession({
           workingDirectory: this.workingDirectory,
           importantContext: supportsSystemPrompt ? (importantContext || undefined) : undefined,
           userId: row.user_id ?? undefined,
@@ -1218,7 +1226,6 @@ export class Pipeline {
       ? this.db.prepare("SELECT name FROM users WHERE id = ?").get(userId) as { name: string | null } | undefined
       : undefined;
     const isAdmin = userId ? this.adminRoles.has(userId) : false;
-    const persona = this.botIdentity.personaPath ? loadPersona(this.botIdentity.personaPath) : undefined;
     const importantContext = buildImportantContext(this.db, {
       botName: this.botIdentity.name,
       botLabel: this.botUserId ? getUserShortLabel(this.db, this.botUserId) : undefined,
@@ -1229,8 +1236,6 @@ export class Pipeline {
       chatLabel: getChatShortLabel(this.db, chatId),
       chatType,
       isAdmin,
-      personaPath: isAdmin ? this.botIdentity.personaPath : undefined,
-      personaContent: persona,
     });
 
     // 等待上一个 session 的归档摘要完成，超时后放行
@@ -1246,7 +1251,7 @@ export class Pipeline {
 
     // Create independent agent session
     const supportsSystemPrompt = this.agent.supportsSystemPrompt === true;
-    const agentSession = await this.agent.createSession({
+    const agentSession = await this.createAgentSession({
       workingDirectory: this.workingDirectory,
       importantContext: supportsSystemPrompt ? (importantContext || undefined) : undefined,
       userId: userId ?? undefined,
@@ -2356,7 +2361,6 @@ export class Pipeline {
       ? this.db.prepare("SELECT name FROM users WHERE id = ?").get(userId) as { name: string | null } | undefined
       : undefined;
     const isAdmin = userId ? this.adminRoles.has(userId) : false;
-    const persona = this.botIdentity.personaPath ? loadPersona(this.botIdentity.personaPath) : undefined;
     const importantContext = buildImportantContext(this.db, {
       botName: this.botIdentity.name,
       botLabel: this.botUserId ? getUserShortLabel(this.db, this.botUserId) : undefined,
@@ -2367,8 +2371,6 @@ export class Pipeline {
       chatLabel: getChatShortLabel(this.db, chatId),
       chatType,
       isAdmin,
-      personaPath: isAdmin ? this.botIdentity.personaPath : undefined,
-      personaContent: persona,
     });
 
     // 等待上一个 session 的归档摘要完成，确保 context 注入拿到最新 summary
@@ -2400,7 +2402,7 @@ export class Pipeline {
     // backend 不支持 system prompt 时，important 上下文 fallback 到首条消息前缀
     const supportsSystemPrompt = this.agent.supportsSystemPrompt === true;
 
-    const agentSession = await this.agent.createSession({
+    const agentSession = await this.createAgentSession({
       workingDirectory: this.workingDirectory,
       importantContext: supportsSystemPrompt ? (importantContext || undefined) : undefined,
       userId: userId ?? undefined,
@@ -2589,7 +2591,7 @@ export class Pipeline {
 
     let session;
     try {
-      session = await this.agent.createSession({ modelTier: "lite", liteModel: this.botIdentity.liteModel });
+      session = await this.createAgentSession({ modelTier: "lite", liteModel: this.botIdentity.liteModel });
     } catch (err) {
       this.log.warn("failed to create archive summary session", { chatId, sessionId, error: String(err) });
       return;
