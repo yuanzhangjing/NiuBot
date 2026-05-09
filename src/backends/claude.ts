@@ -130,11 +130,12 @@ export default class ClaudeBackend extends CliAgentBackend<ClaudeSession> {
     }
 
     return {
-      text: (resultEvent.result ?? "").trim(),
+      text: resultEvent.is_error ? "" : (resultEvent.result ?? "").trim(),
       agentSessionId,
       contextTokens,
       model,
-      error: resultEvent.is_error ? "模型不存在或无权限" : undefined,
+      error: resultEvent.is_error ? (resultEvent.result ?? "").trim() || undefined : undefined,
+      failed: resultEvent.is_error,
     };
   }
 

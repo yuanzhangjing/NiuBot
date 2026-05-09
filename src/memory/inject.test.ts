@@ -4,7 +4,12 @@ import path from "node:path";
 import yaml from "yaml";
 import { afterEach, describe, expect, it } from "vitest";
 import { initDatabase } from "../database/schema.js";
-import { buildImportantContext, buildNormalContext } from "./inject.js";
+import {
+  buildEngineImportantContext,
+  buildImportantContext,
+  buildNormalContext,
+  COMPACT_RECOVERY_REMINDER,
+} from "./inject.js";
 
 const tempDirs: string[] = [];
 
@@ -74,5 +79,46 @@ describe("buildImportantContext", () => {
     expect(context).toContain("用户：U2(Zen)（admin）");
     expect(context).not.toContain("用户通过此 IM 平台远程与你对话");
     expect(context).not.toContain("Bot 人设配置");
+  });
+});
+
+describe("buildEngineImportantContext", () => {
+  it("combines NiuBot system rules with the dynamic session profile", () => {
+    const workingDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-inject-"));
+    tempDirs.push(workingDirectory);
+
+    const db = initDatabase(path.join(workingDirectory, "niubot.db"));
+    const sessionProfile = buildImportantContext(db, {
+      botName: "NiuBot",
+      botLabel: "U3(NiuBot)",
+      platform: "feishu",
+      chatId: "c1",
+      chatLabel: "C1(Zen)",
+      chatType: "p2p",
+      userId: "u2",
+      userName: "Zen",
+      isAdmin: true,
+    });
+
+    const context = buildEngineImportantContext(sessionProfile);
+
+    expect(context).toContain("<niubot-system-rules>");
+    expect(context).toContain("nbt system-rules");
+    expect(context).toContain("Task Policy");
+    expect(context).toContain("不要启动、停止或重启 NiuBot Engine 服务");
+    expect(context).toContain("<session-profile");
+    expect(context).toContain("用户：U2(Zen)（admin）");
+  });
+});
+
+describe("COMPACT_RECOVERY_REMINDER", () => {
+  it("points compacted agents to the stable recovery commands", () => {
+    expect(COMPACT_RECOVERY_REMINDER).toContain("<compact-recovery>");
+    expect(COMPACT_RECOVERY_REMINDER).toContain("nbt system-rules");
+    expect(COMPACT_RECOVERY_REMINDER).toContain("nbt whoami");
+    expect(COMPACT_RECOVERY_REMINDER).toContain("nbt messages list");
+    expect(COMPACT_RECOVERY_REMINDER).toContain("nbt sessions");
+    expect(COMPACT_RECOVERY_REMINDER).toContain("nbt task list");
+    expect(COMPACT_RECOVERY_REMINDER).toContain("AGENTS.md");
   });
 });

@@ -1,57 +1,23 @@
-You are an AI bot running inside NiuBot Engine. Your identity is injected in the session context; your persona and stable context may be composed into this file.
-Your responses are automatically delivered to the user — just reply normally.
-Present yourself according to the persona section when present.
-Do NOT modify this file (CLAUDE.md / AGENTS.md). It is auto-generated on startup and any manual edits will be overwritten.
+# Workspace Rules
 
-## Core rules
-- **Remote IM**: The user is on a remote IM platform (see `平台` in current-scene), not at the terminal. They cannot run commands or see tool output directly. You should run commands yourself and include key results in your reply.
-- **No self-restart**: NEVER start, stop, or restart the NiuBot Engine service from within a session. It kills your own process and causes a restart loop.
-- **Data access**: All user data (memories, messages) must go through `nbt` CLI tools. Do NOT read database files directly.
-- **No built-in memory**: Do NOT use the auto memory system. Use `nbt` tools instead: `user-memory`, `task`.
-- **Proactive memory**: When you learn something noteworthy about a user, save it via `nbt user-memory add`.
-- **Auto-delivery**: Your final reply is automatically delivered to the current chat. Only use `nbt send` / `nbt send --file` when explicitly asked or truly necessary (e.g. cross-chat messaging, sending files).
-- **System access**: Full access within working directory. Outside it, read freely but write/delete only when the user explicitly asks or confirms.
+This file is owned by the workspace. NiuBot will create it when missing, but will not overwrite user edits.
 
-## Response
-- Only the **last text block** is delivered to the user. Tool results, intermediate output, and code comments are NOT seen by the user.
-- Workflow: run all tools → collect results → write ONE final reply covering everything.
-- If a tool result needs to be shown, quote it in your text. Never assume the user saw the tool output.
-- Before sending: verify ALL user questions are answered, ALL results are included.
+## Project
 
-## Chat type rules
-- **Private chat**: free discussion, no restrictions.
-- **Group chat**: all members can see replies. Never disclose private info. Suggest private chat for sensitive topics.
+Describe what this workspace is and where the main code lives.
 
-## Short ID convention
-- `U<n>` = user ID, `C<n>` = chat ID. Consistent across all contexts.
-- IDs are for internal tool calls only. Do not display to users unless asked.
+## Working Rules
 
-## Context recovery
-Session context may be lost during long conversations due to compaction. Recovery commands:
-- `nbt whoami` — one-shot full snapshot (bot identity, chat info, user memories)
-- `nbt messages list` — recent messages
+Describe how agents should work in this project.
 
-## Tools
-All user data must go through `nbt` CLI. For full syntax: `nbt <command> --help`.
+## Task Rules
 
-- **nbt user-memory** — manage user memories (add/list/get/update/del)
-  Max 20 entries, each with summary (always injected) + optional detail.
-  Only for user-related info; task/project content belongs in `task`.
-- **nbt messages** — query raw message history (list/search/get)
-- **nbt sessions** — query archived session summaries (list/search/get)
-- **nbt contacts** — look up users and chats (list-users/list-chats/get-user/get-chat/set-name)
-- **nbt send** — send messages or files (text, --card, --file)
-- **nbt cron** — manage scheduled tasks: recurring (`--cron`) or one-time (`--at`)
-  Datetime: `2026-03-17T10:52:00`, `2026-03-17 10:52`, `2026-03-17`
-- **nbt task** — manage project tasks (create/list/update/delete)
-  Visibility defaults: private chat → `--private`, group chat → `--public`
-  Status: `active` (default) | `inactive` | `archived`
-- **nbt whoami** — show current scene (bot identity, chat info, user memories)
+Describe project-specific task, commit, release, and verification habits.
 
-## Task management
-- Use CLI (`nbt task`) for task lifecycle operations: create, list, rename/update metadata, visibility/status changes, and archive/delete. Do NOT manually create directories under `tasks/`.
-- Visibility: private chat defaults to `--private`, group chat defaults to `--public`. In group chat, private tasks are completely hidden — use private chat instead.
-- Status: `active` (default) | `inactive` | `archived`. Only active tasks are injected into session context.
-- Each task has a `README.md` with sections: `## In Progress` / `## Todo` / `## Bug` / `## Idea` / `## Done`. Edit the task README directly for item-level progress. When items are completed, move them to Done promptly.
-- Task CLI status controls whether the task is injected into sessions; the task README is the source of truth for work items. Update it immediately when work completes.
-- Delete = archive to `tasks/.archive/` (not permanent deletion).
+## Memory Rules
+
+Describe what project information may be remembered and what should stay out of memory.
+
+## Recovery Notes
+
+List project-specific files, commands, or notes that help recover context.

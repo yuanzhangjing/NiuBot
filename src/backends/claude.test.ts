@@ -61,4 +61,19 @@ describe("ClaudeBackend session metadata", () => {
     expect(parsed.model).toBe("claude-sonnet-4-5-20250929");
     expect(parsed.contextTokens).toBe(5662187);
   });
+
+  it("keeps the original Claude result text as the error message", () => {
+    const backend = new ClaudeBackend();
+    const session = backend.buildSession({ workingDirectory: "/tmp" });
+
+    const parsed = backend.parseOutput(JSON.stringify({
+      type: "result",
+      result: "API quota exceeded",
+      is_error: true,
+    }), session);
+
+    expect(parsed.text).toBe("");
+    expect(parsed.error).toBe("API quota exceeded");
+    expect(parsed.failed).toBe(true);
+  });
 });

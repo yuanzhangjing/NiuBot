@@ -105,6 +105,7 @@ export default class OpencodeBackend extends CliAgentBackend<OpencodeSession> {
     let sessionId: string | undefined;
     let contextTokens = 0;
     let errorMsg: string | undefined;
+    let failed = false;
 
     for (const line of stdout.split("\n")) {
       if (!line.trim()) continue;
@@ -129,8 +130,9 @@ export default class OpencodeBackend extends CliAgentBackend<OpencodeSession> {
         }
 
         if (event.type === "error") {
+          failed = true;
           const detail = event.error?.data?.message;
-          errorMsg = String(detail || "（OpenCode 错误）").slice(0, ERROR_DISPLAY_MAX_LEN);
+          errorMsg = detail ? String(detail).slice(0, ERROR_DISPLAY_MAX_LEN) : undefined;
         }
         if (event.type === "text" && event.part?.text) {
           text += event.part.text;
@@ -151,6 +153,7 @@ export default class OpencodeBackend extends CliAgentBackend<OpencodeSession> {
       contextTokens: contextTokens > 0 ? contextTokens : undefined,
       model,
       error: errorMsg,
+      failed,
     };
   }
 

@@ -332,6 +332,43 @@ describe("CodexBackend session metadata", () => {
     expect(parsed.text).toBe("最终结果");
   });
 
+  it("keeps a completed agent message when Codex also emits a non-model error event", () => {
+    const backend = new CodexBackend();
+    const session = backend.buildSession({ workingDirectory: "/tmp" });
+
+    const parsed = backend.parseOutput([
+      JSON.stringify({
+        type: "item.completed",
+        item: { type: "agent_message", text: "已经生成的回复" },
+      }),
+      JSON.stringify({
+        type: "error",
+        message: "stream disconnected before completion",
+      }),
+      JSON.stringify({
+        type: "turn.completed",
+        usage: { input_tokens: 12, output_tokens: 3 },
+      }),
+    ].join("\n"), session);
+
+    expect(parsed.text).toBe("已经生成的回复");
+    expect(parsed.error).toBeUndefined();
+  });
+
+  it("returns the original Codex error message when no agent message is available", () => {
+    const backend = new CodexBackend();
+    const session = backend.buildSession({ workingDirectory: "/tmp" });
+
+    const parsed = backend.parseOutput(JSON.stringify({
+      type: "error",
+      message: "The 'haiku' model is not supported when using Codex with a ChatGPT account.",
+    }), session);
+
+    expect(parsed.text).toBe("");
+    expect(parsed.error).toBe("The 'haiku' model is not supported when using Codex with a ChatGPT account.");
+    expect(parsed.failed).toBe(true);
+  });
+
   it("waits for turn completion instead of finishing on the first agent message", () => {
     const backend = new CodexBackend();
     const session = backend.buildSession({ workingDirectory: "/tmp" });

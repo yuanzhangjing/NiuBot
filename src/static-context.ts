@@ -32,21 +32,6 @@ export function buildStaticContext(options: StaticContextOptions = {}): string {
     parts.push(sources);
   }
 
-  const persona = readOptionalMarkdown(options.personaPath);
-  if (persona) {
-    parts.push(formatSection("Bot Persona", options.personaPath, persona));
-  }
-
-  const instructions = readOptionalMarkdown(options.instructionsPath, DEFAULT_INSTRUCTIONS);
-  if (instructions) {
-    parts.push(formatSection("Bot Instructions", options.instructionsPath, instructions));
-  }
-
-  const projectContext = readOptionalMarkdown(options.projectContextPath, DEFAULT_PROJECT_CONTEXT);
-  if (projectContext) {
-    parts.push(formatSection("Project Context", options.projectContextPath, projectContext));
-  }
-
   return `${parts.join("\n\n")}\n`;
 }
 
@@ -55,14 +40,19 @@ export function ensureStaticContextFiles(options: StaticContextOptions): void {
   ensureFile(options.projectContextPath, DEFAULT_PROJECT_CONTEXT);
 }
 
-function readOptionalMarkdown(filePath: string | undefined, defaultContent?: string): string | undefined {
-  if (!filePath) return undefined;
+export function ensureWorkspaceAgentFiles(workingDirectory: string, options: StaticContextOptions = {}): void {
+  const agentsPath = path.join(workingDirectory, "AGENTS.md");
   try {
-    const content = fs.readFileSync(filePath, "utf-8").trim();
-    if (defaultContent && content === defaultContent.trim()) return undefined;
-    return content || undefined;
+    fs.mkdirSync(workingDirectory, { recursive: true });
+    if (fs.existsSync(agentsPath)) {
+      const existing = fs.readFileSync(agentsPath, "utf-8");
+      if (!isOldGeneratedAgentsFile(existing)) return;
+      const backupPath = path.join(workingDirectory, "AGENTS.niubot-generated.bak.md");
+      fs.writeFileSync(backupPath, existing, "utf-8");
+    }
+    fs.writeFileSync(agentsPath, buildStaticContext(options), "utf-8");
   } catch {
-    return undefined;
+    // Workspace rule files should not prevent the bot from starting.
   }
 }
 
@@ -75,23 +65,6 @@ function ensureFile(filePath: string | undefined, defaultContent: string): void 
   } catch {
     // Optional context files should not prevent the bot from starting.
   }
-}
-
-function formatSection(title: string, sourcePath: string | undefined, content: string): string {
-  const source = sourcePath ? `\nSource: ${sourcePath}\n` : "\n";
-  return `## ${title}${source}\n${stripDuplicateHeading(content, title)}`;
-}
-
-function stripDuplicateHeading(content: string, title: string): string {
-  const lines = content.split(/\r?\n/);
-  const firstLine = lines[0]?.trim();
-  if (firstLine !== `# ${title}`) return content;
-
-  let start = 1;
-  while (start < lines.length && lines[start]?.trim() === "") {
-    start += 1;
-  }
-  return lines.slice(start).join("\n").trim();
 }
 
 function formatSourcesSection(options: StaticContextOptions): string | undefined {
@@ -109,10 +82,14 @@ function formatSourcesSection(options: StaticContextOptions): string | undefined
 
   return [
     "## Stable Context Sources",
-    "AGENTS.md is generated. Do not edit AGENTS.md directly.",
-    "To update stable bot or project context, edit the source files below. Changes apply when a new agent session is created.",
-    "If the user needs changes to apply immediately in the current chat, tell them to start a new session with `/new` after the source file update is complete.",
+    "These files are referenced by NiuBot Engine.",
+    "NiuBot system rules are injected by the engine. Run `nbt system-rules` to view them.",
     "",
     ...sources,
   ].join("\n");
+}
+
+function isOldGeneratedAgentsFile(content: string): boolean {
+  return content.includes("auto-generated on startup")
+    || content.includes("AGENTS.md is generated. Do not edit AGENTS.md directly.");
 }

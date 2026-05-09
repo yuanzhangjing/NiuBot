@@ -14,7 +14,7 @@ import { Pipeline, type BotIdentity } from "./core/pipeline.js";
 import { ApiServer, type ApiHandler } from "./core/api.js";
 import { CronScheduler } from "./core/cron.js";
 import { ensurePersonaFile } from "./persona.js";
-import { buildStaticContext, ensureStaticContextFiles } from "./static-context.js";
+import { ensureStaticContextFiles, ensureWorkspaceAgentFiles } from "./static-context.js";
 import { createLogger } from "./logger.js";
 import type { ResolvedBotRuntimeConfig } from "./runtime-config.js";
 import type Database from "better-sqlite3";
@@ -56,7 +56,7 @@ export async function createBotInstance(
   const db = initDatabase(botConfig.dbPath);
   log.info("database initialized", { dbPath: botConfig.dbPath });
 
-  // 3. 生成 AGENTS.md + CLAUDE.md symlink
+  // 3. 确保 workspace AGENTS.md 存在；已有用户文件不覆盖
   const refreshAgentContextFiles = () => generateAgentFiles(botConfig, log);
   refreshAgentContextFiles();
 
@@ -147,7 +147,7 @@ export async function createBotInstance(
 }
 
 /**
- * 在 workingDirectory 下生成 AGENTS.md 及各 CLI backend 的 symlink（CLAUDE.md 等）。
+ * 确保 workingDirectory 下有用户可编辑的 AGENTS.md。
  */
 function generateAgentFiles(
   botConfig: BotConfig,
@@ -155,19 +155,11 @@ function generateAgentFiles(
 ): void {
   const agentsPath = path.join(botConfig.workingDirectory, "AGENTS.md");
 
-  const content = buildStaticContext({
+  ensureWorkspaceAgentFiles(botConfig.workingDirectory, {
     personaPath: botConfig.personaPath,
     instructionsPath: botConfig.instructionsPath,
     projectContextPath: botConfig.projectContextPath,
   });
-  fs.writeFileSync(agentsPath, content, "utf-8");
 
-  // 各 CLI backend 的指令文件名 → 统一指向 AGENTS.md
-  for (const name of ["CLAUDE.md"]) {
-    const linkPath = path.join(botConfig.workingDirectory, name);
-    try { fs.unlinkSync(linkPath); } catch { /* 不存在就忽略 */ }
-    fs.symlinkSync("AGENTS.md", linkPath);
-  }
-
-  log.info("agent files generated", { agentsPath });
+  log.info("workspace agent rules ensured", { agentsPath });
 }

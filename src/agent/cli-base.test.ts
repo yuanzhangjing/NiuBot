@@ -32,6 +32,36 @@ class FailingCliBackend extends CliAgentBackend<BaseCliSession> {
   }
 }
 
+class ParsedOutputBackend extends CliAgentBackend<BaseCliSession> {
+  constructor(private readonly parsed: ParsedOutput) {
+    super("test-cli");
+  }
+
+  command(): string {
+    return "node";
+  }
+
+  buildSession(_config: SessionConfig): BaseCliSession {
+    return {
+      workingDirectory: process.cwd(),
+      extraEnv: {},
+      cumulativeBytes: 0,
+      compactCount: 0,
+      jsonlOffset: 0,
+    };
+  }
+
+  buildInput(_session: BaseCliSession, _message: string): { args: string[]; stdin?: string } {
+    return {
+      args: ["-e", "process.stdout.write('ok');"],
+    };
+  }
+
+  parseOutput(_stdout: string): ParsedOutput {
+    return this.parsed;
+  }
+}
+
 describe("CliAgentBackend diagnostic logging", () => {
   test("logs stdin and stream tails when child process fails", async () => {
     const backend = new FailingCliBackend("test-cli");
@@ -69,5 +99,14 @@ describe("CliAgentBackend diagnostic logging", () => {
       stderrTail: "No prompt provided via stdin.",
     });
     expect(failLog?.data?.["durationMs"]).toEqual(expect.any(Number));
+  });
+
+  test("uses a neutral backend fallback when parsed output marks failure without an error message", async () => {
+    const backend = new ParsedOutputBackend({ text: "", failed: true });
+    const session = await backend.createSession({ workingDirectory: process.cwd() });
+
+    await expect(backend.sendMessage(session as AgentSession, "ping")).rejects.toMatchObject({
+      message: "test-cli 执行失败",
+    });
   });
 });

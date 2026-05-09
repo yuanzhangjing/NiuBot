@@ -38,8 +38,10 @@ export interface ParsedOutput {
   model?: string;
   /** 累计 compact 次数 */
   compactCount?: number;
-  /** 错误信息（如模型不存在），parseOutput 中设置 */
+  /** 后端提取到的原始错误信息 */
   error?: string;
+  /** 后端明确表示本轮失败，但没有可用错误信息时由基类生成兜底文案 */
+  failed?: boolean;
 }
 
 export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession> implements AgentBackend {
@@ -94,7 +96,8 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
     try {
       const stdout = await this.exec(this.command(), args, { stdin });
       const parsed = this.parseOutput(stdout, session);
-      if (parsed.error) return { valid: false, error: parsed.error };
+      const parsedError = this.getParsedError(parsed);
+      if (parsedError) return { valid: false, error: parsedError };
       return { valid: true };
     } catch (err: any) {
       if (this.isProbeError(err)) return { valid: false, error: "模型不存在或无权限" };
@@ -102,7 +105,8 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
       if (typeof err.stdout === "string") {
         try {
           const parsed = this.parseOutput(err.stdout, session);
-          if (parsed.error) return { valid: false, error: parsed.error };
+          const parsedError = this.getParsedError(parsed);
+          if (parsedError) return { valid: false, error: parsedError };
         } catch { /* ignore */ }
       }
       return { valid: true };
@@ -225,8 +229,9 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
         s.agentSessionId = parsed.agentSessionId;
       }
 
-      if (parsed.error) {
-        const err: Error & { stdout?: string } = new Error(parsed.error);
+      const parsedError = this.getParsedError(parsed);
+      if (parsedError) {
+        const err: Error & { stdout?: string } = new Error(parsedError);
         err.stdout = stdout;
         throw err;
       }
@@ -268,6 +273,13 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
     } else {
       this.log.info("cancel: no active process to kill", { sessionId: session.id });
     }
+  }
+
+  private getParsedError(parsed: ParsedOutput): string | undefined {
+    const message = parsed.error?.trim();
+    if (message) return message;
+    if (parsed.failed) return `${this.name} 执行失败`;
+    return undefined;
   }
 
   async closeSession(session: AgentSession): Promise<void> {

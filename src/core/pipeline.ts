@@ -20,7 +20,16 @@ import {
   getBotBackendModelState, setBotBackendModelState, setBotRuntimeState, clearBotRuntimeModels,
   hasUpdateNotification, recordUpdateNotification,
 } from "../database/schema.js";
-import { buildImportantContext, buildNormalContext, buildSpeakerContext, NEW_SESSION_SEARCH_REMINDER, type SceneInfo, type SpeakerInfo } from "../memory/inject.js";
+import {
+  buildEngineImportantContext,
+  buildImportantContext,
+  buildNormalContext,
+  buildSpeakerContext,
+  COMPACT_RECOVERY_REMINDER,
+  NEW_SESSION_SEARCH_REMINDER,
+  type SceneInfo,
+  type SpeakerInfo,
+} from "../memory/inject.js";
 import { labelLocalDateTime, labelLocalTime, utcDateTimeForSql } from "../tz.js";
 import { buildArchiveSummaryPrompt } from "./prompts.js";
 import { decideRoute, type RouteDecision } from "./routing.js";
@@ -170,6 +179,12 @@ export class Pipeline {
 
   /** 已发送 compact 通知的 session（避免重复通知） */
   private compactNotifiedSessions = new Set<string>();
+
+  /** chatId → 上次从 backend 看到的 compact 次数 */
+  private lastCompactCounts = new Map<string, number>();
+
+  /** chatId 集合：下一条发给 agent 的消息需要注入 compact 恢复提醒 */
+  private pendingCompactRecovery = new Set<string>();
 
   /** 创建新 agent session 前刷新 AGENTS.md / CLAUDE.md 等静态上下文文件 */
   private refreshAgentContextFiles?: () => void;
@@ -454,7 +469,7 @@ export class Pipeline {
         ? this.db.prepare("SELECT name FROM users WHERE id = ?").get(row.user_id) as { name: string | null } | undefined
         : undefined;
       const isAdmin = row.user_id ? this.adminRoles.has(row.user_id) : false;
-      const importantContext = buildImportantContext(this.db, {
+      const sessionProfile = buildImportantContext(this.db, {
         botName: this.botIdentity.name,
         botLabel: this.botUserId ? getUserShortLabel(this.db, this.botUserId) : undefined,
         platform: this.botIdentity.platform,
@@ -465,6 +480,7 @@ export class Pipeline {
         chatType,
         isAdmin,
       });
+      const importantContext = buildEngineImportantContext(sessionProfile);
 
       try {
         const supportsSystemPrompt = this.agent.supportsSystemPrompt === true;
@@ -1227,7 +1243,7 @@ export class Pipeline {
       ? this.db.prepare("SELECT name FROM users WHERE id = ?").get(userId) as { name: string | null } | undefined
       : undefined;
     const isAdmin = userId ? this.adminRoles.has(userId) : false;
-    const importantContext = buildImportantContext(this.db, {
+    const sessionProfile = buildImportantContext(this.db, {
       botName: this.botIdentity.name,
       botLabel: this.botUserId ? getUserShortLabel(this.db, this.botUserId) : undefined,
       platform: this.botIdentity.platform,
@@ -1238,6 +1254,7 @@ export class Pipeline {
       chatType,
       isAdmin,
     });
+    const importantContext = buildEngineImportantContext(sessionProfile);
 
     // 等待上一个 session 的归档摘要完成，超时后放行
     const _pendingSummary = this.pendingSummary.get(chatId);
@@ -1291,8 +1308,8 @@ export class Pipeline {
     }
     if (normalContext) {
       contextParts.push(`<session-state>\n${normalContext}\n</session-state>`);
-      contextParts.push(NEW_SESSION_SEARCH_REMINDER);
     }
+    contextParts.push(NEW_SESSION_SEARCH_REMINDER);
     if (contextParts.length > 0) {
       messageToSend = `${contextParts.join("\n\n")}\n\n${prompt}`;
     }
@@ -2121,7 +2138,9 @@ export class Pipeline {
       let messageToSend = mergedText;
       const importantCtx = this.pendingImportantContext.get(chatId);
       const normalCtx = this.pendingNormalContext.get(chatId);
-      if (importantCtx || normalCtx) {
+      const compactRecovery = this.pendingCompactRecovery.has(chatId);
+      const isNewSessionPrompt = this.pendingNewSessionReminder.has(chatId);
+      if (importantCtx || normalCtx || compactRecovery || isNewSessionPrompt) {
         const parts: string[] = [];
         if (importantCtx) {
           parts.push(importantCtx);
@@ -2129,9 +2148,16 @@ export class Pipeline {
         if (normalCtx) {
           parts.push(`<session-state>\n${normalCtx}\n</session-state>`);
         }
-        parts.push(NEW_SESSION_SEARCH_REMINDER);
+        if (compactRecovery) {
+          parts.push(COMPACT_RECOVERY_REMINDER);
+        }
+        if (isNewSessionPrompt) {
+          parts.push(NEW_SESSION_SEARCH_REMINDER);
+        }
         this.pendingImportantContext.delete(chatId);
         this.pendingNormalContext.delete(chatId);
+        this.pendingCompactRecovery.delete(chatId);
+        this.pendingNewSessionReminder.delete(chatId);
         messageToSend = `${parts.join("\n\n")}\n\n${mergedText}`;
       }
 
@@ -2194,6 +2220,7 @@ export class Pipeline {
       });
 
       const response = await this.agent.sendMessage(chatSession.agentSession, messageToSend);
+      this.updateCompactRecoveryState(chatId, response.compactCount);
 
       // cancelled：有内容就发（中间结果），没内容就静默（用户已收到"已停止"）
       if (response.cancelled) {
@@ -2364,7 +2391,7 @@ export class Pipeline {
       ? this.db.prepare("SELECT name FROM users WHERE id = ?").get(userId) as { name: string | null } | undefined
       : undefined;
     const isAdmin = userId ? this.adminRoles.has(userId) : false;
-    const importantContext = buildImportantContext(this.db, {
+    const sessionProfile = buildImportantContext(this.db, {
       botName: this.botIdentity.name,
       botLabel: this.botUserId ? getUserShortLabel(this.db, this.botUserId) : undefined,
       platform: this.botIdentity.platform,
@@ -2375,6 +2402,7 @@ export class Pipeline {
       chatType,
       isAdmin,
     });
+    const importantContext = buildEngineImportantContext(sessionProfile);
 
     // 等待上一个 session 的归档摘要完成，确保 context 注入拿到最新 summary
     // 超时或 /stop 中断时放行，不阻塞新会话
@@ -2422,6 +2450,7 @@ export class Pipeline {
     if (!supportsSystemPrompt && importantContext) {
       this.pendingImportantContext.set(chatId, importantContext);
     }
+    this.pendingNewSessionReminder.add(chatId);
 
     const sessionId = randomUUID().slice(0, 8);
 
@@ -2466,6 +2495,25 @@ export class Pipeline {
 
   /** important 上下文暂存（backend 不支持 system prompt 时 fallback） */
   private pendingImportantContext = new Map<string, string>();
+
+  /** 新 session 首条消息提醒暂存 */
+  private pendingNewSessionReminder = new Set<string>();
+
+  private clearChatRuntimeState(chatId: string): void {
+    this.pendingNormalContext.delete(chatId);
+    this.pendingImportantContext.delete(chatId);
+    this.pendingNewSessionReminder.delete(chatId);
+    this.pendingCompactRecovery.delete(chatId);
+    this.lastCompactCounts.delete(chatId);
+  }
+
+  private updateCompactRecoveryState(chatId: string, compactCount: number | undefined): void {
+    if (compactCount === undefined || compactCount <= 0) return;
+    const previous = this.lastCompactCounts.get(chatId) ?? 0;
+    if (compactCount <= previous) return;
+    this.lastCompactCounts.set(chatId, compactCount);
+    this.pendingCompactRecovery.add(chatId);
+  }
 
   /** 路由判断的最小轮次门槛 */
   private static readonly ROUTE_MIN_TURNS = 10;
@@ -2522,6 +2570,7 @@ export class Pipeline {
         WHERE chat_id = ? AND status = 'active'
       `).run(chatId);
 
+      this.clearChatRuntimeState(chatId);
       return result.changes > 0;
     }
 
@@ -2540,6 +2589,7 @@ export class Pipeline {
     `).run(sessionId);
 
     this.chatSessions.delete(chatId);
+    this.clearChatRuntimeState(chatId);
     await this.agent.closeSession(agentSession).catch((err) => {
       this.log.warn("failed to close backend session during archive", { chatId, sessionId, error: String(err) });
     });

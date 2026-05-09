@@ -84,7 +84,8 @@ export default class CodexBackend extends CliAgentBackend<CodexSession> {
   parseOutput(stdout: string, session: CodexSession): ParsedOutput {
     let threadId: string | undefined;
     let lastAgentText = "";
-    let errorMsg: string | undefined;
+    let genericErrorMsg: string | undefined;
+    let sawError = false;
     let stdoutContextTokens: number | undefined;
 
     for (const line of stdout.split("\n")) {
@@ -110,12 +111,10 @@ export default class CodexBackend extends CliAgentBackend<CodexSession> {
           threadId = event.thread_id;
         }
 
-        if (event.type === "error") {
-          errorMsg = "模型不存在或不支持";
-        } else if (event.type === "turn.failed") {
-          if (event.error?.message?.includes("not supported")) {
-            errorMsg = "模型不存在或不支持";
-          }
+        if (event.type === "error" || event.type === "turn.failed") {
+          sawError = true;
+          const eventMessage = event.error?.message ?? event.message;
+          genericErrorMsg ??= eventMessage;
         }
 
         if (event.type === "item.completed" && event.item?.type === "agent_message" && event.item.text) {
@@ -156,7 +155,8 @@ export default class CodexBackend extends CliAgentBackend<CodexSession> {
       contextTokens,
       contextWindow,
       compactCount: session.compactCount > 0 ? session.compactCount : undefined,
-      error: errorMsg,
+      error: lastAgentText ? undefined : genericErrorMsg,
+      failed: !lastAgentText && sawError,
     };
   }
 

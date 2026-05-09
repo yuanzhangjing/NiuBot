@@ -5,6 +5,7 @@ import { listContinuationMessages } from "../messages/store.js";
 import { hasUserArchivedSession, listRecentUserArchivedSessions } from "../sessions/store.js";
 import { listTasks, type TaskEntry } from "../tasks/store.js";
 import { utcDateTimeForSql, utcToLocalDateTime } from "../tz.js";
+import { SYSTEM_RULES } from "../system-rules.js";
 
 /** 冷启动注入最近 session 的时间窗口（小时） */
 const RECENT_SESSION_HOURS = 168;
@@ -20,6 +21,23 @@ export const NEW_SESSION_SEARCH_REMINDER =
 `<system-reminder>
 这是一个全新的对话 session。如果用户提到历史决策、旧任务或你不确定的背景，先用 nbt 检索再回答，不要凭记忆猜测。
 </system-reminder>`;
+
+/** compact 后下一条消息：提醒 agent 恢复可能被压缩掉的规则和状态 */
+export const COMPACT_RECOVERY_REMINDER =
+`<compact-recovery>
+上一次 agent 会话发生了上下文压缩，早先注入的规则或历史细节可能已被摘要。
+如果 NiuBot 系统规则丢失，先运行 nbt system-rules。
+如果当前身份、会话或用户记忆丢失，运行 nbt whoami。
+如果最近对话丢失，运行 nbt messages list。
+如果历史 session 摘要丢失，运行 nbt sessions list/search/get。
+如果任务状态丢失，运行 nbt task list，并读取对应 task README。
+如果问题涉及项目规则原文，重新读取 workspace 的 AGENTS.md。
+不要把 compact 摘要当成原文。
+</compact-recovery>`;
+
+export function buildEngineImportantContext(sessionProfile: string): string {
+  return `${SYSTEM_RULES}\n\n${sessionProfile}`;
+}
 
 // ── Important context (不能被 compact 丢失) ──────────────────
 

@@ -29,6 +29,7 @@ import {
 } from "./memory/user-memory.js";
 import { getUserShortLabel, getChatShortLabel } from "./database/schema.js";
 import { buildImportantContext, type SceneInfo } from "./memory/inject.js";
+import { SYSTEM_RULES } from "./system-rules.js";
 import { handleMessages } from "./cli/messages.js";
 import { handleContacts } from "./cli/contacts.js";
 import { handleSend } from "./cli/send.js";
@@ -149,6 +150,9 @@ async function main(): Promise<void> {
     case "sessions":
       handleSession(openDb(), args.slice(1), CHAT_ID, CHAT_TYPE, parseArgs);
       break;
+    case "system-rules":
+      handleSystemRules(args.slice(1));
+      break;
     case "whoami":
       handleWhoami();
       break;
@@ -156,6 +160,15 @@ async function main(): Promise<void> {
       printUsage();
       break;
   }
+}
+
+function handleSystemRules(args: string[]): void {
+  if (args[0] === "--help" || args[0] === "help") {
+    console.log(`Show NiuBot Engine system rules injected into agent context.
+Use when context is lost after compaction or when checking current engine-owned rules.`);
+    return;
+  }
+  console.log(SYSTEM_RULES);
 }
 
 // ─── user-memory ───────────────────────────────────────────
@@ -406,6 +419,7 @@ Commands:
   send          <text>                      Send text, card, or file
   cron          add|list|del                Manage scheduled tasks
   task          create|list|update|delete   Manage task projects
+  system-rules                             Show NiuBot Engine system rules
   whoami                                    Show current scene info
 
 Use "nbt <command> --help" for detailed syntax.

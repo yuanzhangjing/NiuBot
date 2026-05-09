@@ -6,6 +6,8 @@ import type { AgentBackend, AgentResponse, AgentSession, SessionConfig } from ".
 import { getBotBackendModelState, getBotRuntimeState, initDatabase, setBotBackendModelState } from "../database/schema.js";
 import type { NormalizedMessage, PlatformAdapter } from "../im/types.js";
 import { INSTALL_GUIDE_COMMAND } from "../install-guide.js";
+import { COMPACT_RECOVERY_REMINDER } from "../memory/inject.js";
+import { SYSTEM_RULES } from "../system-rules.js";
 import { Pipeline, type BotIdentity } from "./pipeline.js";
 
 class RecordingAgent implements AgentBackend {
@@ -180,6 +182,23 @@ class ErrorAgent extends RecordingAgent {
   override async sendMessage(_session: AgentSession, message: string): Promise<AgentResponse> {
     this.sendMessageCalls.push(message);
     throw this.error;
+  }
+}
+
+class CompactCountingAgent extends RecordingAgent {
+  private calls = 0;
+
+  constructor(private readonly compactCounts: Array<number | undefined> = [1]) {
+    super();
+  }
+
+  override async sendMessage(_session: AgentSession, message: string): Promise<AgentResponse> {
+    this.sendMessageCalls.push(message);
+    this.calls++;
+    return {
+      text: `reply ${this.calls}`,
+      compactCount: this.compactCounts[this.calls - 1],
+    };
   }
 }
 
@@ -910,6 +929,8 @@ describe("Pipeline.recover", () => {
       userId: "u2",
       hasReplied: false,
     });
+    (pipeline as any).pendingCompactRecovery.add("c1");
+    (pipeline as any).lastCompactCounts.set("c1", 1);
 
     const handled = (pipeline as any).handleBuiltinCommand("/new", "u2", "c1", "chat-open-id");
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -921,6 +942,8 @@ describe("Pipeline.recover", () => {
     expect(agent.closeSessionCalls).toEqual(["agent_1"]);
     expect(sentTexts).toContain("已开始新会话，当前上下文已清空。");
     expect((pipeline as any).chatSessions.has("c1")).toBe(false);
+    expect((pipeline as any).pendingCompactRecovery.has("c1")).toBe(false);
+    expect((pipeline as any).lastCompactCounts.has("c1")).toBe(false);
   });
 
   test("refreshes agent context files before creating a new chat session", async () => {
@@ -966,6 +989,125 @@ describe("Pipeline.recover", () => {
 
     expect(events).toEqual(["refresh", "create"]);
     expect(agent.createSessionCalls).toHaveLength(1);
+  });
+
+  test("injects system rules and session profile through system prompt when supported", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const agent = new RecordingAgent();
+    const pipeline = new Pipeline(
+      db,
+      createImStub(),
+      agent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "claude",
+    );
+
+    await pipeline.start();
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "hello",
+      platformMsgId: "m-system-1",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(agent.createSessionCalls).toHaveLength(1);
+    expect(agent.createSessionCalls[0]?.importantContext).toContain("<niubot-system-rules>");
+    expect(agent.createSessionCalls[0]?.importantContext).toContain("<session-profile");
+    expect(agent.createSessionCalls[0]?.importantContext).toContain("nbt system-rules");
+    expect(agent.sendMessageCalls).toHaveLength(1);
+    expect(agent.sendMessageCalls[0]).toContain("这是一个全新的对话 session");
+    expect(agent.sendMessageCalls[0]).not.toContain("<niubot-system-rules>");
+  });
+
+  test("falls back to first user prompt when system prompt is not supported", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const agent = new RecordingAgent();
+    agent.supportsSystemPrompt = false;
+    const pipeline = new Pipeline(
+      db,
+      createImStub(),
+      agent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+
+    await pipeline.start();
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "hello",
+      platformMsgId: "m-system-2",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(agent.createSessionCalls).toHaveLength(1);
+    expect(agent.createSessionCalls[0]?.importantContext).toBeUndefined();
+    expect(agent.sendMessageCalls).toHaveLength(1);
+    expect(agent.sendMessageCalls[0]).toContain("<niubot-system-rules>");
+    expect(agent.sendMessageCalls[0]).toContain("<session-profile");
+    expect(agent.sendMessageCalls[0]).toContain("这是一个全新的对话 session");
+    expect(agent.sendMessageCalls[0]).toContain("hello");
+  });
+
+  test("injects compact recovery reminder once after compact count increases", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const agent = new CompactCountingAgent([1, undefined, 2, undefined]);
+    const pipeline = new Pipeline(
+      db,
+      createImStub(),
+      agent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "claude",
+    );
+
+    await pipeline.start();
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "first",
+      platformMsgId: "m-compact-1",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "second",
+      platformMsgId: "m-compact-2",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "third",
+      platformMsgId: "m-compact-3",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "fourth",
+      platformMsgId: "m-compact-4",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(agent.sendMessageCalls).toHaveLength(4);
+    expect(agent.sendMessageCalls[0]).not.toContain(COMPACT_RECOVERY_REMINDER);
+    expect(agent.sendMessageCalls[1]).toContain(COMPACT_RECOVERY_REMINDER);
+    expect(agent.sendMessageCalls[1]).toContain("second");
+    expect(agent.sendMessageCalls[2]).not.toContain(COMPACT_RECOVERY_REMINDER);
+    expect(agent.sendMessageCalls[3]).toContain(COMPACT_RECOVERY_REMINDER);
+    expect(agent.sendMessageCalls[3]).toContain("fourth");
+    expect(SYSTEM_RULES).toContain("nbt system-rules");
   });
 
   test("defers later messages until /new reset finishes", async () => {
