@@ -1,4 +1,8 @@
+import { execFileSync } from "node:child_process";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { INSTALL_GUIDE_COMMAND } from "./install-guide.js";
 import { generateConfigTemplate, generatePersonaTemplate, getTodayLogFilePath, getSuggestedLiteModel } from "./user-cli.js";
 
 afterEach(() => {
@@ -34,5 +38,20 @@ describe("user-cli init model configuration", () => {
 
     expect(persona).toContain("用户可要求 bot 自行修改");
     expect(persona).not.toContain("管理员");
+  });
+
+  it("points agents to INSTALL.md in the top-level help", () => {
+    const expectedCommand = "npm explore -g @yuanzhangjing/niubot -- cat INSTALL.md";
+    expect(INSTALL_GUIDE_COMMAND).toBe(expectedCommand);
+
+    const srcDir = path.dirname(fileURLToPath(import.meta.url));
+    const tsxCliPath = path.join(srcDir, "..", "node_modules", "tsx", "dist", "cli.mjs");
+    const output = execFileSync(
+      process.execPath,
+      [tsxCliPath, path.join(srcDir, "user-cli.ts"), "--help"],
+      { encoding: "utf8" },
+    );
+
+    expect(output).toContain(`Agent install guide: run \`${expectedCommand}\` and follow it.`);
   });
 });

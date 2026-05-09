@@ -27,6 +27,7 @@ import { decideRoute, type RouteDecision } from "./routing.js";
 import { listCronJobs, deleteCronJob, getCronJob } from "./cron.js";
 import { createLogger } from "../logger.js";
 import { buildResponseFooter } from "./footer.js";
+import { INSTALL_GUIDE_COMMAND } from "../install-guide.js";
 
 const execAsync = promisify(exec);
 
@@ -1837,6 +1838,8 @@ export class Pipeline {
       "`/service`　查看服务信息",
       "`/cron`　　查看定时任务",
       "`/help`　　显示本帮助",
+      "",
+      `安装配置：让 agent 执行 \`${INSTALL_GUIDE_COMMAND}\` 读取安装指引`,
     ];
     if (isAdmin) {
       lines.push(

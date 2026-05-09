@@ -21,6 +21,7 @@ import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 import yaml from "yaml";
 import { AGENT_REGISTRY, DEFAULT_LITE_MODELS, expandHome, loadConfig, type BuiltinBackendType, type NiuBotConfig } from "./config.js";
+import { INSTALL_GUIDE_COMMAND } from "./install-guide.js";
 import { localToday } from "./tz.js";
 
 // ── Paths ──────────────────────────────────────────────────
@@ -1156,8 +1157,8 @@ function waitForHealth(socketPath: string, timeoutSec: number): boolean {
 
 // ── Usage ──────────────────────────────────────────────────
 
-function printUsage(): void {
-  console.log(`NiuBot v${getPkgVersion()}
+function getUsageText(): string {
+  return `NiuBot v${getPkgVersion()}
 
 Usage: niubot <command> [options]
 
@@ -1176,7 +1177,13 @@ Init options:
   --home <path>  Custom NIUBOT_HOME (default: ~/.niubot)
 
 Start options:
-  --restart  Stop existing process first if running`);
+  --restart  Stop existing process first if running
+
+Agent install guide: run \`${INSTALL_GUIDE_COMMAND}\` and follow it.`;
+}
+
+function printUsage(): void {
+  console.log(getUsageText());
 }
 
 // ── Main ───────────────────────────────────────────────────

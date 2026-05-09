@@ -5,6 +5,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import type { AgentBackend, AgentResponse, AgentSession, SessionConfig } from "../agent/types.js";
 import { getBotBackendModelState, getBotRuntimeState, initDatabase, setBotBackendModelState } from "../database/schema.js";
 import type { NormalizedMessage, PlatformAdapter } from "../im/types.js";
+import { INSTALL_GUIDE_COMMAND } from "../install-guide.js";
 import { Pipeline, type BotIdentity } from "./pipeline.js";
 
 class RecordingAgent implements AgentBackend {
@@ -72,9 +73,10 @@ function createRecordingImStub() {
   const sentCards: Array<{ header: string; content: string; footer?: string }> = [];
   const reactions: Array<{ chatId: string; msgId: string; emoji: string }> = [];
   const removedReactions: Array<{ chatId: string; msgId: string; emoji: string }> = [];
+  let messageHandler: ((msg: NormalizedMessage) => void) | undefined;
 
   const im: PlatformAdapter = {
-    onMessage() {},
+    onMessage(handler) { messageHandler = handler; },
     async start() {},
     async stop() {},
     async sendText(_chatId, text) { sentTexts.push(text); return "pmid"; },
@@ -95,7 +97,12 @@ function createRecordingImStub() {
     async getAppCreatorId() { return undefined; },
   };
 
-  return { im, sentTexts, sentCards, reactions, removedReactions };
+  const dispatchMessage = (msg: NormalizedMessage) => {
+    if (!messageHandler) throw new Error("message handler not registered");
+    messageHandler(msg);
+  };
+
+  return { im, sentTexts, sentCards, reactions, removedReactions, dispatchMessage };
 }
 
 function createImStubWithSendFailures(options: {
@@ -1188,6 +1195,33 @@ describe("Pipeline.recover", () => {
     (pipeline as any).sendHelpCard("c1", "chat-open-id", undefined, true);
 
     expect(sentCards.some((card) => card.content.includes("`/flush`　　中断当前回复，合并处理排队消息"))).toBe(true);
+  });
+
+  test("points agents to the installation guide from /help", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const { im, sentCards, dispatchMessage } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db,
+      im,
+      new RecordingAgent(),
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+
+    await pipeline.start();
+    dispatchMessage(createMessage({
+      contentText: "/help",
+      platformMsgId: "m1",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(sentCards.some((card) => card.content.includes(`安装配置：让 agent 执行 \`${INSTALL_GUIDE_COMMAND}\``))).toBe(true);
   });
 
   test("surfaces structured agent errors to the user", async () => {
