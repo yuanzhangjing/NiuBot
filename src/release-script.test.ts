@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   ensureCleanWorktree,
+  npmPublishArgs,
   parseReleaseArgs,
 } from "../scripts/release-lib.mjs";
 
@@ -31,3 +32,14 @@ describe("ensureCleanWorktree", () => {
   });
 });
 
+describe("npmPublishArgs", () => {
+  it("publishes to the official npm registry regardless of local npm config", () => {
+    expect(npmPublishArgs()).toEqual([
+      "publish",
+      "--access",
+      "public",
+      "--registry",
+      "https://registry.npmjs.org/",
+    ]);
+  });
+});
