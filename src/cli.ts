@@ -14,6 +14,7 @@
  *   NIUBOT_PLATFORM   — IM 平台标识（如 feishu）
  *   NIUBOT_BOT_ID     — Bot 平台 ID
  *   NIUBOT_IS_ADMIN   — 是否管理员（"true" 时生效）
+ *   NIUBOT_BOT_PROFILE_PATH — Bot profile 路径（仅管理员 session 注入）
  */
 
 import path from "node:path";
@@ -61,6 +62,7 @@ const WORK_DIR = process.env["NIUBOT_WORK_DIR"] ?? ".";
 const PLATFORM = process.env["NIUBOT_PLATFORM"];
 const BOT_ID = process.env["NIUBOT_BOT_ID"];
 const IS_ADMIN = process.env["NIUBOT_IS_ADMIN"] === "true";
+const BOT_PROFILE_PATH = process.env["NIUBOT_BOT_PROFILE_PATH"];
 
 /** 提取全局 flags 并从 argv 中移除 */
 function extractGlobalFlags(args: string[]): Record<string, string> {
@@ -395,6 +397,7 @@ Use when context is lost or uncertain.`);
     chatType: CHAT_TYPE as "p2p" | "group",
     chatLabel,
     isAdmin: IS_ADMIN,
+    botProfilePath: BOT_PROFILE_PATH,
   };
 
   const output = buildImportantContext(db, scene);

@@ -504,6 +504,7 @@ export class Pipeline {
           model: this.botIdentity.model,
           liteModel: this.botIdentity.liteModel,
           isAdmin,
+          botProfilePath: this.stableContextOptions.botProfilePath,
           agentSessionId: canResumeRecoveredSession ? (row.agent_session_id ?? undefined) : undefined,
         });
 
@@ -1292,6 +1293,7 @@ export class Pipeline {
       model: this.botIdentity.model,
       liteModel: this.botIdentity.liteModel,
       isAdmin,
+      botProfilePath: this.stableContextOptions.botProfilePath,
     });
 
     // Create session record
@@ -1912,6 +1914,7 @@ export class Pipeline {
       botId: this.botIdentity.platformBotId,
       platform: this.botIdentity.platform,
       isAdmin: true,
+      botProfilePath: this.stableContextOptions.botProfilePath,
     });
 
     execAsync(cmd, {
@@ -2470,6 +2473,7 @@ export class Pipeline {
       model: this.botIdentity.model,
       liteModel: this.botIdentity.liteModel,
       isAdmin,
+      botProfilePath: this.stableContextOptions.botProfilePath,
     });
 
     if (!supportsSystemPrompt && stableContext) {

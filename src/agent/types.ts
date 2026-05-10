@@ -34,6 +34,8 @@ export interface SessionConfig {
   platform?: string;
   /** 是否为管理员（传递给 agent 环境变量） */
   isAdmin?: boolean;
+  /** Bot profile 路径（仅管理员 session 传递给 agent 环境变量） */
+  botProfilePath?: string;
   /** Agent 侧 session ID（用于 recover 时 resume） */
   agentSessionId?: string;
 }

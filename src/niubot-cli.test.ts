@@ -33,4 +33,18 @@ describe("niubot CLI path helpers", () => {
 
     expect(env["PATH"]).toContain(getBundledNiubotBinDir());
   });
+
+  it("passes bot profile path only for admin sessions", () => {
+    const adminEnv = buildNiubotEnv({
+      botProfilePath: "/tmp/bot_profile.md",
+      isAdmin: true,
+    });
+    const userEnv = buildNiubotEnv({
+      botProfilePath: "/tmp/bot_profile.md",
+      isAdmin: false,
+    });
+
+    expect(adminEnv["NIUBOT_BOT_PROFILE_PATH"]).toBe("/tmp/bot_profile.md");
+    expect(userEnv["NIUBOT_BOT_PROFILE_PATH"]).toBeUndefined();
+  });
 });
