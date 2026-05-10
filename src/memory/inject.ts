@@ -16,6 +16,9 @@ const RECENT_SESSION_MAX_COUNT = 10;
 const CONTINUATION_TAIL_COUNT = 10;
 /** 续接上下文：每条消息最大长度 */
 const CONTINUATION_MSG_MAX_LEN = 200;
+const DEFAULT_BOT_PROFILE = `# Bot Profile
+
+在这里写 bot 的角色、语气和长期行为边界。`;
 
 /** 新 session 首条消息：引导 agent 按需检索历史上下文 */
 export const NEW_SESSION_SEARCH_REMINDER =
@@ -37,12 +40,19 @@ export const COMPACT_RECOVERY_REMINDER =
 </compact-recovery>`;
 
 export interface StableSystemContextOptions {
+  botProfilePath?: string;
   personaPath?: string;
   instructionsPath?: string;
 }
 
 export function buildStableSystemContext(options: StableSystemContextOptions = {}): string {
   const parts = [SYSTEM_RULES];
+  const botProfile = readContextFile(options.botProfilePath);
+  if (botProfile && !isDefaultBotProfile(botProfile)) {
+    parts.push(`<bot-profile>\n${botProfile}\n</bot-profile>`);
+    return parts.join("\n\n");
+  }
+
   const persona = readContextFile(options.personaPath);
   if (persona) {
     parts.push(`<bot-persona>\n${persona}\n</bot-persona>`);
@@ -68,6 +78,14 @@ function isDefaultInstructions(content: string): boolean {
   return content.includes("在这里写这个 bot 的长期职责、做事规则和边界。");
 }
 
+function isDefaultBotProfile(content: string): boolean {
+  return normalizeContext(content) === normalizeContext(DEFAULT_BOT_PROFILE);
+}
+
+function normalizeContext(content: string): string {
+  return content.trim().replace(/\r\n/g, "\n");
+}
+
 // ── Session profile (场景 + 私聊用户记忆) ──────────────────
 
 export interface SceneInfo {
@@ -79,6 +97,8 @@ export interface SceneInfo {
   userName?: string;
   /** 群聊时可省略（身份信息改为消息级注入） */
   userId?: string;
+  /** 仅私聊管理员可见 */
+  botProfilePath?: string;
   chatId: string;
   chatType: "p2p" | "group";
   /** Chat 的 short label，如 "C1(U1(Zen))" */
@@ -114,6 +134,9 @@ export function buildImportantContext(
     const userDisplay = formatShortLabel(scene.userId, scene.userName);
     if (scene.isAdmin) {
       sceneLines.push(`用户：${userDisplay}（admin）`);
+      if (scene.botProfilePath) {
+        sceneLines.push(`Bot profile：${scene.botProfilePath}`);
+      }
     } else {
       sceneLines.push(`用户：${userDisplay}`);
     }
@@ -205,10 +228,8 @@ export function buildNormalContext(
   const parts: string[] = [];
 
   // 1. 活跃任务索引（统一走 task 管理接口做可见性过滤）
-  const taskBriefs = buildTaskIndex(workingDirectory, chatType, userId);
-  if (taskBriefs.length > 0) {
-    parts.push(`<active-tasks>\n${taskBriefs.join("\n")}\n</active-tasks>`);
-  }
+  const taskContext = buildActiveTaskContext(workingDirectory, chatType, userId);
+  if (taskContext) parts.push(taskContext);
 
   // 2. 最近归档 session 的摘要（短期记忆）— 最近一条完整，其余精简
   const recentSessions = getRecentArchivedSessions(db, chatId, RECENT_SESSION_HOURS, RECENT_SESSION_MAX_COUNT);
@@ -229,6 +250,17 @@ export function buildNormalContext(
   }
 
   return parts.join("\n\n");
+}
+
+export function buildActiveTaskContext(
+  workingDirectory: string,
+  chatType: "p2p" | "group" = "p2p",
+  userId?: string,
+): string {
+  const taskBriefs = buildTaskIndex(workingDirectory, chatType, userId);
+  return taskBriefs.length > 0
+    ? `<active-tasks>\n${taskBriefs.join("\n")}\n</active-tasks>`
+    : "";
 }
 
 // ── Internal helpers ────────────────────────────────────────

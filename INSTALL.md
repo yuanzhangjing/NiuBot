@@ -166,21 +166,29 @@ Config fields:
   - `traecli`: `Gemini-3-Flash-Preview`
 - `workingDirectory`: Where the agent runs. Default: `~/niubot-workspace/<id>`.
 
-Create default persona file:
+Create default bot profile:
 
 ```bash
 mkdir -p ~/.niubot/NiuBot
 ```
 
-Write `~/.niubot/NiuBot/persona.md`:
+Write `~/.niubot/NiuBot/bot_profile.md`:
 ```markdown
-> This file defines the bot's personality. Users can ask the bot to modify it.
+# Bot Profile
 
-## Role
+> Only admins may ask the bot to modify this file.
+
+## Persona
+
+### Role
 None
 
-## Style
+### Style
 Keep conversations natural and friendly.
+
+## Instructions
+
+Long-term responsibilities and behavior boundaries go here.
 ```
 
 ## Step 3: Create Feishu App and Get Credentials (requires user action)
@@ -334,21 +342,29 @@ Check existing bots to avoid conflicts:
 cat ~/.niubot/config.yaml   # look at the bots array
 ```
 
-#### 2. Create Bot Directory and Persona
+#### 2. Create Bot Directory and Profile
 
 ```bash
 mkdir -p ~/.niubot/<BotID>
 ```
 
-Write `~/.niubot/<BotID>/persona.md`:
+Write `~/.niubot/<BotID>/bot_profile.md`:
 ```markdown
-> This file defines the bot's personality. Users can ask the bot to modify it.
+# Bot Profile
 
-## Role
+> Only admins may ask the bot to modify this file.
+
+## Persona
+
+### Role
 None
 
-## Style
+### Style
 Keep conversations natural and friendly.
+
+## Instructions
+
+Long-term responsibilities and behavior boundaries go here.
 ```
 
 #### 3. Append Bot to config.yaml

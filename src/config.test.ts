@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { loadConfig } from "./config.js";
+import { loadConfig, NIUBOT_HOME } from "./config.js";
 
 const tempDirs: string[] = [];
 
@@ -27,8 +27,9 @@ bots:
 
     const config = loadConfig(configPath);
 
-    expect(config.bots[0]?.personaPath).toBe(path.join(dir, "workspace", "persona.md"));
-    expect(config.bots[0]?.instructionsPath).toBe(path.join(dir, "workspace", "instructions.md"));
+    expect(config.bots[0]?.botProfilePath).toBe(path.join(NIUBOT_HOME, "NiuBot", "bot_profile.md"));
+    expect(config.bots[0]?.personaPath).toBeUndefined();
+    expect(config.bots[0]?.instructionsPath).toBeUndefined();
     expect(config.bots[0]?.projectContextPath).toBeUndefined();
   });
 
@@ -37,6 +38,7 @@ bots:
     tempDirs.push(dir);
     const personaPath = path.join(dir, "persona.md");
     const instructionsPath = path.join(dir, "instructions.md");
+    const botProfilePath = path.join(dir, "bot_profile.md");
     const projectContextPath = path.join(dir, "project.md");
     const configPath = path.join(dir, "config.yaml");
     fs.writeFileSync(configPath, `
@@ -45,6 +47,7 @@ bots:
     appId: app-id
     appSecret: app-secret
     workingDirectory: ${dir}/workspace
+    botProfilePath: ${botProfilePath}
     personaPath: ${personaPath}
     instructionsPath: ${instructionsPath}
     projectContextPath: ${projectContextPath}
@@ -52,6 +55,7 @@ bots:
 
     const config = loadConfig(configPath);
 
+    expect(config.bots[0]?.botProfilePath).toBe(botProfilePath);
     expect(config.bots[0]?.personaPath).toBe(personaPath);
     expect(config.bots[0]?.instructionsPath).toBe(instructionsPath);
     expect(config.bots[0]?.projectContextPath).toBe(projectContextPath);

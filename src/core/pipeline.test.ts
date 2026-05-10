@@ -1,6 +1,7 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import yaml from "yaml";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import type { AgentBackend, AgentResponse, AgentSession, SessionConfig } from "../agent/types.js";
 import { getBotBackendModelState, getBotRuntimeState, initDatabase, setBotBackendModelState } from "../database/schema.js";
@@ -1038,8 +1039,92 @@ describe("Pipeline.recover", () => {
   test("injects only stable context through system prompt when supported", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
-    writeFileSync(path.join(dir, "persona.md"), "plain bot persona", "utf-8");
-    writeFileSync(path.join(dir, "instructions.md"), "plain bot instructions", "utf-8");
+    writeFileSync(path.join(dir, "bot_profile.md"), "plain bot profile", "utf-8");
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const agent = new RecordingAgent();
+    const pipeline = new Pipeline(
+      db,
+      createImStub(),
+      agent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "claude",
+      undefined,
+      undefined,
+      undefined,
+      {
+        botProfilePath: path.join(dir, "bot_profile.md"),
+      },
+    );
+
+    await pipeline.start();
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "hello",
+      platformMsgId: "m-system-1",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(agent.createSessionCalls).toHaveLength(1);
+    expect(agent.createSessionCalls[0]?.importantContext).toContain("<niubot-system-rules>");
+    expect(agent.createSessionCalls[0]?.importantContext).toContain("plain bot profile");
+    expect(agent.createSessionCalls[0]?.importantContext).not.toContain("<session-profile");
+    expect(agent.createSessionCalls[0]?.importantContext).toContain("nbt system-rules");
+    expect(agent.sendMessageCalls).toHaveLength(1);
+    expect(agent.sendMessageCalls[0]).toContain("<session-profile");
+    expect(agent.sendMessageCalls[0]).toContain("这是一个全新的对话 session");
+    expect(agent.sendMessageCalls[0]).not.toContain("<niubot-system-rules>");
+    expect(agent.sendMessageCalls[0]).not.toContain("plain bot profile");
+  });
+
+  test("falls back to first user prompt when system prompt is not supported", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+    writeFileSync(path.join(dir, "bot_profile.md"), "fallback bot profile", "utf-8");
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const agent = new RecordingAgent();
+    agent.supportsSystemPrompt = false;
+    const pipeline = new Pipeline(
+      db,
+      createImStub(),
+      agent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+      undefined,
+      undefined,
+      undefined,
+      {
+        botProfilePath: path.join(dir, "bot_profile.md"),
+      },
+    );
+
+    await pipeline.start();
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "hello",
+      platformMsgId: "m-system-2",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(agent.createSessionCalls).toHaveLength(1);
+    expect(agent.createSessionCalls[0]?.importantContext).toBeUndefined();
+    expect(agent.sendMessageCalls).toHaveLength(1);
+    expect(agent.sendMessageCalls[0]).toContain("<niubot-system-rules>");
+    expect(agent.sendMessageCalls[0]).toContain("fallback bot profile");
+    expect(agent.sendMessageCalls[0]).toContain("<session-profile");
+    expect(agent.sendMessageCalls[0]).toContain("这是一个全新的对话 session");
+    expect(agent.sendMessageCalls[0]).toContain("hello");
+  });
+
+  test("does not read workspace bot profile when stable context options are omitted", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+    writeFileSync(path.join(dir, "bot_profile.md"), "workspace profile should be ignored", "utf-8");
 
     const db = initDatabase(path.join(dir, "niubot.db"));
     const agent = new RecordingAgent();
@@ -1057,59 +1142,12 @@ describe("Pipeline.recover", () => {
     await pipeline.start();
     (pipeline as any).handleMessage(createMessage({
       contentText: "hello",
-      platformMsgId: "m-system-1",
+      platformMsgId: "m-system-default",
     }));
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(agent.createSessionCalls).toHaveLength(1);
     expect(agent.createSessionCalls[0]?.importantContext).toContain("<niubot-system-rules>");
-    expect(agent.createSessionCalls[0]?.importantContext).toContain("plain bot persona");
-    expect(agent.createSessionCalls[0]?.importantContext).toContain("plain bot instructions");
-    expect(agent.createSessionCalls[0]?.importantContext).not.toContain("<session-profile");
-    expect(agent.createSessionCalls[0]?.importantContext).toContain("nbt system-rules");
-    expect(agent.sendMessageCalls).toHaveLength(1);
-    expect(agent.sendMessageCalls[0]).toContain("<session-profile");
-    expect(agent.sendMessageCalls[0]).toContain("这是一个全新的对话 session");
-    expect(agent.sendMessageCalls[0]).not.toContain("<niubot-system-rules>");
-    expect(agent.sendMessageCalls[0]).not.toContain("plain bot persona");
-  });
-
-  test("falls back to first user prompt when system prompt is not supported", async () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
-    tempDirs.push(dir);
-    writeFileSync(path.join(dir, "persona.md"), "fallback bot persona", "utf-8");
-    writeFileSync(path.join(dir, "instructions.md"), "fallback bot instructions", "utf-8");
-
-    const db = initDatabase(path.join(dir, "niubot.db"));
-    const agent = new RecordingAgent();
-    agent.supportsSystemPrompt = false;
-    const pipeline = new Pipeline(
-      db,
-      createImStub(),
-      agent,
-      createBotIdentity(),
-      dir,
-      path.join(dir, "niubot.db"),
-      0,
-      "codex",
-    );
-
-    await pipeline.start();
-    (pipeline as any).handleMessage(createMessage({
-      contentText: "hello",
-      platformMsgId: "m-system-2",
-    }));
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    expect(agent.createSessionCalls).toHaveLength(1);
-    expect(agent.createSessionCalls[0]?.importantContext).toBeUndefined();
-    expect(agent.sendMessageCalls).toHaveLength(1);
-    expect(agent.sendMessageCalls[0]).toContain("<niubot-system-rules>");
-    expect(agent.sendMessageCalls[0]).toContain("fallback bot persona");
-    expect(agent.sendMessageCalls[0]).toContain("fallback bot instructions");
-    expect(agent.sendMessageCalls[0]).toContain("<session-profile");
-    expect(agent.sendMessageCalls[0]).toContain("这是一个全新的对话 session");
-    expect(agent.sendMessageCalls[0]).toContain("hello");
+    expect(agent.createSessionCalls[0]?.importantContext).not.toContain("workspace profile should be ignored");
   });
 
   test("injects compact recovery reminder once after compact count increases", async () => {
@@ -1167,11 +1205,69 @@ describe("Pipeline.recover", () => {
     expect(SYSTEM_RULES).toContain("nbt system-rules");
   });
 
+  test("compact recovery keeps active tasks but skips recent sessions and messages", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+    mkdirSync(path.join(dir, "tasks"), { recursive: true });
+    writeFileSync(path.join(dir, "tasks", "index.yaml"), yaml.stringify({
+      tasks: [{
+        name: "visible-task",
+        description: "short task description",
+        path: "tasks/visible-task",
+        owner: "u2",
+        visibility: "private",
+        created_at: "2026-05-10",
+      }],
+    }), "utf-8");
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare(`
+      INSERT INTO sessions (id, chat_id, user_id, source, status, summary, started_at, ended_at, start_msg_id, end_msg_id, last_active_at)
+      VALUES ('archived1', 'c1', 'u2', 'user', 'archived', ?, datetime('now', '-1 hour'), datetime('now', '-30 minutes'), 1, 1, datetime('now', '-30 minutes'))
+    `).run(JSON.stringify({ summary: "archived summary should not appear" }));
+    db.prepare(`
+      INSERT INTO messages (chat_id, sender_id, session_key, role, content_text, content_type, platform, platform_msg_id, platform_ts, platform_raw)
+      VALUES ('c1', 'u2', 'archived1', 'user', 'recent message should not appear', 'text', 'feishu', 'old-msg', datetime('now', '-40 minutes'), '{}')
+    `).run();
+
+    const agent = new CompactCountingAgent([1, undefined]);
+    const pipeline = new Pipeline(
+      db,
+      createImStub(),
+      agent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "claude",
+    );
+
+    await pipeline.start();
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "first",
+      platformMsgId: "m-compact-light-1",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "second",
+      platformMsgId: "m-compact-light-2",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(agent.sendMessageCalls[1]).toContain(COMPACT_RECOVERY_REMINDER);
+    expect(agent.sendMessageCalls[1]).toContain("<active-tasks>");
+    expect(agent.sendMessageCalls[1]).toContain("visible-task");
+    expect(agent.sendMessageCalls[1]).not.toContain("<recent-sessions>");
+    expect(agent.sendMessageCalls[1]).not.toContain("archived summary should not appear");
+    expect(agent.sendMessageCalls[1]).not.toContain("<recent-messages>");
+    expect(agent.sendMessageCalls[1]).not.toContain("recent message should not appear");
+  });
+
   test("reasserts stable context after compact when system prompt is not supported", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
-    writeFileSync(path.join(dir, "persona.md"), "no-system persona", "utf-8");
-    writeFileSync(path.join(dir, "instructions.md"), "no-system instructions", "utf-8");
+    writeFileSync(path.join(dir, "bot_profile.md"), "no-system profile", "utf-8");
 
     const db = initDatabase(path.join(dir, "niubot.db"));
     const agent = new CompactCountingAgent([1, undefined]);
@@ -1185,6 +1281,12 @@ describe("Pipeline.recover", () => {
       path.join(dir, "niubot.db"),
       0,
       "codex",
+      undefined,
+      undefined,
+      undefined,
+      {
+        botProfilePath: path.join(dir, "bot_profile.md"),
+      },
     );
 
     await pipeline.start();
@@ -1203,8 +1305,7 @@ describe("Pipeline.recover", () => {
     expect(agent.sendMessageCalls).toHaveLength(2);
     expect(agent.sendMessageCalls[1]).toContain(COMPACT_RECOVERY_REMINDER);
     expect(agent.sendMessageCalls[1]).toContain("<niubot-system-rules>");
-    expect(agent.sendMessageCalls[1]).toContain("no-system persona");
-    expect(agent.sendMessageCalls[1]).toContain("no-system instructions");
+    expect(agent.sendMessageCalls[1]).toContain("no-system profile");
     expect(agent.sendMessageCalls[1]).toContain("<session-profile");
     expect(agent.sendMessageCalls[1]).toContain("second");
   });

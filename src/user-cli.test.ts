@@ -3,7 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { INSTALL_GUIDE_COMMAND } from "./install-guide.js";
-import { generateConfigTemplate, generatePersonaTemplate, getTodayLogFilePath, getSuggestedLiteModel } from "./user-cli.js";
+import { generateBotProfileTemplate, generateConfigTemplate, getTodayLogFilePath, getSuggestedLiteModel } from "./user-cli.js";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -33,11 +33,11 @@ describe("user-cli init model configuration", () => {
     expect(getTodayLogFilePath("/tmp/niubot")).toBe("/tmp/niubot/logs/niubot-2026-04-25.log");
   });
 
-  it("does not limit persona updates to admins in the default template", () => {
-    const persona = generatePersonaTemplate();
+  it("limits bot profile updates to admins in the default template", () => {
+    const profile = generateBotProfileTemplate();
 
-    expect(persona).toContain("用户可要求 bot 自行修改");
-    expect(persona).not.toContain("管理员");
+    expect(profile).toContain("只有管理员可以要求 bot 修改此文件");
+    expect(profile).toContain("# Bot Profile");
   });
 
   it("points agents to INSTALL.md in the top-level help", () => {

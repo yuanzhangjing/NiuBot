@@ -13,7 +13,7 @@ import { FeishuAdapter } from "./im/feishu/adapter.js";
 import { Pipeline, type BotIdentity } from "./core/pipeline.js";
 import { ApiServer, type ApiHandler } from "./core/api.js";
 import { CronScheduler } from "./core/cron.js";
-import { ensurePersonaFile } from "./persona.js";
+import { ensureBotProfileFile } from "./bot-profile.js";
 import { ensureStaticContextFiles, ensureWorkspaceAgentFiles } from "./static-context.js";
 import { createLogger } from "./logger.js";
 import type { ResolvedBotRuntimeConfig } from "./runtime-config.js";
@@ -46,7 +46,11 @@ export async function createBotInstance(
   // 1. 确保目录和默认文件存在
   fs.mkdirSync(path.dirname(botConfig.dbPath), { recursive: true });
   fs.mkdirSync(botConfig.workingDirectory, { recursive: true });
-  ensurePersonaFile(botConfig.personaPath);
+  ensureBotProfileFile(botConfig.botProfilePath, {
+    personaPath: botConfig.personaPath,
+    instructionsPath: botConfig.instructionsPath,
+    workspaceDirectory: botConfig.workingDirectory,
+  });
   ensureStaticContextFiles({
     instructionsPath: botConfig.instructionsPath,
     projectContextPath: botConfig.projectContextPath,
@@ -102,6 +106,7 @@ export async function createBotInstance(
     getAvailableBackends,
     refreshAgentContextFiles,
     {
+      botProfilePath: botConfig.botProfilePath,
       personaPath: botConfig.personaPath,
       instructionsPath: botConfig.instructionsPath,
     },
@@ -135,7 +140,7 @@ export async function createBotInstance(
 
   log.info("bot instance created", {
     workDir: botConfig.workingDirectory,
-    persona: botConfig.personaPath,
+    botProfile: botConfig.botProfilePath,
     socketPath,
   });
 
@@ -160,8 +165,6 @@ function generateAgentFiles(
   const agentsPath = path.join(botConfig.workingDirectory, "AGENTS.md");
 
   ensureWorkspaceAgentFiles(botConfig.workingDirectory, {
-    personaPath: botConfig.personaPath,
-    instructionsPath: botConfig.instructionsPath,
     projectContextPath: botConfig.projectContextPath,
   });
 

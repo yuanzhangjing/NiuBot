@@ -25,8 +25,8 @@ describe("loadStaticContextTemplate", () => {
     expect(content).toContain("# Workspace Rules");
     expect(content).toContain("## Project");
     expect(content).toContain("## Workspace Layout");
-    expect(content).toContain("`persona.md`");
-    expect(content).toContain("`instructions.md`");
+    expect(content).not.toContain("`persona.md`");
+    expect(content).not.toContain("`instructions.md`");
     expect(content).toContain("`repos/`");
     expect(content).toContain("`tasks/`");
     expect(content).toContain("`tmp/`");
@@ -52,25 +52,20 @@ describe("loadStaticContextTemplate", () => {
     const dir = fs.mkdtempSync(path.join(rootDir, ".tmp-static-context-"));
     tempDirs.push(dir);
 
-    const personaPath = path.join(dir, "persona.md");
-    const instructionsPath = path.join(dir, "instructions.md");
+    const botProfilePath = path.join(dir, "bot_profile.md");
     const projectContextPath = path.join(dir, "project.md");
-    fs.writeFileSync(personaPath, "plain persona text", "utf-8");
-    fs.writeFileSync(instructionsPath, "bot rule text", "utf-8");
+    fs.writeFileSync(botProfilePath, "plain bot profile text", "utf-8");
     fs.writeFileSync(projectContextPath, "project background text", "utf-8");
 
     const content = buildStaticContext({
-      personaPath,
-      instructionsPath,
+      botProfilePath,
       projectContextPath,
     });
 
     expect(content).toContain("# Workspace Rules");
-    expect(content).not.toContain("plain persona text");
-    expect(content).not.toContain("bot rule text");
+    expect(content).not.toContain("plain bot profile text");
     expect(content).not.toContain("project background text");
-    expect(content).not.toContain(personaPath);
-    expect(content).not.toContain(instructionsPath);
+    expect(content).not.toContain(botProfilePath);
     expect(content).not.toContain(projectContextPath);
     expect(content).not.toContain("## Stable Context Sources");
   });
@@ -79,30 +74,28 @@ describe("loadStaticContextTemplate", () => {
     const dir = fs.mkdtempSync(path.join(rootDir, ".tmp-static-context-"));
     tempDirs.push(dir);
 
-    const instructionsPath = path.join(dir, "instructions.md");
-    fs.writeFileSync(instructionsPath, "# Bot Instructions\n\nbot rule text", "utf-8");
+    const botProfilePath = path.join(dir, "bot_profile.md");
+    fs.writeFileSync(botProfilePath, "# Bot Profile\n\nbot rule text", "utf-8");
 
-    const content = buildStaticContext({ instructionsPath });
+    const content = buildStaticContext({ botProfilePath });
 
     expect(content).toContain("# Workspace Rules");
-    expect(content).not.toContain(instructionsPath);
-    expect(content).not.toContain("## Bot Instructions");
+    expect(content).not.toContain(botProfilePath);
+    expect(content).not.toContain("## Bot Profile");
     expect(content).not.toContain("bot rule text");
-    expect(content).not.toContain("# Bot Instructions\n\nbot rule text");
+    expect(content).not.toContain("# Bot Profile\n\nbot rule text");
   });
 
-  it("does not compose untouched default instructions or project templates", () => {
+  it("does not compose untouched project templates", () => {
     const dir = fs.mkdtempSync(path.join(rootDir, ".tmp-static-context-"));
     tempDirs.push(dir);
 
-    const instructionsPath = path.join(dir, "instructions.md");
-    ensureStaticContextFiles({ instructionsPath });
+    const projectContextPath = path.join(dir, "project.md");
+    ensureStaticContextFiles({ projectContextPath });
 
-    const content = buildStaticContext({ instructionsPath });
+    const content = buildStaticContext({ projectContextPath });
 
-    expect(content).not.toContain("## Bot Instructions");
     expect(content).not.toContain("## Project Context");
-    expect(content).not.toContain("在这里写这个 bot 的长期职责");
     expect(content).not.toContain("在这里写这个工作区的背景");
   });
 
@@ -110,18 +103,15 @@ describe("loadStaticContextTemplate", () => {
     const dir = fs.mkdtempSync(path.join(rootDir, ".tmp-static-context-"));
     tempDirs.push(dir);
 
-    const personaPath = path.join(dir, "persona.md");
-    const instructionsPath = path.join(dir, "instructions.md");
-    ensureStaticContextFiles({ instructionsPath });
+    const botProfilePath = path.join(dir, "bot_profile.md");
+    ensureStaticContextFiles({});
 
     const content = buildStaticContext({
-      personaPath,
-      instructionsPath,
+      botProfilePath,
     });
 
     expect(content).not.toContain("## Stable Context Sources");
-    expect(content).not.toContain(personaPath);
-    expect(content).not.toContain(instructionsPath);
+    expect(content).not.toContain(botProfilePath);
     expect(content).not.toContain("Project context:");
     expect(content).not.toContain("These files are referenced by NiuBot Engine.");
     expect(content).not.toContain("Do not edit AGENTS.md directly");

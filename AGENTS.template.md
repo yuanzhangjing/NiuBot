@@ -8,8 +8,6 @@ Describe what this workspace is and where the main code lives. For example: `rep
 
 ## Workspace Layout
 
-- `persona.md`: bot role and response style.
-- `instructions.md`: bot-level long-term instructions.
 - `repos/`: code repositories.
 - `tasks/`: formal tasks managed by `nbt task`.
 - `tmp/`: temporary files, drafts, command outputs, and one-off analysis.

@@ -21,6 +21,7 @@ import {
   hasUpdateNotification, recordUpdateNotification,
 } from "../database/schema.js";
 import {
+  buildActiveTaskContext,
   buildImportantContext,
   buildNormalContext,
   buildSpeakerContext,
@@ -216,10 +217,7 @@ export class Pipeline {
     this.workingDirectory = workingDirectory;
     this.dbPath = dbPath;
     this.refreshAgentContextFiles = refreshAgentContextFiles;
-    this.stableContextOptions = stableContextOptions ?? {
-      personaPath: path.join(workingDirectory, "persona.md"),
-      instructionsPath: path.join(workingDirectory, "instructions.md"),
-    };
+    this.stableContextOptions = stableContextOptions ?? {};
     this.log = createLogger("pipeline", botIdentity.name);
     this.queue = new MessageQueue(bufferMs);
 
@@ -487,6 +485,7 @@ export class Pipeline {
         chatLabel: getChatShortLabel(this.db, row.chat_id),
         chatType,
         isAdmin,
+        botProfilePath: this.stableContextOptions.botProfilePath,
       });
       const stableContext = buildStableSystemContext(this.stableContextOptions);
 
@@ -1264,6 +1263,7 @@ export class Pipeline {
       chatLabel: getChatShortLabel(this.db, chatId),
       chatType,
       isAdmin,
+      botProfilePath: this.stableContextOptions.botProfilePath,
     });
     const stableContext = buildStableSystemContext(this.stableContextOptions);
 
@@ -2169,9 +2169,9 @@ export class Pipeline {
           }
           const recoveryUserId = processChatType === "group" ? undefined : chatSession.userId;
           recoveryParts.push(this.buildSessionProfile(chatId, processChatType, recoveryUserId));
-          const recoveryState = buildNormalContext(this.db, chatId, this.workingDirectory, firstMsgId, processChatType, recoveryUserId);
-          if (recoveryState) {
-            recoveryParts.push(`<session-state>\n${recoveryState}\n</session-state>`);
+          const taskContext = buildActiveTaskContext(this.workingDirectory, processChatType, recoveryUserId);
+          if (taskContext) {
+            recoveryParts.push(`<session-state>\n${taskContext}\n</session-state>`);
           }
           parts.push(recoveryParts.join("\n\n"));
         }
@@ -2423,6 +2423,7 @@ export class Pipeline {
       chatLabel: getChatShortLabel(this.db, chatId),
       chatType,
       isAdmin,
+      botProfilePath: this.stableContextOptions.botProfilePath,
     });
     const stableContext = buildStableSystemContext(this.stableContextOptions);
 
@@ -2547,6 +2548,7 @@ export class Pipeline {
       chatLabel: getChatShortLabel(this.db, chatId),
       chatType,
       isAdmin,
+      botProfilePath: this.stableContextOptions.botProfilePath,
     });
   }
 

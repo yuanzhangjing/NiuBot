@@ -71,19 +71,58 @@ describe("buildImportantContext", () => {
       userId: "u2",
       userName: "Zen",
       isAdmin: true,
+      botProfilePath: "/tmp/bot_profile.md",
     });
 
     expect(context).toContain("Bot：U3(NiuBot)");
     expect(context).toContain("平台：feishu");
     expect(context).toContain("会话：C1(Zen)（私聊）");
     expect(context).toContain("用户：U2(Zen)（admin）");
+    expect(context).toContain("Bot profile：/tmp/bot_profile.md");
     expect(context).not.toContain("用户通过此 IM 平台远程与你对话");
     expect(context).not.toContain("Bot 人设配置");
+  });
+
+  it("does not expose the bot profile path to non-admin users", () => {
+    const workingDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-inject-"));
+    tempDirs.push(workingDirectory);
+
+    const db = initDatabase(path.join(workingDirectory, "niubot.db"));
+    const context = buildImportantContext(db, {
+      botName: "NiuBot",
+      platform: "feishu",
+      chatId: "c1",
+      chatType: "p2p",
+      userId: "u2",
+      userName: "Zen",
+      isAdmin: false,
+      botProfilePath: "/tmp/bot_profile.md",
+    });
+
+    expect(context).not.toContain("Bot profile");
+    expect(context).not.toContain("/tmp/bot_profile.md");
   });
 });
 
 describe("buildStableSystemContext", () => {
-  it("combines NiuBot system rules with bot persona and instructions", () => {
+  it("combines NiuBot system rules with bot profile", () => {
+    const workingDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-inject-"));
+    tempDirs.push(workingDirectory);
+    const botProfilePath = path.join(workingDirectory, "bot_profile.md");
+    fs.writeFileSync(botProfilePath, "plain bot profile text", "utf-8");
+
+    const context = buildStableSystemContext({ botProfilePath });
+
+    expect(context).toContain("<niubot-system-rules>");
+    expect(context).toContain("nbt system-rules");
+    expect(context).toContain("Task Policy");
+    expect(context).toContain("不要启动、停止或重启 NiuBot Engine 服务");
+    expect(context).toContain("<bot-profile>");
+    expect(context).toContain("plain bot profile text");
+    expect(context).not.toContain("<session-profile");
+  });
+
+  it("falls back to legacy persona and instructions paths", () => {
     const workingDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-inject-"));
     tempDirs.push(workingDirectory);
     const personaPath = path.join(workingDirectory, "persona.md");
@@ -93,28 +132,35 @@ describe("buildStableSystemContext", () => {
 
     const context = buildStableSystemContext({ personaPath, instructionsPath });
 
-    expect(context).toContain("<niubot-system-rules>");
-    expect(context).toContain("nbt system-rules");
-    expect(context).toContain("Task Policy");
-    expect(context).toContain("不要启动、停止或重启 NiuBot Engine 服务");
     expect(context).toContain("<bot-persona>");
     expect(context).toContain("plain persona text");
     expect(context).toContain("<bot-instructions>");
     expect(context).toContain("plain instructions text");
-    expect(context).not.toContain("<session-profile");
   });
 
-  it("skips the default instructions placeholder", () => {
+  it("skips the default bot profile placeholder", () => {
     const workingDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-inject-"));
     tempDirs.push(workingDirectory);
-    const instructionsPath = path.join(workingDirectory, "instructions.md");
-    fs.writeFileSync(instructionsPath, "# Bot Instructions\n\n在这里写这个 bot 的长期职责、做事规则和边界。\n", "utf-8");
+    const botProfilePath = path.join(workingDirectory, "bot_profile.md");
+    fs.writeFileSync(botProfilePath, "# Bot Profile\n\n在这里写 bot 的角色、语气和长期行为边界。\n", "utf-8");
 
-    const context = buildStableSystemContext({ instructionsPath });
+    const context = buildStableSystemContext({ botProfilePath });
 
     expect(context).toContain("<niubot-system-rules>");
-    expect(context).not.toContain("<bot-instructions>");
-    expect(context).not.toContain("在这里写这个 bot");
+    expect(context).not.toContain("<bot-profile>");
+    expect(context).not.toContain("在这里写 bot");
+  });
+
+  it("keeps an edited bot profile even if the placeholder text remains", () => {
+    const workingDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-inject-"));
+    tempDirs.push(workingDirectory);
+    const botProfilePath = path.join(workingDirectory, "bot_profile.md");
+    fs.writeFileSync(botProfilePath, "# Bot Profile\n\n在这里写 bot 的角色、语气和长期行为边界。\n\n实际规则：保持简洁。\n", "utf-8");
+
+    const context = buildStableSystemContext({ botProfilePath });
+
+    expect(context).toContain("<bot-profile>");
+    expect(context).toContain("实际规则：保持简洁。");
   });
 });
 

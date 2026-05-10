@@ -6,15 +6,11 @@ const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const templatePath = path.resolve(moduleDir, "..", "AGENTS.template.md");
 
 export interface StaticContextOptions {
+  botProfilePath?: string;
   personaPath?: string;
   instructionsPath?: string;
   projectContextPath?: string;
 }
-
-const DEFAULT_INSTRUCTIONS = `# Bot Instructions
-
-在这里写这个 bot 的长期职责、做事规则和边界。
-`;
 
 const DEFAULT_PROJECT_CONTEXT = `# Project Context
 
@@ -59,7 +55,6 @@ export function buildStaticContext(_options: StaticContextOptions = {}): string 
 }
 
 export function ensureStaticContextFiles(options: StaticContextOptions): void {
-  ensureFile(options.instructionsPath, DEFAULT_INSTRUCTIONS);
   ensureFile(options.projectContextPath, DEFAULT_PROJECT_CONTEXT);
 }
 

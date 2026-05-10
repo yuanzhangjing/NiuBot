@@ -362,15 +362,15 @@ async function cmdInit(niubotHome: string, flags: CliFlags): Promise<void> {
     break;
   }
 
-  // Default bot directory + persona
+  // Default bot directory + profile
   const botDir = path.join(niubotHome, botId);
   fs.mkdirSync(botDir, { recursive: true });
-  const personaPath = path.join(botDir, "persona.md");
-  if (fs.existsSync(personaPath) && !flags.force) {
-    info(`${botId}/persona.md already exists (use --force to overwrite)`);
+  const botProfilePath = path.join(botDir, "bot_profile.md");
+  if (fs.existsSync(botProfilePath) && !flags.force) {
+    info(`${botId}/bot_profile.md already exists (use --force to overwrite)`);
   } else {
-    fs.writeFileSync(personaPath, generatePersonaTemplate());
-    ok(`Created ${botId}/persona.md`);
+    fs.writeFileSync(botProfilePath, generateBotProfileTemplate());
+    ok(`Created ${botId}/bot_profile.md`);
   }
 
   // Plugin symlink
@@ -431,7 +431,7 @@ async function cmdInit(niubotHome: string, flags: CliFlags): Promise<void> {
   console.log("\u2500".repeat(40));
   console.log(`  Bot ID:  ${botId}`);
   console.log(`  Config:  ${configPath}`);
-  console.log(`  Persona: ${personaPath}`);
+  console.log(`  Profile: ${botProfilePath}`);
   console.log(`  Backend: ${defaultBackend}`);
   if (model) console.log(`  Model:   ${model}`);
   if (liteModel) console.log(`  Lite:    ${liteModel}`);
@@ -617,15 +617,15 @@ async function cmdAddBot(niubotHome: string): Promise<void> {
     hint(`Edit ${configPath}`);
   }
 
-  // ── Create bot directory + persona ──────────────────────
+  // ── Create bot directory + profile ──────────────────────
   const botDir = path.join(niubotHome, botId);
   fs.mkdirSync(botDir, { recursive: true });
-  const personaPath = path.join(botDir, "persona.md");
-  if (!fs.existsSync(personaPath)) {
-    fs.writeFileSync(personaPath, generatePersonaTemplate());
-    ok(`Created ${botId}/persona.md`);
+  const botProfilePath = path.join(botDir, "bot_profile.md");
+  if (!fs.existsSync(botProfilePath)) {
+    fs.writeFileSync(botProfilePath, generateBotProfileTemplate());
+    ok(`Created ${botId}/bot_profile.md`);
   } else {
-    info(`${botId}/persona.md already exists`);
+    info(`${botId}/bot_profile.md already exists`);
   }
 
   // ── Update config.yaml ─────────────────────────────────
@@ -657,7 +657,7 @@ async function cmdAddBot(niubotHome: string): Promise<void> {
   console.log("─".repeat(40));
   console.log(`  Bot ID:  ${botId}`);
   console.log(`  Backend: ${backend}`);
-  console.log(`  Persona: ${personaPath}`);
+  console.log(`  Profile: ${botProfilePath}`);
   if (model) console.log(`  Model:   ${model}`);
   if (liteModel) console.log(`  Lite:    ${liteModel}`);
 
@@ -743,14 +743,22 @@ function generateEnvTemplate(): string {
 `;
 }
 
-export function generatePersonaTemplate(): string {
-  return `> 此文件定义 bot 的行为风格，用户可要求 bot 自行修改。
+export function generateBotProfileTemplate(): string {
+  return `# Bot Profile
 
-## 角色
+> 只有管理员可以要求 bot 修改此文件。
+
+## Persona
+
+### 角色
 无
 
-## 风格
+### 风格
 保持自然、友好的对话风格。
+
+## Instructions
+
+长期职责和行为边界写在这里。
 `;
 }
 

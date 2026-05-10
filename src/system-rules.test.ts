@@ -23,6 +23,8 @@ describe("SYSTEM_RULES", () => {
     expect(SYSTEM_RULES).toContain("Task Policy");
     expect(SYSTEM_RULES).toContain("Auto Delivery");
     expect(SYSTEM_RULES).toContain("Current Scene");
+    expect(SYSTEM_RULES).toContain("Bot Profile");
+    expect(SYSTEM_RULES).toContain("只有管理员可以查看或修改 bot profile");
     expect(SYSTEM_RULES).toContain("Compact Recovery");
     expect(SYSTEM_RULES).toContain("Workspace Rules Boundary");
     expect(SYSTEM_RULES).toContain("Privacy");
