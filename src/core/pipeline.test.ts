@@ -1069,6 +1069,9 @@ describe("Pipeline.recover", () => {
 
     expect(agent.createSessionCalls).toHaveLength(1);
     expect(agent.createSessionCalls[0]?.importantContext).toContain("<niubot-system-rules>");
+    expect(agent.createSessionCalls[0]?.importantContext).toContain("<bot-identity>");
+    expect(agent.createSessionCalls[0]?.importantContext).toContain("你就是当前 Bot：");
+    expect(agent.createSessionCalls[0]?.importantContext).toContain("对用户来说，你是 NiuBot。");
     expect(agent.createSessionCalls[0]?.importantContext).toContain("plain bot profile");
     expect(agent.createSessionCalls[0]?.importantContext).not.toContain("<session-profile");
     expect(agent.createSessionCalls[0]?.importantContext).toContain("nbt system-rules");
@@ -1115,6 +1118,8 @@ describe("Pipeline.recover", () => {
     expect(agent.createSessionCalls[0]?.importantContext).toBeUndefined();
     expect(agent.sendMessageCalls).toHaveLength(1);
     expect(agent.sendMessageCalls[0]).toContain("<niubot-system-rules>");
+    expect(agent.sendMessageCalls[0]).toContain("<bot-identity>");
+    expect(agent.sendMessageCalls[0]).toContain("对用户来说，你是 NiuBot。");
     expect(agent.sendMessageCalls[0]).toContain("fallback bot profile");
     expect(agent.sendMessageCalls[0]).toContain("<session-profile");
     expect(agent.sendMessageCalls[0]).toContain("这是一个全新的对话 session");

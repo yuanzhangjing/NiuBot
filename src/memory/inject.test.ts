@@ -111,12 +111,16 @@ describe("buildStableSystemContext", () => {
     const botProfilePath = path.join(workingDirectory, "bot_profile.md");
     fs.writeFileSync(botProfilePath, "plain bot profile text", "utf-8");
 
-    const context = buildStableSystemContext({ botProfilePath });
+    const context = buildStableSystemContext({ botProfilePath, botLabel: "U3(NiuBot)" });
 
     expect(context).toContain("<niubot-system-rules>");
     expect(context).toContain("nbt system-rules");
     expect(context).toContain("Task Policy");
     expect(context).toContain("不要启动、停止或重启 NiuBot Engine 服务");
+    expect(context).toContain("<bot-identity>");
+    expect(context).toContain("你就是当前 Bot：U3(NiuBot)。");
+    expect(context).toContain("对用户来说，你是 NiuBot。");
+    expect(context).toContain("不要把 agent、backend、模型或 session 当作用户可见身份。");
     expect(context).toContain("<bot-profile>");
     expect(context).toContain("plain bot profile text");
     expect(context).not.toContain("<session-profile");
@@ -136,6 +140,14 @@ describe("buildStableSystemContext", () => {
     expect(context).toContain("plain persona text");
     expect(context).toContain("<bot-instructions>");
     expect(context).toContain("plain instructions text");
+  });
+
+  it("uses the bot name for identity when no bot label is available", () => {
+    const context = buildStableSystemContext({ botName: "NiuBot" });
+
+    expect(context).toContain("<bot-identity>");
+    expect(context).toContain("你就是当前 Bot：NiuBot。");
+    expect(context).toContain("对用户来说，你是 NiuBot。");
   });
 
   it("skips the legacy default bot profile placeholder", () => {

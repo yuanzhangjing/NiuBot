@@ -40,6 +40,10 @@ describe("user-cli init model configuration", () => {
     expect(profile).toContain("# Bot Profile");
     expect(profile).toContain("简洁清晰、有温度");
     expect(profile).toContain("平实中文");
+    expect(profile).not.toContain("当前工作区");
+    expect(profile).not.toContain("repos/");
+    expect(profile).not.toContain("tmp/");
+    expect(profile).not.toContain("NiuBot Engine");
   });
 
   it("points agents to INSTALL.md in the top-level help", () => {

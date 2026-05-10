@@ -487,7 +487,7 @@ export class Pipeline {
         isAdmin,
         botProfilePath: this.stableContextOptions.botProfilePath,
       });
-      const stableContext = buildStableSystemContext(this.stableContextOptions);
+      const stableContext = this.buildStableSystemContext();
 
       try {
         const supportsSystemPrompt = this.agent.supportsSystemPrompt === true;
@@ -1266,7 +1266,7 @@ export class Pipeline {
       isAdmin,
       botProfilePath: this.stableContextOptions.botProfilePath,
     });
-    const stableContext = buildStableSystemContext(this.stableContextOptions);
+    const stableContext = this.buildStableSystemContext();
 
     // 等待上一个 session 的归档摘要完成，超时后放行
     const _pendingSummary = this.pendingSummary.get(chatId);
@@ -2168,7 +2168,7 @@ export class Pipeline {
         if (compactRecovery) {
           const recoveryParts = [COMPACT_RECOVERY_REMINDER];
           if (this.agent.supportsSystemPrompt !== true) {
-            recoveryParts.push(buildStableSystemContext(this.stableContextOptions));
+            recoveryParts.push(this.buildStableSystemContext());
           }
           const recoveryUserId = processChatType === "group" ? undefined : chatSession.userId;
           recoveryParts.push(this.buildSessionProfile(chatId, processChatType, recoveryUserId));
@@ -2428,7 +2428,7 @@ export class Pipeline {
       isAdmin,
       botProfilePath: this.stableContextOptions.botProfilePath,
     });
-    const stableContext = buildStableSystemContext(this.stableContextOptions);
+    const stableContext = this.buildStableSystemContext();
 
     // 等待上一个 session 的归档摘要完成，确保 context 注入拿到最新 summary
     // 超时或 /stop 中断时放行，不阻塞新会话
@@ -2553,6 +2553,14 @@ export class Pipeline {
       chatType,
       isAdmin,
       botProfilePath: this.stableContextOptions.botProfilePath,
+    });
+  }
+
+  private buildStableSystemContext(): string {
+    return buildStableSystemContext({
+      ...this.stableContextOptions,
+      botName: this.botIdentity.name,
+      botLabel: this.botUserId ? getUserShortLabel(this.db, this.botUserId) : undefined,
     });
   }
 

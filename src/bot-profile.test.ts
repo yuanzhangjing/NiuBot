@@ -61,6 +61,10 @@ describe("ensureBotProfileFile", () => {
     const content = fs.readFileSync(botProfilePath, "utf-8");
     expect(content).toContain("简洁清晰、有温度");
     expect(content).toContain("平实中文");
+    expect(content).not.toContain("当前工作区");
+    expect(content).not.toContain("repos/");
+    expect(content).not.toContain("tmp/");
+    expect(content).not.toContain("NiuBot Engine");
     expect(content).not.toContain("在这里写这个 bot 的长期职责");
   });
 });

@@ -22,9 +22,14 @@ describe("SYSTEM_RULES", () => {
     expect(SYSTEM_RULES).toContain("Memory");
     expect(SYSTEM_RULES).toContain("Task Policy");
     expect(SYSTEM_RULES).toContain("Auto Delivery");
+    expect(SYSTEM_RULES).toContain("User-facing Identity");
+    expect(SYSTEM_RULES).toContain("对用户回复时，你就是当前 Bot");
+    expect(SYSTEM_RULES).toContain("不要把 agent、backend、模型、NiuBot Engine 或 session 当作用户可见身份");
     expect(SYSTEM_RULES).toContain("Current Scene");
     expect(SYSTEM_RULES).toContain("Bot Profile");
     expect(SYSTEM_RULES).toContain("只有管理员可以查看或修改 bot profile");
+    expect(SYSTEM_RULES).toContain("bot profile 只放 bot 级长期人格、语气和抽象行为规则");
+    expect(SYSTEM_RULES).toContain("不放具体项目、目录结构、任务进度或实现细节");
     expect(SYSTEM_RULES).toContain("Compact Recovery");
     expect(SYSTEM_RULES).toContain("Workspace Rules Boundary");
     expect(SYSTEM_RULES).toContain("Privacy");

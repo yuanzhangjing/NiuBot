@@ -43,10 +43,16 @@ export interface StableSystemContextOptions {
   botProfilePath?: string;
   personaPath?: string;
   instructionsPath?: string;
+  botName?: string;
+  botLabel?: string;
 }
 
 export function buildStableSystemContext(options: StableSystemContextOptions = {}): string {
   const parts = [SYSTEM_RULES];
+  const botIdentity = buildBotIdentityContext(options);
+  if (botIdentity) {
+    parts.push(botIdentity);
+  }
   const botProfile = readContextFile(options.botProfilePath);
   if (botProfile && !isDefaultBotProfile(botProfile)) {
     parts.push(`<bot-profile>\n${botProfile}\n</bot-profile>`);
@@ -62,6 +68,27 @@ export function buildStableSystemContext(options: StableSystemContextOptions = {
     parts.push(`<bot-instructions>\n${instructions}\n</bot-instructions>`);
   }
   return parts.join("\n\n");
+}
+
+function buildBotIdentityContext(options: StableSystemContextOptions): string | undefined {
+  const botDisplay = options.botLabel ?? options.botName;
+  if (!botDisplay) return undefined;
+
+  const botName = options.botName ?? extractNameFromShortLabel(options.botLabel);
+  const lines = [
+    `你就是当前 Bot：${botDisplay}。`,
+  ];
+  if (botName) {
+    lines.push(`对用户来说，你是 ${botName}。`);
+  }
+  lines.push("不要把 agent、backend、模型或 session 当作用户可见身份。");
+  return `<bot-identity>\n${lines.join("\n")}\n</bot-identity>`;
+}
+
+function extractNameFromShortLabel(label: string | undefined): string | undefined {
+  if (!label) return undefined;
+  const match = label.match(/^[^(]+\((.+)\)$/);
+  return match?.[1]?.trim() || undefined;
 }
 
 function readContextFile(filePath: string | undefined): string | undefined {
