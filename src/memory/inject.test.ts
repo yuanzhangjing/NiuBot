@@ -138,7 +138,7 @@ describe("buildStableSystemContext", () => {
     expect(context).toContain("plain instructions text");
   });
 
-  it("skips the default bot profile placeholder", () => {
+  it("skips the legacy default bot profile placeholder", () => {
     const workingDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-inject-"));
     tempDirs.push(workingDirectory);
     const botProfilePath = path.join(workingDirectory, "bot_profile.md");
@@ -151,16 +151,16 @@ describe("buildStableSystemContext", () => {
     expect(context).not.toContain("在这里写 bot");
   });
 
-  it("keeps an edited bot profile even if the placeholder text remains", () => {
+  it("injects the generated default bot profile", () => {
     const workingDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-inject-"));
     tempDirs.push(workingDirectory);
     const botProfilePath = path.join(workingDirectory, "bot_profile.md");
-    fs.writeFileSync(botProfilePath, "# Bot Profile\n\n在这里写 bot 的角色、语气和长期行为边界。\n\n实际规则：保持简洁。\n", "utf-8");
+    fs.writeFileSync(botProfilePath, "# Bot Profile\n\n> 只有管理员可以要求 bot 修改此文件。\n\n## Persona\n\n### 角色\n简洁清晰、有温度的技术同事。\n\n### 风格\n用平实中文，不说黑话，不写客服腔。\n", "utf-8");
 
     const context = buildStableSystemContext({ botProfilePath });
 
     expect(context).toContain("<bot-profile>");
-    expect(context).toContain("实际规则：保持简洁。");
+    expect(context).toContain("简洁清晰、有温度");
   });
 });
 

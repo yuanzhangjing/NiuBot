@@ -20,6 +20,7 @@ import path from "node:path";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 import yaml from "yaml";
+import { DEFAULT_BOT_PROFILE } from "./bot-profile.js";
 import { AGENT_REGISTRY, DEFAULT_LITE_MODELS, expandHome, loadConfig, type BuiltinBackendType, type NiuBotConfig } from "./config.js";
 import { INSTALL_GUIDE_COMMAND } from "./install-guide.js";
 import { localToday } from "./tz.js";
@@ -744,22 +745,7 @@ function generateEnvTemplate(): string {
 }
 
 export function generateBotProfileTemplate(): string {
-  return `# Bot Profile
-
-> 只有管理员可以要求 bot 修改此文件。
-
-## Persona
-
-### 角色
-无
-
-### 风格
-保持自然、友好的对话风格。
-
-## Instructions
-
-长期职责和行为边界写在这里。
-`;
+  return DEFAULT_BOT_PROFILE;
 }
 
 // ── Start ──────────────────────────────────────────────────

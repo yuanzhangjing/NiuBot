@@ -38,6 +38,8 @@ describe("user-cli init model configuration", () => {
 
     expect(profile).toContain("只有管理员可以要求 bot 修改此文件");
     expect(profile).toContain("# Bot Profile");
+    expect(profile).toContain("简洁清晰、有温度");
+    expect(profile).toContain("平实中文");
   });
 
   it("points agents to INSTALL.md in the top-level help", () => {

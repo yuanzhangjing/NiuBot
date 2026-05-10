@@ -59,7 +59,8 @@ describe("ensureBotProfileFile", () => {
     ensureBotProfileFile(botProfilePath, { instructionsPath });
 
     const content = fs.readFileSync(botProfilePath, "utf-8");
-    expect(content).toContain("在这里写 bot 的角色、语气和长期行为边界。");
-    expect(content).not.toContain("## Instructions");
+    expect(content).toContain("简洁清晰、有温度");
+    expect(content).toContain("平实中文");
+    expect(content).not.toContain("在这里写这个 bot 的长期职责");
   });
 });

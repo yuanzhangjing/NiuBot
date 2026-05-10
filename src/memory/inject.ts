@@ -16,7 +16,7 @@ const RECENT_SESSION_MAX_COUNT = 10;
 const CONTINUATION_TAIL_COUNT = 10;
 /** 续接上下文：每条消息最大长度 */
 const CONTINUATION_MSG_MAX_LEN = 200;
-const DEFAULT_BOT_PROFILE = `# Bot Profile
+const LEGACY_DEFAULT_BOT_PROFILE = `# Bot Profile
 
 在这里写 bot 的角色、语气和长期行为边界。`;
 
@@ -79,7 +79,7 @@ function isDefaultInstructions(content: string): boolean {
 }
 
 function isDefaultBotProfile(content: string): boolean {
-  return normalizeContext(content) === normalizeContext(DEFAULT_BOT_PROFILE);
+  return normalizeContext(content) === normalizeContext(LEGACY_DEFAULT_BOT_PROFILE);
 }
 
 function normalizeContext(content: string): string {
