@@ -101,6 +101,10 @@ export async function createBotInstance(
     backendResolver,
     getAvailableBackends,
     refreshAgentContextFiles,
+    {
+      personaPath: botConfig.personaPath,
+      instructionsPath: botConfig.instructionsPath,
+    },
   );
 
   // 6. 创建 API Server

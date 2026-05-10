@@ -24,9 +24,16 @@ describe("loadStaticContextTemplate", () => {
 
     expect(content).toContain("# Workspace Rules");
     expect(content).toContain("## Project");
-    expect(content).toContain("## Working Rules");
-    expect(content).toContain("## Task Rules");
-    expect(content).toContain("## Recovery Notes");
+    expect(content).toContain("## Workspace Layout");
+    expect(content).toContain("`persona.md`");
+    expect(content).toContain("`instructions.md`");
+    expect(content).toContain("`repos/`");
+    expect(content).toContain("`tasks/`");
+    expect(content).toContain("`tmp/`");
+    expect(content).not.toContain("`.niubot/`");
+    expect(content).not.toContain("## Working Rules");
+    expect(content).not.toContain("## Memory Rules");
+    expect(content).not.toContain("Describe how agents should work");
     expect(content).not.toContain("Do NOT modify this file");
     expect(content).not.toContain("NiuBot Engine service");
   });
@@ -41,7 +48,7 @@ describe("loadStaticContextTemplate", () => {
     expect(exists).toBe(true);
   });
 
-  it("keeps buildStaticContext as the workspace template with source references", () => {
+  it("keeps buildStaticContext as the workspace template without source references", () => {
     const dir = fs.mkdtempSync(path.join(rootDir, ".tmp-static-context-"));
     tempDirs.push(dir);
 
@@ -62,9 +69,10 @@ describe("loadStaticContextTemplate", () => {
     expect(content).not.toContain("plain persona text");
     expect(content).not.toContain("bot rule text");
     expect(content).not.toContain("project background text");
-    expect(content).toContain(personaPath);
-    expect(content).toContain(instructionsPath);
-    expect(content).toContain(projectContextPath);
+    expect(content).not.toContain(personaPath);
+    expect(content).not.toContain(instructionsPath);
+    expect(content).not.toContain(projectContextPath);
+    expect(content).not.toContain("## Stable Context Sources");
   });
 
   it("does not compose source file contents into AGENTS.md", () => {
@@ -77,7 +85,7 @@ describe("loadStaticContextTemplate", () => {
     const content = buildStaticContext({ instructionsPath });
 
     expect(content).toContain("# Workspace Rules");
-    expect(content).toContain(instructionsPath);
+    expect(content).not.toContain(instructionsPath);
     expect(content).not.toContain("## Bot Instructions");
     expect(content).not.toContain("bot rule text");
     expect(content).not.toContain("# Bot Instructions\n\nbot rule text");
@@ -88,10 +96,9 @@ describe("loadStaticContextTemplate", () => {
     tempDirs.push(dir);
 
     const instructionsPath = path.join(dir, "instructions.md");
-    const projectContextPath = path.join(dir, "project.md");
-    ensureStaticContextFiles({ instructionsPath, projectContextPath });
+    ensureStaticContextFiles({ instructionsPath });
 
-    const content = buildStaticContext({ instructionsPath, projectContextPath });
+    const content = buildStaticContext({ instructionsPath });
 
     expect(content).not.toContain("## Bot Instructions");
     expect(content).not.toContain("## Project Context");
@@ -99,26 +106,24 @@ describe("loadStaticContextTemplate", () => {
     expect(content).not.toContain("在这里写这个工作区的背景");
   });
 
-  it("lists stable context source files even when default templates are untouched", () => {
+  it("does not list stable context source files in AGENTS.md", () => {
     const dir = fs.mkdtempSync(path.join(rootDir, ".tmp-static-context-"));
     tempDirs.push(dir);
 
     const personaPath = path.join(dir, "persona.md");
     const instructionsPath = path.join(dir, "instructions.md");
-    const projectContextPath = path.join(dir, "project.md");
-    ensureStaticContextFiles({ instructionsPath, projectContextPath });
+    ensureStaticContextFiles({ instructionsPath });
 
     const content = buildStaticContext({
       personaPath,
       instructionsPath,
-      projectContextPath,
     });
 
-    expect(content).toContain("## Stable Context Sources");
-    expect(content).toContain(personaPath);
-    expect(content).toContain(instructionsPath);
-    expect(content).toContain(projectContextPath);
-    expect(content).toContain("These files are referenced by NiuBot Engine.");
+    expect(content).not.toContain("## Stable Context Sources");
+    expect(content).not.toContain(personaPath);
+    expect(content).not.toContain(instructionsPath);
+    expect(content).not.toContain("Project context:");
+    expect(content).not.toContain("These files are referenced by NiuBot Engine.");
     expect(content).not.toContain("Do not edit AGENTS.md directly");
   });
 });
@@ -135,6 +140,19 @@ describe("ensureWorkspaceAgentFiles", () => {
     expect(fs.existsSync(path.join(dir, "CLAUDE.md"))).toBe(false);
   });
 
+  it("creates workspace layout placeholders without requiring a formal task", () => {
+    const dir = fs.mkdtempSync(path.join(rootDir, ".tmp-static-context-"));
+    tempDirs.push(dir);
+
+    ensureWorkspaceAgentFiles(dir, {});
+
+    expect(fs.readFileSync(path.join(dir, "repos", "AGENTS.md"), "utf-8")).toContain("code repositories");
+    expect(fs.readFileSync(path.join(dir, "tasks", "AGENTS.md"), "utf-8")).toContain("Formal tasks");
+    expect(fs.readFileSync(path.join(dir, "tmp", "AGENTS.md"), "utf-8")).toContain("temporary files");
+    expect(fs.existsSync(path.join(dir, "tasks", "README.md"))).toBe(false);
+    expect(fs.existsSync(path.join(dir, ".niubot", "project.md"))).toBe(false);
+  });
+
   it("does not overwrite an existing user AGENTS.md", () => {
     const dir = fs.mkdtempSync(path.join(rootDir, ".tmp-static-context-"));
     tempDirs.push(dir);
@@ -143,6 +161,17 @@ describe("ensureWorkspaceAgentFiles", () => {
     ensureWorkspaceAgentFiles(dir, {});
 
     expect(fs.readFileSync(path.join(dir, "AGENTS.md"), "utf-8")).toBe("user custom rules");
+  });
+
+  it("does not overwrite existing workspace layout placeholder files", () => {
+    const dir = fs.mkdtempSync(path.join(rootDir, ".tmp-static-context-"));
+    tempDirs.push(dir);
+    fs.mkdirSync(path.join(dir, "tmp"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "tmp", "AGENTS.md"), "custom tmp rules", "utf-8");
+
+    ensureWorkspaceAgentFiles(dir, {});
+
+    expect(fs.readFileSync(path.join(dir, "tmp", "AGENTS.md"), "utf-8")).toBe("custom tmp rules");
   });
 
   it("backs up old generated AGENTS.md before writing the user template", () => {

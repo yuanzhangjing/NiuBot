@@ -5,9 +5,9 @@ import yaml from "yaml";
 import { afterEach, describe, expect, it } from "vitest";
 import { initDatabase } from "../database/schema.js";
 import {
-  buildEngineImportantContext,
   buildImportantContext,
   buildNormalContext,
+  buildStableSystemContext,
   COMPACT_RECOVERY_REMINDER,
 } from "./inject.js";
 
@@ -82,32 +82,39 @@ describe("buildImportantContext", () => {
   });
 });
 
-describe("buildEngineImportantContext", () => {
-  it("combines NiuBot system rules with the dynamic session profile", () => {
+describe("buildStableSystemContext", () => {
+  it("combines NiuBot system rules with bot persona and instructions", () => {
     const workingDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-inject-"));
     tempDirs.push(workingDirectory);
+    const personaPath = path.join(workingDirectory, "persona.md");
+    const instructionsPath = path.join(workingDirectory, "instructions.md");
+    fs.writeFileSync(personaPath, "plain persona text", "utf-8");
+    fs.writeFileSync(instructionsPath, "plain instructions text", "utf-8");
 
-    const db = initDatabase(path.join(workingDirectory, "niubot.db"));
-    const sessionProfile = buildImportantContext(db, {
-      botName: "NiuBot",
-      botLabel: "U3(NiuBot)",
-      platform: "feishu",
-      chatId: "c1",
-      chatLabel: "C1(Zen)",
-      chatType: "p2p",
-      userId: "u2",
-      userName: "Zen",
-      isAdmin: true,
-    });
-
-    const context = buildEngineImportantContext(sessionProfile);
+    const context = buildStableSystemContext({ personaPath, instructionsPath });
 
     expect(context).toContain("<niubot-system-rules>");
     expect(context).toContain("nbt system-rules");
     expect(context).toContain("Task Policy");
     expect(context).toContain("不要启动、停止或重启 NiuBot Engine 服务");
-    expect(context).toContain("<session-profile");
-    expect(context).toContain("用户：U2(Zen)（admin）");
+    expect(context).toContain("<bot-persona>");
+    expect(context).toContain("plain persona text");
+    expect(context).toContain("<bot-instructions>");
+    expect(context).toContain("plain instructions text");
+    expect(context).not.toContain("<session-profile");
+  });
+
+  it("skips the default instructions placeholder", () => {
+    const workingDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-inject-"));
+    tempDirs.push(workingDirectory);
+    const instructionsPath = path.join(workingDirectory, "instructions.md");
+    fs.writeFileSync(instructionsPath, "# Bot Instructions\n\n在这里写这个 bot 的长期职责、做事规则和边界。\n", "utf-8");
+
+    const context = buildStableSystemContext({ instructionsPath });
+
+    expect(context).toContain("<niubot-system-rules>");
+    expect(context).not.toContain("<bot-instructions>");
+    expect(context).not.toContain("在这里写这个 bot");
   });
 });
 

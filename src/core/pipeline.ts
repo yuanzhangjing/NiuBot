@@ -21,14 +21,15 @@ import {
   hasUpdateNotification, recordUpdateNotification,
 } from "../database/schema.js";
 import {
-  buildEngineImportantContext,
   buildImportantContext,
   buildNormalContext,
   buildSpeakerContext,
+  buildStableSystemContext,
   COMPACT_RECOVERY_REMINDER,
   NEW_SESSION_SEARCH_REMINDER,
   type SceneInfo,
   type SpeakerInfo,
+  type StableSystemContextOptions,
 } from "../memory/inject.js";
 import { labelLocalDateTime, labelLocalTime, utcDateTimeForSql } from "../tz.js";
 import { buildArchiveSummaryPrompt } from "./prompts.js";
@@ -189,6 +190,8 @@ export class Pipeline {
   /** 创建新 agent session 前刷新 AGENTS.md / CLAUDE.md 等静态上下文文件 */
   private refreshAgentContextFiles?: () => void;
 
+  private stableContextOptions: StableSystemContextOptions;
+
   constructor(
     db: Database.Database,
     im: PlatformAdapter,
@@ -201,6 +204,7 @@ export class Pipeline {
     backendResolver?: (type: AgentBackendType) => Promise<AgentBackend>,
     getAvailableBackends?: () => string[],
     refreshAgentContextFiles?: () => void,
+    stableContextOptions?: StableSystemContextOptions,
   ) {
     this.db = db;
     this.im = im;
@@ -212,6 +216,10 @@ export class Pipeline {
     this.workingDirectory = workingDirectory;
     this.dbPath = dbPath;
     this.refreshAgentContextFiles = refreshAgentContextFiles;
+    this.stableContextOptions = stableContextOptions ?? {
+      personaPath: path.join(workingDirectory, "persona.md"),
+      instructionsPath: path.join(workingDirectory, "instructions.md"),
+    };
     this.log = createLogger("pipeline", botIdentity.name);
     this.queue = new MessageQueue(bufferMs);
 
@@ -462,7 +470,7 @@ export class Pipeline {
         continue;
       }
 
-      // 重建 important 上下文
+      // 重建 stable system context
       // 群聊：只注入 bot + chat 信息，不注入用户身份
       const isGroup = chatType === "group";
       const userRow = (!isGroup && row.user_id)
@@ -480,14 +488,14 @@ export class Pipeline {
         chatType,
         isAdmin,
       });
-      const importantContext = buildEngineImportantContext(sessionProfile);
+      const stableContext = buildStableSystemContext(this.stableContextOptions);
 
       try {
         const supportsSystemPrompt = this.agent.supportsSystemPrompt === true;
 
         const agentSession = await this.createAgentSession({
           workingDirectory: this.workingDirectory,
-          importantContext: supportsSystemPrompt ? (importantContext || undefined) : undefined,
+          importantContext: supportsSystemPrompt ? (stableContext || undefined) : undefined,
           userId: row.user_id ?? undefined,
           chatId: row.chat_id,
           chatType,
@@ -502,8 +510,11 @@ export class Pipeline {
 
         // fallback 模式下：仅新建 session 时需要注入（resume 的 session 已有上下文）
         const isResuming = canResumeRecoveredSession && !!row.agent_session_id;
-        if (!supportsSystemPrompt && importantContext && !isResuming) {
-          this.pendingImportantContext.set(row.chat_id, importantContext);
+        if (!isResuming) {
+          this.pendingMessageContext.set(row.chat_id, sessionProfile);
+        }
+        if (!supportsSystemPrompt && stableContext && !isResuming) {
+          this.pendingStableContext.set(row.chat_id, stableContext);
         }
 
         this.chatSessions.set(row.chat_id, {
@@ -1237,7 +1248,7 @@ export class Pipeline {
     const chatRow = this.db.prepare("SELECT type FROM chats WHERE id = ?").get(chatId) as { type: string } | undefined;
     const chatType = (chatRow?.type ?? "p2p") as "p2p" | "group";
 
-    // Build important context（场景 + 用户记忆）
+    // Build session dynamic context（场景 + 用户记忆）
     const isGroup = chatType === "group";
     const userRow = (!isGroup && userId)
       ? this.db.prepare("SELECT name FROM users WHERE id = ?").get(userId) as { name: string | null } | undefined
@@ -1254,7 +1265,7 @@ export class Pipeline {
       chatType,
       isAdmin,
     });
-    const importantContext = buildEngineImportantContext(sessionProfile);
+    const stableContext = buildStableSystemContext(this.stableContextOptions);
 
     // 等待上一个 session 的归档摘要完成，超时后放行
     const _pendingSummary = this.pendingSummary.get(chatId);
@@ -1264,14 +1275,14 @@ export class Pipeline {
       clearTimeout(timer);
     }
 
-    // Build normal context（会话定位 + task 索引 + 最近 session summaries）
+    // Build task and conversation context（任务索引 + 最近 session summaries）
     const normalContext = buildNormalContext(this.db, chatId, this.workingDirectory, undefined, chatType, userId);
 
     // Create independent agent session
     const supportsSystemPrompt = this.agent.supportsSystemPrompt === true;
     const agentSession = await this.createAgentSession({
       workingDirectory: this.workingDirectory,
-      importantContext: supportsSystemPrompt ? (importantContext || undefined) : undefined,
+      importantContext: supportsSystemPrompt ? (stableContext || undefined) : undefined,
       userId: userId ?? undefined,
       chatId,
       chatType,
@@ -1303,9 +1314,10 @@ export class Pipeline {
     // Inject context prefix
     let messageToSend = prompt;
     const contextParts: string[] = [];
-    if (!supportsSystemPrompt && importantContext) {
-      contextParts.push(importantContext);
+    if (!supportsSystemPrompt && stableContext) {
+      contextParts.push(stableContext);
     }
+    contextParts.push(sessionProfile);
     if (normalContext) {
       contextParts.push(`<session-state>\n${normalContext}\n</session-state>`);
     }
@@ -2133,37 +2145,47 @@ export class Pipeline {
       const msgIds = messages.map((m) => m.dbMsgId).filter((id): id is number => id != null);
       const firstMsgId = msgIds.length > 0 ? Math.min(...msgIds) : undefined;
       const chatSession = await this.getOrCreateSession(chatId, firstMsgId, signal);
+      const chatTypeRow = this.db.prepare("SELECT type FROM chats WHERE id = ?").get(chatId) as { type: string } | undefined;
+      const processChatType = (chatTypeRow?.type ?? "p2p") as "p2p" | "group";
 
       // 拼接上下文前缀（新 session 的首条消息）
       let messageToSend = mergedText;
-      const importantCtx = this.pendingImportantContext.get(chatId);
-      const normalCtx = this.pendingNormalContext.get(chatId);
+      const stableCtx = this.pendingStableContext.get(chatId);
+      const messageCtx = this.pendingMessageContext.get(chatId);
       const compactRecovery = this.pendingCompactRecovery.has(chatId);
       const isNewSessionPrompt = this.pendingNewSessionReminder.has(chatId);
-      if (importantCtx || normalCtx || compactRecovery || isNewSessionPrompt) {
+      if (stableCtx || messageCtx || compactRecovery || isNewSessionPrompt) {
         const parts: string[] = [];
-        if (importantCtx) {
-          parts.push(importantCtx);
+        if (stableCtx) {
+          parts.push(stableCtx);
         }
-        if (normalCtx) {
-          parts.push(`<session-state>\n${normalCtx}\n</session-state>`);
+        if (messageCtx) {
+          parts.push(messageCtx);
         }
         if (compactRecovery) {
-          parts.push(COMPACT_RECOVERY_REMINDER);
+          const recoveryParts = [COMPACT_RECOVERY_REMINDER];
+          if (this.agent.supportsSystemPrompt !== true) {
+            recoveryParts.push(buildStableSystemContext(this.stableContextOptions));
+          }
+          const recoveryUserId = processChatType === "group" ? undefined : chatSession.userId;
+          recoveryParts.push(this.buildSessionProfile(chatId, processChatType, recoveryUserId));
+          const recoveryState = buildNormalContext(this.db, chatId, this.workingDirectory, firstMsgId, processChatType, recoveryUserId);
+          if (recoveryState) {
+            recoveryParts.push(`<session-state>\n${recoveryState}\n</session-state>`);
+          }
+          parts.push(recoveryParts.join("\n\n"));
         }
         if (isNewSessionPrompt) {
           parts.push(NEW_SESSION_SEARCH_REMINDER);
         }
-        this.pendingImportantContext.delete(chatId);
-        this.pendingNormalContext.delete(chatId);
+        this.pendingStableContext.delete(chatId);
+        this.pendingMessageContext.delete(chatId);
         this.pendingCompactRecovery.delete(chatId);
         this.pendingNewSessionReminder.delete(chatId);
         messageToSend = `${parts.join("\n\n")}\n\n${mergedText}`;
       }
 
       // 群聊：消息级 speaker 注入（<current-speaker> / <speakers>）
-      const chatTypeRow = this.db.prepare("SELECT type FROM chats WHERE id = ?").get(chatId) as { type: string } | undefined;
-      const processChatType = (chatTypeRow?.type ?? "p2p") as "p2p" | "group";
       if (processChatType === "group" && messages.length > 0) {
         // 提取去重的 sender 列表
         const senderIds = [...new Set(messages.map((m) => m.senderId).filter((id): id is string => !!id))];
@@ -2384,7 +2406,7 @@ export class Pipeline {
     // 消费路由决策（如有）
     this.pendingRouteDecisions.delete(chatId);
 
-    // 构建 important 上下文（当前场景 + 用户记忆）
+    // 构建 session dynamic context（当前场景 + 用户记忆）
     // 群聊：只注入 bot + chat 信息，不注入用户身份（由消息级 speaker 注入）
     const isGroup = chatType === "group";
     const userRow = (!isGroup && userId)
@@ -2402,7 +2424,7 @@ export class Pipeline {
       chatType,
       isAdmin,
     });
-    const importantContext = buildEngineImportantContext(sessionProfile);
+    const stableContext = buildStableSystemContext(this.stableContextOptions);
 
     // 等待上一个 session 的归档摘要完成，确保 context 注入拿到最新 summary
     // 超时或 /stop 中断时放行，不阻塞新会话
@@ -2424,18 +2446,20 @@ export class Pipeline {
       if (abortHandler) signal?.removeEventListener("abort", abortHandler);
     }
 
-    // 构建 normal 上下文（会话定位 + task 索引 + 最近 session summaries）— 后续拼到首条消息前缀
+    // 构建 task/conversation context（会话定位 + task 索引 + 最近 session summaries）— 后续拼到首条消息前缀
     const normalContext = buildNormalContext(this.db, chatId, this.workingDirectory, beforeMsgId, chatType, userId);
+    const messageContextParts = [sessionProfile];
     if (normalContext) {
-      this.pendingNormalContext.set(chatId, normalContext);
+      messageContextParts.push(`<session-state>\n${normalContext}\n</session-state>`);
     }
+    this.pendingMessageContext.set(chatId, messageContextParts.join("\n\n"));
 
-    // backend 不支持 system prompt 时，important 上下文 fallback 到首条消息前缀
+    // backend 不支持 persistent system prompt 时，stable context fallback 到首条消息前缀
     const supportsSystemPrompt = this.agent.supportsSystemPrompt === true;
 
     const agentSession = await this.createAgentSession({
       workingDirectory: this.workingDirectory,
-      importantContext: supportsSystemPrompt ? (importantContext || undefined) : undefined,
+      importantContext: supportsSystemPrompt ? (stableContext || undefined) : undefined,
       userId: userId ?? undefined,
       chatId,
       chatType,
@@ -2447,8 +2471,8 @@ export class Pipeline {
       isAdmin,
     });
 
-    if (!supportsSystemPrompt && importantContext) {
-      this.pendingImportantContext.set(chatId, importantContext);
+    if (!supportsSystemPrompt && stableContext) {
+      this.pendingStableContext.set(chatId, stableContext);
     }
     this.pendingNewSessionReminder.add(chatId);
 
@@ -2490,21 +2514,40 @@ export class Pipeline {
   /** 路由决策结果暂存 */
   private pendingRouteDecisions = new Map<string, RouteDecision>();
 
-  /** normal 上下文暂存 */
-  private pendingNormalContext = new Map<string, string>();
+  /** 首条消息或恢复消息的动态上下文暂存 */
+  private pendingMessageContext = new Map<string, string>();
 
-  /** important 上下文暂存（backend 不支持 system prompt 时 fallback） */
-  private pendingImportantContext = new Map<string, string>();
+  /** stable context 暂存（backend 不支持 persistent system prompt 时 fallback） */
+  private pendingStableContext = new Map<string, string>();
 
   /** 新 session 首条消息提醒暂存 */
   private pendingNewSessionReminder = new Set<string>();
 
   private clearChatRuntimeState(chatId: string): void {
-    this.pendingNormalContext.delete(chatId);
-    this.pendingImportantContext.delete(chatId);
+    this.pendingMessageContext.delete(chatId);
+    this.pendingStableContext.delete(chatId);
     this.pendingNewSessionReminder.delete(chatId);
     this.pendingCompactRecovery.delete(chatId);
     this.lastCompactCounts.delete(chatId);
+  }
+
+  private buildSessionProfile(chatId: string, chatType: "p2p" | "group", userId?: string): string {
+    const isGroup = chatType === "group";
+    const userRow = (!isGroup && userId)
+      ? this.db.prepare("SELECT name FROM users WHERE id = ?").get(userId) as { name: string | null } | undefined
+      : undefined;
+    const isAdmin = userId ? this.adminRoles.has(userId) : false;
+    return buildImportantContext(this.db, {
+      botName: this.botIdentity.name,
+      botLabel: this.botUserId ? getUserShortLabel(this.db, this.botUserId) : undefined,
+      platform: this.botIdentity.platform,
+      userName: userRow?.name ?? undefined,
+      userId: isGroup ? undefined : userId,
+      chatId,
+      chatLabel: getChatShortLabel(this.db, chatId),
+      chatType,
+      isAdmin,
+    });
   }
 
   private updateCompactRecoveryState(chatId: string, compactCount: number | undefined): void {

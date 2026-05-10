@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
@@ -356,6 +356,50 @@ describe("Pipeline.recover", () => {
 
     expect(agent.createSessionCalls).toHaveLength(1);
     expect(agent.createSessionCalls[0]?.agentSessionId).toBe("claude-session-id");
+  });
+
+  test("injects session profile on first message after recovering a non-resumable active session", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare(`
+      INSERT INTO users (id, name, platform, platform_id)
+      VALUES ('u2', 'admin', 'feishu', 'user-open-id')
+    `).run();
+    db.prepare(`
+      INSERT INTO chats (id, type, platform, platform_id, user_id)
+      VALUES ('c1', 'p2p', 'feishu', 'chat-open-id', 'user-open-id')
+    `).run();
+    db.prepare(`
+      INSERT INTO sessions (id, chat_id, user_id, status, agent_session_id, backend_type, last_active_at)
+      VALUES ('s1', 'c1', 'u2', 'active', NULL, 'claude', datetime('now'))
+    `).run();
+
+    const agent = new RecordingAgent();
+    const pipeline = new Pipeline(
+      db,
+      createImStub(),
+      agent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "claude",
+    );
+
+    await pipeline.start();
+    await pipeline.recover();
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "after recover",
+      platformMsgId: "m-recover-context",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(agent.sendMessageCalls).toHaveLength(1);
+    expect(agent.sendMessageCalls[0]).toContain("<session-profile");
+    expect(agent.sendMessageCalls[0]).toContain("after recover");
+    expect(agent.sendMessageCalls[0]).not.toContain("<niubot-system-rules>");
   });
 
   test("handles single-slash status as a local builtin command", () => {
@@ -991,9 +1035,11 @@ describe("Pipeline.recover", () => {
     expect(agent.createSessionCalls).toHaveLength(1);
   });
 
-  test("injects system rules and session profile through system prompt when supported", async () => {
+  test("injects only stable context through system prompt when supported", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
+    writeFileSync(path.join(dir, "persona.md"), "plain bot persona", "utf-8");
+    writeFileSync(path.join(dir, "instructions.md"), "plain bot instructions", "utf-8");
 
     const db = initDatabase(path.join(dir, "niubot.db"));
     const agent = new RecordingAgent();
@@ -1017,16 +1063,22 @@ describe("Pipeline.recover", () => {
 
     expect(agent.createSessionCalls).toHaveLength(1);
     expect(agent.createSessionCalls[0]?.importantContext).toContain("<niubot-system-rules>");
-    expect(agent.createSessionCalls[0]?.importantContext).toContain("<session-profile");
+    expect(agent.createSessionCalls[0]?.importantContext).toContain("plain bot persona");
+    expect(agent.createSessionCalls[0]?.importantContext).toContain("plain bot instructions");
+    expect(agent.createSessionCalls[0]?.importantContext).not.toContain("<session-profile");
     expect(agent.createSessionCalls[0]?.importantContext).toContain("nbt system-rules");
     expect(agent.sendMessageCalls).toHaveLength(1);
+    expect(agent.sendMessageCalls[0]).toContain("<session-profile");
     expect(agent.sendMessageCalls[0]).toContain("这是一个全新的对话 session");
     expect(agent.sendMessageCalls[0]).not.toContain("<niubot-system-rules>");
+    expect(agent.sendMessageCalls[0]).not.toContain("plain bot persona");
   });
 
   test("falls back to first user prompt when system prompt is not supported", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
+    writeFileSync(path.join(dir, "persona.md"), "fallback bot persona", "utf-8");
+    writeFileSync(path.join(dir, "instructions.md"), "fallback bot instructions", "utf-8");
 
     const db = initDatabase(path.join(dir, "niubot.db"));
     const agent = new RecordingAgent();
@@ -1053,6 +1105,8 @@ describe("Pipeline.recover", () => {
     expect(agent.createSessionCalls[0]?.importantContext).toBeUndefined();
     expect(agent.sendMessageCalls).toHaveLength(1);
     expect(agent.sendMessageCalls[0]).toContain("<niubot-system-rules>");
+    expect(agent.sendMessageCalls[0]).toContain("fallback bot persona");
+    expect(agent.sendMessageCalls[0]).toContain("fallback bot instructions");
     expect(agent.sendMessageCalls[0]).toContain("<session-profile");
     expect(agent.sendMessageCalls[0]).toContain("这是一个全新的对话 session");
     expect(agent.sendMessageCalls[0]).toContain("hello");
@@ -1103,11 +1157,56 @@ describe("Pipeline.recover", () => {
     expect(agent.sendMessageCalls).toHaveLength(4);
     expect(agent.sendMessageCalls[0]).not.toContain(COMPACT_RECOVERY_REMINDER);
     expect(agent.sendMessageCalls[1]).toContain(COMPACT_RECOVERY_REMINDER);
+    expect(agent.sendMessageCalls[1]).toContain("<session-profile");
+    expect(agent.sendMessageCalls[1]).not.toContain("<niubot-system-rules>");
     expect(agent.sendMessageCalls[1]).toContain("second");
     expect(agent.sendMessageCalls[2]).not.toContain(COMPACT_RECOVERY_REMINDER);
     expect(agent.sendMessageCalls[3]).toContain(COMPACT_RECOVERY_REMINDER);
+    expect(agent.sendMessageCalls[3]).not.toContain("<niubot-system-rules>");
     expect(agent.sendMessageCalls[3]).toContain("fourth");
     expect(SYSTEM_RULES).toContain("nbt system-rules");
+  });
+
+  test("reasserts stable context after compact when system prompt is not supported", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+    writeFileSync(path.join(dir, "persona.md"), "no-system persona", "utf-8");
+    writeFileSync(path.join(dir, "instructions.md"), "no-system instructions", "utf-8");
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const agent = new CompactCountingAgent([1, undefined]);
+    agent.supportsSystemPrompt = false;
+    const pipeline = new Pipeline(
+      db,
+      createImStub(),
+      agent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+
+    await pipeline.start();
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "first",
+      platformMsgId: "m-compact-nosystem-1",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "second",
+      platformMsgId: "m-compact-nosystem-2",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(agent.sendMessageCalls).toHaveLength(2);
+    expect(agent.sendMessageCalls[1]).toContain(COMPACT_RECOVERY_REMINDER);
+    expect(agent.sendMessageCalls[1]).toContain("<niubot-system-rules>");
+    expect(agent.sendMessageCalls[1]).toContain("no-system persona");
+    expect(agent.sendMessageCalls[1]).toContain("no-system instructions");
+    expect(agent.sendMessageCalls[1]).toContain("<session-profile");
+    expect(agent.sendMessageCalls[1]).toContain("second");
   });
 
   test("defers later messages until /new reset finishes", async () => {

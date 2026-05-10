@@ -21,18 +21,41 @@ const DEFAULT_PROJECT_CONTEXT = `# Project Context
 在这里写这个工作区的背景、代码目录、测试命令、发布规则和常见坑。
 `;
 
+const DEFAULT_REPOS_AGENTS = `# Repositories
+
+This directory contains real code repositories.
+
+Each first-level directory under \`repos/\` is a repository.
+
+Work inside the target repo when modifying code, running tests, or using git.
+Do not put scratch files, reports, or one-off notes directly under \`repos/\`.
+`;
+
+const DEFAULT_TASKS_AGENTS = `# Tasks
+
+Formal tasks are managed by \`nbt task\`.
+
+Do not create task directories manually.
+Task README files are the source of truth for task progress.
+Only active tasks are injected into agent sessions.
+`;
+
+const DEFAULT_TMP_AGENTS = `# Temporary Workspace
+
+This directory is for temporary files, drafts, command outputs, and one-off analysis.
+
+Files here are not stable project context.
+They may be deleted.
+
+If something becomes important, summarize it into the relevant task README or repo docs.
+`;
+
 export function loadStaticContextTemplate(): string {
   return fs.readFileSync(templatePath, "utf-8");
 }
 
-export function buildStaticContext(options: StaticContextOptions = {}): string {
-  const parts = [loadStaticContextTemplate().trimEnd()];
-  const sources = formatSourcesSection(options);
-  if (sources) {
-    parts.push(sources);
-  }
-
-  return `${parts.join("\n\n")}\n`;
+export function buildStaticContext(_options: StaticContextOptions = {}): string {
+  return `${loadStaticContextTemplate().trimEnd()}\n`;
 }
 
 export function ensureStaticContextFiles(options: StaticContextOptions): void {
@@ -44,6 +67,7 @@ export function ensureWorkspaceAgentFiles(workingDirectory: string, options: Sta
   const agentsPath = path.join(workingDirectory, "AGENTS.md");
   try {
     fs.mkdirSync(workingDirectory, { recursive: true });
+    ensureWorkspaceLayoutFiles(workingDirectory);
     if (fs.existsSync(agentsPath)) {
       const existing = fs.readFileSync(agentsPath, "utf-8");
       if (!isOldGeneratedAgentsFile(existing)) return;
@@ -56,6 +80,12 @@ export function ensureWorkspaceAgentFiles(workingDirectory: string, options: Sta
   }
 }
 
+function ensureWorkspaceLayoutFiles(workingDirectory: string): void {
+  ensureFile(path.join(workingDirectory, "repos", "AGENTS.md"), DEFAULT_REPOS_AGENTS);
+  ensureFile(path.join(workingDirectory, "tasks", "AGENTS.md"), DEFAULT_TASKS_AGENTS);
+  ensureFile(path.join(workingDirectory, "tmp", "AGENTS.md"), DEFAULT_TMP_AGENTS);
+}
+
 function ensureFile(filePath: string | undefined, defaultContent: string): void {
   if (!filePath) return;
   try {
@@ -65,28 +95,6 @@ function ensureFile(filePath: string | undefined, defaultContent: string): void 
   } catch {
     // Optional context files should not prevent the bot from starting.
   }
-}
-
-function formatSourcesSection(options: StaticContextOptions): string | undefined {
-  const sources: string[] = [];
-  if (options.personaPath) {
-    sources.push(`- Persona: ${options.personaPath}`);
-  }
-  if (options.instructionsPath) {
-    sources.push(`- Bot instructions: ${options.instructionsPath}`);
-  }
-  if (options.projectContextPath) {
-    sources.push(`- Project context: ${options.projectContextPath}`);
-  }
-  if (sources.length === 0) return undefined;
-
-  return [
-    "## Stable Context Sources",
-    "These files are referenced by NiuBot Engine.",
-    "NiuBot system rules are injected by the engine. Run `nbt system-rules` to view them.",
-    "",
-    ...sources,
-  ].join("\n");
 }
 
 function isOldGeneratedAgentsFile(content: string): boolean {

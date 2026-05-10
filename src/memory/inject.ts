@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import type Database from "better-sqlite3";
 import { listUserMemory } from "./user-memory.js";
 import { formatShortLabel, formatSenderLabel } from "../database/schema.js";
@@ -35,11 +36,39 @@ export const COMPACT_RECOVERY_REMINDER =
 不要把 compact 摘要当成原文。
 </compact-recovery>`;
 
-export function buildEngineImportantContext(sessionProfile: string): string {
-  return `${SYSTEM_RULES}\n\n${sessionProfile}`;
+export interface StableSystemContextOptions {
+  personaPath?: string;
+  instructionsPath?: string;
 }
 
-// ── Important context (不能被 compact 丢失) ──────────────────
+export function buildStableSystemContext(options: StableSystemContextOptions = {}): string {
+  const parts = [SYSTEM_RULES];
+  const persona = readContextFile(options.personaPath);
+  if (persona) {
+    parts.push(`<bot-persona>\n${persona}\n</bot-persona>`);
+  }
+  const instructions = readContextFile(options.instructionsPath);
+  if (instructions && !isDefaultInstructions(instructions)) {
+    parts.push(`<bot-instructions>\n${instructions}\n</bot-instructions>`);
+  }
+  return parts.join("\n\n");
+}
+
+function readContextFile(filePath: string | undefined): string | undefined {
+  if (!filePath) return undefined;
+  try {
+    const content = fs.readFileSync(filePath, "utf-8").trim();
+    return content.length > 0 ? content : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function isDefaultInstructions(content: string): boolean {
+  return content.includes("在这里写这个 bot 的长期职责、做事规则和边界。");
+}
+
+// ── Session profile (场景 + 私聊用户记忆) ──────────────────
 
 export interface SceneInfo {
   botName: string;
@@ -58,8 +87,8 @@ export interface SceneInfo {
 }
 
 /**
- * 构建 important 上下文：当前场景 + 用户记忆。
- * 优先注入 system prompt（CLI），不支持时注入 user prompt 前缀。
+ * 构建 session profile：当前场景 + 私聊用户记忆。
+ * 新 session 和 compact recovery 都会通过 user prompt 前缀注入。
  */
 export function buildImportantContext(
   db: Database.Database,
@@ -159,10 +188,10 @@ export function buildSpeakerContext(
   return `<speakers>\n${blocks.join("\n")}\n</speakers>`;
 }
 
-// ── Normal context (可以接受 compact 压缩) ───────────────────
+// ── Task and conversation context (可以接受 compact 压缩) ──────
 
 /**
- * 构建 normal 上下文：task 索引 + 最近 session summary + 续接消息。
+ * 构建 task/conversation 上下文：task 索引 + 最近 session summary + 续接消息。
  * 注入 user prompt 前缀。
  */
 export function buildNormalContext(

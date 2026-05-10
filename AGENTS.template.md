@@ -1,23 +1,17 @@
 # Workspace Rules
 
-This file is owned by the workspace. NiuBot will create it when missing, but will not overwrite user edits.
+User-editable workspace notes. NiuBot creates this file when missing and does not overwrite user edits.
 
 ## Project
 
-Describe what this workspace is and where the main code lives.
+Describe what this workspace is and where the main code lives. For example: `repos/<repo>/`.
 
-## Working Rules
+## Workspace Layout
 
-Describe how agents should work in this project.
+- `persona.md`: bot role and response style.
+- `instructions.md`: bot-level long-term instructions.
+- `repos/`: code repositories.
+- `tasks/`: formal tasks managed by `nbt task`.
+- `tmp/`: temporary files, drafts, command outputs, and one-off analysis.
 
-## Task Rules
-
-Describe project-specific task, commit, release, and verification habits.
-
-## Memory Rules
-
-Describe what project information may be remembered and what should stay out of memory.
-
-## Recovery Notes
-
-List project-specific files, commands, or notes that help recover context.
+Do not write ad hoc files into the workspace root. Put temporary files under `tmp/`.

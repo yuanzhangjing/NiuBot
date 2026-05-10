@@ -18,7 +18,7 @@ export interface SessionConfig {
   model?: string;
   /** 轻量模型 ID（覆盖 backend 默认值） */
   liteModel?: string;
-  /** important 上下文（通过 system prompt 注入） */
+  /** stable system context（通过后端 system prompt 注入） */
   importantContext?: string;
   /** 当前用户 ID（传递给 agent 环境变量） */
   userId?: string;

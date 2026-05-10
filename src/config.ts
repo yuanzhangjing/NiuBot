@@ -50,11 +50,11 @@ export interface BotConfig {
   workingDirectory: string;
   /** 数据库路径（默认 ~/.niubot/<id>/niubot.db） */
   dbPath: string;
-  /** 人格文件路径（默认 ~/.niubot/<id>/persona.md） */
+  /** 人格文件路径（默认 <workingDirectory>/persona.md） */
   personaPath: string;
-  /** Bot 级长期做事规则（默认 ~/.niubot/<id>/instructions.md） */
+  /** Bot 级长期做事规则（默认 <workingDirectory>/instructions.md） */
   instructionsPath?: string;
-  /** 项目级长期背景（默认 <workingDirectory>/.niubot/project.md） */
+  /** 项目级长期背景（可选；默认不创建 workspace .niubot/project.md） */
   projectContextPath?: string;
   /** 主模型（可选，覆盖 backend 默认值） */
   model?: string;
@@ -175,9 +175,8 @@ export function loadConfig(configPath?: string): NiuBotConfig {
       backend: legacyDefaultBackend,
       workingDirectory: legacyWorkingDirectory,
       dbPath: path.resolve(expandHome(legacyDbPath)),
-      personaPath: path.join(NIUBOT_HOME, "persona.md"),
-      instructionsPath: path.join(NIUBOT_HOME, "instructions.md"),
-      projectContextPath: path.join(legacyWorkingDirectory, ".niubot", "project.md"),
+      personaPath: path.join(legacyWorkingDirectory, "persona.md"),
+      instructionsPath: path.join(legacyWorkingDirectory, "instructions.md"),
       liteModel: process.env["NIUBOT_LITE_MODEL"] ?? (legacyAgentFile["liteModel"] as string | undefined) ?? undefined,
     }];
   }
@@ -229,9 +228,9 @@ function parseBotConfig(raw: Record<string, string>, legacyDefaultBackend?: stri
     backend,
     workingDirectory,
     dbPath: raw["dbPath"] ? path.resolve(expandHome(raw["dbPath"])) : path.join(botDir, "niubot.db"),
-    personaPath: raw["personaPath"] ? path.resolve(expandHome(raw["personaPath"])) : path.join(botDir, "persona.md"),
-    instructionsPath: raw["instructionsPath"] ? path.resolve(expandHome(raw["instructionsPath"])) : path.join(botDir, "instructions.md"),
-    projectContextPath: raw["projectContextPath"] ? path.resolve(expandHome(raw["projectContextPath"])) : path.join(workingDirectory, ".niubot", "project.md"),
+    personaPath: raw["personaPath"] ? path.resolve(expandHome(raw["personaPath"])) : path.join(workingDirectory, "persona.md"),
+    instructionsPath: raw["instructionsPath"] ? path.resolve(expandHome(raw["instructionsPath"])) : path.join(workingDirectory, "instructions.md"),
+    projectContextPath: raw["projectContextPath"] ? path.resolve(expandHome(raw["projectContextPath"])) : undefined,
     model: raw["model"] ?? undefined,
     liteModel: raw["liteModel"] ?? undefined,
   };

@@ -35,6 +35,11 @@ export function buildTaskReadme(name: string, description: string): string {
 
 ${description || "Task description here."}
 
+## Related Context
+
+- Repositories: （填写相关仓库路径，例如 \`repos/niubot/\`）
+- Key files: （填写关键文件或目录）
+
 ## In Progress
 
 （无）
