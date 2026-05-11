@@ -307,6 +307,43 @@ afterEach(() => {
 });
 
 describe("Pipeline.start", () => {
+  test("registers message entrypoint without waiting for platform probes", async () => {
+    vi.useFakeTimers();
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const im = createImStub();
+    let messageHandlerRegistered = false;
+    im.onMessage = () => {
+      messageHandlerRegistered = true;
+    };
+    im.getBotOpenId = async () => new Promise<string | undefined>(() => {});
+    im.getBotName = async () => new Promise<string | undefined>(() => {});
+    im.getAppCreatorId = async () => new Promise<string | undefined>(() => {});
+    const agent = new RecordingAgent();
+    const pipeline = new Pipeline(
+      db,
+      im,
+      agent,
+      { name: "NiuBot", platform: "feishu", platformBotId: "bot" },
+      dir,
+      path.join(dir, "niubot.db"),
+      10,
+      "codex",
+    );
+
+    let resolved = false;
+    void pipeline.start().then(() => { resolved = true; });
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(resolved).toBe(true);
+    expect(messageHandlerRegistered).toBe(true);
+    pipeline.stop();
+  });
+
   test("continues startup when app creator detection hangs", async () => {
     vi.useFakeTimers();
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));

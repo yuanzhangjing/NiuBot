@@ -260,7 +260,46 @@ export class Pipeline {
 
   /** 启动管道：注册 IM 消息回调 */
   async start(): Promise<void> {
-    // Resolve bot's real open_id and display name from platform
+    // 先用配置里的占位 bot id 建立本地身份，平台真实身份放后台补齐。
+    this.botUserId = ensureUser(
+      this.db,
+      this.botIdentity.platform,
+      this.botIdentity.platformBotId,
+      this.botIdentity.name,
+      "bot_info",
+    );
+
+    this.markUnfinishedRuntimeRunsFailedByRestart();
+    this.restoreAdminsFromDb();
+
+    this.im.onMessage((msg) => this.handleMessage(msg));
+    // 启动 watchdog 定时器
+    this.watchdogTimer = setInterval(() => this.runIdleWatchdogSafely(), AGENT_WATCHDOG_INTERVAL_MS);
+    if (this.isUpdateNotificationWindow(new Date())) {
+      this.checkForUpdatesAndNotifyAdmins().catch((err) => {
+        this.log.warn("startup update check failed", { error: String(err) });
+      });
+    }
+    this.scheduleNextUpdateCheck();
+    this.runStartupPlatformProbes();
+
+    this.log.info("pipeline started", {
+      botUserId: this.botUserId,
+      botPlatformId: this.botIdentity.platformBotId,
+      adminCount: this.adminRoles.size,
+      backend: this.backendType,
+      model: this.botIdentity.model ?? "default",
+      liteModel: this.botIdentity.liteModel ?? "default",
+    });
+
+  }
+
+  private runStartupPlatformProbes(): void {
+    void this.refreshBotIdentityFromPlatform();
+    void this.detectAppCreatorAdmin();
+  }
+
+  private async refreshBotIdentityFromPlatform(): Promise<void> {
     let platformBotName: string | undefined;
     try {
       const [realBotId, name] = await withTimeout({
@@ -277,6 +316,7 @@ export class Pipeline {
       platformBotName = name ?? undefined;
     } catch (err) {
       this.log.warn("failed to fetch bot identity", { error: String(err) });
+      return;
     }
 
     // 平台显示名写入 DB user 记录（用于 whoami 等场景），但不覆盖 botIdentity.name（config name，用于路径）
@@ -287,31 +327,11 @@ export class Pipeline {
       platformBotName ?? this.botIdentity.name,
       "bot_info",
     );
-
-    this.markUnfinishedRuntimeRunsFailedByRestart();
-
-    // Detect admin users
-    await this.detectAdmins();
-
-    this.im.onMessage((msg) => this.handleMessage(msg));
-    // 启动 watchdog 定时器
-    this.watchdogTimer = setInterval(() => this.runIdleWatchdogSafely(), AGENT_WATCHDOG_INTERVAL_MS);
-    if (this.isUpdateNotificationWindow(new Date())) {
-      this.checkForUpdatesAndNotifyAdmins().catch((err) => {
-        this.log.warn("startup update check failed", { error: String(err) });
-      });
-    }
-    this.scheduleNextUpdateCheck();
-
-    this.log.info("pipeline started", {
+    this.log.info("bot identity refreshed", {
       botUserId: this.botUserId,
       botPlatformId: this.botIdentity.platformBotId,
-      adminCount: this.adminRoles.size,
-      backend: this.backendType,
-      model: this.botIdentity.model ?? "default",
-      liteModel: this.botIdentity.liteModel ?? "default",
+      botPlatformName: platformBotName ?? null,
     });
-
   }
 
   /** 停止管道：清除队列计时器 */
@@ -918,17 +938,17 @@ export class Pipeline {
     return true;
   }
 
-  /** Detect admin users from DB + platform */
-  private async detectAdmins(): Promise<void> {
-    const platform = this.botIdentity.platform;
-
-    // 0. Restore from DB
+  /** Restore admin users from local DB only. This must stay fast during startup. */
+  private restoreAdminsFromDb(): void {
     for (const { id, role } of getAdminUserIds(this.db)) {
       this.adminRoles.set(id, role);
       this.log.info("admin restored from DB", { userId: id, role });
     }
+  }
 
-    // 1. App creator → owner
+  /** Detect platform app creator in the background. */
+  private async detectAppCreatorAdmin(): Promise<void> {
+    const platform = this.botIdentity.platform;
     try {
       const creatorId = await withTimeout({
         label: "app creator detection",
