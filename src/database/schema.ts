@@ -307,6 +307,29 @@ const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 15,
+    description: "Track runtime events for run lifecycle diagnostics",
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS runtime_events (
+          id               INTEGER PRIMARY KEY AUTOINCREMENT,
+          bot_id           TEXT NOT NULL,
+          chat_id          TEXT NOT NULL,
+          run_id           TEXT NOT NULL,
+          message_ids_json TEXT NOT NULL,
+          stage            TEXT NOT NULL,
+          event            TEXT NOT NULL,
+          error            TEXT,
+          elapsed_ms       INTEGER,
+          created_at       TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_runtime_events_chat ON runtime_events(chat_id, id);
+        CREATE INDEX IF NOT EXISTS idx_runtime_events_run ON runtime_events(run_id, id);
+        CREATE INDEX IF NOT EXISTS idx_runtime_events_bot ON runtime_events(bot_id, id);
+      `);
+    },
+  },
 ];
 
 const LATEST_VERSION = migrations[migrations.length - 1]!.version;
@@ -338,6 +361,38 @@ export interface BotRuntimeState {
 export interface BotBackendModelState {
   model?: string;
   liteModel?: string;
+}
+
+export type RuntimeEventName =
+  | "started"
+  | "stage_changed"
+  | "timeout"
+  | "failed"
+  | "stopped"
+  | "done"
+  | "failed_by_restart";
+
+export interface RuntimeEventInput {
+  botId: string;
+  chatId: string;
+  runId: string;
+  messageIds: number[];
+  stage: string;
+  event: RuntimeEventName;
+  error?: string;
+  elapsedMs?: number;
+}
+
+export interface RuntimeEventRow extends RuntimeEventInput {
+  id: number;
+  createdAt: string;
+}
+
+export interface RuntimeEventQuery {
+  botId?: string;
+  chatId?: string;
+  runId?: string;
+  limit?: number;
 }
 
 export function getBotRuntimeState(db: Database.Database, botName: string): BotRuntimeState | undefined {
@@ -470,8 +525,126 @@ export function loadPersistedBotRuntimeState(dbPath: string, botName: string): B
   }
 }
 
+export function recordRuntimeEvent(db: Database.Database, input: RuntimeEventInput): number {
+  const result = db.prepare(`
+    INSERT INTO runtime_events (
+      bot_id, chat_id, run_id, message_ids_json, stage, event, error, elapsed_ms
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    input.botId,
+    input.chatId,
+    input.runId,
+    JSON.stringify(input.messageIds),
+    input.stage,
+    input.event,
+    input.error ?? null,
+    input.elapsedMs ?? null,
+  );
+  return Number(result.lastInsertRowid);
+}
+
+export function getRecentRuntimeEvents(db: Database.Database, query: RuntimeEventQuery = {}): RuntimeEventRow[] {
+  const where: string[] = [];
+  const params: unknown[] = [];
+  if (query.botId) {
+    where.push("bot_id = ?");
+    params.push(query.botId);
+  }
+  if (query.chatId) {
+    where.push("chat_id = ?");
+    params.push(query.chatId);
+  }
+  if (query.runId) {
+    where.push("run_id = ?");
+    params.push(query.runId);
+  }
+
+  const limit = Math.max(1, Math.min(query.limit ?? 20, 100));
+  const sql = `
+    SELECT id, bot_id, chat_id, run_id, message_ids_json, stage, event, error, elapsed_ms, created_at
+    FROM runtime_events
+    ${where.length > 0 ? `WHERE ${where.join(" AND ")}` : ""}
+    ORDER BY id DESC
+    LIMIT ?
+  `;
+  params.push(limit);
+
+  const rows = db.prepare(sql).all(...params) as Array<{
+    id: number;
+    bot_id: string;
+    chat_id: string;
+    run_id: string;
+    message_ids_json: string;
+    stage: string;
+    event: RuntimeEventName;
+    error: string | null;
+    elapsed_ms: number | null;
+    created_at: string;
+  }>;
+
+  return rows.map((row) => ({
+    id: row.id,
+    botId: row.bot_id,
+    chatId: row.chat_id,
+    runId: row.run_id,
+    messageIds: parseMessageIds(row.message_ids_json),
+    stage: row.stage,
+    event: row.event,
+    error: row.error ?? undefined,
+    elapsedMs: row.elapsed_ms ?? undefined,
+    createdAt: row.created_at,
+  }));
+}
+
+export function markUnfinishedRuntimeRunsFailedByRestart(db: Database.Database, botId: string): number {
+  const rows = db.prepare(`
+    SELECT e.run_id, e.chat_id, e.message_ids_json, e.elapsed_ms
+    FROM runtime_events e
+    JOIN (
+      SELECT run_id, MAX(id) AS max_id
+      FROM runtime_events
+      WHERE bot_id = ?
+      GROUP BY run_id
+    ) latest ON latest.max_id = e.id
+    WHERE e.event NOT IN ('done', 'failed', 'stopped', 'failed_by_restart')
+  `).all(botId) as Array<{
+    run_id: string;
+    chat_id: string;
+    message_ids_json: string;
+    elapsed_ms: number | null;
+  }>;
+
+  if (rows.length === 0) return 0;
+
+  const insert = db.prepare(`
+    INSERT INTO runtime_events (
+      bot_id, chat_id, run_id, message_ids_json, stage, event, error, elapsed_ms
+    )
+    VALUES (?, ?, ?, ?, 'failed', 'failed_by_restart', ?, ?)
+  `);
+  const error = "Run did not reach a terminal state before restart";
+  const tx = db.transaction((items: typeof rows) => {
+    for (const row of items) {
+      insert.run(botId, row.chat_id, row.run_id, row.message_ids_json, error, row.elapsed_ms ?? null);
+    }
+  });
+  tx(rows);
+  return rows.length;
+}
+
 function getSchemaVersion(db: Database.Database): number {
   return db.pragma("user_version", { simple: true }) as number;
+}
+
+function parseMessageIds(json: string): number[] {
+  try {
+    const parsed = JSON.parse(json) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((id): id is number => typeof id === "number");
+  } catch {
+    return [];
+  }
 }
 
 function setSchemaVersion(db: Database.Database, version: number): void {

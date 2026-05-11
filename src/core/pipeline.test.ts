@@ -4,12 +4,20 @@ import path from "node:path";
 import yaml from "yaml";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import type { AgentBackend, AgentResponse, AgentSession, SessionConfig } from "../agent/types.js";
-import { getBotBackendModelState, getBotRuntimeState, initDatabase, setBotBackendModelState } from "../database/schema.js";
+import {
+  getBotBackendModelState,
+  getBotRuntimeState,
+  getRecentRuntimeEvents,
+  initDatabase,
+  recordRuntimeEvent,
+  setBotBackendModelState,
+} from "../database/schema.js";
 import type { NormalizedMessage, PlatformAdapter } from "../im/types.js";
 import { INSTALL_GUIDE_COMMAND } from "../install-guide.js";
 import { COMPACT_RECOVERY_REMINDER } from "../memory/inject.js";
 import { SYSTEM_RULES } from "../system-rules.js";
 import { Pipeline, type BotIdentity } from "./pipeline.js";
+import { ResponseSender } from "./response-sender.js";
 
 class RecordingAgent implements AgentBackend {
   supportsSystemPrompt = true;
@@ -203,6 +211,17 @@ class CompactCountingAgent extends RecordingAgent {
   }
 }
 
+class ReplyAgent extends RecordingAgent {
+  constructor(private readonly replyText = "agent reply") {
+    super();
+  }
+
+  override async sendMessage(_session: AgentSession, message: string): Promise<AgentResponse> {
+    this.sendMessageCalls.push(message);
+    return { text: this.replyText };
+  }
+}
+
 function createBotIdentity(): BotIdentity {
   return {
     name: "NiuBot",
@@ -357,6 +376,53 @@ describe("Pipeline.recover", () => {
 
     expect(agent.createSessionCalls).toHaveLength(1);
     expect(agent.createSessionCalls[0]?.agentSessionId).toBe("claude-session-id");
+  });
+
+  test("marks unfinished runtime runs failed by restart and keeps chat idle", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    recordRuntimeEvent(db, {
+      botId: "NiuBot",
+      chatId: "c1",
+      runId: "run-before-restart",
+      messageIds: [11],
+      stage: "agent_running",
+      event: "stage_changed",
+    });
+    const { im, sentCards } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db,
+      im,
+      new RecordingAgent(),
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "claude",
+    );
+
+    await pipeline.start();
+
+    const latest = getRecentRuntimeEvents(db, { chatId: "c1", limit: 1 })[0];
+    expect(latest).toMatchObject({
+      runId: "run-before-restart",
+      stage: "failed",
+      event: "failed_by_restart",
+    });
+    expect((pipeline as any).runtimeState.getChatState("c1")).toMatchObject({
+      state: "idle",
+      activeRunId: null,
+    });
+
+    const handled = (pipeline as any).handleBuiltinCommand("/status", "u2", "c1", "chat-open-id", "p2p", "status-msg");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(handled).toBe(true);
+    expect(sentCards.some((card) =>
+      card.content.includes("最近失败") && card.content.includes("failed_by_restart"),
+    )).toBe(true);
   });
 
   test("injects session profile on first message after recovering a non-resumable active session", async () => {
@@ -1022,7 +1088,6 @@ describe("Pipeline.recover", () => {
     await pipeline.start();
     (pipeline as any).handleMessage(createMessage({
       contentText: "first",
-      platformMsgId: "m1",
     }));
     await new Promise((resolve) => setTimeout(resolve, 0));
 
@@ -1034,6 +1099,322 @@ describe("Pipeline.recover", () => {
 
     expect(events).toEqual(["refresh", "create"]);
     expect(agent.createSessionCalls).toHaveLength(1);
+  });
+
+  test("falls back to text and releases queue when card send times out", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const sentTexts: string[] = [];
+    const sentCards: string[] = [];
+    const im = createImStub();
+    im.sendCard = async (_chatId, _header, content) => {
+      sentCards.push(content);
+      return new Promise<string>(() => {});
+    };
+    im.sendText = async (_chatId, text) => {
+      sentTexts.push(text);
+      return "text-msg";
+    };
+    const agent = new ReplyAgent();
+    const pipeline = new Pipeline(
+      db,
+      im,
+      agent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+    (pipeline as any).responseSender = new ResponseSender(im, { timeoutMs: 1 });
+
+    await pipeline.start();
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "first",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(sentCards).toHaveLength(1);
+
+    await new Promise((resolve) => setTimeout(resolve, 5));
+
+    expect(sentTexts).toContain("agent reply");
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "second",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(agent.sendMessageCalls).toHaveLength(2);
+  });
+
+  test("releases queue when all response send methods fail", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const im = createImStub();
+    im.sendCard = async () => { throw new Error("card failed"); };
+    im.sendText = async () => { throw new Error("text failed"); };
+    im.sendFile = async () => { throw new Error("file failed"); };
+    const agent = new ReplyAgent();
+    const pipeline = new Pipeline(
+      db,
+      im,
+      agent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+
+    await pipeline.start();
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "first",
+      platformMsgId: "m1",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "second",
+      platformMsgId: "m2",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(agent.sendMessageCalls).toHaveLength(2);
+  });
+
+  test("syncs runtime state from agent running to response sending to done", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    let resolveSendCard: ((value: string) => void) | undefined;
+    const im = createImStub();
+    im.sendCard = async () => new Promise<string>((resolve) => {
+      resolveSendCard = resolve;
+    });
+    const pipeline = new Pipeline(
+      db,
+      im,
+      new ReplyAgent(),
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+
+    await pipeline.start();
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "first",
+      platformMsgId: "m1",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const store = (pipeline as any).runtimeState;
+    const run = store.getRunsForChat("c1")[0];
+    expect(run).toMatchObject({
+      chatId: "c1",
+      triggerMessageIds: [1],
+      triggerPlatformMsgIds: ["m1"],
+      replyToPlatformMsgId: "m1",
+      mergedText: "first",
+      stage: "sending_response",
+    });
+    expect(store.getChatState("c1").state).toBe("busy");
+
+    resolveSendCard?.("pmid");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(store.getRunsForChat("c1")[0].stage).toBe("done");
+    expect(store.getChatState("c1").state).toBe("idle");
+    expect(store.getPipelineHealth().inflightRunIds).toEqual([]);
+  });
+
+  test("marks runtime run failed when agent throws and keeps queue behavior", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const { im, sentTexts } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db,
+      im,
+      new ErrorAgent(new Error("agent failed")),
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+
+    await pipeline.start();
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "first",
+      platformMsgId: "m1",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const store = (pipeline as any).runtimeState;
+    const run = store.getRunsForChat("c1")[0];
+    expect(run.stage).toBe("failed");
+    expect(run.lastError).toContain("agent failed");
+    expect(store.getChatState("c1")).toMatchObject({
+      state: "idle",
+      activeRunId: null,
+    });
+    expect(sentTexts.some((text) => text.includes("处理出错了"))).toBe(true);
+  });
+
+  test("syncs runtime state while preserving pending queue behavior", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const agent = new DeferredAgent();
+    const pipeline = new Pipeline(
+      db,
+      createImStub(),
+      agent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+
+    await pipeline.start();
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "first",
+      platformMsgId: "m1",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "second",
+      platformMsgId: "m2",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const store = (pipeline as any).runtimeState;
+    expect(store.getActiveRun("c1")).toMatchObject({ stage: "agent_running" });
+    expect((pipeline as any).queue.pendingCount("c1")).toBe(1);
+
+    agent.resolveNext();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    agent.resolveNext();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(store.getRunsForChat("c1").map((run: { stage: string }) => run.stage)).toEqual(["done", "done"]);
+    expect((pipeline as any).queue.pendingCount("c1")).toBe(0);
+  });
+
+  test("persists runtime events for a successful run", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const pipeline = new Pipeline(
+      db,
+      createImStub(),
+      new ReplyAgent("agent reply"),
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+
+    await pipeline.start();
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "first",
+      platformMsgId: "m1",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const events = getRecentRuntimeEvents(db, { chatId: "c1", limit: 10 }).reverse();
+    expect(events.map((event) => event.event)).toEqual([
+      "started",
+      "stage_changed",
+      "stage_changed",
+      "done",
+    ]);
+    expect(events[0]).toMatchObject({
+      botId: "NiuBot",
+      chatId: "c1",
+      messageIds: [1],
+      stage: "queued",
+    });
+    expect(events.at(-1)).toMatchObject({
+      runId: events[0].runId,
+      stage: "done",
+    });
+  });
+
+  test("runtime event write failures do not affect message processing", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare("DROP TABLE runtime_events").run();
+    const { im, sentCards } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db,
+      im,
+      new ReplyAgent("agent reply"),
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+
+    await pipeline.start();
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "first",
+      platformMsgId: "m1",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const store = (pipeline as any).runtimeState;
+    expect(store.getRunsForChat("c1")[0].stage).toBe("done");
+    expect(sentCards.some((card) => card.content.includes("agent reply"))).toBe(true);
+  });
+
+  test("syncs runtime state while messages are buffering", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const pipeline = new Pipeline(
+      db,
+      createImStub(),
+      new RecordingAgent(),
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      1000,
+      "codex",
+    );
+
+    await pipeline.start();
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "first",
+      platformMsgId: "m1",
+    }));
+
+    const store = (pipeline as any).runtimeState;
+    expect(store.getChatState("c1")).toMatchObject({
+      state: "buffering",
+      bufferMessageIds: [1],
+      activeRunId: null,
+    });
   });
 
   test("injects only stable context through system prompt when supported", async () => {
@@ -1520,6 +1901,210 @@ describe("Pipeline.recover", () => {
 
     expect(handled).toBe(true);
     expect(sentTexts).toContain("中断当前回复，合并处理队列中的 1 条消息。");
+  });
+
+  test("/status reads runtime state while response sending is active", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const sentCards: Array<{ header: string; content: string }> = [];
+    let resolveAgentCard: ((value: string) => void) | undefined;
+    const im = createImStub();
+    im.sendCard = async (_chatId, header, content) => {
+      if (content.includes("agent reply")) {
+        return new Promise<string>((resolve) => {
+          resolveAgentCard = resolve;
+        });
+      }
+      sentCards.push({ header, content });
+      return "status-msg";
+    };
+    const pipeline = new Pipeline(
+      db,
+      im,
+      new ReplyAgent(),
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+
+    await pipeline.start();
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "first",
+      platformMsgId: "m1",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "second",
+      platformMsgId: "m2",
+    }));
+
+    const handled = (pipeline as any).handleBuiltinCommand("/status", "u2", "c1", "chat-open-id", "p2p", "status-msg");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(handled).toBe(true);
+    expect(sentCards.some((card) => card.content.includes("sending_response"))).toBe(true);
+    expect(sentCards.some((card) => card.content.includes("pending: 1"))).toBe(true);
+
+    resolveAgentCard?.("pmid-1");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    resolveAgentCard?.("pmid-2");
+  });
+
+  test("/status shows the latest failed runtime run", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const { im, sentCards } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db,
+      im,
+      new ErrorAgent(new Error("agent failed")),
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+
+    await pipeline.start();
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "first",
+      platformMsgId: "m1",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const handled = (pipeline as any).handleBuiltinCommand("/status", "u2", "c1", "chat-open-id", "p2p", "status-msg");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(handled).toBe(true);
+    expect(sentCards.some((card) => card.content.includes("最近失败") && card.content.includes("agent failed"))).toBe(true);
+  });
+
+  test("/stop marks the active runtime run stopped and clears pending messages", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const agent = new DeferredAgent();
+    const { im, sentTexts } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db,
+      im,
+      agent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+
+    await pipeline.start();
+    (pipeline as any).handleMessage(createMessage({ contentText: "first", platformMsgId: "m1" }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    (pipeline as any).handleMessage(createMessage({ contentText: "second", platformMsgId: "m2" }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const handled = (pipeline as any).handleBuiltinCommand("/stop", "u2", "c1", "chat-open-id", "p2p", "stop-msg");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const store = (pipeline as any).runtimeState;
+    expect(handled).toBe(true);
+    expect(store.getRunsForChat("c1")[0].stage).toBe("stopped");
+    expect(store.getActiveRun("c1")).toBeNull();
+    expect((pipeline as any).queue.pendingCount("c1")).toBe(0);
+    expect(sentTexts).toContain("已停止当前任务，并清空 1 条排队消息。");
+    expect(getRecentRuntimeEvents(db, { chatId: "c1", limit: 1 })[0]).toMatchObject({
+      event: "stopped",
+      stage: "stopped",
+    });
+  });
+
+  test("/stop releases a runtime run stuck in response sending without waiting for IM send", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const { im, sentTexts } = createRecordingImStub();
+    im.sendCard = async () => new Promise<string>(() => {});
+    const pipeline = new Pipeline(
+      db,
+      im,
+      new ReplyAgent(),
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+
+    await pipeline.start();
+    (pipeline as any).responseSender = new ResponseSender(im, { timeoutMs: 30_000 });
+    (pipeline as any).handleMessage(createMessage({ contentText: "first", platformMsgId: "m1" }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const store = (pipeline as any).runtimeState;
+    expect(store.getActiveRun("c1")).toMatchObject({ stage: "sending_response" });
+
+    const handled = (pipeline as any).handleBuiltinCommand("/stop", "u2", "c1", "chat-open-id", "p2p", "stop-msg");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(handled).toBe(true);
+    expect(store.getRunsForChat("c1")[0].stage).toBe("stopped");
+    expect(store.getActiveRun("c1")).toBeNull();
+    expect(sentTexts).toContain("已停止当前任务。");
+  });
+
+  test("/flush stops the active runtime run and keeps pending messages for the next run", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const agent = new DeferredAgent();
+    const { im, sentTexts } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db,
+      im,
+      agent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+
+    await pipeline.start();
+    (pipeline as any).handleMessage(createMessage({ contentText: "first", platformMsgId: "m1" }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    (pipeline as any).handleMessage(createMessage({ contentText: "second", platformMsgId: "m2" }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const handled = (pipeline as any).handleBuiltinCommand("/flush", "u2", "c1", "chat-open-id", "p2p", "flush-msg");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const store = (pipeline as any).runtimeState;
+    expect(handled).toBe(true);
+    expect(store.getRunsForChat("c1")[0].stage).toBe("stopped");
+    expect((pipeline as any).queue.pendingCount("c1")).toBe(1);
+    expect(sentTexts).toContain("中断当前回复，合并处理队列中的 1 条消息。");
+
+    agent.resolveNext();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(store.getRunsForChat("c1")).toHaveLength(2);
+    expect(store.getRunsForChat("c1")[1].stage).toBe("agent_running");
+
+    agent.resolveNext();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(store.getRunsForChat("c1").map((run: { stage: string }) => run.stage)).toEqual(["stopped", "done"]);
   });
 
   test("shows accurate /flush help copy", () => {

@@ -11,7 +11,8 @@ import { ERROR_DISPLAY_MAX_LEN } from "../agent/types.js";
 import type { AgentBackend, AgentSession, AgentSessionActivity, SessionConfig } from "../agent/types.js";
 import { CliAgentBackend, buildNiubotEnv } from "../agent/cli-base.js";
 import { BUILTIN_BACKEND_LIST, DEFAULT_LITE_MODELS, NIUBOT_HOME, normalizeBackend, type AgentBackendType, type BuiltinBackendType } from "../config.js";
-import { MessageQueue } from "./queue.js";
+import { ChatManager } from "./chat-manager.js";
+import type { QueuedMessage } from "./queue.js";
 import {
   ensureUser, ensureChat, storeMessage, updateChatName,
   getUserShortLabel, getChatShortLabel, formatSenderLabel, getMessageByPlatformId, updateMessageContent, updateMessagePlatformId,
@@ -19,6 +20,9 @@ import {
   setUserAdminRole, getAdminUserIds, getUserAdminRole, type AdminRole,
   getBotBackendModelState, setBotBackendModelState, setBotRuntimeState, clearBotRuntimeModels,
   hasUpdateNotification, recordUpdateNotification,
+  getRecentRuntimeEvents,
+  markUnfinishedRuntimeRunsFailedByRestart,
+  recordRuntimeEvent,
 } from "../database/schema.js";
 import {
   buildActiveTaskContext,
@@ -38,6 +42,10 @@ import { decideRoute, type RouteDecision } from "./routing.js";
 import { listCronJobs, deleteCronJob, getCronJob } from "./cron.js";
 import { createLogger } from "../logger.js";
 import { buildResponseFooter } from "./footer.js";
+import { ResponseSender } from "./response-sender.js";
+import { TimeoutError } from "./timeout.js";
+import { RuntimeStateStore, type RunStage, type RuntimeStateEvent } from "./runtime-state.js";
+import { RunManager } from "./run-manager.js";
 import { INSTALL_GUIDE_COMMAND } from "../install-guide.js";
 
 const execAsync = promisify(exec);
@@ -109,7 +117,10 @@ export class Pipeline {
   private backendType: AgentBackendType;
   private backendResolver?: (type: AgentBackendType) => Promise<AgentBackend>;
   private getAvailableBackends: () => string[];
-  private queue: MessageQueue;
+  private queue: ChatManager;
+  private responseSender: ResponseSender;
+  private runtimeState: RuntimeStateStore;
+  private runManager: RunManager;
   private botIdentity: BotIdentity;
   private log: ReturnType<typeof createLogger>;
 
@@ -219,7 +230,12 @@ export class Pipeline {
     this.refreshAgentContextFiles = refreshAgentContextFiles;
     this.stableContextOptions = stableContextOptions ?? {};
     this.log = createLogger("pipeline", botIdentity.name);
-    this.queue = new MessageQueue(bufferMs);
+    this.runtimeState = new RuntimeStateStore({
+      onEvent: (event) => this.persistRuntimeEvent(event),
+    });
+    this.queue = new ChatManager(bufferMs, this.runtimeState);
+    this.responseSender = new ResponseSender(im);
+    this.runManager = new RunManager(this.agent, this.runtimeState, this.responseSender);
 
     // 初始 backend 的模型配置入缓存，确保切走再切回来能恢复
     this.backendModelCache.set(backendType, {
@@ -227,7 +243,9 @@ export class Pipeline {
       liteModel: botIdentity.liteModel,
     });
 
-    this.queue.onProcess((chatId, mergedText, messages, signal) => this.process(chatId, mergedText, messages, signal));
+    this.queue.onProcess((runId, chatId, mergedText, messages, signal) => (
+      this.process(chatId, mergedText, messages, signal, runId)
+    ));
   }
 
   private async createAgentSession(config: SessionConfig): Promise<AgentSession> {
@@ -264,6 +282,8 @@ export class Pipeline {
       platformBotName ?? this.botIdentity.name,
       "bot_info",
     );
+
+    this.markUnfinishedRuntimeRunsFailedByRestart();
 
     // Detect admin users
     await this.detectAdmins();
@@ -413,6 +433,50 @@ export class Pipeline {
     }
 
     this.queue.push({ chatId, text, timestamp: Date.now() });
+  }
+
+  private markRuntimeRun(runId: string | undefined, stage: RunStage, lastError?: string): void {
+    if (!runId) return;
+    const current = this.runtimeState.getRun(runId);
+    if (!current || isTerminalRunStage(current.stage)) return;
+    try {
+      this.runtimeState.markRunStage(runId, stage, lastError);
+    } catch (err) {
+      this.log.warn("failed to update runtime run state", { runId, stage, error: String(err) });
+    }
+  }
+
+  private persistRuntimeEvent(event: RuntimeStateEvent): void {
+    try {
+      recordRuntimeEvent(this.db, {
+        botId: this.botIdentity.name,
+        chatId: event.chatId,
+        runId: event.runId,
+        messageIds: event.messageIds,
+        stage: event.stage,
+        event: event.event,
+        error: event.error,
+        elapsedMs: event.elapsedMs,
+      });
+    } catch (err) {
+      this.log.warn("failed to persist runtime event", {
+        chatId: event.chatId,
+        runId: event.runId,
+        event: event.event,
+        error: String(err),
+      });
+    }
+  }
+
+  private markUnfinishedRuntimeRunsFailedByRestart(): void {
+    try {
+      const marked = markUnfinishedRuntimeRunsFailedByRestart(this.db, this.botIdentity.name);
+      if (marked > 0) {
+        this.log.warn("marked unfinished runtime runs failed by restart", { count: marked });
+      }
+    } catch (err) {
+      this.log.warn("failed to mark unfinished runtime runs after restart", { error: String(err) });
+    }
   }
 
   /** 进程恢复：从 DB 恢复 active sessions，重建 backend session */
@@ -935,16 +999,19 @@ export class Pipeline {
       }
       case "/stop": {
         this.log.info("builtin command: stop", { userId, chatId });
-        const hasSession = this.chatSessions.has(chatId);
-        const isBusy = this.queue.isBusy(chatId);
-        if (hasSession) {
+        const activeRun = this.runtimeState.getActiveRun(chatId);
+        const hasActiveRun = !!activeRun;
+        if (activeRun) {
+          this.markRuntimeRun(activeRun.runId, "stopped");
+        }
+        if (hasActiveRun && this.chatSessions.has(chatId)) {
           this.cancelChat(chatId).catch(() => {});
         }
-        if (isBusy) {
+        if (hasActiveRun || this.queue.isBusy(chatId)) {
           this.queue.cancel(chatId);
         }
         const dropped = this.queue.drain(chatId);
-        if (hasSession || isBusy) {
+        if (hasActiveRun) {
           if (dropped > 0) {
             this.replyText(chatId, platformChatId, msgId, `已停止当前任务，并清空 ${dropped} 条排队消息。`);
           } else {
@@ -972,10 +1039,15 @@ export class Pipeline {
       case "/flush": {
         this.log.info("builtin command: flush", { userId, chatId });
         const pending = this.queue.pendingCount(chatId);
+        const activeRun = this.runtimeState.getActiveRun(chatId);
         if (pending === 0) {
           this.replyText(chatId, platformChatId, msgId, "队列是空的，没有需要 flush 的消息。");
-        } else if (this.chatSessions.has(chatId)) {
-          this.cancelChat(chatId).catch(() => {});
+        } else if (activeRun) {
+          this.markRuntimeRun(activeRun.runId, "stopped");
+          if (this.chatSessions.has(chatId)) {
+            this.cancelChat(chatId).catch(() => {});
+          }
+          this.queue.cancel(chatId);
           this.replyText(chatId, platformChatId, msgId, `中断当前回复，合并处理队列中的 ${pending} 条消息。`);
         } else {
           this.replyText(chatId, platformChatId, msgId, `队列中有 ${pending} 条消息，即将处理。`);
@@ -1048,20 +1120,49 @@ export class Pipeline {
     const sections: string[] = [];
     let count = 0;
 
-    // 主 session
-    const session = this.chatSessions.get(chatId);
-    if (session) {
+    // 主会话 Runtime State
+    const activeRun = this.runtimeState.getActiveRun(chatId);
+    if (activeRun) {
+      count++;
+      const elapsed = formatUptime(Date.now() - activeRun.startedAt);
+      sections.push(`**主会话**（${displayRunStage(activeRun.stage)} · ${elapsed}）`);
+      sections.push([
+        `stage: ${activeRun.stage}`,
+        `run: ${activeRun.runId}`,
+        `messages: ${activeRun.triggerMessageIds.length}`,
+        `pending: ${this.queue.pendingCount(chatId)}`,
+      ].join("\n"));
+      const session = this.chatSessions.get(chatId);
       const a = typeof cliAgent.getActivity === "function"
-        ? cliAgent.getActivity(session.agentSession.id)
+        ? (session ? cliAgent.getActivity(session.agentSession.id) : undefined)
         : undefined;
-      if (a?.status === "running") {
-        count++;
-        const elapsed = formatUptime(Date.now() - a.startedAt);
-        const status = a.compacting ? "压缩上下文" : "处理中";
-        sections.push(`**主会话**（${status} · ${elapsed}）`);
-        if (a.recentLines.length > 0) {
-          const logBlock = a.recentLines.map((l) => l.replace(/`{3,}/g, "``").slice(0, ERROR_DISPLAY_MAX_LEN)).join("\n");
-          sections.push(`\`\`\`\n${logBlock}\n\`\`\``);
+      if (a?.status === "running" && a.recentLines.length > 0) {
+        const logBlock = a.recentLines.map((l) => l.replace(/`{3,}/g, "``").slice(0, ERROR_DISPLAY_MAX_LEN)).join("\n");
+        sections.push(`\`\`\`\n${logBlock}\n\`\`\``);
+      }
+    } else {
+      const latestRun = this.runtimeState.getRunsForChat(chatId).at(-1);
+      if (latestRun?.stage === "failed") {
+        sections.push("**最近失败**");
+        sections.push([
+          `stage: ${latestRun.stage}`,
+          `run: ${latestRun.runId}`,
+          latestRun.lastError ? `error: ${latestRun.lastError}` : undefined,
+        ].filter((line): line is string => !!line).join("\n"));
+      } else {
+        const latestFailedEvent = getRecentRuntimeEvents(this.db, {
+          botId: this.botIdentity.name,
+          chatId,
+          limit: 20,
+        }).find((event) => event.event === "failed" || event.event === "failed_by_restart");
+        if (latestFailedEvent) {
+          sections.push("**最近失败**");
+          sections.push([
+            `stage: ${latestFailedEvent.stage}`,
+            `event: ${latestFailedEvent.event}`,
+            `run: ${latestFailedEvent.runId}`,
+            latestFailedEvent.error ? `error: ${latestFailedEvent.error}` : undefined,
+          ].filter((line): line is string => !!line).join("\n"));
         }
       }
     }
@@ -1080,13 +1181,13 @@ export class Pipeline {
       }
     }
 
-    if (count === 0) {
+    if (count === 0 && sections.length === 0) {
       this.replyText(chatId, platformChatId, msgId, "当前没有正在执行的任务。");
       return;
     }
 
     const content = sections.join("\n\n");
-    const header = `Running · ${count} 个任务`;
+    const header = count > 0 ? `Running · ${count} 个任务` : "Status";
     this.im.sendCard(platformChatId, header, content, undefined, msgId)
       .then((pmid) => { this.storeBotResponse(chatId, content, pmid); })
       .catch((err) => this.log.error("running list card send failed", { chatId, error: String(err) }));
@@ -1594,6 +1695,7 @@ export class Pipeline {
 
       const newBackend = await this.backendResolver!(target);
       this.agent = newBackend;
+      this.runManager = new RunManager(this.agent, this.runtimeState, this.responseSender);
       this.backendType = target;
 
       // 恢复目标 backend 的模型配置（如有），否则不指定，让 backend 用自己的默认
@@ -2113,7 +2215,7 @@ export class Pipeline {
     });
   }
 
-  private async process(chatId: string, mergedText: string, messages: import("./queue.js").QueuedMessage[] = [], signal?: AbortSignal): Promise<void> {
+  private async process(chatId: string, mergedText: string, messages: QueuedMessage[] = [], signal?: AbortSignal, runId?: string): Promise<void> {
     const platformChatId = this.chatSessions.get(chatId)?.platformChatId
       ?? this.platformChatIds.get(chatId);
 
@@ -2142,6 +2244,7 @@ export class Pipeline {
 
       if (signal?.aborted) {
         this.log.info("process cancelled before session creation", { chatId });
+        this.markRuntimeRun(runId, "stopped");
         return;
       }
 
@@ -2235,6 +2338,7 @@ export class Pipeline {
       if (signal?.aborted) {
         this.log.info("process cancelled before sending to agent", { chatId });
         await this.archiveSession(chatId);
+        this.markRuntimeRun(runId, "stopped");
         return;
       }
 
@@ -2244,23 +2348,25 @@ export class Pipeline {
         textLength: messageToSend.length,
       });
 
-      const response = await this.agent.sendMessage(chatSession.agentSession, messageToSend);
+      const agentResult = await this.runManager.runAgent({
+        runId: runId!,
+        chatId,
+        session: chatSession.agentSession,
+        message: messageToSend,
+        signal,
+      });
+      if (agentResult.status === "stopped") {
+        this.log.info("prompt cancelled, no response to send", { chatId });
+        return;
+      }
+      const response = agentResult.response;
       this.updateCompactRecoveryState(chatId, response.compactCount);
 
       // cancelled：有内容就发（中间结果），没内容就静默（用户已收到"已停止"）
       if (response.cancelled) {
         if (response.text.trim()) {
           this.log.info("cancelled with content, delivering result", { chatId, responseLength: response.text.length });
-        } else {
-          this.log.info("prompt cancelled, no response to send", { chatId });
-          return;
         }
-      }
-
-      // 非 cancel 的空响应：发兜底提示，防止用户等半天没反应
-      if (!response.text.trim()) {
-        this.log.warn("empty response from agent", { chatId });
-        response.text = EMPTY_RESPONSE_FALLBACK;
       }
 
       // 存储 agent 回复并标记已见
@@ -2319,38 +2425,64 @@ export class Pipeline {
         displayText = `> 📌 回复 ${messages.length} 条消息：\n${lines.map((l) => `> ${l}`).join("\n")}\n\n${response.text}`;
       }
 
-      // 发送到 IM（始终用卡片，footer 带 session 信息）
-      // 超长内容由 adapter 层自动转文件发送
+      // 发送到 IM（始终优先卡片，footer 带 session 信息）
+      // 超长内容由 adapter 层自动转文件发送；发送器负责超时和降级。
+      this.markRuntimeRun(runId, "sending_response");
       let sentPlatformMsgId: string | undefined;
-      const sendFallbackText = (text: string) => triggerMsgId
-        ? this.im.sendReply(chatSession.platformChatId, text, triggerMsgId)
-        : this.im.sendText(chatSession.platformChatId, text);
+      const sendTextWithReplyFallback = async (text: string): Promise<string> => {
+        if (!triggerMsgId) {
+          return this.responseSender.sendText(chatSession.platformChatId, text, signal);
+        }
+        try {
+          return await this.responseSender.sendReply(chatSession.platformChatId, text, triggerMsgId, signal);
+        } catch {
+          return this.responseSender.sendText(chatSession.platformChatId, text, signal);
+        }
+      };
       try {
         this.log.info("send decision", { chatId, useReply: !!triggerMsgId, merged: isMerged, messageCount: messages.length, triggerMsgId: triggerMsgId ?? "none" });
-        sentPlatformMsgId = await this.im.sendCard(chatSession.platformChatId, "", displayText, footer, triggerMsgId);
+        if (triggerMsgId) {
+          try {
+            sentPlatformMsgId = await this.responseSender.sendCard(chatSession.platformChatId, "", displayText, footer, triggerMsgId, signal);
+          } catch {
+            sentPlatformMsgId = await this.responseSender.sendCard(chatSession.platformChatId, "", displayText, footer, undefined, signal);
+          }
+        } else {
+          sentPlatformMsgId = await this.responseSender.sendCard(chatSession.platformChatId, "", displayText, footer, undefined, signal);
+        }
       } catch (sendErr) {
         this.log.error("failed to send response to IM", {
           chatId,
           error: String(sendErr),
           responseLength: response.text.length,
         });
-        // 先把平台错误原样回给用户；若平台连这条也拦，再降级为稳定短句。
+        const preferOriginalText = sendErr instanceof TimeoutError;
         try {
-          deliveredText = `发送失败：${extractPlatformErrorDetail(sendErr)}`;
-          sentPlatformMsgId = await sendFallbackText(deliveredText);
-        } catch (platformErrEchoErr) {
-          this.log.warn("failed to surface platform error to user", {
-            chatId,
-            error: String(platformErrEchoErr),
-          });
+          deliveredText = preferOriginalText ? displayText : `发送失败：${extractPlatformErrorDetail(sendErr)}`;
+          sentPlatformMsgId = await sendTextWithReplyFallback(deliveredText);
+        } catch (firstFallbackErr) {
+          this.log.warn("failed to send first fallback text", { chatId, error: String(firstFallbackErr) });
           try {
-            deliveredText = buildPlatformFailureFallback(sendErr);
-            sentPlatformMsgId = await sendFallbackText(deliveredText);
+            deliveredText = preferOriginalText ? displayText : buildPlatformFailureFallback(sendErr);
+            sentPlatformMsgId = await sendTextWithReplyFallback(deliveredText);
           } catch (fallbackSendErr) {
-            this.log.error("failed to send degraded platform error", {
-              chatId,
-              error: String(fallbackSendErr),
+            const fileContent = footer ? `${deliveredText}\n\n---\n${footer}` : deliveredText;
+            const result = await this.runManager.sendFinalResponse({
+              runId: runId!,
+              chatId: chatSession.platformChatId,
+              header: "",
+              content: fileContent,
+              signal,
             });
+            if (result.ok) {
+              sentPlatformMsgId = result.platformMsgId;
+            } else {
+              this.log.error("failed to send degraded response", {
+                chatId,
+                error: result.error,
+                methodsTried: result.methodsTried,
+              });
+            }
           }
         }
       }
@@ -2369,14 +2501,17 @@ export class Pipeline {
           responseLength: response.text.length,
           filesChanged: response.filesChanged,
         });
+        this.markRuntimeRun(runId, "done");
       } else {
         this.log.warn("response not delivered to IM", {
           chatId,
           responseLength: response.text.length,
         });
+        this.markRuntimeRun(runId, "failed", "response not delivered to IM");
       }
     } catch (err) {
       this.log.error("pipeline error", { chatId, error: String(err) });
+      this.markRuntimeRun(runId, signal?.aborted ? "stopped" : "failed", String(err));
 
       if (platformChatId) {
         const detail = extractAgentErrorDetail(err);
@@ -3044,6 +3179,21 @@ function formatUptime(ms: number): string {
 
 function displayBackendType(type: AgentBackendType): string {
   return type;
+}
+
+function isTerminalRunStage(stage: RunStage): boolean {
+  return stage === "done" || stage === "failed" || stage === "stopped";
+}
+
+function displayRunStage(stage: RunStage): string {
+  switch (stage) {
+    case "queued": return "排队中";
+    case "agent_running": return "处理中";
+    case "sending_response": return "发送回复";
+    case "done": return "已完成";
+    case "failed": return "失败";
+    case "stopped": return "已停止";
+  }
 }
 
 /** 格式化 lite model 显示：优先显示用户配置值，否则显示 backend 默认值 */

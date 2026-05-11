@@ -31,11 +31,18 @@ interface ChatQueue {
 
 type ProcessFn = (chatId: string, mergedText: string, messages: QueuedMessage[], signal: AbortSignal) => Promise<void>;
 
+export interface QueueSnapshot {
+  buffer: QueuedMessage[];
+  pending: QueuedMessage[];
+  busy: boolean;
+}
+
 export class MessageQueue {
   private queues = new Map<string, ChatQueue>();
   private processFn: ProcessFn | null = null;
   private bufferMs: number;
   private pendingFn: ((msg: QueuedMessage) => void) | null = null;
+  private stateFn: ((chatId: string, snapshot: QueueSnapshot) => void) | null = null;
   private stopped = false;
 
   constructor(bufferMs = 1500) {
@@ -52,6 +59,11 @@ export class MessageQueue {
     this.pendingFn = fn;
   }
 
+  /** 注册队列状态变更通知，用于外部同步观测状态 */
+  onStateChange(fn: (chatId: string, snapshot: QueueSnapshot) => void): void {
+    this.stateFn = fn;
+  }
+
   /** 推入一条新消息，返回是否进入 pending 队列 */
   push(msg: QueuedMessage): boolean {
     if (this.stopped) return false;
@@ -62,10 +74,12 @@ export class MessageQueue {
       log.info("message queued", { chatId: msg.chatId, pending: q.pending.length + 1 });
       q.pending.push(msg);
       this.pendingFn?.(msg);
+      this.emitState(msg.chatId, q);
       return true;
     }
 
     q.buffer.push(msg);
+    this.emitState(msg.chatId, q);
     this.resetBufferTimer(q, msg.chatId);
     return false;
   }
@@ -82,6 +96,7 @@ export class MessageQueue {
       if (dropped > 0) {
         log.warn("dropping buffered messages on stop", { chatId, count: dropped });
       }
+      this.emitState(chatId, q);
     }
   }
 
@@ -99,6 +114,7 @@ export class MessageQueue {
     if (dropped > 0) {
       log.info("drain", { chatId, dropped });
     }
+    this.emitState(chatId, q);
     return dropped;
   }
 
@@ -152,6 +168,7 @@ export class MessageQueue {
   /** 标记某 chat 处理完成，检查后续队列 */
   private processNext(q: ChatQueue, chatId: string): void {
     q.busy = false;
+    this.emitState(chatId, q);
 
     // 已停止，不再启动新的处理
     if (this.stopped) return;
@@ -160,6 +177,7 @@ export class MessageQueue {
       const next = q.pending;
       q.pending = [];
       q.buffer = next;
+      this.emitState(chatId, q);
       this.resetBufferTimer(q, chatId);
     }
   }
@@ -172,6 +190,7 @@ export class MessageQueue {
     q.bufferTimer = null;
     q.busy = true;
     q.abortController = new AbortController();
+    this.emitState(chatId, q);
     const { signal } = q.abortController;
 
     const mergedText = messages.length === 1
@@ -194,6 +213,14 @@ export class MessageQueue {
       q.abortController = null;
       this.processNext(q, chatId);
     }
+  }
+
+  private emitState(chatId: string, q: ChatQueue): void {
+    this.stateFn?.(chatId, {
+      buffer: [...q.buffer],
+      pending: [...q.pending],
+      busy: q.busy,
+    });
   }
 
 }
