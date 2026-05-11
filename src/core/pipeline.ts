@@ -43,7 +43,7 @@ import { listCronJobs, deleteCronJob, getCronJob } from "./cron.js";
 import { createLogger } from "../logger.js";
 import { buildResponseFooter } from "./footer.js";
 import { ResponseSender } from "./response-sender.js";
-import { TimeoutError } from "./timeout.js";
+import { TimeoutError, withTimeout } from "./timeout.js";
 import { RuntimeStateStore, type RunStage, type RuntimeStateEvent } from "./runtime-state.js";
 import { RunManager } from "./run-manager.js";
 import { INSTALL_GUIDE_COMMAND } from "../install-guide.js";
@@ -71,6 +71,7 @@ const INDEPENDENT_IDLE_KILL_MS = 3_600_000;    // 1 小时：独立 session 无�
 const SUMMARY_TIMEOUT_MS = 60_000;             // 归档摘要最长等待 60 秒
 const UPDATE_CHECK_HOUR = 10;                  // 本地时间 10:00 检查 npm latest
 const UPDATE_NOTIFY_END_HOUR = 18;             // 10:00-18:00 启动时允许立即通知
+const STARTUP_PLATFORM_TIMEOUT_MS = 5_000;      // 平台启动探测超时后降级继续启动
 
 /** Bot 身份信息，由外部传入 */
 export interface BotIdentity {
@@ -262,10 +263,14 @@ export class Pipeline {
     // Resolve bot's real open_id and display name from platform
     let platformBotName: string | undefined;
     try {
-      const [realBotId, name] = await Promise.all([
-        this.im.getBotOpenId(),
-        this.im.getBotName(),
-      ]);
+      const [realBotId, name] = await withTimeout({
+        label: "bot identity lookup",
+        timeoutMs: STARTUP_PLATFORM_TIMEOUT_MS,
+        fn: async () => Promise.all([
+          this.im.getBotOpenId(),
+          this.im.getBotName(),
+        ]),
+      });
       if (realBotId) {
         this.botIdentity.platformBotId = realBotId;
       }
@@ -290,7 +295,7 @@ export class Pipeline {
 
     this.im.onMessage((msg) => this.handleMessage(msg));
     // 启动 watchdog 定时器
-    this.watchdogTimer = setInterval(() => this.runIdleWatchdog(), AGENT_WATCHDOG_INTERVAL_MS);
+    this.watchdogTimer = setInterval(() => this.runIdleWatchdogSafely(), AGENT_WATCHDOG_INTERVAL_MS);
     if (this.isUpdateNotificationWindow(new Date())) {
       this.checkForUpdatesAndNotifyAdmins().catch((err) => {
         this.log.warn("startup update check failed", { error: String(err) });
@@ -448,7 +453,7 @@ export class Pipeline {
 
   private persistRuntimeEvent(event: RuntimeStateEvent): void {
     try {
-      recordRuntimeEvent(this.db, {
+      const eventId = recordRuntimeEvent(this.db, {
         botId: this.botIdentity.name,
         chatId: event.chatId,
         runId: event.runId,
@@ -457,6 +462,16 @@ export class Pipeline {
         event: event.event,
         error: event.error,
         elapsedMs: event.elapsedMs,
+      });
+      this.log.info("runtime event persisted", {
+        eventId,
+        chatId: event.chatId,
+        runId: event.runId,
+        stage: event.stage,
+        event: event.event,
+        messageIds: event.messageIds,
+        elapsedMs: event.elapsedMs,
+        hasError: !!event.error,
       });
     } catch (err) {
       this.log.warn("failed to persist runtime event", {
@@ -470,7 +485,15 @@ export class Pipeline {
 
   private markUnfinishedRuntimeRunsFailedByRestart(): void {
     try {
-      const marked = markUnfinishedRuntimeRunsFailedByRestart(this.db, this.botIdentity.name);
+      const marked = markUnfinishedRuntimeRunsFailedByRestart(this.db, this.botIdentity.name, (run) => {
+        this.log.warn("runtime run failed by restart", {
+          botId: run.botId,
+          chatId: run.chatId,
+          runId: run.runId,
+          messageIds: run.messageIds,
+          previousElapsedMs: run.previousElapsedMs ?? null,
+        });
+      });
       if (marked > 0) {
         this.log.warn("marked unfinished runtime runs failed by restart", { count: marked });
       }
@@ -907,7 +930,11 @@ export class Pipeline {
 
     // 1. App creator → owner
     try {
-      const creatorId = await this.im.getAppCreatorId();
+      const creatorId = await withTimeout({
+        label: "app creator detection",
+        timeoutMs: STARTUP_PLATFORM_TIMEOUT_MS,
+        fn: async () => this.im.getAppCreatorId(),
+      });
       if (creatorId) {
         const userId = ensureUser(this.db, platform, creatorId, undefined, undefined);
         this.setAdminRole(userId, "owner", "app_creator", creatorId);
@@ -1001,6 +1028,7 @@ export class Pipeline {
         this.log.info("builtin command: stop", { userId, chatId });
         const activeRun = this.runtimeState.getActiveRun(chatId);
         const hasActiveRun = !!activeRun;
+        const pendingBefore = this.queue.pendingCount(chatId);
         if (activeRun) {
           this.markRuntimeRun(activeRun.runId, "stopped");
         }
@@ -1011,6 +1039,14 @@ export class Pipeline {
           this.queue.cancel(chatId);
         }
         const dropped = this.queue.drain(chatId);
+        this.log.info("stop command applied", {
+          userId,
+          chatId,
+          activeRunId: activeRun?.runId ?? null,
+          activeRunStage: activeRun?.stage ?? null,
+          pendingBefore,
+          dropped,
+        });
         if (hasActiveRun) {
           if (dropped > 0) {
             this.replyText(chatId, platformChatId, msgId, `已停止当前任务，并清空 ${dropped} 条排队消息。`);
@@ -1052,6 +1088,14 @@ export class Pipeline {
         } else {
           this.replyText(chatId, platformChatId, msgId, `队列中有 ${pending} 条消息，即将处理。`);
         }
+        this.log.info("flush command applied", {
+          userId,
+          chatId,
+          activeRunId: activeRun?.runId ?? null,
+          activeRunStage: activeRun?.stage ?? null,
+          pending,
+          stoppedActiveRun: !!(pending > 0 && activeRun),
+        });
         return true;
       }
       case "/task": {
@@ -2922,6 +2966,14 @@ export class Pipeline {
   }
 
   /** Watchdog 主循环：检测 idle session，按策略通知或自动 kill */
+  private runIdleWatchdogSafely(): void {
+    try {
+      this.runIdleWatchdog();
+    } catch (err) {
+      this.log.error("watchdog tick failed", { error: String(err) });
+    }
+  }
+
   private runIdleWatchdog(): void {
     if (!(this.agent instanceof CliAgentBackend)) return;
     const cliAgent = this.agent as CliAgentBackend;
@@ -2934,9 +2986,17 @@ export class Pipeline {
       // 探测 session 文件 mtime，更新 lastActiveAt
       const s = (cliAgent as any).sessions?.get(session.agentSession.id);
       if (s && typeof (cliAgent as any).probeSessionFileMtime === "function") {
-        const fileMtime = (cliAgent as any).probeSessionFileMtime(s) as number | null;
-        if (fileMtime && fileMtime > a.lastActiveAt) {
-          a.lastActiveAt = fileMtime;
+        try {
+          const fileMtime = (cliAgent as any).probeSessionFileMtime(s) as number | null;
+          if (fileMtime && fileMtime > a.lastActiveAt) {
+            a.lastActiveAt = fileMtime;
+          }
+        } catch (err) {
+          this.log.warn("watchdog: session file mtime probe failed", {
+            chatId,
+            sessionId: session.agentSession.id,
+            error: String(err),
+          });
         }
       }
 

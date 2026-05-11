@@ -1,5 +1,8 @@
 import { MessageQueue, type QueuedMessage, type QueueSnapshot } from "./queue.js";
+import { createLogger } from "../logger.js";
 import { RuntimeStateStore } from "./runtime-state.js";
+
+const log = createLogger("chat-manager");
 
 type ChatProcessFn = (
   runId: string,
@@ -26,6 +29,16 @@ export class ChatManager {
         replyToPlatformMsgId: messages.at(-1)?.platformMsgId,
         mergedText,
       });
+      log.info("run created", {
+        runId: run.runId,
+        chatId,
+        messageCount: messages.length,
+        messageIds: run.triggerMessageIds,
+        platformMsgIds: run.triggerPlatformMsgIds,
+        replyToPlatformMsgId: run.replyToPlatformMsgId ?? null,
+        mergedTextLength: mergedText.length,
+        pendingCount: this.queue.pendingCount(chatId),
+      });
       return this.processFn?.(run.runId, chatId, mergedText, messages, signal) ?? Promise.resolve();
     });
   }
@@ -39,7 +52,20 @@ export class ChatManager {
   }
 
   enqueue(msg: QueuedMessage): boolean {
-    return this.queue.push(msg);
+    const pending = this.queue.push(msg);
+    const state = this.runtimeState.getChatState(msg.chatId);
+    log.info("message enqueued", {
+      chatId: msg.chatId,
+      dbMsgId: msg.dbMsgId ?? null,
+      platformMsgId: msg.platformMsgId ?? null,
+      textLength: msg.text.length,
+      pending,
+      state: state.state,
+      activeRunId: state.activeRunId,
+      bufferCount: state.bufferMessageIds.length,
+      pendingCount: this.queue.pendingCount(msg.chatId),
+    });
+    return pending;
   }
 
   push(msg: QueuedMessage): boolean {
@@ -52,11 +78,19 @@ export class ChatManager {
 
   stopChat(chatId: string): number {
     const activeRun = this.runtimeState.getActiveRun(chatId);
+    const pendingBefore = this.pendingCount(chatId);
     if (activeRun) {
       this.markActiveRunStopped(activeRun.runId);
       this.queue.cancel(chatId);
     }
-    return this.queue.drain(chatId);
+    const dropped = this.queue.drain(chatId);
+    log.info("stop chat requested", {
+      chatId,
+      activeRunId: activeRun?.runId ?? null,
+      pendingBefore,
+      dropped,
+    });
+    return dropped;
   }
 
   flushChat(chatId: string): number {
@@ -66,11 +100,19 @@ export class ChatManager {
       this.markActiveRunStopped(activeRun.runId);
       this.queue.cancel(chatId);
     }
+    log.info("flush chat requested", {
+      chatId,
+      activeRunId: activeRun?.runId ?? null,
+      pendingBefore: pending,
+      stoppedActiveRun: !!(pending > 0 && activeRun),
+    });
     return pending;
   }
 
   drain(chatId: string): number {
-    return this.queue.drain(chatId);
+    const dropped = this.queue.drain(chatId);
+    log.info("drain chat requested", { chatId, dropped });
+    return dropped;
   }
 
   pendingCount(chatId: string): number {
@@ -86,7 +128,14 @@ export class ChatManager {
   }
 
   cancel(chatId: string): boolean {
-    return this.queue.cancel(chatId);
+    const cancelled = this.queue.cancel(chatId);
+    log.info("cancel chat requested", {
+      chatId,
+      cancelled,
+      activeRunId: this.runtimeState.getActiveRun(chatId)?.runId ?? null,
+      pendingCount: this.pendingCount(chatId),
+    });
+    return cancelled;
   }
 
   getState(chatId: string) {
@@ -98,6 +147,14 @@ export class ChatManager {
       chatId,
       snapshot.buffer.map((message) => message.dbMsgId).filter((id): id is number => id != null),
     );
+    log.debug("queue state synced", {
+      chatId,
+      bufferCount: snapshot.buffer.length,
+      pendingCount: snapshot.pending.length,
+      busy: snapshot.busy,
+      bufferMessageIds: snapshot.buffer.map((message) => message.dbMsgId).filter((id): id is number => id != null),
+      pendingMessageIds: snapshot.pending.map((message) => message.dbMsgId).filter((id): id is number => id != null),
+    });
   }
 
   private markActiveRunStopped(runId: string): void {

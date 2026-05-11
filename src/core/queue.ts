@@ -73,7 +73,11 @@ export class MessageQueue {
     if (q.busy) {
       log.info("message queued", { chatId: msg.chatId, pending: q.pending.length + 1 });
       q.pending.push(msg);
-      this.pendingFn?.(msg);
+      try {
+        this.pendingFn?.(msg);
+      } catch (err) {
+        log.warn("pending callback failed", { chatId: msg.chatId, error: String(err) });
+      }
       this.emitState(msg.chatId, q);
       return true;
     }
@@ -161,7 +165,9 @@ export class MessageQueue {
   private resetBufferTimer(q: ChatQueue, chatId: string): void {
     if (q.bufferTimer) clearTimeout(q.bufferTimer);
     q.bufferTimer = setTimeout(() => {
-      void this.flush(q, chatId);
+      void this.flush(q, chatId).catch((err) => {
+        log.error("flush failed", { chatId, error: String(err) });
+      });
     }, this.bufferMs);
   }
 
@@ -191,21 +197,20 @@ export class MessageQueue {
     q.busy = true;
     q.abortController = new AbortController();
     this.emitState(chatId, q);
-    const { signal } = q.abortController;
-
-    const mergedText = messages.length === 1
-      ? messages[0].text
-      : messages.map((m) => {
-          // 已经是 YAML 格式（- msg: / - forward:）的保持原样
-          if (m.text.startsWith("- msg:") || m.text.startsWith("- forward:")) return m.text;
-          // 独立消息包装成 YAML 格式
-          const label = m.senderLabel ?? "user";
-          return `- msg: "${escapeYamlContent(label)}: ${escapeYamlContent(m.text)}"`;
-        }).join("\n");
-
-    log.info("flush", { chatId, messageCount: messages.length, textLength: mergedText.length });
-
     try {
+      const { signal } = q.abortController;
+
+      const mergedText = messages.length === 1
+        ? messages[0].text
+        : messages.map((m) => {
+            // 已经是 YAML 格式（- msg: / - forward:）的保持原样
+            if (m.text.startsWith("- msg:") || m.text.startsWith("- forward:")) return m.text;
+            // 独立消息包装成 YAML 格式
+            const label = m.senderLabel ?? "user";
+            return `- msg: "${escapeYamlContent(label)}: ${escapeYamlContent(m.text)}"`;
+          }).join("\n");
+
+      log.info("flush", { chatId, messageCount: messages.length, textLength: mergedText.length });
       await this.processFn?.(chatId, mergedText, messages, signal);
     } catch (err) {
       log.error("process error", { chatId, error: String(err) });
@@ -216,11 +221,15 @@ export class MessageQueue {
   }
 
   private emitState(chatId: string, q: ChatQueue): void {
-    this.stateFn?.(chatId, {
-      buffer: [...q.buffer],
-      pending: [...q.pending],
-      busy: q.busy,
-    });
+    try {
+      this.stateFn?.(chatId, {
+        buffer: [...q.buffer],
+        pending: [...q.pending],
+        busy: q.busy,
+      });
+    } catch (err) {
+      log.warn("state callback failed", { chatId, error: String(err) });
+    }
   }
 
 }

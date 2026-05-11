@@ -59,7 +59,13 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
   /** 获取指定 session 的活动状态（供 watchdog / /list 读取） */
   getActivity(sessionId: string): AgentSessionActivity | undefined {
     const a = this.activityMap.get(sessionId);
-    if (a?.status === "running") this.refreshActivity(sessionId, a);
+    if (a?.status === "running") {
+      try {
+        this.refreshActivity(sessionId, a);
+      } catch (err) {
+        this.log.warn("refreshActivity failed", { sessionId, error: String(err) });
+      }
+    }
     return a;
   }
 
@@ -367,7 +373,14 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
             const parsed = JSON.parse(line);
             if (parsed.type === "system" && parsed.subtype === "status" && parsed.status === "compacting") {
               if (myActivity) myActivity.compacting = true;
-              hooks.onStatus?.("compacting");
+              try {
+                hooks.onStatus?.("compacting");
+              } catch (err) {
+                this.log.warn("stdout status hook failed", {
+                  sessionId: sessionId ?? null,
+                  error: String(err),
+                });
+              }
             } else {
               if (myActivity && myActivity.compacting) myActivity.compacting = false;
             }
@@ -375,23 +388,37 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
             if (myActivity && myActivity.compacting) myActivity.compacting = false;
           }
           // 回调
-          hooks.onLine?.(line);
+          try {
+            hooks.onLine?.(line);
+          } catch (err) {
+            this.log.warn("stdout line hook failed", {
+              sessionId: sessionId ?? null,
+              error: String(err),
+            });
+          }
           // 完成检测 → 立即 resolve，不等进程退出
-          if (hooks.isComplete?.(line)) {
-            if (myActivity) myActivity.completionDetected = true;
-            if (!settled) {
-              settled = true;
-              earlyResolveAt = Date.now();
-              const stdout = lines.join("\n");
-              this.log.info("completion detected, resolving immediately", {
-                sessionId: sessionId ?? null,
-                linesCollected: lines.length,
-                stdoutLength: stdout.length,
-                elapsedMs: earlyResolveAt - startedAt,
-              });
-              resolve(stdout);
-              // 进程继续在后台运行，等它自行退出；退不了的由 watchdog 收尸
+          try {
+            if (hooks.isComplete?.(line)) {
+              if (myActivity) myActivity.completionDetected = true;
+              if (!settled) {
+                settled = true;
+                earlyResolveAt = Date.now();
+                const stdout = lines.join("\n");
+                this.log.info("completion detected, resolving immediately", {
+                  sessionId: sessionId ?? null,
+                  linesCollected: lines.length,
+                  stdoutLength: stdout.length,
+                  elapsedMs: earlyResolveAt - startedAt,
+                });
+                resolve(stdout);
+                // 进程继续在后台运行，等它自行退出；退不了的由 watchdog 收尸
+              }
             }
+          } catch (err) {
+            this.log.warn("stdout completion hook failed", {
+              sessionId: sessionId ?? null,
+              error: String(err),
+            });
           }
         });
       } else {

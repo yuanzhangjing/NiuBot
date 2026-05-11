@@ -1,9 +1,11 @@
 import type { AgentBackend, AgentResponse, AgentSession } from "../agent/types.js";
+import { createLogger } from "../logger.js";
 import { RuntimeStateStore, type RunStage } from "./runtime-state.js";
 import { ResponseSender, type SendResult } from "./response-sender.js";
 import { TimeoutError, withTimeout } from "./timeout.js";
 
 const EMPTY_RESPONSE_FALLBACK = "（处理完成，但未生成回复。如果没收到预期结果，请重试）";
+const log = createLogger("run-manager");
 
 type RunManagerOptions = {
   agentTimeoutMs?: number;
@@ -46,10 +48,23 @@ export class RunManager {
   async runAgent(input: RunAgentInput): Promise<RunAgentResult> {
     if (input.signal?.aborted) {
       this.markRun(input.runId, "stopped");
+      log.info("agent run skipped, signal already aborted", {
+        runId: input.runId,
+        chatId: input.chatId,
+        agentSessionId: input.session.id,
+      });
       return { status: "stopped" };
     }
 
     this.markRun(input.runId, "agent_running");
+    const startedAt = Date.now();
+    log.info("agent run started", {
+      runId: input.runId,
+      chatId: input.chatId,
+      agentSessionId: input.session.id,
+      messageLength: input.message.length,
+      timeoutMs: this.agentTimeoutMs,
+    });
 
     try {
       const response = await withTimeout({
@@ -61,6 +76,11 @@ export class RunManager {
 
       if (response.cancelled && !response.text.trim()) {
         this.markRun(input.runId, "stopped");
+        log.info("agent run stopped without response", {
+          runId: input.runId,
+          chatId: input.chatId,
+          elapsedMs: Date.now() - startedAt,
+        });
         return { status: "stopped" };
       }
 
@@ -68,16 +88,34 @@ export class RunManager {
         response.text = EMPTY_RESPONSE_FALLBACK;
       }
 
+      log.info("agent run completed", {
+        runId: input.runId,
+        chatId: input.chatId,
+        responseLength: response.text.length,
+        cancelled: !!response.cancelled,
+        elapsedMs: Date.now() - startedAt,
+      });
       return { status: "response", response };
     } catch (err) {
       if (input.signal?.aborted) {
         this.markRun(input.runId, "stopped");
+        log.info("agent run stopped by abort", {
+          runId: input.runId,
+          chatId: input.chatId,
+          elapsedMs: Date.now() - startedAt,
+        });
         return { status: "stopped" };
       }
       if (err instanceof TimeoutError) {
         this.recordRunEvent(input.runId, "timeout", err.message);
       }
       this.markRun(input.runId, "failed", String(err));
+      log.error("agent run failed", {
+        runId: input.runId,
+        chatId: input.chatId,
+        error: String(err),
+        elapsedMs: Date.now() - startedAt,
+      });
       throw err;
     }
   }
@@ -85,10 +123,21 @@ export class RunManager {
   async sendFinalResponse(input: SendFinalResponseInput): Promise<SendResult> {
     if (input.signal?.aborted) {
       this.markRun(input.runId, "stopped");
+      log.info("final response skipped, signal already aborted", {
+        runId: input.runId,
+        chatId: input.chatId,
+      });
       return { ok: false, error: "aborted", methodsTried: [] };
     }
 
     this.markRun(input.runId, "sending_response");
+    const startedAt = Date.now();
+    log.info("final response send started", {
+      runId: input.runId,
+      chatId: input.chatId,
+      contentLength: input.content.length,
+      hasReply: !!input.replyToMsgId,
+    });
     const result = await this.responseSender.sendFinalResponse({
       chatId: input.chatId,
       header: input.header,
@@ -100,11 +149,25 @@ export class RunManager {
 
     if (result.ok) {
       this.markRun(input.runId, "done");
+      log.info("final response sent", {
+        runId: input.runId,
+        chatId: input.chatId,
+        method: result.method,
+        platformMsgId: result.platformMsgId,
+        elapsedMs: Date.now() - startedAt,
+      });
     } else {
       if (isTimeoutErrorMessage(result.error)) {
         this.recordRunEvent(input.runId, "timeout", result.error);
       }
       this.markRun(input.runId, input.signal?.aborted ? "stopped" : "failed", result.error);
+      log.error("final response send failed", {
+        runId: input.runId,
+        chatId: input.chatId,
+        error: result.error,
+        methodsTried: result.methodsTried,
+        elapsedMs: Date.now() - startedAt,
+      });
     }
     return result;
   }

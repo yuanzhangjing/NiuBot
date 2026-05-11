@@ -30,7 +30,19 @@ function waitMicrotask(): Promise<void> {
 describe("ChatManager", () => {
   afterEach(() => {
     vi.useRealTimers();
+    vi.restoreAllMocks();
   });
+
+  function captureStdout(): string[] {
+    const lines: string[] = [];
+    vi.spyOn(process.stdout, "write").mockImplementation((chunk: string | Uint8Array, ...args: unknown[]) => {
+      lines.push(String(chunk));
+      const callback = args.find((arg): arg is () => void => typeof arg === "function");
+      callback?.();
+      return true;
+    });
+    return lines;
+  }
 
   test("moves an idle chat into buffering when a message is enqueued", () => {
     const store = createStore();
@@ -116,6 +128,29 @@ describe("ChatManager", () => {
 
     expect(calls).toEqual(["first", "second"]);
     expect(store.getRunsForChat("c1").map((run) => run.runId)).toEqual(["run-1", "run-2"]);
+  });
+
+  test("logs run creation and stop details without message text", async () => {
+    vi.useFakeTimers();
+    const logs = captureStdout();
+    const store = createStore();
+    const manager = new ChatManager(10, store);
+    manager.onProcess((_runId, _chatId, _mergedText, _messages, signal) => new Promise<void>((resolve) => {
+      signal.addEventListener("abort", () => resolve(), { once: true });
+    }));
+
+    manager.enqueue(message({ text: "secret first", dbMsgId: 1, platformMsgId: "m1" }));
+    await vi.advanceTimersByTimeAsync(10);
+    manager.enqueue(message({ text: "secret second", dbMsgId: 2, platformMsgId: "m2" }));
+    manager.stopChat("c1");
+    await waitMicrotask();
+
+    const output = logs.join("");
+    expect(output).toContain("[chat-manager] run created runId=run-1 chatId=c1 messageCount=1");
+    expect(output).toContain("messageIds=[1]");
+    expect(output).toContain("[chat-manager] stop chat requested chatId=c1 activeRunId=run-1 pendingBefore=1 dropped=1");
+    expect(output).not.toContain("secret first");
+    expect(output).not.toContain("secret second");
   });
 
   test("stopChat aborts the active run and clears pending messages", async () => {

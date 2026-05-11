@@ -273,13 +273,13 @@ export default class CodexBackend extends CliAgentBackend<CodexSession> {
     const sessionsRoot = resolve(homedir(), ".codex", "sessions");
     if (!existsSync(sessionsRoot)) return null;
 
-    for (const year of readdirSync(sessionsRoot)) {
+    for (const year of this.readDirectoryNames(sessionsRoot)) {
       const yearDir = join(sessionsRoot, year);
-      for (const month of readdirSync(yearDir)) {
+      for (const month of this.readDirectoryNames(yearDir)) {
         const monthDir = join(yearDir, month);
-        for (const day of readdirSync(monthDir)) {
+        for (const day of this.readDirectoryNames(monthDir)) {
           const dayDir = join(monthDir, day);
-          const match = readdirSync(dayDir).find((name) => name.endsWith(`${session.agentSessionId}.jsonl`));
+          const match = this.readFileNames(dayDir).find((name) => name.endsWith(`${session.agentSessionId}.jsonl`));
           if (match) {
             session.sessionLogPath = join(dayDir, match);
             return session.sessionLogPath;
@@ -289,5 +289,27 @@ export default class CodexBackend extends CliAgentBackend<CodexSession> {
     }
 
     return null;
+  }
+
+  private readDirectoryNames(dir: string): string[] {
+    try {
+      return readdirSync(dir, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => entry.name);
+    } catch (err) {
+      this.log.warn("getJsonlPath: directory scan failed", { dir, error: String(err) });
+      return [];
+    }
+  }
+
+  private readFileNames(dir: string): string[] {
+    try {
+      return readdirSync(dir, { withFileTypes: true })
+        .filter((entry) => entry.isFile() || entry.isSymbolicLink())
+        .map((entry) => entry.name);
+    } catch (err) {
+      this.log.warn("getJsonlPath: file scan failed", { dir, error: String(err) });
+      return [];
+    }
   }
 }

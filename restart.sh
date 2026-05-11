@@ -33,6 +33,7 @@ elif [ "${RESTART_DETACHED:-}" != "1" ]; then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT_DIR_REAL="$(cd "$SCRIPT_DIR" && pwd -P)"
 BOT_NAME="${NIUBOT_BOT_NAME:-NiuBot}"
 CHAT_ID="${NIUBOT_RESTART_NOTIFY_CHAT_ID:-}"
 if [ -z "${NIUBOT_HOME:-}" ]; then
@@ -70,6 +71,61 @@ notify() {
         -d "{\"chat_id\":\"$CHAT_ID\",\"text\":\"$1\"}" >> "$DEBUG_LOG" 2>&1 || true
 }
 
+find_service_pids() {
+    ps -eo pid=,command= | while read -r pid command; do
+        if [ -z "$pid" ] || [ -z "$command" ]; then
+            continue
+        fi
+        case "$command" in
+            *"node dist/index.js"*|*"tsx src/index.ts"*)
+                case "$command" in
+                    *"pkill"*|*"pgrep"*|*"restart.sh"*) ;;
+                    *)
+                        local cwd
+                        cwd="$(process_cwd "$pid" || true)"
+                        if [ "$cwd" = "$SCRIPT_DIR_REAL" ]; then
+                            echo "$pid"
+                        else
+                            debug "skip PID $pid from scan: cwd=${cwd:-unknown}"
+                        fi
+                        ;;
+                esac
+                ;;
+        esac
+    done
+}
+
+process_cwd() {
+    local pid="$1"
+    if [ -e "/proc/$pid/cwd" ]; then
+        (cd "/proc/$pid/cwd" 2>/dev/null && pwd -P)
+        return
+    fi
+    if command -v lsof >/dev/null 2>&1; then
+        local cwd
+        cwd="$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1)"
+        if [ -n "$cwd" ]; then
+            (cd "$cwd" 2>/dev/null && pwd -P)
+        fi
+    fi
+}
+
+kill_service_pids() {
+    local signal="$1"
+    local pids
+    pids="$(find_service_pids || true)"
+    if [ -z "$pids" ]; then
+        return 1
+    fi
+    echo "$pids" | while read -r pid; do
+        if [ -n "$pid" ]; then
+            debug "killing PID $pid (from process scan, signal=$signal)"
+            kill "-$signal" "$pid" 2>/dev/null || true
+        fi
+    done
+    return 0
+}
+
 stop_service() {
     debug "stopping process..."
     local PID_FILE="$NIUBOT_HOME/niubot.pid"
@@ -88,11 +144,10 @@ stop_service() {
         rm -f "$PID_FILE"
     fi
 
-    # 兜底：pkill 模式匹配（处理没有 PID 文件的情况）
+    # 兜底：扫描真实服务 PID。不要用 pkill -f；pkill 的 argv 本身可能匹配模式并中断脚本。
     if [ -z "$target_pid" ]; then
-        debug "no PID file, falling back to pkill"
-        pkill -TERM -f "tsx src/index.ts" 2>/dev/null || true
-        pkill -TERM -f "node dist/index.js" 2>/dev/null || true
+        debug "no PID file, scanning service processes"
+        kill_service_pids TERM || debug "no matching service processes found"
     fi
 
     # 等待进程退出（最多 10s）
@@ -102,8 +157,7 @@ stop_service() {
         if [ -n "$target_pid" ] && kill -0 "$target_pid" 2>/dev/null; then
             still_alive=true
         elif [ -z "$target_pid" ]; then
-            if pgrep -f "tsx src/index.ts" > /dev/null 2>&1 || \
-               pgrep -f "node dist/index.js" > /dev/null 2>&1; then
+            if [ -n "$(find_service_pids || true)" ]; then
                 still_alive=true
             fi
         fi
@@ -119,11 +173,9 @@ stop_service() {
         kill -9 "$target_pid" 2>/dev/null || true
         sleep 1
     elif [ -z "$target_pid" ]; then
-        if pgrep -f "tsx src/index.ts" > /dev/null 2>&1 || \
-           pgrep -f "node dist/index.js" > /dev/null 2>&1; then
-            debug "force killing via pkill"
-            pkill -9 -f "tsx src/index.ts" 2>/dev/null || true
-            pkill -9 -f "node dist/index.js" 2>/dev/null || true
+        if [ -n "$(find_service_pids || true)" ]; then
+            debug "force killing scanned service processes"
+            kill_service_pids KILL || true
             sleep 1
         fi
     fi

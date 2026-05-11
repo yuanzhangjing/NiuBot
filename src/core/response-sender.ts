@@ -2,7 +2,10 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { PlatformAdapter } from "../im/types.js";
+import { createLogger } from "../logger.js";
 import { withTimeout } from "./timeout.js";
+
+const log = createLogger("response-sender");
 
 export type SendResult =
   | { ok: true; platformMsgId: string; method: "card" | "text" | "file" }
@@ -32,21 +35,26 @@ export class ResponseSender {
   }
 
   sendText(chatId: string, text: string, signal?: AbortSignal): Promise<string> {
-    return withTimeout({
+    return this.sendWithTelemetry("im.sendText", chatId, {
+      contentLength: text.length,
+    }, () => withTimeout({
       label: "im.sendText",
       timeoutMs: this.timeoutMs,
       signal,
       fn: () => this.im.sendText(chatId, text),
-    });
+    }));
   }
 
   sendReply(chatId: string, text: string, replyToMsgId: string, signal?: AbortSignal): Promise<string> {
-    return withTimeout({
+    return this.sendWithTelemetry("im.sendReply", chatId, {
+      hasReply: true,
+      contentLength: text.length,
+    }, () => withTimeout({
       label: "im.sendReply",
       timeoutMs: this.timeoutMs,
       signal,
       fn: () => this.im.sendReply(chatId, text, replyToMsgId),
-    });
+    }));
   }
 
   sendCard(
@@ -57,21 +65,26 @@ export class ResponseSender {
     replyToMsgId?: string,
     signal?: AbortSignal,
   ): Promise<string> {
-    return withTimeout({
+    return this.sendWithTelemetry("im.sendCard", chatId, {
+      hasReply: !!replyToMsgId,
+      contentLength: content.length,
+    }, () => withTimeout({
       label: "im.sendCard",
       timeoutMs: this.timeoutMs,
       signal,
       fn: () => this.im.sendCard(chatId, header, content, footer, replyToMsgId),
-    });
+    }));
   }
 
   sendFile(chatId: string, filePath: string, fileName?: string, signal?: AbortSignal): Promise<string> {
-    return withTimeout({
+    return this.sendWithTelemetry("im.sendFile", chatId, {
+      fileName: fileName ?? path.basename(filePath),
+    }, () => withTimeout({
       label: "im.sendFile",
       timeoutMs: this.timeoutMs,
       signal,
       fn: () => this.im.sendFile(chatId, filePath, fileName),
-    });
+    }));
   }
 
   addReaction(chatId: string, msgId: string, emoji: string, signal?: AbortSignal): Promise<void> {
@@ -102,11 +115,28 @@ export class ResponseSender {
       send: () => Promise<string>,
     ): Promise<SendResult | undefined> => {
       methodsTried.push(methodLabel);
+      log.info("send attempt", {
+        method: methodLabel,
+        chatId: options.chatId,
+        hasReply: !!options.replyToMsgId,
+        contentLength: options.content.length,
+        timeoutMs: this.timeoutMs,
+      });
       try {
         const platformMsgId = await send();
+        log.info("send succeeded", {
+          method: methodLabel,
+          chatId: options.chatId,
+          platformMsgId,
+        });
         return { ok: true, platformMsgId, method };
       } catch (err) {
         lastError = err;
+        log.warn("send failed", {
+          method: methodLabel,
+          chatId: options.chatId,
+          error: errorMessage(err),
+        });
         return undefined;
       }
     };
@@ -151,6 +181,39 @@ export class ResponseSender {
       return await this.sendFile(chatId, filePath, "reply.md", signal);
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  private async sendWithTelemetry(
+    method: string,
+    chatId: string,
+    data: Record<string, unknown>,
+    send: () => Promise<string>,
+  ): Promise<string> {
+    const startedAt = Date.now();
+    log.info("send started", {
+      method,
+      chatId,
+      ...data,
+      timeoutMs: this.timeoutMs,
+    });
+    try {
+      const platformMsgId = await send();
+      log.info("send succeeded", {
+        method,
+        chatId,
+        platformMsgId,
+        durationMs: Date.now() - startedAt,
+      });
+      return platformMsgId;
+    } catch (err) {
+      log.warn("send failed", {
+        method,
+        chatId,
+        error: errorMessage(err),
+        durationMs: Date.now() - startedAt,
+      });
+      throw err;
     }
   }
 }

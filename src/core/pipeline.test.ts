@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import yaml from "yaml";
 import { afterEach, describe, expect, test, vi } from "vitest";
+import { CliAgentBackend, type BaseCliSession, type ParsedOutput } from "../agent/cli-base.js";
 import type { AgentBackend, AgentResponse, AgentSession, SessionConfig } from "../agent/types.js";
 import {
   getBotBackendModelState,
@@ -55,6 +56,58 @@ class RecordingAgent implements AgentBackend {
       model: "model" in models ? models.model : current.model,
       liteModel: "liteModel" in models ? models.liteModel : current.liteModel,
     });
+  }
+}
+
+class ThrowingProbeAgent extends CliAgentBackend<BaseCliSession> {
+  constructor() {
+    super("throwing-probe");
+  }
+
+  override async start(): Promise<void> {}
+
+  command(): string {
+    return "throwing-probe";
+  }
+
+  buildSession(config: SessionConfig): BaseCliSession {
+    return {
+      workingDirectory: config.workingDirectory ?? process.cwd(),
+      extraEnv: {},
+      cumulativeBytes: 0,
+      compactCount: 0,
+      jsonlOffset: 0,
+    };
+  }
+
+  buildInput(): { args: string[]; stdin?: string } {
+    return { args: [] };
+  }
+
+  parseOutput(): ParsedOutput {
+    return { text: "" };
+  }
+
+  protected probeSessionFileMtime(): number | null {
+    throw new Error("probe failed");
+  }
+
+  markRunning(sessionId: string): void {
+    (this as any).activityMap.set(sessionId, {
+      status: "running",
+      startedAt: Date.now(),
+      lastActiveAt: Date.now(),
+      completionDetected: false,
+      compacting: false,
+      recentLines: [],
+      notifyCount: 0,
+    });
+  }
+}
+
+class ThrowingActivityAgent extends ThrowingProbeAgent {
+  override getActivity(): undefined {
+    throw new Error("activity failed");
   }
 }
 
@@ -253,7 +306,97 @@ afterEach(() => {
   }
 });
 
+describe("Pipeline.start", () => {
+  test("continues startup when app creator detection hangs", async () => {
+    vi.useFakeTimers();
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const im = createImStub();
+    im.getAppCreatorId = async () => new Promise<string | undefined>(() => {});
+    const agent = new RecordingAgent();
+    const pipeline = new Pipeline(
+      db,
+      im,
+      agent,
+      { name: "NiuBot", platform: "feishu", platformBotId: "bot" },
+      dir,
+      path.join(dir, "niubot.db"),
+      10,
+      "codex",
+    );
+
+    let resolved = false;
+    const started = pipeline.start().then(() => { resolved = true; });
+
+    await vi.advanceTimersByTimeAsync(6_000);
+    await Promise.resolve();
+
+    expect(resolved).toBe(true);
+    pipeline.stop();
+    await started;
+  });
+});
+
 describe("Pipeline.recover", () => {
+  test("idle watchdog does not throw when backend session mtime probing fails", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const agent = new ThrowingProbeAgent();
+    const agentSession = await agent.createSession({ workingDirectory: dir });
+    agent.markRunning(agentSession.id);
+    const pipeline = new Pipeline(
+      db,
+      createImStub(),
+      agent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+    (pipeline as any).chatSessions.set("c1", {
+      agentSession,
+      sessionId: "s1",
+      platformChatId: "chat-open-id",
+      userId: "u2",
+      hasReplied: false,
+    });
+
+    expect(() => (pipeline as any).runIdleWatchdog()).not.toThrow();
+  });
+
+  test("idle watchdog tick catches unexpected synchronous failures", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const agent = new ThrowingActivityAgent();
+    const agentSession = await agent.createSession({ workingDirectory: dir });
+    const pipeline = new Pipeline(
+      db,
+      createImStub(),
+      agent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+    (pipeline as any).chatSessions.set("c1", {
+      agentSession,
+      sessionId: "s1",
+      platformChatId: "chat-open-id",
+      userId: "u2",
+      hasReplied: false,
+    });
+
+    expect(() => (pipeline as any).runIdleWatchdogSafely()).not.toThrow();
+  });
+
   test("does not recover active sessions when the stored backend is missing", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);

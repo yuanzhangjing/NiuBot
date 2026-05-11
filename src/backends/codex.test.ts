@@ -242,6 +242,53 @@ describe("CodexBackend session metadata", () => {
     expect(parsed.contextTokens).toBeUndefined();
   });
 
+  it("skips non-directory entries while locating Codex session logs", () => {
+    const threadId = "019d688f-4db1-7871-981e-09b47ad4f84b";
+    const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-home-"));
+    process.env["HOME"] = tempHome;
+
+    const sessionsRoot = path.join(tempHome, ".codex", "sessions");
+    const logDir = path.join(sessionsRoot, "2026", "04", "07");
+    fs.mkdirSync(logDir, { recursive: true });
+    fs.writeFileSync(path.join(sessionsRoot, "rollout-2025-legacy.json"), "{}");
+    fs.writeFileSync(path.join(sessionsRoot, "2026", "legacy-month-file.json"), "{}");
+    fs.writeFileSync(path.join(sessionsRoot, "2026", "04", "legacy-day-file.json"), "{}");
+    fs.writeFileSync(
+      path.join(logDir, `rollout-2026-04-07T23-28-35-${threadId}.jsonl`),
+      JSON.stringify({
+        type: "turn_context",
+        payload: { model: "gpt-5.4" },
+      }),
+    );
+
+    const backend = new CodexBackend();
+    const session = backend.buildSession({ workingDirectory: tempHome });
+    const parsed = backend.parseOutput([
+      JSON.stringify({ type: "thread.started", thread_id: threadId }),
+      JSON.stringify({
+        type: "item.completed",
+        item: { type: "agent_message", text: "ok" },
+      }),
+    ].join("\n"), session);
+
+    expect(parsed.model).toBe("gpt-5.4");
+  });
+
+  it("returns null from mtime probe when Codex sessions root contains only files", () => {
+    const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-home-"));
+    process.env["HOME"] = tempHome;
+
+    const sessionsRoot = path.join(tempHome, ".codex", "sessions");
+    fs.mkdirSync(sessionsRoot, { recursive: true });
+    fs.writeFileSync(path.join(sessionsRoot, "rollout-2025-legacy.json"), "{}");
+
+    const backend = new CodexBackend();
+    const session = backend.buildSession({ workingDirectory: tempHome });
+    session.agentSessionId = "missing-thread";
+
+    expect((backend as any).probeSessionFileMtime(session)).toBeNull();
+  });
+
   it("lite tier with no liteModel uses backend default lite model", () => {
     const backend = new CodexBackend();
     const session = backend.buildSession({

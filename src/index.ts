@@ -16,6 +16,7 @@ import { createBotInstance, type BotInstance } from "./bot-instance.js";
 import { loadPersistedBotRuntimeState } from "./database/schema.js";
 import { createLogger, setLogLevel } from "./logger.js";
 import { prependNiubotBinToPath } from "./niubot-cli.js";
+import { summarizeProxyEnvironment } from "./proxy-env.js";
 import { resolveBotRuntimeConfig } from "./runtime-config.js";
 
 const log = createLogger("main");
@@ -122,6 +123,7 @@ async function main(): Promise<void> {
   }
 
   log.info(preflight ? "NiuBot preflight check starting..." : "NiuBot starting...");
+  log.info("proxy environment", summarizeProxyEnvironment());
   process.env["PATH"] = prependNiubotBinToPath();
 
   // 1. 加载配置

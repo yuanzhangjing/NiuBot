@@ -597,7 +597,19 @@ export function getRecentRuntimeEvents(db: Database.Database, query: RuntimeEven
   }));
 }
 
-export function markUnfinishedRuntimeRunsFailedByRestart(db: Database.Database, botId: string): number {
+export interface RestartFailedRunInfo {
+  botId: string;
+  chatId: string;
+  runId: string;
+  messageIds: number[];
+  previousElapsedMs?: number;
+}
+
+export function markUnfinishedRuntimeRunsFailedByRestart(
+  db: Database.Database,
+  botId: string,
+  onMarked?: (run: RestartFailedRunInfo) => void,
+): number {
   const rows = db.prepare(`
     SELECT e.run_id, e.chat_id, e.message_ids_json, e.elapsed_ms
     FROM runtime_events e
@@ -624,12 +636,28 @@ export function markUnfinishedRuntimeRunsFailedByRestart(db: Database.Database, 
     VALUES (?, ?, ?, ?, 'failed', 'failed_by_restart', ?, ?)
   `);
   const error = "Run did not reach a terminal state before restart";
+  const markedRuns = rows.map((row) => ({
+    botId,
+    chatId: row.chat_id,
+    runId: row.run_id,
+    messageIds: parseMessageIds(row.message_ids_json),
+    previousElapsedMs: row.elapsed_ms ?? undefined,
+  }));
   const tx = db.transaction((items: typeof rows) => {
     for (const row of items) {
       insert.run(botId, row.chat_id, row.run_id, row.message_ids_json, error, row.elapsed_ms ?? null);
     }
   });
   tx(rows);
+  if (onMarked) {
+    for (const run of markedRuns) {
+      try {
+        onMarked(run);
+      } catch {
+        // Telemetry callbacks must not affect restart recovery bookkeeping.
+      }
+    }
+  }
   return rows.length;
 }
 

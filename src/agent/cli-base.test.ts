@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import { CliAgentBackend, type BaseCliSession, type ParsedOutput } from "./cli-base.js";
-import type { AgentSession, SessionConfig } from "./types.js";
+import type { AgentSession, ExecHooks, SessionConfig } from "./types.js";
 
 class FailingCliBackend extends CliAgentBackend<BaseCliSession> {
   command(): string {
@@ -62,6 +62,29 @@ class ParsedOutputBackend extends CliAgentBackend<BaseCliSession> {
   }
 }
 
+class ThrowingRefreshBackend extends ParsedOutputBackend {
+  protected refreshActivity(): void {
+    throw new Error("refresh failed");
+  }
+}
+
+class ThrowingHookBackend extends ParsedOutputBackend {
+  buildInput(_session: BaseCliSession, _message: string): { args: string[]; stdin?: string } {
+    return {
+      args: ["-e", "process.stdout.write('ok\\n');"],
+    };
+  }
+
+  protected getExecHooks(): ExecHooks {
+    return {
+      onLine: () => {
+        throw new Error("hook failed");
+      },
+      isComplete: (line) => line === "ok",
+    };
+  }
+}
+
 describe("CliAgentBackend diagnostic logging", () => {
   test("logs stdin and stream tails when child process fails", async () => {
     const backend = new FailingCliBackend("test-cli");
@@ -108,5 +131,57 @@ describe("CliAgentBackend diagnostic logging", () => {
     await expect(backend.sendMessage(session as AgentSession, "ping")).rejects.toMatchObject({
       message: "test-cli 执行失败",
     });
+  });
+
+  test("keeps activity readable when backend refreshActivity throws", async () => {
+    const backend = new ThrowingRefreshBackend({ text: "ok" });
+    const entries: Array<{ level: string; msg: string; data?: Record<string, unknown> }> = [];
+    (backend as any).log = {
+      debug: (msg: string, data?: Record<string, unknown>) => entries.push({ level: "debug", msg, data }),
+      info: (msg: string, data?: Record<string, unknown>) => entries.push({ level: "info", msg, data }),
+      warn: (msg: string, data?: Record<string, unknown>) => entries.push({ level: "warn", msg, data }),
+      error: (msg: string, data?: Record<string, unknown>) => entries.push({ level: "error", msg, data }),
+    };
+    const session = await backend.createSession({ workingDirectory: process.cwd() });
+    (backend as any).activityMap.set(session.id, {
+      status: "running",
+      startedAt: 1,
+      lastActiveAt: 1,
+      completionDetected: false,
+      compacting: false,
+      recentLines: [],
+      notifyCount: 0,
+    });
+
+    expect(backend.getActivity(session.id)?.status).toBe("running");
+    expect(entries).toContainEqual(expect.objectContaining({
+      level: "warn",
+      msg: "refreshActivity failed",
+      data: expect.objectContaining({ sessionId: session.id, error: "Error: refresh failed" }),
+    }));
+  });
+
+  test("does not let stdout hook errors escape readline callbacks", async () => {
+    const backend = new ThrowingHookBackend({ text: "ok" });
+    const entries: Array<{ level: string; msg: string; data?: Record<string, unknown> }> = [];
+    (backend as any).log = {
+      debug: (msg: string, data?: Record<string, unknown>) => entries.push({ level: "debug", msg, data }),
+      info: (msg: string, data?: Record<string, unknown>) => entries.push({ level: "info", msg, data }),
+      warn: (msg: string, data?: Record<string, unknown>) => entries.push({ level: "warn", msg, data }),
+      error: (msg: string, data?: Record<string, unknown>) => entries.push({ level: "error", msg, data }),
+    };
+    const session = await backend.createSession({ workingDirectory: process.cwd() });
+
+    await expect(backend.sendMessage(session as AgentSession, "ping")).resolves.toMatchObject({ text: "ok" });
+    expect(entries).toContainEqual(expect.objectContaining({
+      level: "warn",
+      msg: "stdout line hook failed",
+      data: expect.objectContaining({ sessionId: session.id, error: "Error: hook failed" }),
+    }));
+    expect(entries).toContainEqual(expect.objectContaining({
+      level: "info",
+      msg: "completion detected, resolving immediately",
+      data: expect.objectContaining({ sessionId: session.id }),
+    }));
   });
 });

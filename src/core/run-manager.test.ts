@@ -54,7 +54,19 @@ function createSender(overrides: Partial<ResponseSender> = {}): ResponseSender {
 describe("RunManager", () => {
   afterEach(() => {
     vi.useRealTimers();
+    vi.restoreAllMocks();
   });
+
+  function captureStdout(): string[] {
+    const lines: string[] = [];
+    vi.spyOn(process.stdout, "write").mockImplementation((chunk: string | Uint8Array, ...args: unknown[]) => {
+      lines.push(String(chunk));
+      const callback = args.find((arg): arg is () => void => typeof arg === "function");
+      callback?.();
+      return true;
+    });
+    return lines;
+  }
 
   test("marks a successful agent call and final send as done", async () => {
     const { store, runId } = createStore();
@@ -78,6 +90,25 @@ describe("RunManager", () => {
     expect(sendResult.ok).toBe(true);
     expect(store.getRun(runId)?.stage).toBe("done");
     expect(agent.sendMessageCalls).toEqual(["hello"]);
+  });
+
+  test("logs agent lifecycle without prompt content", async () => {
+    const logs = captureStdout();
+    const { store, runId } = createStore();
+    const agent = new RecordingAgent(async () => ({ text: "reply" }));
+    const manager = new RunManager(agent, store, createSender());
+
+    await manager.runAgent({
+      runId,
+      chatId: "c1",
+      session: { id: "agent-1" },
+      message: "secret prompt",
+    });
+
+    const output = logs.join("");
+    expect(output).toContain("[run-manager] agent run started runId=run-1 chatId=c1 agentSessionId=agent-1 messageLength=13");
+    expect(output).toContain("[run-manager] agent run completed runId=run-1 chatId=c1 responseLength=5");
+    expect(output).not.toContain("secret prompt");
   });
 
   test("marks the run failed when the agent throws", async () => {

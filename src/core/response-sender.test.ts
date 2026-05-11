@@ -15,10 +15,22 @@ const tempDirs: string[] = [];
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.restoreAllMocks();
   for (const dir of tempDirs.splice(0)) {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+function captureStdout(): string[] {
+  const lines: string[] = [];
+  vi.spyOn(process.stdout, "write").mockImplementation((chunk: string | Uint8Array, ...args: unknown[]) => {
+    lines.push(String(chunk));
+    const callback = args.find((arg): arg is () => void => typeof arg === "function");
+    callback?.();
+    return true;
+  });
+  return lines;
+}
 
 function createAdapter(overrides: Partial<PlatformAdapter> = {}) {
   const calls: Call[] = [];
@@ -57,6 +69,24 @@ function createAdapter(overrides: Partial<PlatformAdapter> = {}) {
 }
 
 describe("ResponseSender", () => {
+  test("logs direct send duration without response content", async () => {
+    const logs = captureStdout();
+    const { im } = createAdapter();
+    const sender = new ResponseSender(im, { timeoutMs: 100 });
+
+    await expect(sender.sendCard("chat-1", "Reply", "secret reply", "footer", "msg-1"))
+      .resolves.toBe("card-msg");
+
+    const output = logs.join("");
+    expect(output).toContain("[response-sender] send started method=im.sendCard chatId=chat-1");
+    expect(output).toContain("hasReply=true");
+    expect(output).toContain("contentLength=12");
+    expect(output).toContain("timeoutMs=100");
+    expect(output).toContain("[response-sender] send succeeded method=im.sendCard chatId=chat-1 platformMsgId=card-msg");
+    expect(output).toContain("durationMs=");
+    expect(output).not.toContain("secret reply");
+  });
+
   test("does not call fallback when card succeeds", async () => {
     const { im, calls } = createAdapter();
     const sender = new ResponseSender(im, { timeoutMs: 100 });
@@ -92,6 +122,28 @@ describe("ResponseSender", () => {
 
     expect(result).toEqual({ ok: true, platformMsgId: "text-msg", method: "text" });
     expect(calls.map((call) => call.method)).toEqual(["card", "text"]);
+  });
+
+  test("logs send attempts and fallback results without response content", async () => {
+    const logs = captureStdout();
+    const { im } = createAdapter({
+      async sendCard() { throw new Error("card failed"); },
+    });
+    const sender = new ResponseSender(im, { timeoutMs: 100 });
+
+    const result = await sender.sendFinalResponse({
+      chatId: "chat-1",
+      header: "Reply",
+      content: "secret reply",
+    });
+
+    const output = logs.join("");
+    expect(result).toEqual({ ok: true, platformMsgId: "text-msg", method: "text" });
+    expect(output).toContain("[response-sender] send attempt method=card:create chatId=chat-1");
+    expect(output).toContain("[response-sender] send failed method=card:create chatId=chat-1");
+    expect(output).toContain("[response-sender] send succeeded method=text:create chatId=chat-1 platformMsgId=text-msg");
+    expect(output).toContain("contentLength=12");
+    expect(output).not.toContain("secret reply");
   });
 
   test("falls back from reply to create when reply fails", async () => {
