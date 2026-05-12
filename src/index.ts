@@ -18,6 +18,7 @@ import { createLogger, setLogLevel } from "./logger.js";
 import { prependNiubotBinToPath } from "./niubot-cli.js";
 import { summarizeProxyEnvironment } from "./proxy-env.js";
 import { resolveBotRuntimeConfig } from "./runtime-config.js";
+import { startBotRuntime } from "./bot-startup.js";
 
 const log = createLogger("main");
 
@@ -240,20 +241,10 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
-  // 4. 启动所有 bot：start（identity + admin 检测） → recover → IM connect → API server → Cron
+  // 4. 启动所有 bot：pipeline/recover → API server → Cron → IM connect in background
   for (const bot of bots) {
     try {
-      await bot.pipeline.start();
-      await bot.pipeline.recover();
-      await bot.im.start();
-
-      // Start API server for IPC
-      await bot.apiServer.start();
-
-      // Start cron scheduler
-      bot.cronScheduler.start();
-
-      log.info("bot started", { name: bot.id });
+      await startBotRuntime(bot, { log });
     } catch (err) {
       log.error("failed to start bot", { name: bot.id, error: String(err) });
     }
