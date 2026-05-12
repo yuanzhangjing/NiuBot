@@ -56,6 +56,8 @@ mkdir -p "$LOG_DIR" "$RELEASES_DIR" "$PACKAGES_DIR" "$RESTART_DIR"
 RELEASES_DIR_REAL="$(cd "$RELEASES_DIR" && pwd -P)"
 LOG_FILE="$LOG_DIR/niubot-$(date '+%Y-%m-%d').log"
 DEBUG_LOG="$LOG_DIR/restart-debug.log"
+STATE_FILE="$RESTART_DIR/state.json"
+CANDIDATE_PID_FILE="$RESTART_DIR/candidate.pid"
 
 # Unset session-specific env vars so they don't leak into the new daemon
 # or its agent subprocesses. BOT_NAME / CHAT_ID / SOCKET_PATH are captured
@@ -68,8 +70,43 @@ HEALTH_TIMEOUT=15
 HEALTH_INTERVAL=1
 PREFLIGHT_TIMEOUT=20
 PREFLIGHT_SOCKET="$NIUBOT_HOME/$BOT_NAME/api.sock.preflight"
+RESTART_ID="$(date '+%Y%m%d-%H%M%S')-$$"
+RESTART_STARTED_AT="$(date '+%Y-%m-%dT%H:%M:%S%z')"
+STATE_OLD_PID=""
+STATE_CANDIDATE_PID=""
+STATE_CANDIDATE_RELEASE=""
+STATE_PREVIOUS_RELEASE=""
 
 debug() { echo "[$(date '+%H:%M:%S')] $*" >> "$DEBUG_LOG"; }
+
+json_string() {
+    local value="${1:-}"
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    value="${value//$'\n'/\\n}"
+    printf '"%s"' "$value"
+}
+
+write_state() {
+    local phase="$1"
+    local error="${2:-}"
+    local updated_at
+    updated_at="$(date '+%Y-%m-%dT%H:%M:%S%z')"
+    {
+        echo "{"
+        printf '  "id": %s,\n' "$(json_string "$RESTART_ID")"
+        printf '  "phase": %s,\n' "$(json_string "$phase")"
+        printf '  "oldPid": %s,\n' "$(json_string "$STATE_OLD_PID")"
+        printf '  "candidatePid": %s,\n' "$(json_string "$STATE_CANDIDATE_PID")"
+        printf '  "candidateRelease": %s,\n' "$(json_string "$STATE_CANDIDATE_RELEASE")"
+        printf '  "previousRelease": %s,\n' "$(json_string "$STATE_PREVIOUS_RELEASE")"
+        printf '  "startedAt": %s,\n' "$(json_string "$RESTART_STARTED_AT")"
+        printf '  "updatedAt": %s,\n' "$(json_string "$updated_at")"
+        printf '  "error": %s\n' "$(json_string "$error")"
+        echo "}"
+    } > "$STATE_FILE.tmp"
+    mv "$STATE_FILE.tmp" "$STATE_FILE"
+}
 
 resolve_release_link() {
     local link="$1"
@@ -164,6 +201,7 @@ stop_service() {
     if [ -f "$PID_FILE" ]; then
         target_pid=$(cat "$PID_FILE")
         if kill -0 "$target_pid" 2>/dev/null; then
+            STATE_OLD_PID="$target_pid"
             debug "killing PID $target_pid (from PID file)"
             kill -TERM "$target_pid" 2>/dev/null || true
         else
@@ -216,7 +254,34 @@ start_service() {
     debug "starting new process from $package_dir..."
     cd "$package_dir"
     NIUBOT_SOURCE_DIR="$SOURCE_DIR_REAL" NIUBOT_LOG_LEVEL="${NIUBOT_LOG_LEVEL:-info}" nohup node dist/index.js >> "$LOG_FILE" 2>&1 &
+    echo "$!" > "$CANDIDATE_PID_FILE"
+    STATE_CANDIDATE_PID="$!"
     debug "new process launched, PID=$!"
+}
+
+stop_candidate_service() {
+    if [ -f "$CANDIDATE_PID_FILE" ]; then
+        local candidate_pid
+        candidate_pid="$(cat "$CANDIDATE_PID_FILE")"
+        if [ -n "$candidate_pid" ] && kill -0 "$candidate_pid" 2>/dev/null; then
+            debug "killing candidate PID $candidate_pid"
+            kill -TERM "$candidate_pid" 2>/dev/null || true
+            local wait=0
+            while [ "$wait" -lt 10 ] && kill -0 "$candidate_pid" 2>/dev/null; do
+                sleep 1
+                wait=$((wait + 1))
+                debug "  waiting candidate... ($wait/10)"
+            done
+            if kill -0 "$candidate_pid" 2>/dev/null; then
+                debug "force killing candidate PID $candidate_pid"
+                kill -9 "$candidate_pid" 2>/dev/null || true
+                sleep 1
+            fi
+            rm -f "$CANDIDATE_PID_FILE"
+            return 0
+        fi
+    fi
+    stop_service
 }
 
 check_health() {
@@ -391,6 +456,7 @@ cleanup_old_releases() {
 echo "" > "$DEBUG_LOG"
 debug "=== restart.sh started ==="
 debug "PID=$$, BOT=$BOT_NAME, CHAT=$CHAT_ID"
+write_state "started" || true
 
 # Let the "正在重启..." message get delivered
 sleep 2
@@ -406,18 +472,24 @@ fi
 if $DEV_MODE; then
     # ── Dev mode: build package → release → preflight → switch → commit LKG / rollback ──
 
+    write_state "bootstrap_last_known_good" || true
     bootstrap_last_known_good
 
+    write_state "build_candidate" || true
     if ! candidate_release="$(build_candidate_release)"; then
+        write_state "build_package_failed" "build or package failed" || true
         notify "重启失败：构建或打包错误，当前服务不受影响。"
         debug "=== restart.sh done (build/package failed) ==="
         exit 1
     fi
+    STATE_CANDIDATE_RELEASE="$candidate_release"
     candidate_package_dir="$(release_package_dir "$candidate_release")"
 
     # Preflight: verify new code can start before killing old process
+    write_state "preflight_candidate" || true
     if ! run_preflight "$candidate_package_dir"; then
         debug "preflight FAILED, old process unaffected"
+        write_state "preflight_failed" "candidate preflight failed" || true
         notify "重启失败：新版本预检不通过，当前服务不受影响。"
         debug "=== restart.sh done (preflight failed) ==="
         exit 1
@@ -426,20 +498,26 @@ if $DEV_MODE; then
 
     previous_release="$(resolve_release_link "$LKG_LINK")"
     if [ -n "$previous_release" ]; then
+        STATE_PREVIOUS_RELEASE="$previous_release"
         set_release_link "$PREVIOUS_LINK" "$previous_release"
     fi
+
+    write_state "stop_old_service" || true
+    stop_service
     set_release_link "$CURRENT_LINK" "$candidate_release"
     debug "current release switched candidate=$candidate_release previous=${previous_release:-none}"
-
-    stop_service
+    write_state "start_candidate" || true
     start_service "$candidate_package_dir"
 
+    write_state "health_check_candidate" || true
     if check_health; then
         debug "candidate health check passed"
         sleep 1
         set_release_link "$LKG_LINK" "$candidate_release"
         debug "last-known-good updated release=$candidate_release"
         cleanup_old_releases
+        rm -f "$CANDIDATE_PID_FILE"
+        write_state "success" || true
         notify "重启成功。"
         debug "=== restart.sh done (success) ==="
         exit 0
@@ -447,7 +525,8 @@ if $DEV_MODE; then
 
     # Failed — rollback to last-known-good
     debug "new version failed, rolling back..."
-    stop_service
+    write_state "rollback_stop_candidate" "candidate health check failed" || true
+    stop_candidate_service
 
     rollback_release="$(resolve_release_link "$LKG_LINK")"
     if [ -n "$rollback_release" ]; then
@@ -455,20 +534,26 @@ if $DEV_MODE; then
         set_release_link "$CURRENT_LINK" "$rollback_release"
         debug "current release restored from last-known-good release=$rollback_release"
 
+        write_state "rollback_start_lkg" "candidate health check failed" || true
         start_service "$rollback_package_dir"
+        write_state "health_check_rollback" "candidate health check failed" || true
         if check_health; then
             sleep 1
+            rm -f "$CANDIDATE_PID_FILE"
+            write_state "rollback_success" "candidate health check failed" || true
             notify "新版本启动失败，已回滚到上一版本。"
             debug "=== restart.sh done (rollback success) ==="
             exit 0
         fi
 
         debug "rollback also failed"
+        write_state "rollback_failed" "rollback health check failed" || true
         notify "重启失败（回滚也失败），请检查日志: $LOG_FILE"
         debug "=== restart.sh done (rollback failed) ==="
         exit 1
     else
         debug "no last-known-good to rollback to"
+        write_state "rollback_unavailable" "no last-known-good to rollback to" || true
         notify "重启失败，无 last-known-good 可回滚，请检查日志: $LOG_FILE"
         debug "=== restart.sh done (no last-known-good) ==="
         exit 1
@@ -477,24 +562,32 @@ else
     # ── Production mode: preflight → restart (no build, no rollback) ──
 
     debug "production mode: preflight..."
+    write_state "production_preflight" || true
     if ! run_preflight "$SCRIPT_DIR_REAL"; then
         debug "preflight FAILED, old process unaffected"
+        write_state "production_preflight_failed" "preflight failed" || true
         notify "重启失败：预检不通过，当前服务不受影响。"
         debug "=== restart.sh done (preflight failed) ==="
         exit 1
     fi
     debug "preflight passed, restarting..."
 
+    write_state "production_stop_service" || true
     stop_service
+    write_state "production_start_service" || true
     start_service "$SCRIPT_DIR_REAL"
 
+    write_state "production_health_check" || true
     if check_health; then
         sleep 1
+        rm -f "$CANDIDATE_PID_FILE"
+        write_state "production_success" || true
         notify "重启成功。"
         debug "=== restart.sh done (success) ==="
         exit 0
     fi
 
+    write_state "production_failed" "health check failed" || true
     notify "重启失败，请检查日志: $LOG_FILE"
     debug "=== restart.sh done (failed) ==="
     exit 1

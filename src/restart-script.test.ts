@@ -39,6 +39,25 @@ describe("restart.sh", () => {
     expect(lkgUpdateIndex).toBeGreaterThan(healthSuccessIndex);
   });
 
+  test("switches current release only after the old service is stopped", () => {
+    const script = readScript();
+    const stopIndex = script.indexOf('write_state "stop_old_service"');
+    const switchIndex = script.indexOf("current release switched candidate=");
+
+    expect(stopIndex).toBeGreaterThan(-1);
+    expect(switchIndex).toBeGreaterThan(stopIndex);
+  });
+
+  test("records restart state and candidate pid for rollback diagnostics", () => {
+    const script = readScript();
+
+    expect(script).toContain("STATE_FILE=");
+    expect(script).toContain("CANDIDATE_PID_FILE=");
+    expect(script).toContain("write_state");
+    expect(script).toContain('echo "$!" > "$CANDIDATE_PID_FILE"');
+    expect(script).toContain('rm -f "$CANDIDATE_PID_FILE"');
+  });
+
   test("passes the current bot name to the detached restart script", () => {
     const pipeline = readFileSync(path.resolve(__dirname, "core/pipeline.ts"), "utf-8");
 
