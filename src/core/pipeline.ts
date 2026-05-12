@@ -2252,6 +2252,7 @@ export class Pipeline {
       env: {
         ...process.env,
         NIUBOT_HOME,
+        NIUBOT_BOT_NAME: this.botIdentity.name,
         NIUBOT_RESTART_NOTIFY_CHAT_ID: chatId ?? "",
         NIUBOT_API_SOCKET: socketPath,
       },

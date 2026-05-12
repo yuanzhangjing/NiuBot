@@ -166,22 +166,26 @@ async function main(): Promise<void> {
     return [...BUILTIN_BACKEND_LIST, ...custom];
   };
 
-  // 确保插件 symlink 存在（使 import("niubot/plugin") 可解析）
-  // 必须在 bot 创建之前，因为自定义 backend 可能在 getOrCreateBackend 中被 lazy-load
+  // 确保插件 symlink 存在（使 import("niubot/plugin") 可解析）。
+  // Preflight 运行在候选 release 上；不能提前改全局 symlink，否则预检失败也会影响旧服务。
   const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
   const pluginLink = resolve(NIUBOT_HOME, "node_modules", "niubot");
-  let needSymlink = true;
-  try {
-    needSymlink = realpathSync(pluginLink) !== realpathSync(packageRoot);
-    if (needSymlink) rmSync(pluginLink, { recursive: true, force: true });
-  } catch { /* 不存在 */ }
-  if (needSymlink) {
+  if (preflight) {
+    log.info("plugin symlink skipped in preflight", { link: pluginLink, target: packageRoot });
+  } else {
+    let needSymlink = true;
     try {
-      mkdirSync(dirname(pluginLink), { recursive: true });
-      symlinkSync(packageRoot, pluginLink);
-      log.info("plugin symlink created", { link: pluginLink, target: packageRoot });
-    } catch (e) {
-      log.warn("failed to create plugin symlink", { error: String(e) });
+      needSymlink = realpathSync(pluginLink) !== realpathSync(packageRoot);
+      if (needSymlink) rmSync(pluginLink, { recursive: true, force: true });
+    } catch { /* 不存在 */ }
+    if (needSymlink) {
+      try {
+        mkdirSync(dirname(pluginLink), { recursive: true });
+        symlinkSync(packageRoot, pluginLink);
+        log.info("plugin symlink created", { link: pluginLink, target: packageRoot });
+      } catch (e) {
+        log.warn("failed to create plugin symlink", { error: String(e) });
+      }
     }
   }
 
