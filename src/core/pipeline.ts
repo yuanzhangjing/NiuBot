@@ -67,7 +67,10 @@ const INTERRUPT_WORDS = new Set([
 const AGENT_WATCHDOG_INTERVAL_MS = 15_000;     // 15 秒检测间隔
 const AGENT_IDLE_THRESHOLD_MS = 600_000;       // 10 分钟：第一次 idle 通知
 const AGENT_IDLE_THRESHOLD_2_MS = 1_800_000;   // 30 分钟：第二次 idle 通知
+const AGENT_LONG_RUNNING_FIRST_NOTIFY_MS = 1_800_000;  // 30 分钟：主会话仍活跃时提醒
+const AGENT_LONG_RUNNING_REPEAT_NOTIFY_MS = 3_600_000; // 1 小时：主会话长运行重复提醒
 const INDEPENDENT_IDLE_KILL_MS = 3_600_000;    // 1 小时：独立 session 无活动自动 kill
+const INDEPENDENT_LONG_RUNNING_NOTIFY_MS = 3_600_000;  // 1 小时：独立 session 仍活跃时提醒
 const SUMMARY_TIMEOUT_MS = 60_000;             // 归档摘要最长等待 60 秒
 const UPDATE_CHECK_HOUR = 10;                  // 本地时间 10:00 检查 npm latest
 const UPDATE_NOTIFY_END_HOUR = 18;             // 10:00-18:00 启动时允许立即通知
@@ -3022,6 +3025,7 @@ export class Pipeline {
       }
 
       const idleMs = now - a.lastActiveAt;
+      const runningMs = now - a.startedAt;
 
       // ── 活动恢复检测：发过通知后又有活动 → 通知用户 + 重置 ──
       if (a.notifyCount > 0 && a.lastNotifiedAt && a.lastActiveAt > a.lastNotifiedAt) {
@@ -3049,7 +3053,27 @@ export class Pipeline {
         continue;
       }
 
-      // ── 策略 2: 无 completion + 长时间无活动 → 通知 ──
+      // ── 策略 2: 长时间运行但仍有活动 → 低频提醒，不 kill ──
+      if (
+        !a.completionDetected
+        && idleMs <= AGENT_IDLE_THRESHOLD_MS
+        && runningMs > AGENT_LONG_RUNNING_FIRST_NOTIFY_MS
+        && (!a.lastLongRunningNotifiedAt || now - a.lastLongRunningNotifiedAt > AGENT_LONG_RUNNING_REPEAT_NOTIFY_MS)
+      ) {
+        const runningMin = Math.round(runningMs / 60_000);
+        const idleMin = Math.max(0, Math.round(idleMs / 60_000));
+        const header = `⏳ 任务仍在运行`;
+        const parts = [`已运行 ${runningMin} 分钟，最近 ${idleMin} 分钟内仍有输出。可以发 /stop 停止当前任务。`];
+        if (a.recentLines.length > 0) {
+          const logBlock = a.recentLines.map((l) => l.replace(/`{3,}/g, "``").slice(0, ERROR_DISPLAY_MAX_LEN)).join("\n");
+          parts.push(`**最近 ${a.recentLines.length} 条日志：**\n\`\`\`\n${logBlock}\n\`\`\``);
+        }
+        this.sendWatchdogCard(chatId, header, parts.join("\n\n"));
+        a.lastLongRunningNotifiedAt = now;
+        continue;
+      }
+
+      // ── 策略 3: 无 completion + 长时间无活动 → 通知 ──
       if (!a.completionDetected) {
         if (a.notifyCount >= 2) continue;  // 两次封顶
 
@@ -3087,6 +3111,26 @@ export class Pipeline {
           sessionId, chatId: task.chatId, description: task.description, idleMs,
         });
         this.agent.cancelSession(task.agentSession).catch(() => {});
+        continue;
+      }
+
+      // 仍在活跃的长任务 → 低频提醒，不 kill
+      if (
+        !a.completionDetected
+        && idleMs <= AGENT_IDLE_THRESHOLD_MS
+        && runningMs > INDEPENDENT_LONG_RUNNING_NOTIFY_MS
+        && (!a.lastLongRunningNotifiedAt || now - a.lastLongRunningNotifiedAt > AGENT_LONG_RUNNING_REPEAT_NOTIFY_MS)
+      ) {
+        const runningMin = Math.round(runningMs / 60_000);
+        const idleMin = Math.max(0, Math.round(idleMs / 60_000));
+        const header = `⏳ 定时任务仍在运行`;
+        const parts = [`「${task.description}」已运行 ${runningMin} 分钟，最近 ${idleMin} 分钟内仍有输出。`];
+        if (a.recentLines.length > 0) {
+          const logBlock = a.recentLines.map((l) => l.replace(/`{3,}/g, "``").slice(0, ERROR_DISPLAY_MAX_LEN)).join("\n");
+          parts.push(`**最近 ${a.recentLines.length} 条日志：**\n\`\`\`\n${logBlock}\n\`\`\``);
+        }
+        this.sendWatchdogCard(task.chatId, header, parts.join("\n\n"));
+        a.lastLongRunningNotifiedAt = now;
         continue;
       }
 

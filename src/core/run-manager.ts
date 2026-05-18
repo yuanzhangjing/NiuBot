@@ -2,14 +2,9 @@ import type { AgentBackend, AgentResponse, AgentSession } from "../agent/types.j
 import { createLogger } from "../logger.js";
 import { RuntimeStateStore, type RunStage } from "./runtime-state.js";
 import { ResponseSender, type SendResult } from "./response-sender.js";
-import { TimeoutError, withTimeout } from "./timeout.js";
 
 const EMPTY_RESPONSE_FALLBACK = "（处理完成，但未生成回复。如果没收到预期结果，请重试）";
 const log = createLogger("run-manager");
-
-type RunManagerOptions = {
-  agentTimeoutMs?: number;
-};
 
 type RunAgentInput = {
   runId: string;
@@ -34,16 +29,11 @@ type SendFinalResponseInput = {
 };
 
 export class RunManager {
-  private readonly agentTimeoutMs: number;
-
   constructor(
     private readonly agent: AgentBackend,
     private readonly runtimeState: RuntimeStateStore,
     private readonly responseSender: ResponseSender,
-    options: RunManagerOptions = {},
-  ) {
-    this.agentTimeoutMs = options.agentTimeoutMs ?? 30 * 60_000;
-  }
+  ) {}
 
   async runAgent(input: RunAgentInput): Promise<RunAgentResult> {
     if (input.signal?.aborted) {
@@ -63,16 +53,13 @@ export class RunManager {
       chatId: input.chatId,
       agentSessionId: input.session.id,
       messageLength: input.message.length,
-      timeoutMs: this.agentTimeoutMs,
     });
 
     try {
-      const response = await withTimeout({
-        label: "agent.sendMessage",
-        timeoutMs: this.agentTimeoutMs,
-        signal: input.signal,
-        fn: () => this.agent.sendMessage(input.session, input.message),
-      });
+      const response = await abortable(
+        this.agent.sendMessage(input.session, input.message),
+        input.signal,
+      );
 
       if (response.cancelled && !response.text.trim()) {
         this.markRun(input.runId, "stopped");
@@ -105,9 +92,6 @@ export class RunManager {
           elapsedMs: Date.now() - startedAt,
         });
         return { status: "stopped" };
-      }
-      if (err instanceof TimeoutError) {
-        this.recordRunEvent(input.runId, "timeout", err.message);
       }
       this.markRun(input.runId, "failed", String(err));
       log.error("agent run failed", {
@@ -194,4 +178,27 @@ function isTerminalRunStage(stage: RunStage): boolean {
 
 function isTimeoutErrorMessage(error: string): boolean {
   return error.includes(" timed out after ");
+}
+
+async function abortable<T>(operation: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return operation;
+  if (signal.aborted) throw getAbortReason(signal);
+
+  let abortHandler: (() => void) | undefined;
+  const aborted = new Promise<never>((_, reject) => {
+    abortHandler = () => reject(getAbortReason(signal));
+    signal.addEventListener("abort", abortHandler, { once: true });
+  });
+
+  try {
+    return await Promise.race([operation, aborted]);
+  } finally {
+    if (abortHandler) {
+      signal.removeEventListener("abort", abortHandler);
+    }
+  }
+}
+
+function getAbortReason(signal: AbortSignal): unknown {
+  return signal.reason ?? new Error("aborted");
 }

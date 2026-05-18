@@ -121,6 +121,8 @@ export interface AgentSessionActivity {
   notifyCount: number;
   /** 上次通知时间 */
   lastNotifiedAt?: number;
+  /** 上次长时间运行提醒时间 */
+  lastLongRunningNotifiedAt?: number;
 }
 
 /** exec() 流式 hooks，由各 backend 提供 */

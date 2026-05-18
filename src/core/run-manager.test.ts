@@ -132,15 +132,15 @@ describe("RunManager", () => {
     });
   });
 
-  test("marks the run failed when the agent times out", async () => {
+  test("does not fail an active agent call because of a fixed wall-clock timeout", async () => {
     vi.useFakeTimers();
     const events: RuntimeStateEvent[] = [];
     const { store, runId } = createStore((event) => events.push(event));
+    let resolveAgent: ((response: AgentResponse) => void) | undefined;
     const manager = new RunManager(
-      new RecordingAgent(() => new Promise<AgentResponse>(() => {})),
+      new RecordingAgent(() => new Promise<AgentResponse>((resolve) => { resolveAgent = resolve; })),
       store,
       createSender(),
-      { agentTimeoutMs: 100 },
     );
 
     const pending = manager.runAgent({
@@ -148,13 +148,17 @@ describe("RunManager", () => {
       chatId: "c1",
       session: { id: "agent-1" },
       message: "hello",
-    }).catch((err: unknown) => err);
-    await vi.advanceTimersByTimeAsync(100);
+    });
+    await vi.advanceTimersByTimeAsync(30 * 60_000);
 
-    const err = await pending;
-    expect(String(err)).toContain("agent.sendMessage timed out after 100ms");
-    expect(store.getRun(runId)?.stage).toBe("failed");
-    expect(events.map((event) => event.event)).toEqual(["started", "stage_changed", "timeout", "failed"]);
+    expect(store.getRun(runId)?.stage).toBe("agent_running");
+    resolveAgent?.({ text: "late reply" });
+
+    await expect(pending).resolves.toMatchObject({
+      status: "response",
+      response: { text: "late reply" },
+    });
+    expect(events.map((event) => event.event)).toEqual(["started", "stage_changed"]);
   });
 
   test("marks the run failed when final response cannot be sent", async () => {
@@ -223,6 +227,32 @@ describe("RunManager", () => {
     });
 
     expect(result.status).toBe("stopped");
+    expect(store.getRun(runId)?.stage).toBe("stopped");
+  });
+
+  test("releases the run when the signal aborts during an agent call", async () => {
+    const { store, runId } = createStore();
+    const controller = new AbortController();
+    let agentResolved = false;
+    const manager = new RunManager(
+      new RecordingAgent(() => new Promise<AgentResponse>(() => { agentResolved = true; })),
+      store,
+      createSender(),
+    );
+
+    const pending = manager.runAgent({
+      runId,
+      chatId: "c1",
+      session: { id: "agent-1" },
+      message: "hello",
+      signal: controller.signal,
+    });
+    await Promise.resolve();
+
+    controller.abort(new Error("stopped"));
+
+    await expect(pending).resolves.toEqual({ status: "stopped" });
+    expect(agentResolved).toBe(true);
     expect(store.getRun(runId)?.stage).toBe("stopped");
   });
 
