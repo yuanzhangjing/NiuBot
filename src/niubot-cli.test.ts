@@ -1,9 +1,18 @@
 import path from "node:path";
+import fs from "node:fs";
 import { describe, expect, it } from "vitest";
 import { buildNiubotEnv } from "./agent/cli-base.js";
 import { getBundledNiubotBinDir, prependNiubotBinToPath } from "./niubot-cli.js";
 
 describe("niubot CLI path helpers", () => {
+  it("publishes nbt as a stable package binary", () => {
+    const pkg = JSON.parse(fs.readFileSync(path.resolve(import.meta.dirname, "..", "package.json"), "utf-8")) as {
+      bin?: Record<string, string>;
+    };
+
+    expect(pkg.bin?.["nbt"]).toBe("bin/nbt");
+  });
+
   it("resolves the repo-local niubot bin directory", () => {
     expect(getBundledNiubotBinDir()).toBe(
       path.resolve(import.meta.dirname, "..", "bin"),

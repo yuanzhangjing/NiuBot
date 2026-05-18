@@ -12,7 +12,8 @@
     "./plugin": "./dist/exports.js"
   },
   "bin": {
-    "niubot": "dist/user-cli.js"
+    "niubot": "dist/user-cli.js",
+    "nbt": "bin/nbt"
   },
   "files": [
     "dist",

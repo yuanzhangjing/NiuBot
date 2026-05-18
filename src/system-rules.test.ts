@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -60,5 +60,49 @@ describe("nbt system-rules", () => {
     });
 
     expect(output.trim()).toBe(SYSTEM_RULES.trim());
+  });
+
+  it("can print rules outside an agent session", () => {
+    const env = { ...process.env };
+    delete env["NIUBOT_HOME"];
+    delete env["NIUBOT_AGENT_SESSION"];
+
+    const output = execFileSync(process.execPath, [
+      "--import",
+      "tsx",
+      path.join(process.cwd(), "src/cli.ts"),
+      "system-rules",
+    ], {
+      cwd: process.cwd(),
+      env,
+      encoding: "utf-8",
+    });
+
+    expect(output.trim()).toBe(SYSTEM_RULES.trim());
+  });
+
+  it("rejects data commands outside an agent session", () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-cli-home-"));
+    tempDirs.push(home);
+    const env = {
+      ...process.env,
+      NIUBOT_HOME: home,
+    };
+    delete env["NIUBOT_AGENT_SESSION"];
+
+    const result = spawnSync(process.execPath, [
+      "--import",
+      "tsx",
+      path.join(process.cwd(), "src/cli.ts"),
+      "messages",
+      "list",
+    ], {
+      cwd: process.cwd(),
+      env,
+      encoding: "utf-8",
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("nbt is for NiuBot agent sessions");
   });
 });

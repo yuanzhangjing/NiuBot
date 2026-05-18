@@ -11,14 +11,14 @@ function requireEnv(name: string): string {
   if (!v) { console.error(`${name} is not set. nbt must run inside a NiuBot session.`); process.exit(1); }
   return v;
 }
-const NIUBOT_HOME = requireEnv("NIUBOT_HOME");
 const DB_PATH = process.env["NIUBOT_DB_PATH"];
 
 function getSocketPath(): string {
+  const niubotHome = requireEnv("NIUBOT_HOME");
   return process.env["NIUBOT_API_SOCKET"]
     ?? (DB_PATH
       ? path.join(path.dirname(DB_PATH), "api.sock")
-      : path.join(NIUBOT_HOME, "run", "api.sock"));
+      : path.join(niubotHome, "run", "api.sock"));
 }
 
 function ipcRequest(socketPath: string, urlPath: string, body: unknown): Promise<string> {

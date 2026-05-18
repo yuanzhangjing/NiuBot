@@ -41,20 +41,48 @@ import { formatLocalDateTimeWithTZ } from "./tz.js";
 
 // ─── Context ───────────────────────────────────────────────
 
-const NIUBOT_HOME = process.env["NIUBOT_HOME"];
-if (!NIUBOT_HOME) {
-  console.error("NIUBOT_HOME is not set. nbt must run inside a NiuBot session.");
-  process.exit(1);
-}
-dotenv.config({ path: path.join(NIUBOT_HOME, ".env"), quiet: true });
-
 // 命令行参数解析（全局 flags 优先于环境变量）
 const cliArgs = process.argv.slice(2);
+const requestedCommand = cliArgs[0];
+const sessionCommands = new Set([
+  "user-memory",
+  "messages",
+  "contacts",
+  "send",
+  "cron",
+  "task",
+  "sessions",
+  "whoami",
+]);
+const publicCommands = new Set([
+  undefined,
+  "",
+  "--help",
+  "-h",
+  "help",
+  "system-rules",
+]);
+
+const NIUBOT_HOME = process.env["NIUBOT_HOME"];
+if (!NIUBOT_HOME && !publicCommands.has(requestedCommand)) {
+  console.error("nbt is for NiuBot agent sessions. Use niubot for user commands.");
+  console.error("Error: NIUBOT_HOME is not set.");
+  process.exit(1);
+}
+if (NIUBOT_HOME) {
+  dotenv.config({ path: path.join(NIUBOT_HOME, ".env"), quiet: true });
+}
 const globalFlags = extractGlobalFlags(cliArgs);
+const IS_AGENT_SESSION = process.env["NIUBOT_AGENT_SESSION"] === "1";
+if (!IS_AGENT_SESSION && sessionCommands.has(requestedCommand)) {
+  console.error("nbt is for NiuBot agent sessions. Use niubot for user commands.");
+  console.error("Error: NIUBOT_AGENT_SESSION is not set.");
+  process.exit(1);
+}
 
 const DB_PATH = globalFlags["db-path"]
   ?? process.env["NIUBOT_DB_PATH"]
-  ?? path.join(NIUBOT_HOME, "niubot.db");
+  ?? (NIUBOT_HOME ? path.join(NIUBOT_HOME, "niubot.db") : "");
 const USER_ID = globalFlags["user-id"] ?? process.env["NIUBOT_USER_ID"];
 const CHAT_ID = globalFlags["chat-id"] ?? process.env["NIUBOT_CHAT_ID"];
 const CHAT_TYPE = (globalFlags["chat-type"] ?? process.env["NIUBOT_CHAT_TYPE"] ?? "p2p") as "p2p" | "group";
