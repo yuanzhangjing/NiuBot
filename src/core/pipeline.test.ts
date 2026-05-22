@@ -440,7 +440,7 @@ describe("Pipeline.recover", () => {
     expect(() => (pipeline as any).runIdleWatchdogSafely()).not.toThrow();
   });
 
-  test("notifies when a main chat session keeps running with recent activity", async () => {
+  test("notifies softly when a main chat session keeps running for one hour", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
@@ -451,7 +451,7 @@ describe("Pipeline.recover", () => {
     agent.markRunning(agentSession.id);
     const activity = (agent as any).activityMap.get(agentSession.id);
     const now = Date.now();
-    activity.startedAt = now - 31 * 60_000;
+    activity.startedAt = now - 61 * 60_000;
     activity.lastActiveAt = now - 60_000;
     activity.recentLines = ["still working"];
 
@@ -477,9 +477,90 @@ describe("Pipeline.recover", () => {
     (pipeline as any).runIdleWatchdog();
 
     expect(sentCards).toHaveLength(1);
-    expect(sentCards[0].header).toContain("仍在运行");
-    expect(sentCards[0].content).toContain("已运行 31 分钟");
-    expect(sentCards[0].content).toContain("still working");
+    expect(sentCards[0].header).toBe("任务还在运行");
+    expect(sentCards[0].content).toContain("任务已经运行约 1 小时，目前还在工作中。");
+    expect(sentCards[0].content).toContain("不急的话可以继续等");
+    expect(sentCards[0].content).toContain("可以发送 /stop");
+    expect(sentCards[0].content).not.toContain("still working");
+  });
+
+  test("does not send a long-running notice before one hour for a main chat session", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const { im, sentCards } = createRecordingImStub();
+    const agent = new WatchdogAgent();
+    const agentSession = await agent.createSession({ workingDirectory: dir });
+    agent.markRunning(agentSession.id);
+    const activity = (agent as any).activityMap.get(agentSession.id);
+    const now = Date.now();
+    activity.startedAt = now - 31 * 60_000;
+    activity.lastActiveAt = now - 20_000;
+
+    const pipeline = new Pipeline(
+      db,
+      im,
+      agent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+    (pipeline as any).platformChatIds.set("c1", "chat-open-id");
+    (pipeline as any).chatSessions.set("c1", {
+      agentSession,
+      sessionId: "s1",
+      platformChatId: "chat-open-id",
+      userId: "u2",
+      hasReplied: false,
+    });
+
+    (pipeline as any).runIdleWatchdog();
+
+    expect(sentCards).toHaveLength(0);
+  });
+
+  test("notifies softly when an independent task keeps running for one hour", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const { im, sentCards } = createRecordingImStub();
+    const agent = new WatchdogAgent();
+    const agentSession = await agent.createSession({ workingDirectory: dir });
+    agent.markRunning(agentSession.id);
+    const activity = (agent as any).activityMap.get(agentSession.id);
+    const now = Date.now();
+    activity.lastActiveAt = now - 20_000;
+    activity.recentLines = ["still working"];
+
+    const pipeline = new Pipeline(
+      db,
+      im,
+      agent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+    (pipeline as any).platformChatIds.set("c1", "chat-open-id");
+    (pipeline as any).runningTasks.set(agentSession.id, {
+      agentSession,
+      chatId: "c1",
+      description: "daily job",
+      startedAt: now - 61 * 60_000,
+    });
+
+    (pipeline as any).runIdleWatchdog();
+
+    expect(sentCards).toHaveLength(1);
+    expect(sentCards[0].header).toBe("定时任务还在运行");
+    expect(sentCards[0].content).toContain("「daily job」已经运行约 1 小时，目前还在工作中。");
+    expect(sentCards[0].content).not.toContain("/stop");
+    expect(sentCards[0].content).not.toContain("still working");
   });
 
   test("does not recover active sessions when the stored backend is missing", async () => {

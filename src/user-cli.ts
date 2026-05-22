@@ -29,6 +29,7 @@ import { localToday } from "./tz.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, "..");
+const PACKAGE_NAME = "@yuanzhangjing/niubot";
 
 function getPkgVersion(): string {
   try {
@@ -39,8 +40,86 @@ function getPkgVersion(): string {
   }
 }
 
+function readNiuBotPackage(packageRoot: string | undefined): { root: string; version: string } | undefined {
+  if (!packageRoot) return undefined;
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(packageRoot, "package.json"), "utf-8"));
+    if (pkg.name !== PACKAGE_NAME || typeof pkg.version !== "string") return undefined;
+    return { root: packageRoot, version: pkg.version };
+  } catch {
+    return undefined;
+  }
+}
+
 export function getTodayLogFilePath(niubotHome: string): string {
   return path.join(niubotHome, "logs", `niubot-${localToday()}.log`);
+}
+
+interface RunningStatusDetailsOptions {
+  niubotHome: string;
+  cliPath: string;
+  todayLogFile: string;
+  processCwd?: string;
+  processStdoutPath?: string;
+}
+
+export function resolveRunningStatusDetails(options: RunningStatusDetailsOptions): {
+  version: string;
+  path: string;
+  logFile: string;
+} {
+  const versionFile = path.join(options.niubotHome, "niubot.version");
+  const runningPackage = readNiuBotPackage(options.processCwd);
+  let version = runningPackage?.version;
+  if (!version) {
+    try { version = fs.readFileSync(versionFile, "utf-8").trim(); } catch { /* missing for old installs */ }
+  }
+
+  return {
+    version: version || "unknown",
+    path: runningPackage?.root || options.cliPath,
+    logFile: isRegularFile(options.processStdoutPath) ? options.processStdoutPath : options.todayLogFile,
+  };
+}
+
+function isRegularFile(filePath: string | undefined): filePath is string {
+  if (!filePath) return false;
+  try {
+    return fs.statSync(filePath).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function parseLsofName(output: string): string | undefined {
+  return output
+    .split(/\r?\n/)
+    .find((line) => line.startsWith("n") && line.length > 1)
+    ?.slice(1);
+}
+
+function getProcessCwd(pid: number): string | undefined {
+  try {
+    const out = execFileSync("lsof", ["-a", "-p", String(pid), "-d", "cwd", "-Fn"], {
+      encoding: "utf-8",
+      timeout: 3000,
+    });
+    return parseLsofName(out);
+  } catch {
+    return undefined;
+  }
+}
+
+function getProcessFdPath(pid: number, fd: number): string | undefined {
+  try {
+    const out = execFileSync("lsof", ["-a", "-p", String(pid), "-d", String(fd), "-Fn"], {
+      encoding: "utf-8",
+      timeout: 3000,
+    });
+    return parseLsofName(out);
+  } catch {
+    return undefined;
+  }
 }
 
 // ── CLI arg helpers ────────────────────────────────────────
@@ -984,19 +1063,21 @@ function cmdStatus(niubotHome: string): void {
     uptime = psOut;
   } catch { /* ignore */ }
 
-  const configPath = path.join(niubotHome, "config.yaml");
   const logFile = getTodayLogFilePath(niubotHome);
-
-  // Read the version snapshot written at startup (reflects the actual running code)
-  const versionFile = path.join(niubotHome, "niubot.version");
-  let runningVersion = "unknown";
-  try { runningVersion = fs.readFileSync(versionFile, "utf-8").trim(); } catch { /* missing for old installs */ }
+  const configPath = path.join(niubotHome, "config.yaml");
+  const details = resolveRunningStatusDetails({
+    niubotHome,
+    cliPath: __dirname,
+    todayLogFile: logFile,
+    processCwd: getProcessCwd(pid),
+    processStdoutPath: getProcessFdPath(pid, 1),
+  });
 
   console.log(`NiuBot is running (PID ${pid})`);
-  console.log(`  Version: ${runningVersion}`);
-  console.log(`  Path: ${__dirname}`);
+  console.log(`  Version: ${details.version}`);
+  console.log(`  Path: ${details.path}`);
   if (uptime) console.log(`  Uptime: ${uptime}`);
-  console.log(`  Log: ${logFile}`);
+  console.log(`  Log: ${details.logFile}`);
   console.log(`  Config: ${configPath}`);
 }
 
