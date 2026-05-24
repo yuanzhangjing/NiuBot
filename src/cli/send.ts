@@ -52,6 +52,31 @@ function ipcRequest(socketPath: string, urlPath: string, body: unknown): Promise
   });
 }
 
+export function resolveSendFilePaths(
+  args: string[],
+  positional: string[],
+  flags: Record<string, string>,
+): string[] | undefined {
+  const filePaths: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
+    if (arg !== "--file") continue;
+    const next = args[i + 1];
+    if (next && !next.startsWith("--")) {
+      filePaths.push(next);
+      i++;
+    } else {
+      filePaths.push("");
+    }
+  }
+
+  if (filePaths.length > 0) return filePaths;
+
+  const fileFlag = flags["file"];
+  if (fileFlag === undefined) return undefined;
+  return [fileFlag === "true" ? (positional[0] ?? "") : fileFlag];
+}
+
 export function handleSend(
   args: string[],
   chatId: string | undefined,
@@ -71,17 +96,20 @@ export function handleSend(
   }
 
   // Send file
-  const fileFlag = flags["file"];
-  if (fileFlag !== undefined) {
-    const filePath = fileFlag === "true" ? positional[0] : fileFlag;
-    if (!filePath) {
-      console.error("Usage: nbt send --file <path>");
+  const filePaths = resolveSendFilePaths(args, positional, flags);
+  if (filePaths !== undefined) {
+    if (filePaths.length === 0 || filePaths.some((filePath) => !filePath)) {
+      console.error("Usage: nbt send --file <path> [--file <path> ...]");
       process.exit(1);
     }
     const socketPath = getSocketPath();
-    const absPath = path.resolve(filePath);
-    ipcRequest(socketPath, "/send-file", { chat_id: targetChatId, file_path: absPath })
-      .then(() => console.log("File sent."))
+    (async () => {
+      for (const filePath of filePaths) {
+        const absPath = path.resolve(filePath);
+        await ipcRequest(socketPath, "/send-file", { chat_id: targetChatId, file_path: absPath });
+      }
+      console.log(filePaths.length === 1 ? "File sent." : `${filePaths.length} files sent.`);
+    })()
       .catch((err) => {
         console.error(`Error: ${err.message}`);
         process.exit(1);
@@ -127,6 +155,7 @@ function printHelp(): void {
 
   nbt send <text>                        Text message
   nbt send --card <header> <content>     Card message
-  nbt send --file <path>                 Send a file
+  nbt send --file <path> [--file <path> ...]
+                                         Send one or more files
   nbt send --chat-id <id> <text>         Send to a specific chat`);
 }
