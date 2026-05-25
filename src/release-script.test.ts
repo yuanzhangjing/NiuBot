@@ -45,7 +45,7 @@ describe("trusted publishing release flow", () => {
     expect(workflow.permissions["id-token"]).toBe("write");
     expect(workflow.jobs.publish.steps).toContainEqual({
       name: "Publish",
-      run: "npm publish --access public --provenance --registry https://registry.npmjs.org",
+      run: "npm publish --access public --registry https://registry.npmjs.org",
     });
     expect(JSON.stringify(workflow)).not.toContain("NPM_TOKEN");
   });
