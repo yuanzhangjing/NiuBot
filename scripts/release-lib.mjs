@@ -1,7 +1,6 @@
 import { execFileSync } from "node:child_process";
 
 const VALID_BUMPS = new Set(["patch", "minor", "major"]);
-const NPM_REGISTRY = "https://registry.npmjs.org/";
 
 export function parseReleaseArgs(argv) {
   let bump = "patch";
@@ -26,10 +25,6 @@ export function ensureCleanWorktree(statusOutput) {
   if (statusOutput.trim().length > 0) {
     throw new Error("Git worktree is not clean. Commit or stash your changes before releasing.");
   }
-}
-
-export function npmPublishArgs() {
-  return ["publish", "--access", "public", "--registry", NPM_REGISTRY];
 }
 
 export function run(command, args, options = {}) {

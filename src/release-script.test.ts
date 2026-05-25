@@ -1,8 +1,9 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { parse } from "yaml";
 
 import {
   ensureCleanWorktree,
-  npmPublishArgs,
   parseReleaseArgs,
 } from "../scripts/release-lib.mjs";
 
@@ -32,14 +33,28 @@ describe("ensureCleanWorktree", () => {
   });
 });
 
-describe("npmPublishArgs", () => {
-  it("publishes to the official npm registry regardless of local npm config", () => {
-    expect(npmPublishArgs()).toEqual([
-      "publish",
-      "--access",
-      "public",
-      "--registry",
-      "https://registry.npmjs.org/",
-    ]);
+describe("trusted publishing release flow", () => {
+  it("publishes from GitHub Actions with an OIDC token", () => {
+    const workflow = parse(
+      readFileSync(new URL("../.github/workflows/publish.yml", import.meta.url), "utf8"),
+    ) as {
+      permissions: Record<string, string>;
+      jobs: { publish: { steps: Array<{ name?: string; run?: string; uses?: string }> } };
+    };
+
+    expect(workflow.permissions["id-token"]).toBe("write");
+    expect(workflow.jobs.publish.steps).toContainEqual({
+      name: "Publish",
+      run: "npm publish --access public --provenance --registry https://registry.npmjs.org",
+    });
+    expect(JSON.stringify(workflow)).not.toContain("NPM_TOKEN");
+  });
+
+  it("does not publish from the local release script", () => {
+    const releaseScript = readFileSync(new URL("../scripts/release.mjs", import.meta.url), "utf8");
+
+    expect(releaseScript).not.toContain("npmPublishArgs");
+    expect(releaseScript).not.toContain("[\"publish\"");
+    expect(releaseScript).toContain("git\", [\"push\"");
   });
 });

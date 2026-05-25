@@ -4,7 +4,6 @@ import fs from "node:fs";
 
 import {
   ensureCleanWorktree,
-  npmPublishArgs,
   parseReleaseArgs,
   run,
 } from "./release-lib.mjs";
@@ -22,7 +21,7 @@ run("npm", ["version", bump], { dryRun, stdio: "inherit" });
 const pkg = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8"));
 const version = pkg.version;
 
-run("npm", npmPublishArgs(), { dryRun, stdio: "inherit" });
 run("git", ["push", "origin", branch, "--follow-tags"], { dryRun, stdio: "inherit" });
 
-console.log(`Release complete: ${pkg.name}@${version}`);
+console.log(`Release pushed: ${pkg.name}@${version}`);
+console.log("GitHub Actions will publish this version to npm.");

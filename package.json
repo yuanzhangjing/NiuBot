@@ -2,6 +2,10 @@
   "name": "@yuanzhangjing/niubot",
   "version": "0.1.73",
   "description": "NiuBot Engine — AI Persona Runtime powering autonomous digital coworkers with memory and personality",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yuanzhangjing/NiuBot.git"
+  },
   "publishConfig": {
     "registry": "https://registry.npmjs.org"
   },
