@@ -39,10 +39,31 @@ describe("trusted publishing release flow", () => {
       readFileSync(new URL("../.github/workflows/publish.yml", import.meta.url), "utf8"),
     ) as {
       permissions: Record<string, string>;
-      jobs: { publish: { steps: Array<{ name?: string; run?: string; uses?: string }> } };
+      jobs: {
+        publish: {
+          steps: Array<{
+            name?: string;
+            run?: string;
+            uses?: string;
+            with?: Record<string, string>;
+          }>;
+        };
+      };
     };
 
     expect(workflow.permissions["id-token"]).toBe("write");
+    expect(workflow.jobs.publish.steps).toContainEqual({
+      name: "Setup Node",
+      uses: "actions/setup-node@v4",
+      with: {
+        "node-version": "22.14.0",
+        "registry-url": "https://registry.npmjs.org",
+      },
+    });
+    expect(workflow.jobs.publish.steps).toContainEqual({
+      name: "Upgrade npm",
+      run: "npm install -g npm@11",
+    });
     expect(workflow.jobs.publish.steps).toContainEqual({
       name: "Publish",
       run: "npm publish --access public --registry https://registry.npmjs.org",
