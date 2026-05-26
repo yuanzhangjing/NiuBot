@@ -43,6 +43,7 @@ export async function createBotInstance(
   runtimeConfig?: ResolvedBotRuntimeConfig,
   outputRewriteConfig?: OutputRewriteConfig,
   restartConfig?: RestartConfig,
+  autoUpdateNotificationsEnabled = true,
 ): Promise<BotInstance> {
   const log = createLogger("bot-instance", botConfig.id);
 
@@ -115,6 +116,7 @@ export async function createBotInstance(
     },
     outputRewriteConfig ? new OutputRewriter({ config: outputRewriteConfig }) : undefined,
     restartConfig,
+    autoUpdateNotificationsEnabled,
   );
 
   // 6. 创建 API Server

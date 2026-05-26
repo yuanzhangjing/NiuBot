@@ -132,6 +132,7 @@ export class Pipeline {
   private runManager: RunManager;
   private outputRewriter?: Pick<OutputRewriter, "rewrite"> & Partial<Pick<OutputRewriter, "shouldLogText">>;
   private restartConfig?: RestartConfig;
+  private autoUpdateNotificationsEnabled: boolean;
   private botIdentity: BotIdentity;
   private log: ReturnType<typeof createLogger>;
 
@@ -230,6 +231,7 @@ export class Pipeline {
     stableContextOptions?: StableSystemContextOptions,
     outputRewriter?: Pick<OutputRewriter, "rewrite"> & Partial<Pick<OutputRewriter, "shouldLogText">>,
     restartConfig?: RestartConfig,
+    autoUpdateNotificationsEnabled = true,
   ) {
     this.db = db;
     this.im = im;
@@ -244,6 +246,7 @@ export class Pipeline {
     this.stableContextOptions = stableContextOptions ?? {};
     this.outputRewriter = outputRewriter;
     this.restartConfig = restartConfig;
+    this.autoUpdateNotificationsEnabled = autoUpdateNotificationsEnabled;
     this.log = createLogger("pipeline", botIdentity.name);
     this.runtimeState = new RuntimeStateStore({
       onEvent: (event) => this.persistRuntimeEvent(event),
@@ -289,12 +292,16 @@ export class Pipeline {
     this.im.onMessage((msg) => this.handleMessage(msg));
     // 启动 watchdog 定时器
     this.watchdogTimer = setInterval(() => this.runIdleWatchdogSafely(), AGENT_WATCHDOG_INTERVAL_MS);
-    if (this.isUpdateNotificationWindow(new Date())) {
-      this.checkForUpdatesAndNotifyAdmins().catch((err) => {
-        this.log.warn("startup update check failed", { error: String(err) });
-      });
+    if (this.autoUpdateNotificationsEnabled) {
+      if (this.isUpdateNotificationWindow(new Date())) {
+        this.checkForUpdatesAndNotifyAdmins().catch((err) => {
+          this.log.warn("startup update check failed", { error: String(err) });
+        });
+      }
+      this.scheduleNextUpdateCheck();
+    } else {
+      this.log.info("automatic update notifications disabled for bot");
     }
-    this.scheduleNextUpdateCheck();
     this.runStartupPlatformProbes();
 
     this.log.info("pipeline started", {
@@ -304,6 +311,7 @@ export class Pipeline {
       backend: this.backendType,
       model: this.botIdentity.model ?? "default",
       liteModel: this.botIdentity.liteModel ?? "default",
+      autoUpdateNotifications: this.autoUpdateNotificationsEnabled,
     });
 
   }

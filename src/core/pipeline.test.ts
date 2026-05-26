@@ -1000,6 +1000,41 @@ describe("Pipeline.recover", () => {
     pipeline.stop();
   });
 
+  test("skips automatic update notifications when disabled", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 3, 25, 11, 0, 0));
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const agent = new RecordingAgent();
+    const pipeline = new Pipeline(
+      db,
+      createImStub(),
+      agent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      false,
+    );
+    let checks = 0;
+    (pipeline as any).checkForUpdatesAndNotifyAdmins = async () => { checks++; };
+
+    await pipeline.start();
+    await vi.advanceTimersByTimeAsync(24 * 60 * 60 * 1000);
+
+    expect(checks).toBe(0);
+    pipeline.stop();
+  });
+
   test("uses the standard empty-response fallback for cron jobs", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);

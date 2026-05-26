@@ -192,6 +192,7 @@ async function main(): Promise<void> {
   const bots: BotInstance[] = [];
   for (const botConfig of config.bots) {
     try {
+      const autoUpdateNotificationsEnabled = bots.length === 0;
       const runtimeState = loadPersistedBotRuntimeState(botConfig.dbPath, botConfig.id);
       const runtimeConfig = resolveBotRuntimeConfig(botConfig.backend, runtimeState, getAvailableBackends());
       const backendType = runtimeConfig.backendType;
@@ -206,6 +207,7 @@ async function main(): Promise<void> {
         runtimeConfig,
         config.outputRewrite,
         config.restart,
+        autoUpdateNotificationsEnabled,
       );
       bots.push(instance);
       log.info("bot backend assigned", {
@@ -215,6 +217,7 @@ async function main(): Promise<void> {
         runtimeBackend: runtimeState?.backendType,
         model: runtimeConfig.model,
         liteModel: runtimeConfig.liteModel,
+        autoUpdateNotifications: autoUpdateNotificationsEnabled,
       });
     } catch (err) {
       log.error("failed to create bot instance", { bot: botConfig.id, error: String(err) });
