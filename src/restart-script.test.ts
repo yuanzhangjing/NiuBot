@@ -58,6 +58,17 @@ describe("restart.sh", () => {
     expect(script).toContain('rm -f "$CANDIDATE_PID_FILE"');
   });
 
+  test("prefers configured restart source directory over inherited source env", () => {
+    const script = readScript();
+    const configIndex = script.indexOf("CONFIG_SOURCE_DIR=");
+    const sourceIndex = script.indexOf('SOURCE_DIR="${NIUBOT_SOURCE_DIR:-$SCRIPT_DIR}"');
+
+    expect(script).toContain("resolve_config_source_dir");
+    expect(script).toContain("restart.sourceDirectory");
+    expect(configIndex).toBeGreaterThan(-1);
+    expect(sourceIndex).toBeGreaterThan(configIndex);
+  });
+
   test("passes the current bot name to the detached restart script", () => {
     const pipeline = readFileSync(path.resolve(__dirname, "core/pipeline.ts"), "utf-8");
 

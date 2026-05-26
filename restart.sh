@@ -34,15 +34,53 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SCRIPT_DIR_REAL="$(cd "$SCRIPT_DIR" && pwd -P)"
-SOURCE_DIR="${NIUBOT_SOURCE_DIR:-$SCRIPT_DIR}"
-SOURCE_DIR_REAL="$(cd "$SOURCE_DIR" && pwd -P)"
-BOT_NAME="${NIUBOT_BOT_NAME:-NiuBot}"
-CHAT_ID="${NIUBOT_RESTART_NOTIFY_CHAT_ID:-}"
 if [ -z "${NIUBOT_HOME:-}" ]; then
     echo "Error: NIUBOT_HOME is not set." >&2
     exit 1
 fi
 export NIUBOT_HOME
+
+resolve_config_source_dir() {
+    local config_file="$NIUBOT_HOME/config.yaml"
+    if [ ! -f "$config_file" ]; then
+        return 0
+    fi
+    node - "$config_file" <<'NODE' 2>/dev/null || true
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+let YAML;
+try {
+  YAML = require("yaml");
+} catch {
+  process.exit(0);
+}
+const configPath = process.argv[2];
+const config = YAML.parse(fs.readFileSync(configPath, "utf8"));
+const value = config?.restart?.sourceDirectory;
+if (typeof value !== "string" || value.trim() === "") {
+  process.exit(0);
+}
+const expanded = value === "~"
+  ? os.homedir()
+  : value.startsWith("~/")
+    ? path.join(os.homedir(), value.slice(2))
+    : value;
+process.stdout.write(path.resolve(expanded));
+NODE
+}
+
+CONFIG_SOURCE_DIR="$(resolve_config_source_dir)"
+if [ -n "$CONFIG_SOURCE_DIR" ] && [ -d "$CONFIG_SOURCE_DIR" ]; then
+    # restart.sourceDirectory takes precedence over an inherited NIUBOT_SOURCE_DIR
+    # because long-running services may carry an old release path in the env.
+    SOURCE_DIR="$CONFIG_SOURCE_DIR"
+else
+    SOURCE_DIR="${NIUBOT_SOURCE_DIR:-$SCRIPT_DIR}"
+fi
+SOURCE_DIR_REAL="$(cd "$SOURCE_DIR" && pwd -P)"
+BOT_NAME="${NIUBOT_BOT_NAME:-NiuBot}"
+CHAT_ID="${NIUBOT_RESTART_NOTIFY_CHAT_ID:-}"
 SOCKET_PATH="${NIUBOT_API_SOCKET:-$NIUBOT_HOME/$BOT_NAME/api.sock}"
 LOG_DIR="$NIUBOT_HOME/logs"
 BOT_DIR="$NIUBOT_HOME/$BOT_NAME"

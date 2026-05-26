@@ -10,7 +10,7 @@ import { escapeYamlContent, renderMessageNodes } from "../im/render.js";
 import { ERROR_DISPLAY_MAX_LEN } from "../agent/types.js";
 import type { AgentBackend, AgentSession, AgentSessionActivity, SessionConfig } from "../agent/types.js";
 import { CliAgentBackend, buildNiubotEnv } from "../agent/cli-base.js";
-import { BUILTIN_BACKEND_LIST, DEFAULT_LITE_MODELS, NIUBOT_HOME, normalizeBackend, type AgentBackendType, type BuiltinBackendType } from "../config.js";
+import { BUILTIN_BACKEND_LIST, DEFAULT_LITE_MODELS, NIUBOT_HOME, normalizeBackend, type AgentBackendType, type BuiltinBackendType, type RestartConfig } from "../config.js";
 import { ChatManager } from "./chat-manager.js";
 import type { QueuedMessage } from "./queue.js";
 import {
@@ -47,6 +47,7 @@ import { TimeoutError, withTimeout } from "./timeout.js";
 import { RuntimeStateStore, type RunStage, type RuntimeStateEvent } from "./runtime-state.js";
 import { RunManager } from "./run-manager.js";
 import { INSTALL_GUIDE_COMMAND } from "../install-guide.js";
+import type { OutputRewriter } from "./output-rewrite.js";
 
 const execAsync = promisify(exec);
 
@@ -129,6 +130,8 @@ export class Pipeline {
   private responseSender: ResponseSender;
   private runtimeState: RuntimeStateStore;
   private runManager: RunManager;
+  private outputRewriter?: Pick<OutputRewriter, "rewrite"> & Partial<Pick<OutputRewriter, "shouldLogText">>;
+  private restartConfig?: RestartConfig;
   private botIdentity: BotIdentity;
   private log: ReturnType<typeof createLogger>;
 
@@ -225,6 +228,8 @@ export class Pipeline {
     getAvailableBackends?: () => string[],
     refreshAgentContextFiles?: () => void,
     stableContextOptions?: StableSystemContextOptions,
+    outputRewriter?: Pick<OutputRewriter, "rewrite"> & Partial<Pick<OutputRewriter, "shouldLogText">>,
+    restartConfig?: RestartConfig,
   ) {
     this.db = db;
     this.im = im;
@@ -237,6 +242,8 @@ export class Pipeline {
     this.dbPath = dbPath;
     this.refreshAgentContextFiles = refreshAgentContextFiles;
     this.stableContextOptions = stableContextOptions ?? {};
+    this.outputRewriter = outputRewriter;
+    this.restartConfig = restartConfig;
     this.log = createLogger("pipeline", botIdentity.name);
     this.runtimeState = new RuntimeStateStore({
       onEvent: (event) => this.persistRuntimeEvent(event),
@@ -1517,6 +1524,12 @@ export class Pipeline {
         response.text = EMPTY_RESPONSE_FALLBACK;
       }
 
+      response.text = await this.rewriteOutputText({
+        chatId,
+        source,
+        text: response.text,
+      });
+
       // Store response
       const replyMsgId = storeMessage(this.db, {
         chatId,
@@ -2229,10 +2242,11 @@ export class Pipeline {
    * 可通过 platformChatId 或 chatId 指定通知目标，都不传则不发通知。
    */
   triggerRestart(opts?: { platformChatId?: string; chatId?: string }): void {
-    const projectRoot = path.resolve(
+    const runtimeRoot = path.resolve(
       path.dirname(fileURLToPath(import.meta.url)),
       "../..",
     );
+    const projectRoot = this.restartConfig?.sourceDirectory ?? runtimeRoot;
     const restartScript = path.join(projectRoot, "restart.sh");
 
     // 解析 chatId 和 platformChatId（互相反查）
@@ -2260,6 +2274,7 @@ export class Pipeline {
         ...process.env,
         NIUBOT_HOME,
         NIUBOT_BOT_NAME: this.botIdentity.name,
+        NIUBOT_SOURCE_DIR: projectRoot,
         NIUBOT_RESTART_NOTIFY_CHAT_ID: chatId ?? "",
         NIUBOT_API_SOCKET: socketPath,
       },
@@ -2275,7 +2290,7 @@ export class Pipeline {
       if (code === 0) {
         // restart.sh auto-detached successfully — stop accepting new messages
         this.stop();
-        this.log.info("restart script detached, pipeline stopped", { pid: child.pid, chatId, socketPath });
+        this.log.info("restart script detached, pipeline stopped", { pid: child.pid, chatId, socketPath, sourceDirectory: projectRoot });
       } else {
         // restart.sh failed to start (guard blocked, missing deps, etc.)
         const errMsg = (stderr.trim() || `restart.sh exited with code ${code}`).slice(0, ERROR_DISPLAY_MAX_LEN);
@@ -2433,6 +2448,13 @@ export class Pipeline {
       }
       const response = agentResult.response;
       this.updateCompactRecoveryState(chatId, response.compactCount);
+
+      response.text = await this.rewriteOutputText({
+        chatId,
+        source: "user",
+        text: response.text,
+        signal,
+      });
 
       // cancelled：有内容就发（中间结果），没内容就静默（用户已收到"已停止"）
       if (response.cancelled) {
@@ -2595,6 +2617,47 @@ export class Pipeline {
           this.storeBotResponse(chatId, errorText, pmid);
         } catch { /* give up */ }
       }
+    }
+  }
+
+  private async rewriteOutputText(options: {
+    chatId: string;
+    source: "user" | "cron" | "task";
+    text: string;
+    signal?: AbortSignal;
+  }): Promise<string> {
+    if (!this.outputRewriter || !options.text.trim()) return options.text;
+
+    try {
+      const rewrittenText = await this.outputRewriter.rewrite({
+        backendType: this.backendType,
+        text: options.text,
+        signal: options.signal,
+      });
+      this.log.info("output rewrite completed", {
+        chatId: options.chatId,
+        source: options.source,
+        backend: this.backendType,
+        originalLength: options.text.length,
+        rewrittenLength: rewrittenText.length,
+        changed: rewrittenText !== options.text,
+      });
+      if (this.outputRewriter.shouldLogText?.()) {
+        this.log.info("output rewrite text", {
+          chatId: options.chatId,
+          source: options.source,
+          originalText: options.text,
+          rewrittenText,
+        });
+      }
+      return rewrittenText;
+    } catch (err) {
+      this.log.warn("output rewrite failed outside rewriter fallback", {
+        chatId: options.chatId,
+        source: options.source,
+        error: String(err),
+      });
+      return options.text;
     }
   }
 

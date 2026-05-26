@@ -166,6 +166,35 @@ Config fields:
   - `traecli`: `Gemini-3-Flash-Preview`
 - `workingDirectory`: Where the agent runs. Default: `~/niubot-workspace/<id>`.
 
+Optional final-response rewrite for Codex:
+
+```yaml
+outputRewrite:
+  enabled: true
+  applyToBackends:
+    - codex
+  provider: anthropic-compatible
+  baseURL: https://api.deepseek.com/anthropic
+  apiKeyEnv: ANTHROPIC_API_KEY
+  # apiKey: sk-...    # optional; prefer apiKeyEnv when possible
+  model: deepseek-v4-flash
+  timeoutMs: 15000
+  logText: false  # set true only when you need to compare original and rewritten text in logs
+  # prompt: |
+  #   You can override the default rewrite prompt here.
+```
+
+This is off by default. It only rewrites the final text before sending it to IM; it does not change agent execution or session history. If the provider fails, times out, returns empty text, or the API key is missing, NiuBot sends the original Codex reply. Rewrite logs include lengths by default; set `logText: true` only for local debugging because it records the original and rewritten reply text.
+
+Optional restart source directory for local development:
+
+```yaml
+restart:
+  sourceDirectory: /path/to/niubot/source
+```
+
+When this is set, `/restart` runs that source tree's `restart.sh` and passes it as `NIUBOT_SOURCE_DIR`. If the directory contains `src/`, the restart script uses dev mode: build, package, preflight, switch release, then health check. Without this setting, `/restart` keeps using the currently running package directory.
+
 Create default bot profile:
 
 ```bash

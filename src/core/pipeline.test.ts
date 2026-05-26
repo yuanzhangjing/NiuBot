@@ -1035,6 +1035,53 @@ describe("Pipeline.recover", () => {
     expect(sentCards[0]?.content).toBe("（处理完成，但未生成回复。如果没收到预期结果，请重试）");
   });
 
+  test("rewrites cron job replies before storing and sending", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare(`
+      INSERT INTO users (id, name, platform, platform_id)
+      VALUES ('u2', 'admin', 'feishu', 'user-open-id')
+    `).run();
+    db.prepare(`
+      INSERT INTO chats (id, type, platform, platform_id, user_id)
+      VALUES ('c1', 'p2p', 'feishu', 'chat-open-id', 'user-open-id')
+    `).run();
+
+    const { im, sentCards } = createRecordingImStub();
+    const outputRewriter = {
+      rewrite: vi.fn().mockResolvedValue("rewritten cron reply"),
+    };
+    const pipeline = new Pipeline(
+      db,
+      im,
+      new ReplyAgent("cron reply"),
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      outputRewriter,
+    );
+    await pipeline.start();
+
+    await pipeline.processCronJob("c1", "u2", "check weather", "每日天气");
+
+    expect(outputRewriter.rewrite).toHaveBeenCalledWith(expect.objectContaining({
+      backendType: "codex",
+      text: "cron reply",
+    }));
+    expect(sentCards[0]?.content).toBe("rewritten cron reply");
+
+    const row = db.prepare("SELECT content_text FROM messages WHERE role = 'assistant'").get() as { content_text: string };
+    expect(row.content_text).toBe("rewritten cron reply");
+  });
+
   test("normalizes double-slash commands before forwarding to agent", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
@@ -1694,6 +1741,50 @@ describe("Pipeline.recover", () => {
     const store = (pipeline as any).runtimeState;
     expect(store.getRunsForChat("c1")[0].stage).toBe("done");
     expect(sentCards.some((card) => card.content.includes("agent reply"))).toBe(true);
+  });
+
+  test("rewrites codex final replies before storing and sending", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const { im, sentCards } = createRecordingImStub();
+    const outputRewriter = {
+      rewrite: vi.fn().mockResolvedValue("rewritten reply"),
+    };
+    const pipeline = new Pipeline(
+      db,
+      im,
+      new ReplyAgent("agent reply"),
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      outputRewriter,
+    );
+
+    await pipeline.start();
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "first",
+      platformMsgId: "m1",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(outputRewriter.rewrite).toHaveBeenCalledWith(expect.objectContaining({
+      backendType: "codex",
+      text: "agent reply",
+    }));
+    expect(sentCards.some((card) => card.content.includes("rewritten reply"))).toBe(true);
+    expect(sentCards.some((card) => card.content.includes("agent reply"))).toBe(false);
+
+    const row = db.prepare("SELECT content_text FROM messages WHERE role = 'assistant'").get() as { content_text: string };
+    expect(row.content_text).toBe("rewritten reply");
   });
 
   test("syncs runtime state while messages are buffering", async () => {

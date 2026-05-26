@@ -204,6 +204,8 @@ async function main(): Promise<void> {
         getOrCreateBackend,
         getAvailableBackends,
         runtimeConfig,
+        config.outputRewrite,
+        config.restart,
       );
       bots.push(instance);
       log.info("bot backend assigned", {

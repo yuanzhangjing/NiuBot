@@ -64,10 +64,32 @@ export interface BotConfig {
   liteModel?: string;
 }
 
+export interface OutputRewriteConfig {
+  enabled: boolean;
+  applyToBackends?: string[];
+  provider?: "anthropic-compatible";
+  baseURL?: string;
+  apiKey?: string;
+  apiKeyEnv?: string;
+  model?: string;
+  timeoutMs?: number;
+  maxTokens?: number;
+  prompt?: string;
+  logText?: boolean;
+}
+
+export interface RestartConfig {
+  sourceDirectory?: string;
+}
+
 export interface NiuBotConfig {
   bots: BotConfig[];
   /** 自定义 backend 插件注册 */
   backends: Record<string, CustomBackendDef>;
+  /** 可选：最终回复后处理。默认关闭。 */
+  outputRewrite?: OutputRewriteConfig;
+  /** 可选：重启脚本配置。默认使用当前运行包目录。 */
+  restart?: RestartConfig;
   queue: {
     /** 消息缓冲合并窗口（ms），默认 1500 */
     bufferMs: number;
@@ -202,7 +224,50 @@ export function loadConfig(configPath?: string): NiuBotConfig {
   return {
     bots,
     backends,
+    outputRewrite: parseOutputRewriteConfig(fileConfig["outputRewrite"]),
+    restart: parseRestartConfig(fileConfig["restart"]),
     queue: queueConfig,
+  };
+}
+
+function parseOutputRewriteConfig(raw: unknown): OutputRewriteConfig | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const obj = raw as Record<string, unknown>;
+  const enabled = obj["enabled"] === true;
+  const applyToBackends = Array.isArray(obj["applyToBackends"])
+    ? obj["applyToBackends"].filter((v): v is string => typeof v === "string")
+    : undefined;
+  const provider = obj["provider"] === "anthropic-compatible" ? "anthropic-compatible" : undefined;
+  return {
+    enabled,
+    applyToBackends,
+    provider,
+    baseURL: stringValue(obj["baseURL"]),
+    apiKey: stringValue(obj["apiKey"]),
+    apiKeyEnv: stringValue(obj["apiKeyEnv"]),
+    model: stringValue(obj["model"]),
+    timeoutMs: numberValue(obj["timeoutMs"]),
+    maxTokens: numberValue(obj["maxTokens"]),
+    prompt: stringValue(obj["prompt"]),
+    logText: obj["logText"] === true,
+  };
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function numberValue(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function parseRestartConfig(raw: unknown): RestartConfig | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const obj = raw as Record<string, unknown>;
+  const sourceDirectory = stringValue(obj["sourceDirectory"]);
+  if (!sourceDirectory) return undefined;
+  return {
+    sourceDirectory: path.resolve(expandHome(sourceDirectory)),
   };
 }
 

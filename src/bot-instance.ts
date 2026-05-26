@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { AgentBackend } from "./agent/types.js";
-import type { BotConfig, AgentBackendType } from "./config.js";
+import type { BotConfig, AgentBackendType, OutputRewriteConfig, RestartConfig } from "./config.js";
 import {
   initDatabase,
   ensureUser,
@@ -18,6 +18,7 @@ import { ensureStaticContextFiles, ensureWorkspaceAgentFiles } from "./static-co
 import { createLogger } from "./logger.js";
 import type { ResolvedBotRuntimeConfig } from "./runtime-config.js";
 import type Database from "better-sqlite3";
+import { OutputRewriter } from "./core/output-rewrite.js";
 
 export interface BotInstance {
   id: string;
@@ -40,6 +41,8 @@ export async function createBotInstance(
   backendResolver?: (type: AgentBackendType) => Promise<AgentBackend>,
   getAvailableBackends?: () => string[],
   runtimeConfig?: ResolvedBotRuntimeConfig,
+  outputRewriteConfig?: OutputRewriteConfig,
+  restartConfig?: RestartConfig,
 ): Promise<BotInstance> {
   const log = createLogger("bot-instance", botConfig.id);
 
@@ -110,6 +113,8 @@ export async function createBotInstance(
       personaPath: botConfig.personaPath,
       instructionsPath: botConfig.instructionsPath,
     },
+    outputRewriteConfig ? new OutputRewriter({ config: outputRewriteConfig }) : undefined,
+    restartConfig,
   );
 
   // 6. 创建 API Server
