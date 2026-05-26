@@ -21,6 +21,11 @@ const DEFAULT_MAX_TOKENS = 4096;
 
 type MessageContentBlock = { type: string; text?: string };
 
+export interface OutputRewriteMarkerConfig {
+  enabled?: boolean;
+  text?: string;
+}
+
 export interface OutputRewriteConfig {
   enabled: boolean;
   applyToBackends?: string[];
@@ -33,6 +38,7 @@ export interface OutputRewriteConfig {
   maxTokens?: number;
   prompt?: string;
   logText?: boolean;
+  marker?: OutputRewriteMarkerConfig;
 }
 
 type AnthropicMessagesClient = {
@@ -111,7 +117,12 @@ export class OutputRewriter {
         .join("")
         .trim();
 
-      return rewritten || input.text;
+      if (!rewritten) return input.text;
+      return appendMarkerIfNeeded({
+        originalText: input.text,
+        rewrittenText: rewritten,
+        marker: config.marker,
+      });
     } catch (err) {
       log.warn("output rewrite failed, using original text", { error: String(err) });
       return input.text;
@@ -145,4 +156,16 @@ function buildRewriteUserMessage(originalPrompt: string, originalReply: string):
     originalReply,
     ">>>",
   ].join("\n");
+}
+
+function appendMarkerIfNeeded(input: {
+  originalText: string;
+  rewrittenText: string;
+  marker?: OutputRewriteMarkerConfig;
+}): string {
+  const markerText = input.marker?.enabled === true ? input.marker.text?.trim() : undefined;
+  if (!markerText) return input.rewrittenText;
+  if (input.rewrittenText === input.originalText) return input.rewrittenText;
+  if (input.rewrittenText.endsWith(markerText)) return input.rewrittenText;
+  return `${input.rewrittenText}\n\n${markerText}`;
 }

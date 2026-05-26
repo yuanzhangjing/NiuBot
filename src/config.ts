@@ -76,6 +76,10 @@ export interface OutputRewriteConfig {
   maxTokens?: number;
   prompt?: string;
   logText?: boolean;
+  marker?: {
+    enabled?: boolean;
+    text?: string;
+  };
 }
 
 export interface RestartConfig {
@@ -250,6 +254,16 @@ function parseOutputRewriteConfig(raw: unknown): OutputRewriteConfig | undefined
     maxTokens: numberValue(obj["maxTokens"]),
     prompt: stringValue(obj["prompt"]),
     logText: obj["logText"] === true,
+    marker: parseOutputRewriteMarkerConfig(obj["marker"]),
+  };
+}
+
+function parseOutputRewriteMarkerConfig(raw: unknown): OutputRewriteConfig["marker"] {
+  if (!raw || typeof raw !== "object") return undefined;
+  const obj = raw as Record<string, unknown>;
+  return {
+    enabled: obj["enabled"] === true,
+    text: stringValue(obj["text"]),
   };
 }
 

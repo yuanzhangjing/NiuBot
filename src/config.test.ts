@@ -82,6 +82,9 @@ outputRewrite:
   timeoutMs: 15000
   apiKey: dummy
   logText: true
+  marker:
+    enabled: true
+    text: "📝 <font color='grey'>rewritten by deepseek-v4-flash</font>"
 `, "utf-8");
 
     const config = loadConfig(configPath);
@@ -96,6 +99,12 @@ outputRewrite:
       timeoutMs: 15000,
       apiKey: "dummy",
       logText: true,
+      maxTokens: undefined,
+      prompt: undefined,
+      marker: {
+        enabled: true,
+        text: "📝 <font color='grey'>rewritten by deepseek-v4-flash</font>",
+      },
     });
   });
 

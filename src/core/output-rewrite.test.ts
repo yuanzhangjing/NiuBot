@@ -114,6 +114,50 @@ describe("OutputRewriter", () => {
     }));
   });
 
+  it("appends a configured marker when the rewrite changes text", async () => {
+    const create = vi.fn().mockResolvedValue({
+      content: [{ type: "text", text: "rewritten" }],
+    });
+    const createClient = vi.fn(() => ({ messages: { create } }));
+    const rewriter = new OutputRewriter({
+      config: enabledConfig({
+        marker: {
+          enabled: true,
+          text: "📝 <font color='grey'>rewritten by deepseek-v4-flash</font>",
+        },
+      }),
+      env: { TEST_DEEPSEEK_KEY: "sk-test" },
+      createClient,
+    });
+
+    await expect(rewriter.rewrite({
+      backendType: "codex",
+      text: "original",
+    })).resolves.toBe("rewritten\n\n📝 <font color='grey'>rewritten by deepseek-v4-flash</font>");
+  });
+
+  it("does not append a marker when the rewrite is unchanged", async () => {
+    const create = vi.fn().mockResolvedValue({
+      content: [{ type: "text", text: "original" }],
+    });
+    const createClient = vi.fn(() => ({ messages: { create } }));
+    const rewriter = new OutputRewriter({
+      config: enabledConfig({
+        marker: {
+          enabled: true,
+          text: "📝 <font color='grey'>rewritten by deepseek-v4-flash</font>",
+        },
+      }),
+      env: { TEST_DEEPSEEK_KEY: "sk-test" },
+      createClient,
+    });
+
+    await expect(rewriter.rewrite({
+      backendType: "codex",
+      text: "original",
+    })).resolves.toBe("original");
+  });
+
   it("falls back to the original text when the provider fails", async () => {
     const createClient = vi.fn(() => ({
       messages: {

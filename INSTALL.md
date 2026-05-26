@@ -180,11 +180,14 @@ outputRewrite:
   model: deepseek-v4-flash
   timeoutMs: 15000
   logText: false  # set true only when you need to compare original and rewritten text in logs
+  # marker:
+  #   enabled: true
+  #   text: "📝 <font color='grey'>rewritten by deepseek-v4-flash</font>"
   # prompt: |
   #   You can override the default system prompt here.
 ```
 
-This is off by default. It rewrites the final text before sending it to IM, using the user's original request as context so the rewritten reply stays focused. It does not change agent execution or session history. If the provider fails, times out, returns empty text, or the API key is missing, NiuBot sends the original Codex reply. Rewrite logs include lengths by default; set `logText: true` only for local debugging because it records the original and rewritten reply text.
+This is off by default. It rewrites the final text before sending it to IM, using the user's original request as context so the rewritten reply stays focused. It does not change agent execution or session history. If `marker.enabled` is true, NiuBot appends `marker.text` only when the rewrite changes the text. If the provider fails, times out, returns empty text, or the API key is missing, NiuBot sends the original Codex reply without a marker. Rewrite logs include lengths by default; set `logText: true` only for local debugging because it records the original and rewritten reply text.
 
 Optional restart source directory for local development:
 
