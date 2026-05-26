@@ -61,7 +61,8 @@ describe("OutputRewriter", () => {
 
     await expect(rewriter.rewrite({
       backendType: "codex",
-      text: "original",
+      originalPrompt: "用户要查天气",
+      text: "北京天气晴。",
     })).resolves.toBe("rewritten");
 
     expect(createClient).toHaveBeenCalledWith({
@@ -72,7 +73,21 @@ describe("OutputRewriter", () => {
       model: "deepseek-v4-flash",
       temperature: 0.2,
       max_tokens: 4096,
-      messages: [{ role: "user", content: "original" }],
+      system: expect.stringContaining("你是回复改写器，不是对话助手。"),
+      messages: [{
+        role: "user",
+        content: [
+          "用户原始请求：",
+          "<<<",
+          "用户要查天气",
+          ">>>",
+          "",
+          "原始回复：",
+          "<<<",
+          "北京天气晴。",
+          ">>>",
+        ].join("\n"),
+      }],
     }), expect.objectContaining({
       timeout: 15_000,
     }));

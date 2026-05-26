@@ -1074,6 +1074,7 @@ describe("Pipeline.recover", () => {
 
     expect(outputRewriter.rewrite).toHaveBeenCalledWith(expect.objectContaining({
       backendType: "codex",
+      originalPrompt: "check weather",
       text: "cron reply",
     }));
     expect(sentCards[0]?.content).toBe("rewritten cron reply");
@@ -1778,6 +1779,7 @@ describe("Pipeline.recover", () => {
 
     expect(outputRewriter.rewrite).toHaveBeenCalledWith(expect.objectContaining({
       backendType: "codex",
+      originalPrompt: "first",
       text: "agent reply",
     }));
     expect(sentCards.some((card) => card.content.includes("rewritten reply"))).toBe(true);

@@ -2,16 +2,17 @@ import Anthropic from "@anthropic-ai/sdk";
 import { createLogger } from "../logger.js";
 
 const DEFAULT_REWRITE_PROMPT = [
-  "重写下面这段回复，第一目标是让用户看得清楚。",
-  "不要为了变短牺牲清晰度；根据内容复杂度决定篇幅。",
-  "简单内容用几句话说清；复杂内容保留必要结构，但不要完整复述。",
-  "先给结论，再说关键原因、重要问题和下一步动作。",
-  "可以重新组织段落，合并重复内容，删掉铺垫、废话和不影响判断的过程说明。",
-  "优先保留核心内容：结论、关键进展、重要问题、限制条件、错误信息、下一步动作。",
-  "命令、路径、URL、数字、版本号、配置名和技术名词，只有在影响理解、判断或下一步时才保留。",
-  "保留人称和责任归属，不要把“我”改成“你”，不要改变谁做了什么。",
-  "语气平实、克制，像靠谱同事说话；不要客服腔、汇报腔、黑话。",
-  "不要添加任何关于改写过程、改写结果或任务完成情况的说明。",
+  "你是回复改写器，不是对话助手。",
+  "",
+  "任务：",
+  "根据用户原始请求，重写“原始回复”，让它更清楚、更直接、更容易读。",
+  "",
+  "要求：",
+  "- 只改写原始回复，不重新回答用户问题。",
+  "- 不添加原始回复中没有的新事实、新结论、新步骤。",
+  "- 不改变技术含义、数字、路径、版本号、命令和责任归属。",
+  "- 用户原始请求只用于理解意图和取舍重点。",
+  "- 输出最终要发给用户的正文，不要解释改写过程。",
 ].join("\n");
 
 const DEFAULT_MODEL = "deepseek-v4-flash";
@@ -69,7 +70,7 @@ export class OutputRewriter {
     this.createClient = options.createClient ?? ((clientOptions) => new Anthropic(clientOptions));
   }
 
-  async rewrite(input: { backendType: string; text: string; signal?: AbortSignal }): Promise<string> {
+  async rewrite(input: { backendType: string; text: string; originalPrompt?: string; signal?: AbortSignal }): Promise<string> {
     const config = this.config;
     if (!config?.enabled) return input.text;
     if (!this.shouldApplyToBackend(config, input.backendType)) return input.text;
@@ -98,7 +99,7 @@ export class OutputRewriter {
         max_tokens: config.maxTokens ?? DEFAULT_MAX_TOKENS,
         temperature: 0.2,
         system: config.prompt ?? DEFAULT_REWRITE_PROMPT,
-        messages: [{ role: "user", content: input.text }],
+        messages: [{ role: "user", content: buildRewriteUserMessage(input.originalPrompt ?? "", input.text) }],
       }, {
         signal: input.signal,
         timeout: config.timeoutMs ?? DEFAULT_TIMEOUT_MS,
@@ -130,4 +131,18 @@ export class OutputRewriter {
     this.client ??= this.createClient(options);
     return this.client;
   }
+}
+
+function buildRewriteUserMessage(originalPrompt: string, originalReply: string): string {
+  return [
+    "用户原始请求：",
+    "<<<",
+    originalPrompt,
+    ">>>",
+    "",
+    "原始回复：",
+    "<<<",
+    originalReply,
+    ">>>",
+  ].join("\n");
 }

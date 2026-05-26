@@ -1527,6 +1527,7 @@ export class Pipeline {
       response.text = await this.rewriteOutputText({
         chatId,
         source,
+        originalPrompt: prompt,
         text: response.text,
       });
 
@@ -2452,6 +2453,7 @@ export class Pipeline {
       response.text = await this.rewriteOutputText({
         chatId,
         source: "user",
+        originalPrompt: mergedText,
         text: response.text,
         signal,
       });
@@ -2623,6 +2625,7 @@ export class Pipeline {
   private async rewriteOutputText(options: {
     chatId: string;
     source: "user" | "cron" | "task";
+    originalPrompt: string;
     text: string;
     signal?: AbortSignal;
   }): Promise<string> {
@@ -2631,6 +2634,7 @@ export class Pipeline {
     try {
       const rewrittenText = await this.outputRewriter.rewrite({
         backendType: this.backendType,
+        originalPrompt: options.originalPrompt,
         text: options.text,
         signal: options.signal,
       });
