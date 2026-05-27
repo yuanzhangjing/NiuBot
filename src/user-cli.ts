@@ -814,6 +814,18 @@ ${modelLine}${liteModelLine}    # workingDirectory: ~/niubot-workspace/NiuBot  #
 
 # queue:
 #   bufferMs: 1500         # 消息缓冲合并窗口（ms）
+
+# Optional final-response rewrite. Off by default; uncomment to enable.
+# outputRewrite:
+#   enabled: true
+#   applyToBackends:
+#     - codex
+#   provider: anthropic-compatible
+#   baseURL: https://api.deepseek.com/anthropic
+#   apiKeyEnv: DEEPSEEK_API_KEY
+#   model: deepseek-v4-flash
+#   timeoutMs: 15000
+#   # marker_enable: false  # marker is enabled by default when rewrite changes text
 ${backendsSection}`;
 }
 

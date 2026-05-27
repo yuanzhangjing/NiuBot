@@ -100,8 +100,9 @@ export class OutputRewriter {
         apiKey,
         baseURL: config.baseURL ?? this.env["ANTHROPIC_BASE_URL"],
       });
+      const model = config.model ?? this.env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] ?? DEFAULT_MODEL;
       const message = await client.messages.create({
-        model: config.model ?? this.env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] ?? DEFAULT_MODEL,
+        model,
         max_tokens: config.maxTokens ?? DEFAULT_MAX_TOKENS,
         temperature: 0.2,
         system: config.prompt ?? DEFAULT_REWRITE_PROMPT,
@@ -121,6 +122,7 @@ export class OutputRewriter {
       return appendMarkerIfNeeded({
         originalText: input.text,
         rewrittenText: rewritten,
+        model,
         marker: config.marker,
       });
     } catch (err) {
@@ -161,11 +163,19 @@ function buildRewriteUserMessage(originalPrompt: string, originalReply: string):
 function appendMarkerIfNeeded(input: {
   originalText: string;
   rewrittenText: string;
+  model: string;
   marker?: OutputRewriteMarkerConfig;
 }): string {
-  const markerText = input.marker?.enabled === true ? input.marker.text?.trim() : undefined;
-  if (!markerText) return input.rewrittenText;
+  if (input.marker?.enabled === false) return input.rewrittenText;
+  const markerText = `📝 <font color='grey'>rewritten by ${escapeMarkerText(input.model)}</font>`;
   if (input.rewrittenText === input.originalText) return input.rewrittenText;
   if (input.rewrittenText.endsWith(markerText)) return input.rewrittenText;
   return `${input.rewrittenText}\n\n${markerText}`;
+}
+
+function escapeMarkerText(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
 }

@@ -78,6 +78,7 @@ export interface OutputRewriteConfig {
   logText?: boolean;
   marker?: {
     enabled?: boolean;
+    /** Deprecated: marker text is generated from the rewrite model. */
     text?: string;
   };
 }
@@ -238,6 +239,11 @@ function parseOutputRewriteConfig(raw: unknown): OutputRewriteConfig | undefined
   if (!raw || typeof raw !== "object") return undefined;
   const obj = raw as Record<string, unknown>;
   const enabled = obj["enabled"] === true;
+  const marker = parseOutputRewriteMarkerConfig(obj["marker"]);
+  const markerEnable = booleanValue(obj["marker_enable"] ?? obj["markerEnable"]);
+  const resolvedMarker = markerEnable === undefined
+    ? marker
+    : { ...marker, enabled: markerEnable };
   const applyToBackends = Array.isArray(obj["applyToBackends"])
     ? obj["applyToBackends"].filter((v): v is string => typeof v === "string")
     : undefined;
@@ -254,7 +260,7 @@ function parseOutputRewriteConfig(raw: unknown): OutputRewriteConfig | undefined
     maxTokens: numberValue(obj["maxTokens"]),
     prompt: stringValue(obj["prompt"]),
     logText: obj["logText"] === true,
-    marker: parseOutputRewriteMarkerConfig(obj["marker"]),
+    marker: resolvedMarker,
   };
 }
 
@@ -262,7 +268,7 @@ function parseOutputRewriteMarkerConfig(raw: unknown): OutputRewriteConfig["mark
   if (!raw || typeof raw !== "object") return undefined;
   const obj = raw as Record<string, unknown>;
   return {
-    enabled: obj["enabled"] === true,
+    enabled: booleanValue(obj["enabled"]),
     text: stringValue(obj["text"]),
   };
 }
@@ -273,6 +279,10 @@ function stringValue(value: unknown): string | undefined {
 
 function numberValue(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function booleanValue(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined;
 }
 
 function parseRestartConfig(raw: unknown): RestartConfig | undefined {

@@ -82,6 +82,7 @@ outputRewrite:
   timeoutMs: 15000
   apiKey: dummy
   logText: true
+  marker_enable: false
   marker:
     enabled: true
     text: "📝 <font color='grey'>rewritten by deepseek-v4-flash</font>"
@@ -102,7 +103,7 @@ outputRewrite:
       maxTokens: undefined,
       prompt: undefined,
       marker: {
-        enabled: true,
+        enabled: false,
         text: "📝 <font color='grey'>rewritten by deepseek-v4-flash</font>",
       },
     });
