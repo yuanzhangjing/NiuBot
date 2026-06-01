@@ -22,7 +22,7 @@ describe("niubot CLI path helpers", () => {
   it("prepends the repo-local niubot bin directory to PATH", () => {
     const original = "/usr/bin:/bin";
 
-    expect(prependNiubotBinToPath(original)).toBe(
+    expect(prependNiubotBinToPath(original, { env: {}, homeDir: "", execPath: "" })).toBe(
       `${getBundledNiubotBinDir()}:${original}`,
     );
   });
@@ -30,7 +30,27 @@ describe("niubot CLI path helpers", () => {
   it("does not prepend the repo-local niubot bin directory twice", () => {
     const original = `${getBundledNiubotBinDir()}:/usr/bin:/bin`;
 
-    expect(prependNiubotBinToPath(original)).toBe(original);
+    expect(prependNiubotBinToPath(original, { env: {}, homeDir: "", execPath: "" })).toBe(original);
+  });
+
+  it("adds npm global and common user bin directories before the original PATH", () => {
+    const projectRoot = "/opt/homebrew/lib/node_modules/@yuanzhangjing/niubot";
+
+    expect(prependNiubotBinToPath("/usr/bin:/bin", {
+      projectRoot,
+      env: { npm_config_prefix: "/custom/npm" },
+      homeDir: "/home/u",
+      execPath: "/usr/local/bin/node",
+    })).toBe([
+      `${projectRoot}/bin`,
+      "/opt/homebrew/bin",
+      "/custom/npm/bin",
+      "/usr/local/bin",
+      "/home/u/.local/bin",
+      "/home/u/.npm-global/bin",
+      "/usr/bin",
+      "/bin",
+    ].join(":"));
   });
 
   it("injects the repo-local niubot bin directory into agent env", () => {
