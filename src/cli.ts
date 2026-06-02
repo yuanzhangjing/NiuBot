@@ -2,7 +2,7 @@
 
 /**
  * NiuBot CLI — agent 调用的 memory/summary/messages/contacts/send/cron/task 操作工具。
- * 命令和权限逻辑对齐 cc-connect。
+ * 命令和权限逻辑保持与 IM 运行时一致。
  *
  * 环境变量：
  *   NIUBOT_HOME       — 配置/数据目录（必须设置）

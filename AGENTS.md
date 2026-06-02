@@ -55,7 +55,7 @@ NIUBOT_HOME=~/.niubot bash restart.sh
 - 日志用 `createLogger`，不用 `console.log`
 - DB 操作用 prepared statements
 - 新增 DB 字段走 migration（`src/database/schema.ts`）
-- 对齐 cc-connect 的实现风格（飞书卡片、footer 格式、命令输出格式等）
+- 保持 IM 卡片、footer、命令输出格式一致，避免同类功能各写一套样式
 
 ### 关键架构
 - **Pipeline**（`src/core/pipeline.ts`）：消息入口 → 存 DB → 队列缓冲（3s）→ flush（platformTs 排序 + YAML 合并）→ 路由决策 → session 管理 → agent 调用 → IM 发送
@@ -65,15 +65,6 @@ NIUBOT_HOME=~/.niubot bash restart.sh
 - **Built-in backends**（`src/backends/*.ts`）：Claude、Codex、Trae CLI 的内置适配；公共抽象在 `src/agent/`
 - **内置命令**：三层分发 — builtin switch → shell exec（admin）→ forward to agent
 
-### 对齐参考
-NiuBot 的能力和实现风格对齐 cc-connect（Go 版本），代码在 `/Users/yuanmouren/workspace/cc-connect/`。
-关键对齐点：飞书卡片格式、footer 信息、命令输出格式、restart 流程、context 注入架构。
-
 ## 任务管理
 
-进展和设计文档统一在工作空间的 task 中管理：
-- 任务目录：`../../tasks/niubot-engine/`
-- 进展跟踪：`../../tasks/niubot-engine/README.md`（Bug / Todo / In Progress / Done 分区）
-- 设计文档：同目录下的 `.md` 文件
-
-开发完成后及时更新 README.md 中对应条目的状态。
+项目进展优先记录在 issue、PR 或公开文档中。不要把个人工作空间路径、私有任务目录或未公开项目资料写进仓库文件。

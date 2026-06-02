@@ -850,7 +850,7 @@ export class FeishuAdapter implements PlatformAdapter {
     return nodes;
   }
 
-  /** Resolve sender display name (对齐 cc-connect resolveSenderName: lookup → bot → register) */
+  /** Resolve sender display name: lookup -> bot -> register. */
   private resolveSenderFromItem(item: any): string {
     const sender = item.sender;
     if (!sender?.id) return "未知";
@@ -953,7 +953,7 @@ export class FeishuAdapter implements PlatformAdapter {
   }
 }
 
-/** 构建飞书卡片 JSON（对齐 cc-connect buildRichCardJSON） */
+/** 构建飞书卡片 JSON */
 function buildCardJSON(header: string, content: string, footer?: string): string {
   let mdContent = content;
   if (footer) {
@@ -994,4 +994,3 @@ function mimeToExt(mime: string): string {
   if (mime.includes("pdf")) return ".pdf";
   return ".bin";
 }
-

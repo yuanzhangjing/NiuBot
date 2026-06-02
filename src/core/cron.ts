@@ -185,7 +185,7 @@ export function addCronJob(
     untilTime?: string;
   },
 ): number {
-  // Validate: runAt must be in the future（对齐 cc-connect AddJob）
+  // Validate: runAt must be in the future.
   if (opts.runAt) {
     const runAtTime = new Date(opts.runAt.replace(" ", "T"));
     if (runAtTime.getTime() <= Date.now()) {

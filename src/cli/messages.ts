@@ -235,7 +235,7 @@ function formatMessageListLine(r: MessageRow, time: string, prefix = ""): string
   return `${prefix}[#${r.id}] [${time}] ${senderLabel} (${roleLabel}): ${text}`;
 }
 
-/** Rune-safe truncation (对齐 cc-connect: []rune 截断) */
+/** Rune-safe truncation. */
 function truncate(text: string, max: number): string {
   const runes = [...text];
   if (runes.length <= max) return text;

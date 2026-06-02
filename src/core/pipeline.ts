@@ -991,7 +991,7 @@ export class Pipeline {
    * //xxx 视为强制透传给 agent，本地不拦截。
    * 未命中返回 false，消息继续走 agent 流程。
    *
-   * 分发顺序（对齐 cc-connect）：
+   * 分发顺序：
    *   1. 内置命令 switch（/restart, /service, /new, /clear, /stop, /cron）
    *   2. 管理员 shell 命令（tryShellCommand）
    *   3. return false → 转发给 agent
@@ -1405,7 +1405,7 @@ export class Pipeline {
       .catch((err) => this.log.error("cron list send failed", { platformChatId, error: String(err) }));
   }
 
-  // ── Cron job execution（独立 session，对齐 cc-connect BackgroundSession） ──
+  // ── Cron job execution（独立 session） ──
 
   /**
    * 执行定时任务：创建独立 session，发送 prompt，结果用 ⏰ header 卡片发送，完成后归档。
@@ -2087,7 +2087,7 @@ export class Pipeline {
   }
 
   /**
-   * 管理员 shell 命令执行（对齐 cc-connect tryShellCommand）。
+   * 管理员 shell 命令执行。
    * 通过 sh -c 执行，30s 超时。调用前已由 commandExistsSync 确认命令存在。
    */
   private tryShellCommand(cmd: string, userId: string, chatId: string, chatType: string, platformChatId: string, msgId?: string): void {
@@ -2246,7 +2246,7 @@ export class Pipeline {
   }
 
   /**
-   * Spawn detached restart.sh（对齐 cc-connect cmdRestart）。
+   * Spawn detached restart.sh.
    * restart.sh 负责：sleep → build → preflight → kill old → start new → health check → notify。
    * 可通过 platformChatId 或 chatId 指定通知目标，都不传则不发通知。
    */
@@ -2506,7 +2506,7 @@ export class Pipeline {
         chatSession.sessionId,
       );
 
-      // 构建 footer（对齐 cc-connect：shortId · #turn · context · model）
+      // 构建 footer：shortId · #turn · context · model
       const stats = this.db.prepare(
         "SELECT turn_count FROM sessions WHERE id = ?",
       ).get(chatSession.sessionId) as { turn_count: number } | undefined;
@@ -3337,7 +3337,7 @@ function commandExistsSync(cmd: string): boolean {
 /** Shell 输出最大字符数（超出截断） */
 const SHELL_MAX_OUTPUT_LEN = 4000;
 
-/** 格式化 shell 命令输出（对齐 cc-connect FormatOutput） */
+/** 格式化 shell 命令输出 */
 function formatShellOutput(cwd: string, cmd: string, output: string, exitCode: number): string {
   let body = "";
   if (!output && exitCode === 0) {
