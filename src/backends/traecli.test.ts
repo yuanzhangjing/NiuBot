@@ -41,6 +41,19 @@ describe("TraeCliBackend", () => {
     });
   });
 
+  it("preassigns a plain UUID session id for the first turn", () => {
+    const backend = new TraeCliBackend();
+    const session = backend.buildSession({
+      workingDirectory: "/tmp/workspace",
+    });
+
+    expect(session.preassignedSessionId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    expect(session.preassignedSessionId?.startsWith("niubot-")).toBe(false);
+    expect(backend.buildInput(session, "first turn")).toEqual({
+      args: ["-p", "--json", "--yolo", `--session-id=${session.preassignedSessionId}`, "--", "first turn"],
+    });
+  });
+
   it("uses backend default lite model when liteModel is not configured", () => {
     const backend = new TraeCliBackend();
     const session = backend.buildSession({
@@ -55,6 +68,7 @@ describe("TraeCliBackend", () => {
   it("parses stdout fields from the traecli json response", () => {
     const backend = new TraeCliBackend();
     const session = backend.buildSession({ workingDirectory: "/tmp/workspace" });
+    const sessionId = session.preassignedSessionId!;
 
     const parsed = backend.parseOutput(JSON.stringify({
       message: {
@@ -68,12 +82,12 @@ describe("TraeCliBackend", () => {
           _source_model: "trae-main",
         },
       },
-      session_id: "session-abc",
+      session_id: sessionId,
     }), session);
 
     expect(parsed).toMatchObject({
       text: "hello from trae",
-      agentSessionId: "session-abc",
+      agentSessionId: sessionId,
       contextTokens: 321,
       model: "trae-main",
     });
@@ -163,6 +177,34 @@ describe("TraeCliBackend", () => {
 
     expect(parsed.text).toContain("Coco 错误");
     expect(parsed.text).toContain("ValidationException");
+  });
+
+  it("uses the preassigned session id to find the log when stdout omits session_id", () => {
+    const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "trae-home-"));
+    process.env["HOME"] = tempHome;
+    process.env["XDG_CACHE_HOME"] = path.join(tempHome, ".cache");
+
+    const backend = new TraeCliBackend();
+    const session = backend.buildSession({ workingDirectory: "/tmp/workspace" });
+    const sessionId = session.preassignedSessionId!;
+    const logDir = getTraeLogDir(tempHome, sessionId);
+    fs.mkdirSync(logDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(logDir, "events.jsonl"),
+      JSON.stringify({
+        agent_end: {
+          error_message: "preassigned log error",
+        },
+      }),
+    );
+
+    const parsed = backend.parseOutput(JSON.stringify({
+      message: { content: "" },
+    }), session);
+
+    expect(parsed.agentSessionId).toBe(sessionId);
+    expect(parsed.text).toContain("preassigned log error");
+    expect(session.agentSessionId).toBe(sessionId);
   });
 
   it("does not override non-empty content with error_message", () => {

@@ -3,6 +3,7 @@
  * 通过 `traecli -p` 命令驱动 agent，JSON 输出。
  */
 
+import { randomUUID } from "node:crypto";
 import { existsSync, openSync, readSync, closeSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -13,6 +14,7 @@ import { DEFAULT_LITE_MODELS } from "../config.js";
 
 interface TraeCliSession extends BaseCliSession {
   sessionLogPath?: string;
+  preassignedSessionId?: string;
 }
 
 export default class TraeCliBackend extends CliAgentBackend<TraeCliSession> {
@@ -35,6 +37,7 @@ export default class TraeCliBackend extends CliAgentBackend<TraeCliSession> {
       cumulativeBytes: 0,
       compactCount: 0,
       jsonlOffset: 0,
+      preassignedSessionId: randomUUID(),
     };
   }
 
@@ -42,6 +45,7 @@ export default class TraeCliBackend extends CliAgentBackend<TraeCliSession> {
     const args = ["-p", "--json", "--yolo"];
     if (session.model) args.push("-c", `model.name=${session.model}`);
     if (session.agentSessionId) args.push(`--resume=${session.agentSessionId}`);
+    else if (session.preassignedSessionId) args.push(`--session-id=${session.preassignedSessionId}`);
     args.push("--", message);
     return { args };
   }
@@ -73,7 +77,15 @@ export default class TraeCliBackend extends CliAgentBackend<TraeCliSession> {
         text: data.message?.content ?? "",
       };
 
-      const resolvedSessionId = data.session_id ?? session.agentSessionId;
+      const returnedSessionId = data.session_id;
+      if (!session.agentSessionId && returnedSessionId && session.preassignedSessionId && returnedSessionId !== session.preassignedSessionId) {
+        this.log.warn("preassigned session id mismatch", {
+          preassignedSessionId: session.preassignedSessionId,
+          returnedSessionId,
+        });
+        session.sessionLogPath = undefined;
+      }
+      const resolvedSessionId = returnedSessionId ?? session.agentSessionId ?? session.preassignedSessionId;
       if (resolvedSessionId) {
         result.agentSessionId = resolvedSessionId;
         session.agentSessionId = resolvedSessionId;
@@ -249,13 +261,14 @@ export default class TraeCliBackend extends CliAgentBackend<TraeCliSession> {
     if (session.sessionLogPath && existsSync(session.sessionLogPath)) {
       return session.sessionLogPath;
     }
-    if (!session.agentSessionId) return null;
+    const sessionId = session.agentSessionId ?? session.preassignedSessionId;
+    if (!sessionId) return null;
 
     const cacheBase = process.platform === "darwin"
       ? join(homedir(), "Library", "Caches", "coco")
       : join(process.env["XDG_CACHE_HOME"] || join(homedir(), ".cache"), "coco");
 
-    const jsonlPath = join(cacheBase, "sessions", session.agentSessionId, "events.jsonl");
+    const jsonlPath = join(cacheBase, "sessions", sessionId, "events.jsonl");
     if (existsSync(jsonlPath)) {
       session.sessionLogPath = jsonlPath;
       return jsonlPath;
