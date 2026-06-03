@@ -4,8 +4,20 @@ import os from "node:os";
 import path from "node:path";
 import yaml from "yaml";
 
+/** 展开路径中的 ~ 为用户 home 目录 */
+export function expandHome(p: string): string {
+  if (p === "~") return os.homedir();
+  if (p.startsWith("~/") || p.startsWith("~\\")) return path.join(os.homedir(), p.slice(2));
+  return p;
+}
+
+export function resolveHomePath(homePath: string, cwd: string = process.cwd()): string {
+  const expanded = expandHome(homePath);
+  return path.isAbsolute(expanded) ? path.normalize(expanded) : path.resolve(cwd, expanded);
+}
+
 /** NIUBOT_HOME 默认 ~/.niubot */
-const NIUBOT_HOME = process.env["NIUBOT_HOME"] ?? path.join(os.homedir(), ".niubot");
+const NIUBOT_HOME = resolveHomePath(process.env["NIUBOT_HOME"] ?? path.join(os.homedir(), ".niubot"));
 
 // 从 NIUBOT_HOME 加载 .env
 dotenv.config({ path: path.join(NIUBOT_HOME, ".env"), quiet: true });
@@ -335,13 +347,6 @@ function findConfigFile(): string | undefined {
     path.join(NIUBOT_HOME, "config.json"),
   ];
   return candidates.find((f) => fs.existsSync(f));
-}
-
-/** 展开路径中的 ~ 为用户 home 目录 */
-export function expandHome(p: string): string {
-  if (p === "~") return os.homedir();
-  if (p.startsWith("~/") || p.startsWith("~\\")) return path.join(os.homedir(), p.slice(2));
-  return p;
 }
 
 /** 解析数字环境变量，undefined 或 NaN 返回 undefined（不会把 0 当 falsy） */

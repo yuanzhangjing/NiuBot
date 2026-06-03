@@ -11,6 +11,14 @@ import {
   getTodayLogFilePath,
   getSuggestedLiteModel,
   resolveRunningStatusDetails,
+  parseNiubotVersionOutput,
+  deriveNpmPrefixFromPackageRoot,
+  isPackageRootInsideNpmRoot,
+  resolveNpmExecutableForNode,
+  resolveNiubotHome,
+  collectStatusHomes,
+  readRegisteredHomes,
+  registerHomePath,
 } from "./user-cli.js";
 
 const tempDirs: string[] = [];
@@ -29,6 +37,58 @@ afterEach(() => {
 });
 
 describe("user-cli init model configuration", () => {
+  it("parses niubot version command output", () => {
+    expect(parseNiubotVersionOutput("niubot v0.1.81\n")).toBe("0.1.81");
+    expect(parseNiubotVersionOutput("unexpected\n")).toBeUndefined();
+  });
+
+  it("derives npm prefix from a scoped global package root", () => {
+    expect(deriveNpmPrefixFromPackageRoot("/opt/homebrew/lib/node_modules/@yuanzhangjing/niubot")).toBe("/opt/homebrew");
+    expect(deriveNpmPrefixFromPackageRoot("/Users/me/.nvs/node/22/lib/node_modules/@yuanzhangjing/niubot")).toBe("/Users/me/.nvs/node/22");
+  });
+
+  it("checks whether the package root belongs to the active npm root", () => {
+    expect(isPackageRootInsideNpmRoot(
+      "/opt/homebrew/lib/node_modules/@yuanzhangjing/niubot",
+      "/opt/homebrew/lib/node_modules",
+    )).toBe(true);
+    expect(isPackageRootInsideNpmRoot(
+      "/opt/homebrew/lib/node_modules/@yuanzhangjing/niubot",
+      "/Users/me/.nvs/node/22/lib/node_modules",
+    )).toBe(false);
+  });
+
+  it("resolves npm next to the active node runtime", () => {
+    expect(resolveNpmExecutableForNode("/opt/homebrew/bin/node", "darwin", () => true)).toBe("/opt/homebrew/bin/npm");
+    expect(resolveNpmExecutableForNode("C:\\node\\node.exe", "win32", () => true)).toBe("C:\\node\\npm.cmd");
+    expect(resolveNpmExecutableForNode("/missing/bin/node", "darwin", () => false)).toBeUndefined();
+  });
+
+  it("resolves relative NIUBOT_HOME before passing it to the engine", () => {
+    expect(resolveNiubotHome(".niubot-2", undefined, "/tmp/workspace")).toBe("/tmp/workspace/.niubot-2");
+    expect(resolveNiubotHome(undefined, ".env-home", "/tmp/workspace")).toBe("/tmp/workspace/.env-home");
+    expect(resolveNiubotHome("/abs/home", ".env-home", "/tmp/workspace")).toBe("/abs/home");
+  });
+
+  it("stores registered homes as a de-duplicated path list", () => {
+    const tempDir = makeTempDir("niubot-home-registry-");
+    const registryPath = path.join(tempDir, "instances.json");
+
+    registerHomePath(registryPath, "/tmp/niubot-a");
+    registerHomePath(registryPath, "/tmp/niubot-a");
+    registerHomePath(registryPath, "/tmp/niubot-b");
+
+    expect(readRegisteredHomes(registryPath)).toEqual(["/tmp/niubot-a", "/tmp/niubot-b"]);
+  });
+
+  it("collects status homes from the current default home and registry", () => {
+    expect(collectStatusHomes("/tmp/niubot-default", [
+      "/tmp/niubot-a",
+      "/tmp/niubot-default",
+      "/tmp/niubot-b",
+    ])).toEqual(["/tmp/niubot-default", "/tmp/niubot-a", "/tmp/niubot-b"]);
+  });
+
   it("suggests built-in lite models per backend", () => {
     expect(getSuggestedLiteModel("claude")).toBe("haiku");
     expect(getSuggestedLiteModel("codex")).toBe("gpt-5.4-mini");
@@ -71,6 +131,7 @@ describe("user-cli init model configuration", () => {
     fs.writeFileSync(path.join(runningRoot, "package.json"), JSON.stringify({ name: "@yuanzhangjing/niubot", version: "1.2.3" }));
     fs.writeFileSync(realLog, "");
     fs.writeFileSync(path.join(tempDir, "niubot.version"), "0.9.0");
+    fs.writeFileSync(path.join(tempDir, "niubot.node"), "/opt/homebrew/bin/node v22.1.0 ABI 127");
 
     const details = resolveRunningStatusDetails({
       niubotHome: tempDir,
@@ -82,6 +143,7 @@ describe("user-cli init model configuration", () => {
 
     expect(details.version).toBe("1.2.3");
     expect(details.path).toBe(runningRoot);
+    expect(details.node).toBe("/opt/homebrew/bin/node v22.1.0 ABI 127");
     expect(details.logFile).toBe(realLog);
   });
 

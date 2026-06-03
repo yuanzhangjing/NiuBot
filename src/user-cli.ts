@@ -15,13 +15,14 @@
 
 import { execFileSync, spawn } from "node:child_process";
 import fs from "node:fs";
+import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 import yaml from "yaml";
 import { DEFAULT_BOT_PROFILE } from "./bot-profile.js";
-import { AGENT_REGISTRY, DEFAULT_LITE_MODELS, expandHome, loadConfig, type BuiltinBackendType, type NiuBotConfig } from "./config.js";
+import { AGENT_REGISTRY, DEFAULT_LITE_MODELS, expandHome, loadConfig, resolveHomePath, type BuiltinBackendType, type NiuBotConfig } from "./config.js";
 import { INSTALL_GUIDE_COMMAND } from "./install-guide.js";
 import { localToday } from "./tz.js";
 
@@ -30,6 +31,7 @@ import { localToday } from "./tz.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, "..");
 const PACKAGE_NAME = "@yuanzhangjing/niubot";
+const requireFromPackage = createRequire(import.meta.url);
 
 function getPkgVersion(): string {
   try {
@@ -66,18 +68,22 @@ interface RunningStatusDetailsOptions {
 export function resolveRunningStatusDetails(options: RunningStatusDetailsOptions): {
   version: string;
   path: string;
+  node?: string;
   logFile: string;
 } {
   const versionFile = path.join(options.niubotHome, "niubot.version");
+  const nodeFile = path.join(options.niubotHome, "niubot.node");
   const runningPackage = readNiuBotPackage(options.processCwd);
   let version = runningPackage?.version;
   if (!version) {
-    try { version = fs.readFileSync(versionFile, "utf-8").trim(); } catch { /* missing for old installs */ }
+    version = readTrimmedFile(versionFile);
   }
+  const node = readTrimmedFile(nodeFile);
 
   return {
     version: version || "unknown",
     path: runningPackage?.root || options.cliPath,
+    node,
     logFile: isRegularFile(options.processStdoutPath) ? options.processStdoutPath : options.todayLogFile,
   };
 }
@@ -128,6 +134,8 @@ interface CliFlags {
   check?: boolean;
   force?: boolean;
   restart?: boolean;
+  verbose?: boolean;
+  all?: boolean;
   home?: string;
 }
 
@@ -140,6 +148,9 @@ function parseCliArgs(args: string[]): { command: string | undefined; flags: Cli
     if (arg === "--check") flags.check = true;
     else if (arg === "--force") flags.force = true;
     else if (arg === "--restart") flags.restart = true;
+    else if (arg === "--verbose") flags.verbose = true;
+    else if (arg === "--all") flags.all = true;
+    else if ((arg === "--version" || arg === "-v") && !command) command = arg;
     else if (arg === "--home" && i + 1 < args.length) {
       flags.home = args[++i];
     } else if (!arg.startsWith("-") && !command) {
@@ -156,6 +167,117 @@ const ok = (msg: string) => console.log(`  \u2713 ${msg}`);
 const fail = (msg: string) => console.log(`  \u2717 ${msg}`);
 const hint = (msg: string) => console.log(`    \u2192 ${msg}`);
 const info = (msg: string) => console.log(`  ${msg}`);
+
+function readTrimmedFile(filePath: string): string | undefined {
+  try {
+    const text = fs.readFileSync(filePath, "utf-8").trim();
+    return text || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function getNodeRuntimeLabel(): string {
+  return `${process.execPath} ${process.version} ABI ${process.versions.modules}`;
+}
+
+export function deriveNpmPrefixFromPackageRoot(packageRoot: string): string | undefined {
+  const normalized = path.normalize(packageRoot);
+  const parts = normalized.split(path.sep);
+  const nodeModulesIndex = parts.lastIndexOf("node_modules");
+  if (nodeModulesIndex < 1) return undefined;
+
+  const prefixParts = parts[nodeModulesIndex - 1] === "lib"
+    ? parts.slice(0, nodeModulesIndex - 1)
+    : parts.slice(0, nodeModulesIndex);
+  const prefix = prefixParts.join(path.sep);
+  return prefix || path.sep;
+}
+
+export function isPackageRootInsideNpmRoot(packageRoot: string, npmRoot: string): boolean {
+  const relative = path.relative(path.resolve(npmRoot), path.resolve(packageRoot));
+  return relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative);
+}
+
+export function resolveNpmExecutableForNode(
+  nodePath: string,
+  platform: NodeJS.Platform = process.platform,
+  exists: (filePath: string) => boolean = fs.existsSync,
+): string | undefined {
+  const npmName = platform === "win32" ? "npm.cmd" : "npm";
+  const pathApi = platform === "win32" ? path.win32 : path;
+  const candidate = pathApi.join(pathApi.dirname(nodePath), npmName);
+  return exists(candidate) ? candidate : undefined;
+}
+
+function resolveNpmCommandForCurrentNode(): string {
+  return resolveNpmExecutableForNode(process.execPath) ?? "npm";
+}
+
+export function resolveNiubotHome(flagHome: string | undefined, envHome: string | undefined, cwd: string = process.cwd()): string {
+  return resolveHomePath(flagHome ?? envHome ?? path.join(os.homedir(), ".niubot"), cwd);
+}
+
+function getDefaultNiubotHome(): string {
+  return resolveHomePath(path.join(os.homedir(), ".niubot"));
+}
+
+function getHomeRegistryPath(): string {
+  return path.join(getDefaultNiubotHome(), "instances.json");
+}
+
+export function readRegisteredHomes(registryPath: string): string[] {
+  try {
+    const raw = JSON.parse(fs.readFileSync(registryPath, "utf-8")) as unknown;
+    const homes = Array.isArray(raw)
+      ? raw
+      : typeof raw === "object" && raw !== null && Array.isArray((raw as { homes?: unknown }).homes)
+        ? (raw as { homes: unknown[] }).homes
+        : [];
+    return homes
+      .filter((home): home is string => typeof home === "string" && home.trim().length > 0)
+      .map((home) => resolveHomePath(home));
+  } catch {
+    return [];
+  }
+}
+
+export function collectStatusHomes(currentHome: string, registeredHomes: string[]): string[] {
+  const seen = new Set<string>();
+  const homes: string[] = [];
+  for (const home of [currentHome, ...registeredHomes]) {
+    const resolved = resolveHomePath(home);
+    if (seen.has(resolved)) continue;
+    seen.add(resolved);
+    homes.push(resolved);
+  }
+  return homes;
+}
+
+export function registerHomePath(registryPath: string, home: string): void {
+  const seen = new Set<string>();
+  const homes: string[] = [];
+  for (const item of [...readRegisteredHomes(registryPath), home]) {
+    const resolved = resolveHomePath(item);
+    if (seen.has(resolved)) continue;
+    seen.add(resolved);
+    homes.push(resolved);
+  }
+  fs.mkdirSync(path.dirname(registryPath), { recursive: true });
+  fs.writeFileSync(registryPath, `${JSON.stringify({ homes }, null, 2)}\n`);
+}
+
+function readNpmRoot(npmCommand: string): string | undefined {
+  try {
+    return execFileSync(npmCommand, ["root", "-g"], {
+      encoding: "utf-8",
+      timeout: 8000,
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  } catch {
+    return undefined;
+  }
+}
 
 function prompt(question: string): Promise<string> {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
@@ -184,6 +306,21 @@ function checkBotCredentials(config: NiuBotConfig, issues: string[]): void {
     } else {
       ok(`Bot '${bot.id}' credentials present`);
     }
+  }
+}
+
+function checkNativeDependencies(issues: string[]): void {
+  try {
+    requireFromPackage("better-sqlite3");
+    ok("Native dependencies loadable");
+  } catch (err) {
+    fail("Native dependency check failed");
+    hint(`Node: ${process.execPath}`);
+    hint(`ABI: ${process.versions.modules}`);
+    hint(`Package: ${PROJECT_ROOT}`);
+    hint("Run npm rebuild -g @yuanzhangjing/niubot or reinstall with the same Node runtime.");
+    hint(`Error: ${err instanceof Error ? err.message : String(err)}`);
+    issues.push("native-dependencies");
   }
 }
 
@@ -871,6 +1008,7 @@ function cmdStart(niubotHome: string, flags: CliFlags): void {
 
   // Check credentials
   checkBotCredentials(config, issues);
+  checkNativeDependencies(issues);
 
   // Check backend availability (deduplicate across bots)
   const backendsToCheck = new Set(config.bots.map((b) => b.backend).filter((b): b is string => !!b));
@@ -953,7 +1091,7 @@ function cmdStart(niubotHome: string, flags: CliFlags): void {
 
   const logFd = fs.openSync(logFile, "a");
 
-  const child = spawn("node", [path.join(PROJECT_ROOT, "dist", "index.js")], {
+  const child = spawn(process.execPath, [path.join(PROJECT_ROOT, "dist", "index.js")], {
     cwd: PROJECT_ROOT,
     detached: true,
     stdio: ["ignore", logFd, logFd],
@@ -971,6 +1109,12 @@ function cmdStart(niubotHome: string, flags: CliFlags): void {
   fs.writeFileSync(pidFile, String(child.pid));
   // Snapshot the version at startup so status shows the actual running version
   fs.writeFileSync(path.join(niubotHome, "niubot.version"), getPkgVersion());
+  fs.writeFileSync(path.join(niubotHome, "niubot.node"), getNodeRuntimeLabel());
+  try {
+    registerHomePath(getHomeRegistryPath(), niubotHome);
+  } catch (err) {
+    hint(`Could not update home registry: ${err instanceof Error ? err.message : String(err)}`);
+  }
   ok(`Process started (PID ${child.pid})`);
   info(`Log: ${logFile}`);
 
@@ -1051,7 +1195,7 @@ function stopProcess(niubotHome: string): boolean {
 
 // ── Status ─────────────────────────────────────────────────
 
-function cmdStatus(niubotHome: string): void {
+function printStatusForHome(niubotHome: string): void {
   const pidFile = path.join(niubotHome, "niubot.pid");
   if (!fs.existsSync(pidFile)) {
     console.log("NiuBot is not running.");
@@ -1088,26 +1232,78 @@ function cmdStatus(niubotHome: string): void {
   console.log(`NiuBot is running (PID ${pid})`);
   console.log(`  Version: ${details.version}`);
   console.log(`  Path: ${details.path}`);
+  if (details.node) console.log(`  Node: ${details.node}`);
   if (uptime) console.log(`  Uptime: ${uptime}`);
   console.log(`  Log: ${details.logFile}`);
   console.log(`  Config: ${configPath}`);
 }
 
+function cmdStatus(niubotHome: string, flags: CliFlags, hasExplicitHome: boolean): void {
+  const listAll = flags.all || !hasExplicitHome;
+  if (!listAll) {
+    printStatusForHome(niubotHome);
+    return;
+  }
+
+  const homes = collectStatusHomes(niubotHome, readRegisteredHomes(getHomeRegistryPath()));
+  if (homes.length <= 1) {
+    printStatusForHome(niubotHome);
+    return;
+  }
+
+  console.log("NiuBot instances:");
+  for (const home of homes) {
+    console.log();
+    console.log(`Home: ${home}`);
+    printStatusForHome(home);
+  }
+}
+
 // ── Version ────────────────────────────────────────────────
 
-function cmdVersion(): void {
+function cmdVersion(flags: CliFlags = {}): void {
   console.log(`niubot v${getPkgVersion()}`);
+  if (!flags.verbose) return;
+
+  const npmCommand = resolveNpmCommandForCurrentNode();
+  const npmRoot = readNpmRoot(npmCommand);
+  const npmPrefix = deriveNpmPrefixFromPackageRoot(PROJECT_ROOT);
+  console.log(`CLI: ${entryPath ?? process.argv[1] ?? "unknown"}`);
+  console.log(`Package: ${PROJECT_ROOT}`);
+  console.log(`Node: ${getNodeRuntimeLabel()}`);
+  console.log(`npm: ${npmCommand}`);
+  if (npmRoot) console.log(`npm root: ${npmRoot}`);
+  if (npmPrefix) console.log(`npm prefix: ${npmPrefix}`);
 }
 
 // ── Update ────────────────────────────────────────────────
 
 const PKG_NAME = "@yuanzhangjing/niubot";
 
+export function parseNiubotVersionOutput(output: string): string | undefined {
+  const match = output.trim().match(/^niubot v(.+)$/);
+  return match?.[1];
+}
+
+function readActiveCliVersion(): string | undefined {
+  try {
+    const output = execFileSync("niubot", ["version"], {
+      encoding: "utf-8",
+      timeout: 8000,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    return parseNiubotVersionOutput(output);
+  } catch {
+    return undefined;
+  }
+}
+
 /** Check npm registry for a newer version. Returns latest version or null. */
 function checkForUpdate(): string | null {
   const local = getPkgVersion();
+  const npmCommand = resolveNpmCommandForCurrentNode();
   try {
-    const latest = execFileSync("npm", ["view", `${PKG_NAME}@latest`, "version"], {
+    const latest = execFileSync(npmCommand, ["view", `${PKG_NAME}@latest`, "version"], {
       encoding: "utf-8",
       timeout: 8000,
       stdio: ["ignore", "pipe", "ignore"],
@@ -1119,6 +1315,7 @@ function checkForUpdate(): string | null {
 
 function cmdUpdate(niubotHome: string): void {
   const current = getPkgVersion();
+  const npmCommand = resolveNpmCommandForCurrentNode();
   console.log();
   console.log(`Current version: ${current}`);
 
@@ -1134,21 +1331,43 @@ function cmdUpdate(niubotHome: string): void {
   console.log(`  New version available: ${latest}`);
   console.log();
 
+  const npmRoot = readNpmRoot(npmCommand);
+  if (npmRoot && !isPackageRootInsideNpmRoot(PROJECT_ROOT, npmRoot)) {
+    fail("Refusing to update because npm global root does not match the active niubot installation.");
+    hint(`Current niubot package: ${PROJECT_ROOT}`);
+    hint(`Current Node: ${process.execPath}`);
+    hint(`npm command: ${npmCommand}`);
+    hint(`npm root -g: ${npmRoot}`);
+    hint("Use the npm that owns the active niubot install, or fix PATH so niubot and npm use the same Node runtime.");
+    console.log();
+    process.exit(1);
+  }
+
   // Install
   info(`Installing ${PKG_NAME}@${latest} ...`);
   try {
-    execFileSync("npm", ["install", "-g", `${PKG_NAME}@${latest}`], {
+    execFileSync(npmCommand, ["install", "-g", `${PKG_NAME}@${latest}`], {
       encoding: "utf-8",
       timeout: 60000,
       stdio: ["ignore", "pipe", "pipe"],
     });
-    ok(`Updated to ${latest}`);
   } catch (err) {
     fail(`Install failed: ${err instanceof Error ? err.message : err}`);
     hint("Try manually: npm install -g " + PKG_NAME + "@latest");
     console.log();
     process.exit(1);
   }
+
+  const activeVersion = readActiveCliVersion();
+  if (activeVersion && activeVersion !== latest) {
+    fail(`Installed ${latest}, but the active niubot command is still ${activeVersion}.`);
+    hint("You probably have multiple global npm installs or PATH is resolving an older binary first.");
+    hint("Check with: which -a niubot");
+    hint("Check npm prefix with: npm root -g");
+    console.log();
+    process.exit(1);
+  }
+  ok(`Updated to ${latest}`);
 
   // Restart if running
   const pidFile = path.join(niubotHome, "niubot.pid");
@@ -1175,7 +1394,7 @@ function cmdUpdate(niubotHome: string): void {
 
   // Re-exec start with the NEW binary (the just-installed version)
   try {
-    execFileSync("niubot", ["start"], {
+    execFileSync(process.execPath, [path.join(PROJECT_ROOT, "dist", "user-cli.js"), "start"], {
       encoding: "utf-8",
       timeout: 30000,
       stdio: "inherit",
@@ -1266,6 +1485,9 @@ Init options:
 Start options:
   --restart  Stop existing process first if running
 
+Status options:
+  --all      List all registered NiuBot homes
+
 Agent install guide: run \`${INSTALL_GUIDE_COMMAND}\` and follow it.`;
 }
 
@@ -1277,7 +1499,9 @@ function printUsage(): void {
 
 async function main(): Promise<void> {
   const { command, flags } = parseCliArgs(process.argv.slice(2));
-  const niubotHome = flags.home ?? process.env["NIUBOT_HOME"] ?? path.join(os.homedir(), ".niubot");
+  const envHome = process.env["NIUBOT_HOME"];
+  const hasExplicitHome = flags.home !== undefined || envHome !== undefined;
+  const niubotHome = resolveNiubotHome(flags.home, envHome);
 
   switch (command) {
     case "init":
@@ -1293,7 +1517,7 @@ async function main(): Promise<void> {
       cmdStop(niubotHome);
       break;
     case "status":
-      cmdStatus(niubotHome);
+      cmdStatus(niubotHome, flags, hasExplicitHome);
       break;
     case "update":
       cmdUpdate(niubotHome);
@@ -1301,7 +1525,7 @@ async function main(): Promise<void> {
     case "version":
     case "--version":
     case "-v":
-      cmdVersion();
+      cmdVersion(flags);
       break;
     default:
       printUsage();
