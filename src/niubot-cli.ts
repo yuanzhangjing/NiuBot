@@ -1,5 +1,6 @@
 import path from "node:path";
 import os from "node:os";
+import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 
 type PathBuildOptions = {
@@ -9,12 +10,83 @@ type PathBuildOptions = {
   execPath?: string;
 };
 
+export type NbtShimStatus = "created" | "updated" | "unchanged" | "conflict" | "skipped";
+
+export type NbtShimResult = {
+  status: NbtShimStatus;
+  shimPath: string;
+  targetPath: string;
+  reason?: string;
+};
+
+type NbtShimOptions = {
+  projectRoot?: string;
+  homeDir?: string;
+};
+
+type RuntimeNbtShimOptions = NbtShimOptions & {
+  preflight?: boolean;
+};
+
+const NBT_SHIM_MARKER = "# Managed by NiuBot: nbt shim";
+
 export function getProjectRoot(): string {
   return path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 }
 
 export function getBundledNiubotBinDir(projectRoot = getProjectRoot()): string {
   return path.join(projectRoot, "bin");
+}
+
+export function getBundledNbtPath(projectRoot = getProjectRoot()): string {
+  return path.join(getBundledNiubotBinDir(projectRoot), "nbt");
+}
+
+export function ensureNbtShim(options: NbtShimOptions = {}): NbtShimResult {
+  const projectRoot = options.projectRoot ?? getProjectRoot();
+  const homeDir = options.homeDir ?? os.homedir();
+  const targetPath = getBundledNbtPath(projectRoot);
+  const shimPath = path.join(homeDir, ".local", "bin", "nbt");
+
+  if (!homeDir) {
+    return { status: "skipped", shimPath, targetPath, reason: "home directory is empty" };
+  }
+  if (!fs.existsSync(targetPath)) {
+    return { status: "skipped", shimPath, targetPath, reason: "bundled nbt not found" };
+  }
+
+  const desired = buildNbtShimContent(targetPath);
+  fs.mkdirSync(path.dirname(shimPath), { recursive: true });
+
+  if (fs.existsSync(shimPath)) {
+    const existing = fs.readFileSync(shimPath, "utf-8");
+    if (existing === desired) {
+      return { status: "unchanged", shimPath, targetPath };
+    }
+    if (!existing.includes(NBT_SHIM_MARKER)) {
+      return { status: "conflict", shimPath, targetPath, reason: "existing nbt is not managed by NiuBot" };
+    }
+    fs.writeFileSync(shimPath, desired, { mode: 0o755 });
+    fs.chmodSync(shimPath, 0o755);
+    return { status: "updated", shimPath, targetPath };
+  }
+
+  fs.writeFileSync(shimPath, desired, { mode: 0o755 });
+  fs.chmodSync(shimPath, 0o755);
+  return { status: "created", shimPath, targetPath };
+}
+
+export function ensureRuntimeNbtShim(options: RuntimeNbtShimOptions = {}): NbtShimResult {
+  const projectRoot = options.projectRoot ?? getProjectRoot();
+  const homeDir = options.homeDir ?? os.homedir();
+  const targetPath = getBundledNbtPath(projectRoot);
+  const shimPath = path.join(homeDir, ".local", "bin", "nbt");
+
+  if (options.preflight) {
+    return { status: "skipped", shimPath, targetPath, reason: "preflight run" };
+  }
+
+  return ensureNbtShim({ projectRoot, homeDir });
 }
 
 export function prependNiubotBinToPath(
@@ -62,4 +134,17 @@ function uniquePathEntries(entries: string[]): string[] {
     result.push(entry);
   }
   return result;
+}
+
+function buildNbtShimContent(targetPath: string): string {
+  return [
+    "#!/bin/sh",
+    NBT_SHIM_MARKER,
+    `exec ${shellSingleQuote(targetPath)} "$@"`,
+    "",
+  ].join("\n");
+}
+
+function shellSingleQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
 }

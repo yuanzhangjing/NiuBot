@@ -15,7 +15,7 @@ import type { CliAgentBackend } from "./agent/cli-base.js";
 import { createBotInstance, type BotInstance } from "./bot-instance.js";
 import { loadPersistedBotRuntimeState } from "./database/schema.js";
 import { createLogger, setLogLevel } from "./logger.js";
-import { prependNiubotBinToPath } from "./niubot-cli.js";
+import { ensureRuntimeNbtShim, prependNiubotBinToPath } from "./niubot-cli.js";
 import { summarizeProxyEnvironment } from "./proxy-env.js";
 import { resolveBotRuntimeConfig } from "./runtime-config.js";
 import { startBotRuntime } from "./bot-startup.js";
@@ -126,6 +126,36 @@ async function main(): Promise<void> {
   log.info(preflight ? "NiuBot preflight check starting..." : "NiuBot starting...");
   log.info("proxy environment", summarizeProxyEnvironment());
   process.env["PATH"] = prependNiubotBinToPath();
+  try {
+    const nbtShim = ensureRuntimeNbtShim({ preflight });
+    if (nbtShim.status === "conflict") {
+      log.warn("nbt shim not installed because target already exists", {
+        shimPath: nbtShim.shimPath,
+        targetPath: nbtShim.targetPath,
+        reason: nbtShim.reason,
+      });
+    } else if (nbtShim.status === "skipped" && nbtShim.reason === "preflight run") {
+      log.info("nbt shim setup skipped", {
+        shimPath: nbtShim.shimPath,
+        targetPath: nbtShim.targetPath,
+        reason: nbtShim.reason,
+      });
+    } else if (nbtShim.status === "skipped") {
+      log.warn("nbt shim setup skipped", {
+        shimPath: nbtShim.shimPath,
+        targetPath: nbtShim.targetPath,
+        reason: nbtShim.reason,
+      });
+    } else {
+      log.info("nbt shim ready", {
+        status: nbtShim.status,
+        shimPath: nbtShim.shimPath,
+        targetPath: nbtShim.targetPath,
+      });
+    }
+  } catch (err) {
+    log.warn("nbt shim setup failed", { error: String(err) });
+  }
 
   // 1. 加载配置
   const config = loadConfig();
