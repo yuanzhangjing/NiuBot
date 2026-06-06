@@ -47,7 +47,6 @@ import { TimeoutError, withTimeout } from "./timeout.js";
 import { RuntimeStateStore, type RunStage, type RuntimeStateEvent } from "./runtime-state.js";
 import { RunManager } from "./run-manager.js";
 import { INSTALL_GUIDE_COMMAND } from "../install-guide.js";
-import type { OutputRewriter } from "./output-rewrite.js";
 
 const execAsync = promisify(exec);
 
@@ -130,7 +129,6 @@ export class Pipeline {
   private responseSender: ResponseSender;
   private runtimeState: RuntimeStateStore;
   private runManager: RunManager;
-  private outputRewriter?: Pick<OutputRewriter, "rewrite"> & Partial<Pick<OutputRewriter, "shouldLogText">>;
   private restartConfig?: RestartConfig;
   private autoUpdateNotificationsEnabled: boolean;
   private botIdentity: BotIdentity;
@@ -229,7 +227,6 @@ export class Pipeline {
     getAvailableBackends?: () => string[],
     refreshAgentContextFiles?: () => void,
     stableContextOptions?: StableSystemContextOptions,
-    outputRewriter?: Pick<OutputRewriter, "rewrite"> & Partial<Pick<OutputRewriter, "shouldLogText">>,
     restartConfig?: RestartConfig,
     autoUpdateNotificationsEnabled = true,
   ) {
@@ -244,7 +241,6 @@ export class Pipeline {
     this.dbPath = dbPath;
     this.refreshAgentContextFiles = refreshAgentContextFiles;
     this.stableContextOptions = stableContextOptions ?? {};
-    this.outputRewriter = outputRewriter;
     this.restartConfig = restartConfig;
     this.autoUpdateNotificationsEnabled = autoUpdateNotificationsEnabled;
     this.log = createLogger("pipeline", botIdentity.name);
@@ -1532,13 +1528,6 @@ export class Pipeline {
         response.text = EMPTY_RESPONSE_FALLBACK;
       }
 
-      response.text = await this.rewriteOutputText({
-        chatId,
-        source,
-        originalPrompt: prompt,
-        text: response.text,
-      });
-
       // Store response
       const replyMsgId = storeMessage(this.db, {
         chatId,
@@ -2458,14 +2447,6 @@ export class Pipeline {
       const response = agentResult.response;
       this.updateCompactRecoveryState(chatId, response.compactCount);
 
-      response.text = await this.rewriteOutputText({
-        chatId,
-        source: "user",
-        originalPrompt: mergedText,
-        text: response.text,
-        signal,
-      });
-
       // cancelled：有内容就发（中间结果），没内容就静默（用户已收到"已停止"）
       if (response.cancelled) {
         if (response.text.trim()) {
@@ -2627,49 +2608,6 @@ export class Pipeline {
           this.storeBotResponse(chatId, errorText, pmid);
         } catch { /* give up */ }
       }
-    }
-  }
-
-  private async rewriteOutputText(options: {
-    chatId: string;
-    source: "user" | "cron" | "task";
-    originalPrompt: string;
-    text: string;
-    signal?: AbortSignal;
-  }): Promise<string> {
-    if (!this.outputRewriter || !options.text.trim()) return options.text;
-
-    try {
-      const rewrittenText = await this.outputRewriter.rewrite({
-        backendType: this.backendType,
-        originalPrompt: options.originalPrompt,
-        text: options.text,
-        signal: options.signal,
-      });
-      this.log.info("output rewrite completed", {
-        chatId: options.chatId,
-        source: options.source,
-        backend: this.backendType,
-        originalLength: options.text.length,
-        rewrittenLength: rewrittenText.length,
-        changed: rewrittenText !== options.text,
-      });
-      if (this.outputRewriter.shouldLogText?.()) {
-        this.log.info("output rewrite text", {
-          chatId: options.chatId,
-          source: options.source,
-          originalText: options.text,
-          rewrittenText,
-        });
-      }
-      return rewrittenText;
-    } catch (err) {
-      this.log.warn("output rewrite failed outside rewriter fallback", {
-        chatId: options.chatId,
-        source: options.source,
-        error: String(err),
-      });
-      return options.text;
     }
   }
 

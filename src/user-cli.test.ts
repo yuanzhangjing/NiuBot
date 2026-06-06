@@ -105,13 +105,12 @@ describe("user-cli init model configuration", () => {
     expect(config).not.toContain('# liteModel: ""');
   });
 
-  it("includes an output rewrite placeholder in new config.yaml", () => {
+  it("does not include an output rewrite placeholder in new config.yaml", () => {
     const config = generateConfigTemplate("codex", undefined, "NiuBot", "app-id", "app-secret");
 
-    expect(config).toContain("# Optional final-response rewrite. Off by default; uncomment to enable.");
-    expect(config).toContain("# outputRewrite:");
-    expect(config).toContain("#   model: deepseek-v4-flash");
-    expect(config).toContain("#   # marker_enable: false");
+    expect(config).not.toContain("outputRewrite");
+    expect(config).not.toContain("deepseek-v4-flash");
+    expect(config).not.toContain("marker_enable");
   });
 
   it("uses the local calendar date for log file paths", () => {

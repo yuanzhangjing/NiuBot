@@ -166,27 +166,6 @@ Config fields:
   - `traecli`: `Gemini-3-Flash-Preview`
 - `workingDirectory`: Where the agent runs. Default: `~/niubot-workspace/<id>`.
 
-Optional final-response rewrite for Codex:
-
-```yaml
-outputRewrite:
-  enabled: true
-  applyToBackends:
-    - codex
-  provider: anthropic-compatible
-  baseURL: https://api.deepseek.com/anthropic
-  apiKeyEnv: ANTHROPIC_API_KEY
-  # apiKey: sk-...    # optional; prefer apiKeyEnv when possible
-  model: deepseek-v4-flash
-  timeoutMs: 15000
-  logText: false  # set true only when you need to compare original and rewritten text in logs
-  # marker_enable: false  # optional; marker is enabled by default
-  # prompt: |
-  #   You can override the default system prompt here.
-```
-
-This is off by default. It rewrites the final text before sending it to IM, using the user's original request as context so the rewritten reply stays focused. It does not change agent execution or session history. When output rewrite changes the text, NiuBot appends `📝 <font color='grey'>rewritten by {model}</font>` by default; set `marker_enable: false` to disable it. If the provider fails, times out, returns empty text, or the API key is missing, NiuBot sends the original Codex reply without a marker. Rewrite logs include lengths by default; set `logText: true` only for local debugging because it records the original and rewritten reply text.
-
 Optional restart source directory for local development:
 
 ```yaml

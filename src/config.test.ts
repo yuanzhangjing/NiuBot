@@ -61,7 +61,7 @@ bots:
     expect(config.bots[0]?.projectContextPath).toBe(projectContextPath);
   });
 
-  it("loads optional output rewrite settings", () => {
+  it("ignores legacy output rewrite settings", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-config-"));
     tempDirs.push(dir);
     const configPath = path.join(dir, "config.yaml");
@@ -90,23 +90,8 @@ outputRewrite:
 
     const config = loadConfig(configPath);
 
-    expect(config.outputRewrite).toEqual({
-      enabled: true,
-      applyToBackends: ["codex"],
-      provider: "anthropic-compatible",
-      baseURL: "https://api.deepseek.com/anthropic",
-      apiKeyEnv: "ANTHROPIC_API_KEY",
-      model: "deepseek-v4-flash",
-      timeoutMs: 15000,
-      apiKey: "dummy",
-      logText: true,
-      maxTokens: undefined,
-      prompt: undefined,
-      marker: {
-        enabled: false,
-        text: "📝 <font color='grey'>rewritten by deepseek-v4-flash</font>",
-      },
-    });
+    expect(config.bots[0]?.id).toBe("NiuBot");
+    expect((config as Record<string, unknown>).outputRewrite).toBeUndefined();
   });
 
   it("loads optional restart source directory", () => {
