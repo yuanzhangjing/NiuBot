@@ -333,6 +333,29 @@ describe("CodexBackend session metadata", () => {
     });
   });
 
+  it("injects important context as Codex developer instructions", () => {
+    const backend = new CodexBackend();
+    const session = backend.buildSession({
+      workingDirectory: "/tmp/project",
+      importantContext: "<niubot-system-rules>stable</niubot-system-rules>",
+    });
+
+    expect(backend.supportsSystemPrompt).toBe(true);
+    expect(backend.buildInput(session, "ping")).toEqual({
+      args: [
+        "exec",
+        "--json",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--skip-git-repo-check",
+        "-C",
+        "/tmp/project",
+        "-c",
+        "developer_instructions=<niubot-system-rules>stable</niubot-system-rules>",
+      ],
+      stdin: "ping",
+    });
+  });
+
   it("passes the new user message when resuming an existing codex thread", () => {
     const backend = new CodexBackend();
     const session = backend.buildSession({

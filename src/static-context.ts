@@ -32,7 +32,7 @@ const DEFAULT_TASKS_AGENTS = `# Tasks
 Formal tasks are managed by \`nbt task\`.
 
 Do not create task directories manually.
-Task README files are the source of truth for task progress.
+Task README files are long-lived index and status files for tasks. Keep goals, status, key entry points, important decisions, and next steps there; do not use them as chat transcripts.
 Only active tasks are injected into agent sessions.
 `;
 

@@ -22,7 +22,7 @@ export const SYSTEM_RULES = `<niubot-system-rules>
 ## Task Policy
 任务生命周期使用 nbt task 管理。
 不要手动创建 tasks/ 目录。
-任务 README 是事项进度来源。
+任务 README 是任务的长期索引和状态文件，记录目标、状态、关键入口、重要决策和下一步，不记录聊天流水。
 active 任务会注入新 session；inactive 和 archived 不注入。
 私聊默认 private，群聊默认 public；群聊不能暴露 private task。
 

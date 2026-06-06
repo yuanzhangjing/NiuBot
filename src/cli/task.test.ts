@@ -45,6 +45,8 @@ describe("handleTask create", () => {
     const readmePath = path.join(workingDirectory, "tasks", "demo-task", "README.md");
     const readme = fs.readFileSync(readmePath, "utf-8");
 
+    expect(readme).toContain("长期索引和状态文件");
+    expect(readme).toContain("不记录聊天流水");
     expect(readme).toContain("## Related Context");
     expect(readme).toContain("Repositories:");
     expect(readme).toContain("Key files:");

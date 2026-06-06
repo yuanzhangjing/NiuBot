@@ -138,6 +138,7 @@ describe("ensureWorkspaceAgentFiles", () => {
 
     expect(fs.readFileSync(path.join(dir, "repos", "AGENTS.md"), "utf-8")).toContain("code repositories");
     expect(fs.readFileSync(path.join(dir, "tasks", "AGENTS.md"), "utf-8")).toContain("Formal tasks");
+    expect(fs.readFileSync(path.join(dir, "tasks", "AGENTS.md"), "utf-8")).toContain("long-lived index and status files");
     expect(fs.readFileSync(path.join(dir, "tmp", "AGENTS.md"), "utf-8")).toContain("temporary files");
     expect(fs.existsSync(path.join(dir, "tasks", "README.md"))).toBe(false);
     expect(fs.existsSync(path.join(dir, ".niubot", "project.md"))).toBe(false);

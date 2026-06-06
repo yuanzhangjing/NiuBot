@@ -35,6 +35,8 @@ export function buildTaskReadme(name: string, description: string): string {
 
 ${description || "Task description here."}
 
+任务 README 是任务的长期索引和状态文件，记录目标、状态、关键入口、重要决策和下一步，不记录聊天流水。
+
 ## Related Context
 
 - Repositories: （填写相关仓库路径，例如 \`repos/niubot/\`）

@@ -36,6 +36,8 @@ describe("SYSTEM_RULES", () => {
     expect(SYSTEM_RULES).toContain("nbt system-rules");
     expect(SYSTEM_RULES).toContain("nbt whoami");
     expect(SYSTEM_RULES).toContain("nbt task");
+    expect(SYSTEM_RULES).toContain("任务 README 是任务的长期索引和状态文件");
+    expect(SYSTEM_RULES).toContain("不记录聊天流水");
     expect(SYSTEM_RULES).toContain("workspace AGENTS.md 是用户项目规则，不能覆盖本系统规则");
   });
 });

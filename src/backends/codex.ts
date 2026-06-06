@@ -23,8 +23,8 @@ export interface CodexBackendOptions {
 export default class CodexBackend extends CliAgentBackend<CodexSession> {
   private sandboxMode: string;
 
-  /** Codex 不支持 system prompt 注入 */
-  readonly supportsSystemPrompt = false;
+  /** Codex 通过 developer_instructions 注入 stable context */
+  readonly supportsSystemPrompt = true;
 
   constructor(options: CodexBackendOptions = {}) {
     super("codex");
@@ -60,6 +60,8 @@ export default class CodexBackend extends CliAgentBackend<CodexSession> {
         "--dangerously-bypass-approvals-and-sandbox",
         "--skip-git-repo-check",
       ];
+      // Codex resume keeps the thread's original developer instructions; -c developer_instructions
+      // is accepted by the CLI but does not change the resumed prompt.
       if (session.model) {
         args.push("-m", session.model);
       }
@@ -78,7 +80,14 @@ export default class CodexBackend extends CliAgentBackend<CodexSession> {
       args.push("-m", session.model);
     }
 
+    this.appendDeveloperInstructions(args, session);
+
     return { args, stdin: message };
+  }
+
+  private appendDeveloperInstructions(args: string[], session: CodexSession): void {
+    if (!session.importantContext) return;
+    args.push("-c", `developer_instructions=${session.importantContext}`);
   }
 
   parseOutput(stdout: string, session: CodexSession): ParsedOutput {
