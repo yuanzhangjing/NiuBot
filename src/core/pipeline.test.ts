@@ -1954,7 +1954,7 @@ describe("Pipeline.recover", () => {
     expect(agent.createSessionCalls[0]?.importantContext).not.toContain("workspace profile should be ignored");
   });
 
-  test("injects compact recovery reminder once after compact count increases", async () => {
+  test("reasserts stable context once after compact count increases", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
@@ -1999,12 +1999,12 @@ describe("Pipeline.recover", () => {
     expect(agent.sendMessageCalls).toHaveLength(4);
     expect(agent.sendMessageCalls[0]).not.toContain(COMPACT_RECOVERY_REMINDER);
     expect(agent.sendMessageCalls[1]).toContain(COMPACT_RECOVERY_REMINDER);
+    expect(agent.sendMessageCalls[1]).toContain("<niubot-system-rules>");
     expect(agent.sendMessageCalls[1]).toContain("<session-profile");
-    expect(agent.sendMessageCalls[1]).not.toContain("<niubot-system-rules>");
     expect(agent.sendMessageCalls[1]).toContain("second");
     expect(agent.sendMessageCalls[2]).not.toContain(COMPACT_RECOVERY_REMINDER);
     expect(agent.sendMessageCalls[3]).toContain(COMPACT_RECOVERY_REMINDER);
-    expect(agent.sendMessageCalls[3]).not.toContain("<niubot-system-rules>");
+    expect(agent.sendMessageCalls[3]).toContain("<niubot-system-rules>");
     expect(agent.sendMessageCalls[3]).toContain("fourth");
     expect(SYSTEM_RULES).toContain("nbt system-rules");
   });

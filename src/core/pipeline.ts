@@ -2355,9 +2355,7 @@ export class Pipeline {
         }
         if (compactRecovery) {
           const recoveryParts = [COMPACT_RECOVERY_REMINDER];
-          if (this.agent.supportsSystemPrompt !== true) {
-            recoveryParts.push(this.buildStableSystemContext());
-          }
+          recoveryParts.push(this.buildStableSystemContext());
           const recoveryUserId = processChatType === "group" ? undefined : chatSession.userId;
           recoveryParts.push(this.buildSessionProfile(chatId, processChatType, recoveryUserId));
           const taskContext = buildActiveTaskContext(this.workingDirectory, processChatType, recoveryUserId);
