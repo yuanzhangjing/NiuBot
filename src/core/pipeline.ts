@@ -53,6 +53,7 @@ const execAsync = promisify(exec);
 const PROCESSING_EMOJI = "Get";
 const MERGED_EMOJI = "Pin";
 const EMPTY_RESPONSE_FALLBACK = "（处理完成，但未生成回复。如果没收到预期结果，请重试）";
+const UPDATE_CONFIRM_COMMAND = "/update 1";
 
 /** 过期消息阈值（ms）：超过 2 分钟的消息丢弃 */
 const STALE_MESSAGE_THRESHOLD_MS = 2 * 60 * 1000;
@@ -86,6 +87,11 @@ function formatOutputActivity(idleMs: number): string {
     return `输出状态：最近 ${idleMin} 分钟内有输出，按输出看任务还活跃。`;
   }
   return `输出状态：已经 ${idleMin} 分钟没有输出，按输出看任务不活跃，可能卡住。`;
+}
+
+function isUpdateConfirmedArg(arg?: string): boolean {
+  const normalized = arg?.toLowerCase();
+  return normalized === "1" || normalized === "confirm";
 }
 
 /** Bot 身份信息，由外部传入 */
@@ -1024,7 +1030,7 @@ export class Pipeline {
           return true;
         }
         this.log.info("builtin command: update", { userId });
-        this.handleUpdate(chatId, platformChatId, msgId, parts[1]?.toLowerCase() === "confirm");
+        this.handleUpdate(chatId, platformChatId, msgId, isUpdateConfirmedArg(parts[1]));
         return true;
       }
       case "/service": {
@@ -2156,7 +2162,7 @@ export class Pipeline {
       }
 
       if (!confirmed) {
-        const text = `发现新版本：${currentVersion} → ${latest}\n发送 \`/update confirm\` 升级并重启。`;
+        const text = `发现新版本：${currentVersion} → ${latest}\n发送 \`${UPDATE_CONFIRM_COMMAND}\` 升级并重启。`;
         const send = this.im.sendCard(platformChatId, "Update", text, undefined, msgId);
         send.then((pmid) => { this.storeBotResponse(chatId, text, pmid); }).catch((err) => this.log.warn("update card send failed", { error: String(err) }));
         return;
@@ -2226,7 +2232,7 @@ export class Pipeline {
     if (!latest || latest === this.version) return;
     if (hasUpdateNotification(this.db, this.botIdentity.name, latest)) return;
 
-    const text = `发现新版本：${this.version} → ${latest}\n发送 \`/update confirm\` 升级并重启。`;
+    const text = `发现新版本：${this.version} → ${latest}\n发送 \`${UPDATE_CONFIRM_COMMAND}\` 升级并重启。`;
 
     let delivered = false;
     for (const platformChatId of platformChatIds) {

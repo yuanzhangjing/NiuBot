@@ -905,7 +905,36 @@ describe("Pipeline.recover", () => {
     expect(sentCards).toHaveLength(1);
     expect(sentCards[0]?.content).toContain("发现新版本");
     expect(sentCards[0]?.content).toContain("9.9.9");
-    expect(sentCards[0]?.content).toContain("/update confirm");
+    expect(sentCards[0]?.content).toContain("/update 1");
+  });
+
+  test("/update 1 confirms update command", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const agent = new RecordingAgent();
+    const pipeline = new Pipeline(
+      db,
+      createImStub(),
+      agent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+    const calls: boolean[] = [];
+    (pipeline as any).adminRoles.set("u2", "owner");
+    (pipeline as any).handleUpdate = (_chatId: string, _platformChatId: string, _msgId?: string, confirmed = false) => {
+      calls.push(confirmed);
+      return Promise.resolve();
+    };
+
+    const handled = (pipeline as any).handleBuiltinCommand("/update 1", "u2", "c1", "chat-open-id", "p2p", "m1");
+
+    expect(handled).toBe(true);
+    expect(calls).toEqual([true]);
   });
 
   test("/update confirm installs the newer version and restarts", async () => {
@@ -980,7 +1009,7 @@ describe("Pipeline.recover", () => {
     expect(sentCards).toHaveLength(1);
     expect(sentCards[0]?.content).toContain("发现新版本");
     expect(sentCards[0]?.content).toContain("9.9.9");
-    expect(sentCards[0]?.content).toContain("/update confirm");
+    expect(sentCards[0]?.content).toContain("/update 1");
   });
 
   test("checks for updates immediately when startup is inside the daytime window", async () => {
