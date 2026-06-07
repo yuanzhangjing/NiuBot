@@ -14,7 +14,6 @@ import {
   setBotBackendModelState,
 } from "../database/schema.js";
 import type { NormalizedMessage, PlatformAdapter } from "../im/types.js";
-import { INSTALL_GUIDE_COMMAND } from "../install-guide.js";
 import { COMPACT_RECOVERY_REMINDER } from "../memory/inject.js";
 import { SYSTEM_RULES } from "../system-rules.js";
 import { Pipeline, type BotIdentity } from "./pipeline.js";
@@ -2621,7 +2620,7 @@ describe("Pipeline.recover", () => {
     expect(sentCards.some((card) => card.content.includes("`/flush`　　中断当前回复，合并处理排队消息"))).toBe(true);
   });
 
-  test("points agents to the installation guide from /help", async () => {
+  test("does not show installation setup guidance from /help", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
@@ -2645,7 +2644,7 @@ describe("Pipeline.recover", () => {
     }));
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(sentCards.some((card) => card.content.includes(`安装配置：让 agent 执行 \`${INSTALL_GUIDE_COMMAND}\``))).toBe(true);
+    expect(sentCards.some((card) => card.content.includes("安装配置"))).toBe(false);
   });
 
   test("surfaces structured agent errors to the user", async () => {

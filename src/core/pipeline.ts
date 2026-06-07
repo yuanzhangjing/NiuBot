@@ -46,7 +46,6 @@ import { ResponseSender } from "./response-sender.js";
 import { TimeoutError, withTimeout } from "./timeout.js";
 import { RuntimeStateStore, type RunStage, type RuntimeStateEvent } from "./runtime-state.js";
 import { RunManager } from "./run-manager.js";
-import { INSTALL_GUIDE_COMMAND } from "../install-guide.js";
 
 const execAsync = promisify(exec);
 
@@ -2067,8 +2066,6 @@ export class Pipeline {
       "`/service`　查看服务信息",
       "`/cron`　　查看定时任务",
       "`/help`　　显示本帮助",
-      "",
-      `安装配置：让 agent 执行 \`${INSTALL_GUIDE_COMMAND}\` 读取安装指引`,
     ];
     if (isAdmin) {
       lines.push(
