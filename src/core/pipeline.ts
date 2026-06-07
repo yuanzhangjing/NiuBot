@@ -3070,10 +3070,9 @@ export class Pipeline {
         continue;
       }
 
-      // ── 策略 2: 长时间运行但仍有活动 → 低频提醒，不 kill ──
+      // ── 策略 2: 长时间运行 → 每小时固定提醒，不 kill ──
       if (
         !a.completionDetected
-        && idleMs <= AGENT_IDLE_THRESHOLD_MS
         && runningMs > AGENT_LONG_RUNNING_FIRST_NOTIFY_MS
         && (!a.lastLongRunningNotifiedAt || now - a.lastLongRunningNotifiedAt > AGENT_LONG_RUNNING_REPEAT_NOTIFY_MS)
       ) {

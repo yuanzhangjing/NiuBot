@@ -484,6 +484,48 @@ describe("Pipeline.recover", () => {
     expect(sentCards[0].content).not.toContain("still working");
   });
 
+  test("sends hourly main chat notices even after idle notices are exhausted", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const { im, sentCards } = createRecordingImStub();
+    const agent = new WatchdogAgent();
+    const agentSession = await agent.createSession({ workingDirectory: dir });
+    agent.markRunning(agentSession.id);
+    const activity = (agent as any).activityMap.get(agentSession.id);
+    const now = Date.now();
+    activity.startedAt = now - 61 * 60_000;
+    activity.lastActiveAt = now - 45 * 60_000;
+    activity.notifyCount = 2;
+    activity.lastNotifiedAt = now - 31 * 60_000;
+
+    const pipeline = new Pipeline(
+      db,
+      im,
+      agent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+    (pipeline as any).platformChatIds.set("c1", "chat-open-id");
+    (pipeline as any).chatSessions.set("c1", {
+      agentSession,
+      sessionId: "s1",
+      platformChatId: "chat-open-id",
+      userId: "u2",
+      hasReplied: false,
+    });
+
+    (pipeline as any).runIdleWatchdog();
+
+    expect(sentCards).toHaveLength(1);
+    expect(sentCards[0].header).toBe("任务还在运行");
+    expect(sentCards[0].content).toContain("任务已经运行约 1 小时，目前还在工作中。");
+  });
+
   test("does not send a long-running notice before one hour for a main chat session", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
