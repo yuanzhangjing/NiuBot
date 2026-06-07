@@ -478,7 +478,8 @@ describe("Pipeline.recover", () => {
 
     expect(sentCards).toHaveLength(1);
     expect(sentCards[0].header).toBe("任务还在运行");
-    expect(sentCards[0].content).toContain("任务已经运行约 1 小时，目前还在工作中。");
+    expect(sentCards[0].content).toContain("任务已经运行约 1 小时，进程仍在运行。");
+    expect(sentCards[0].content).toContain("输出状态：最近 1 分钟内有输出，按输出看任务还活跃。");
     expect(sentCards[0].content).toContain("不急的话可以继续等");
     expect(sentCards[0].content).toContain("可以发送 /stop");
     expect(sentCards[0].content).not.toContain("still working");
@@ -523,7 +524,8 @@ describe("Pipeline.recover", () => {
 
     expect(sentCards).toHaveLength(1);
     expect(sentCards[0].header).toBe("任务还在运行");
-    expect(sentCards[0].content).toContain("任务已经运行约 1 小时，目前还在工作中。");
+    expect(sentCards[0].content).toContain("任务已经运行约 1 小时，进程仍在运行。");
+    expect(sentCards[0].content).toContain("输出状态：已经 45 分钟没有输出，按输出看任务不活跃，可能卡住。");
   });
 
   test("does not send a long-running notice before one hour for a main chat session", async () => {
@@ -600,7 +602,8 @@ describe("Pipeline.recover", () => {
 
     expect(sentCards).toHaveLength(1);
     expect(sentCards[0].header).toBe("定时任务还在运行");
-    expect(sentCards[0].content).toContain("「daily job」已经运行约 1 小时，目前还在工作中。");
+    expect(sentCards[0].content).toContain("「daily job」已经运行约 1 小时，进程仍在运行。");
+    expect(sentCards[0].content).toContain("输出状态：最近 1 分钟内有输出，按输出看任务还活跃。");
     expect(sentCards[0].content).not.toContain("/stop");
     expect(sentCards[0].content).not.toContain("still working");
   });
