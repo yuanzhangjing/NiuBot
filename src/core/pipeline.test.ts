@@ -823,7 +823,7 @@ describe("Pipeline.recover", () => {
     expect(agent.sendMessageCalls[0]).not.toContain("<niubot-system-rules>");
   });
 
-  test("handles single-slash status as a local builtin command", () => {
+  test("handles single-slash service as a local builtin command", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
@@ -845,7 +845,7 @@ describe("Pipeline.recover", () => {
 
     expect(handled).toBe(true);
     expect(sentCards).toHaveLength(1);
-    expect(sentCards[0]?.header).toBe("Status");
+    expect(sentCards[0]?.header).toBe("service");
   });
 
   test("leaves double-slash service for agent passthrough", () => {

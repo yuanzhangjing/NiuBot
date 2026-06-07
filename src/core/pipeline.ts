@@ -1326,7 +1326,7 @@ export class Pipeline {
       `**Working directory:** \`${this.workingDirectory}\``,
     ].join("\n");
 
-    const send = this.im.sendCard(platformChatId, "Status", content, undefined, msgId);
+    const send = this.im.sendCard(platformChatId, "service", content, undefined, msgId);
     send
       .then((pmid) => {
         this.storeBotResponse(chatId, content, pmid);
