@@ -847,6 +847,38 @@ describe("Pipeline.recover", () => {
     expect(sentCards[0]?.header).toBe("service");
   });
 
+  test("service card does not show latest data age", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-09T04:03:20Z"));
+
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare(`
+      INSERT INTO messages (chat_id, sender_id, role, content_text, created_at, platform)
+      VALUES ('c1', 'u2', 'user', 'hello', '2026-06-09 04:00:00', 'feishu')
+    `).run();
+
+    const agent = new RecordingAgent();
+    const { im, sentCards } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db,
+      im,
+      agent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+
+    const handled = (pipeline as any).handleBuiltinCommand("/service", "u2", "c1", "chat-open-id");
+
+    expect(handled).toBe(true);
+    expect(sentCards[0]?.content).not.toContain("**最新数据:**");
+  });
+
   test("leaves double-slash service for agent passthrough", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
@@ -2476,6 +2508,47 @@ describe("Pipeline.recover", () => {
 
     expect(handled).toBe(true);
     expect(sentCards.some((card) => card.content.includes("最近失败") && card.content.includes("agent failed"))).toBe(true);
+  });
+
+  test("/status card shows latest data age", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-09T04:03:20Z"));
+
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare(`
+      INSERT INTO messages (chat_id, sender_id, role, content_text, created_at, platform)
+      VALUES ('c1', 'u2', 'user', 'hello', '2026-06-09 04:00:00', 'feishu')
+    `).run();
+    recordRuntimeEvent(db, {
+      botId: "NiuBot",
+      chatId: "c1",
+      runId: "run-1",
+      messageIds: [1],
+      stage: "failed",
+      event: "failed",
+      error: "agent failed",
+    });
+    db.prepare("UPDATE runtime_events SET created_at = '2026-06-09 03:59:00'").run();
+
+    const { im, sentCards } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db,
+      im,
+      new RecordingAgent(),
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+
+    const handled = (pipeline as any).handleBuiltinCommand("/status", "u2", "c1", "chat-open-id", "p2p", "status-msg");
+
+    expect(handled).toBe(true);
+    expect(sentCards[0]?.content).toContain("**最新数据:** 3 分钟前");
   });
 
   test("/stop marks the active runtime run stopped and clears pending messages", async () => {

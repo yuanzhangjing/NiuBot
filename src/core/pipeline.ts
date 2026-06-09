@@ -1281,7 +1281,12 @@ export class Pipeline {
       return;
     }
 
-    const content = sections.join("\n\n");
+    const latestDataAt = this.getLatestDataTimestamp();
+    const latestDataAge = latestDataAt ? formatRelativeAge(latestDataAt) : "无";
+    const content = [
+      `**最新数据:** ${latestDataAge}`,
+      ...sections,
+    ].join("\n\n");
     const header = count > 0 ? `Running · ${count} 个任务` : "Status";
     this.im.sendCard(platformChatId, header, content, undefined, msgId)
       .then((pmid) => { this.storeBotResponse(chatId, content, pmid); })
@@ -1332,6 +1337,22 @@ export class Pipeline {
         this.log.info("status sent", { platformChatId });
       })
       .catch((err) => this.log.error("status send failed", { platformChatId, error: String(err) }));
+  }
+
+  private getLatestDataTimestamp(): string | undefined {
+    const row = this.db.prepare(`
+      SELECT MAX(ts) AS latestAt
+      FROM (
+        SELECT MAX(created_at) AS ts FROM messages
+        UNION ALL SELECT MAX(started_at) AS ts FROM sessions
+        UNION ALL SELECT MAX(last_active_at) AS ts FROM sessions
+        UNION ALL SELECT MAX(ended_at) AS ts FROM sessions
+        UNION ALL SELECT MAX(created_at) AS ts FROM runtime_events
+        UNION ALL SELECT MAX(last_run_at) AS ts FROM cron_jobs
+      )
+      WHERE ts IS NOT NULL
+    `).get() as { latestAt: string | null } | undefined;
+    return row?.latestAt ?? undefined;
   }
 
   // ── /cron command ─────────────────────────────────────────────
@@ -3324,6 +3345,29 @@ function formatUptime(ms: number): string {
   if (minutes > 0) parts.push(`${minutes}m`);
   parts.push(`${secs}s`);
   return parts.join(" ");
+}
+
+function formatRelativeAge(sqlUtcDatetime: string): string {
+  const timestamp = parseSqlUtcDatetime(sqlUtcDatetime);
+  if (timestamp === undefined) return "未知";
+
+  const diffMs = Math.max(0, Date.now() - timestamp);
+  if (diffMs < 60_000) return "刚刚";
+
+  const minutes = Math.floor(diffMs / 60_000);
+  if (minutes < 60) return `${minutes} 分钟前`;
+
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} 小时前`;
+
+  const days = Math.floor(hours / 24);
+  return `${days} 天前`;
+}
+
+function parseSqlUtcDatetime(value: string): number | undefined {
+  const normalized = value.includes("T") ? value : `${value.replace(" ", "T")}Z`;
+  const timestamp = Date.parse(normalized);
+  return Number.isFinite(timestamp) ? timestamp : undefined;
 }
 
 function displayBackendType(type: AgentBackendType): string {
