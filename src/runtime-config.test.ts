@@ -55,6 +55,17 @@ describe("resolveBotRuntimeConfig", () => {
     });
   });
 
+  test("normalizes legacy cursor-agent runtime backend to cursor", () => {
+    const resolved = resolveBotRuntimeConfig(
+      "claude",
+      { backendType: "cursor-agent" },
+      ["claude", "cursor"],
+    );
+
+    expect(resolved.backendType).toBe("cursor");
+    expect(resolved.liteModel).toBe("composer-2.5");
+  });
+
   test("model is undefined when no runtime model set — backend uses its own default", () => {
     const resolved = resolveBotRuntimeConfig(
       "claude",

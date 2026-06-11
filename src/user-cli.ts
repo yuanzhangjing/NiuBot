@@ -22,7 +22,7 @@ import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 import yaml from "yaml";
 import { DEFAULT_BOT_PROFILE } from "./bot-profile.js";
-import { AGENT_REGISTRY, DEFAULT_LITE_MODELS, expandHome, loadConfig, resolveHomePath, type BuiltinBackendType, type NiuBotConfig } from "./config.js";
+import { AGENT_REGISTRY, DEFAULT_LITE_MODELS, expandHome, loadConfig, normalizeBackend, resolveHomePath, type BuiltinBackendType, type NiuBotConfig } from "./config.js";
 import { INSTALL_GUIDE_COMMAND } from "./install-guide.js";
 import { localToday } from "./tz.js";
 
@@ -345,6 +345,8 @@ function scanBackend(name: string): BackendScanResult {
     claude: { cmd: "claude", args: ["--version"] },
     codex: { cmd: "codex", args: ["--version"] },
     traecli: { cmd: "traecli", args: ["--version"] },
+    opencode: { cmd: "opencode", args: ["--version"] },
+    cursor: { cmd: "cursor-agent", args: ["--version"] },
   };
 
   const entry = commands[name];
@@ -382,7 +384,8 @@ function scanAllBackends(): { results: BackendScanResult[]; firstAvailable?: str
 }
 
 export function getSuggestedLiteModel(backend: string): string | undefined {
-  return DEFAULT_LITE_MODELS[backend as BuiltinBackendType];
+  const normalized = normalizeBackend(backend) ?? backend;
+  return DEFAULT_LITE_MODELS[normalized as BuiltinBackendType];
 }
 
 // ── Init ───────────────────────────────────────────────────
@@ -416,24 +419,13 @@ async function cmdInit(niubotHome: string, flags: CliFlags): Promise<void> {
         // Validate backend availability for each bot
         const backendsToCheck = new Set(config.bots.map((b) => b.backend).filter((b): b is string => !!b));
         for (const be of backendsToCheck) {
-          const customDef = config.backends[be];
-          if (customDef) {
-            const pluginPath = path.resolve(niubotHome, expandHome(customDef.plugin));
-            if (fs.existsSync(pluginPath)) {
-              ok(`${be} plugin found (${customDef.plugin})`);
-            } else {
-              fail(`${be} plugin not found: ${pluginPath}`);
-              issues.push("backend");
-            }
+          const backendScan = scanBackend(be);
+          if (backendScan.available) {
+            ok(`${be} CLI available${backendScan.version ? ` (v${backendScan.version})` : ""}`);
           } else {
-            const backendScan = scanBackend(be);
-            if (backendScan.available) {
-              ok(`${be} CLI available${backendScan.version ? ` (v${backendScan.version})` : ""}`);
-            } else {
-              fail(`${be} CLI not found`);
-              hint(`Install ${be} CLI, or change backend in config.yaml`);
-              issues.push("backend");
-            }
+            fail(`${be} CLI not found`);
+            hint(`Install ${be} CLI, or change backend in config.yaml`);
+            issues.push("backend");
           }
         }
       } catch (err) {
@@ -456,86 +448,48 @@ async function cmdInit(niubotHome: string, flags: CliFlags): Promise<void> {
   }
 
   // Backend selection
-  // Step 1: ask if user has a custom backend
   console.log();
-  const customAnswer = await prompt("  Do you have a custom agent backend? (y/N): ");
-  const wantsCustom = customAnswer.toLowerCase() === "y" || customAnswer.toLowerCase() === "yes";
-
-  let defaultBackend: string;
-  let customBackendConfig: { name: string; plugin: string } | undefined;
-
-  if (wantsCustom) {
-    // Custom backend flow
-    console.log();
-    console.log("  Custom backend setup");
-    console.log("  \u2500".repeat(36));
-    console.log("  Create a plugin file that extends CliAgentBackend.");
-    console.log("  See INSTALL.md \"Plugin API Reference\" section for the full protocol.");
-    console.log("  Plugin location: ~/.niubot/backends/<name>.js");
-    console.log();
-
-    const backendName = await prompt("  Backend name (e.g. my-agent): ");
-    if (!backendName) {
-      fail("Backend name is required");
-      process.exit(1);
-    }
-
-    const defaultPlugin = `./backends/${backendName}.js`;
-    const pluginPath = (await prompt(`  Plugin path (default: ${defaultPlugin}): `)) || defaultPlugin;
-
-    customBackendConfig = { name: backendName, plugin: pluginPath };
-    defaultBackend = backendName;
-
-    // Create backends directory
-    const backendsDir = path.join(niubotHome, "backends");
-    fs.mkdirSync(backendsDir, { recursive: true });
-
-    info(`\u2192 Using custom backend '${defaultBackend}'`);
-    hint(`Create your plugin at ${path.resolve(niubotHome, pluginPath)} before running 'niubot start'`);
-  } else {
-    // Built-in backend flow
-    console.log();
-    console.log("  Scanning agent backends...");
-    const { results: backendResults } = scanAllBackends();
-    for (const r of backendResults) {
-      if (r.available) {
-        ok(`${r.name} v${r.version}`);
-      } else {
-        fail(`${r.name} \u2014 ${r.error}`);
-      }
-    }
-
-    const availableBackends = backendResults.filter((r) => r.available);
-
-    if (availableBackends.length === 0) {
-      fail("No agent backend found");
-      hint("Install claude, codex, or traecli CLI, or re-run init with a custom backend");
-      console.log();
-      console.log("Aborted: at least one agent backend is required.");
-      console.log();
-      process.exit(1);
-    }
-
-    if (availableBackends.length === 1) {
-      defaultBackend = availableBackends[0]!.name;
-      info(`\u2192 Using '${defaultBackend}' as bot backend`);
+  console.log("  Scanning agent backends...");
+  const { results: backendResults } = scanAllBackends();
+  for (const r of backendResults) {
+    if (r.available) {
+      ok(`${r.name} v${r.version}`);
     } else {
-      console.log();
-      console.log("  Available backends:");
-      for (let i = 0; i < availableBackends.length; i++) {
-        const r = availableBackends[i]!;
-        console.log(`    ${i + 1}) ${r.name} (v${r.version})`);
-      }
-      const answer = await prompt(`  Select backend [1-${availableBackends.length}] (default: 1): `);
-      const parsed = answer ? parseInt(answer, 10) : 1;
-      const idx = Number.isNaN(parsed) ? -1 : parsed - 1;
-      if (idx < 0 || idx >= availableBackends.length) {
-        fail("Invalid selection");
-        process.exit(1);
-      }
-      defaultBackend = availableBackends[idx]!.name;
-      info(`\u2192 Using '${defaultBackend}' as bot backend`);
+      fail(`${r.name} \u2014 ${r.error}`);
     }
+  }
+
+  const availableBackends = backendResults.filter((r) => r.available);
+  let defaultBackend: string;
+
+  if (availableBackends.length === 0) {
+    fail("No agent backend found");
+    hint("Install claude, codex, traecli, opencode, or cursor CLI");
+    console.log();
+    console.log("Aborted: at least one agent backend is required.");
+    console.log();
+    process.exit(1);
+  }
+
+  if (availableBackends.length === 1) {
+    defaultBackend = availableBackends[0]!.name;
+    info(`\u2192 Using '${defaultBackend}' as bot backend`);
+  } else {
+    console.log();
+    console.log("  Available backends:");
+    for (let i = 0; i < availableBackends.length; i++) {
+      const r = availableBackends[i]!;
+      console.log(`    ${i + 1}) ${r.name} (v${r.version})`);
+    }
+    const answer = await prompt(`  Select backend [1-${availableBackends.length}] (default: 1): `);
+    const parsed = answer ? parseInt(answer, 10) : 1;
+    const idx = Number.isNaN(parsed) ? -1 : parsed - 1;
+    if (idx < 0 || idx >= availableBackends.length) {
+      fail("Invalid selection");
+      process.exit(1);
+    }
+    defaultBackend = availableBackends[idx]!.name;
+    info(`\u2192 Using '${defaultBackend}' as bot backend`);
   }
 
   // Generate files
@@ -590,10 +544,6 @@ async function cmdInit(niubotHome: string, flags: CliFlags): Promise<void> {
     ok(`Created ${botId}/bot_profile.md`);
   }
 
-  // Plugin symlink
-  ensurePluginSymlink(niubotHome);
-  ok("Created node_modules/niubot symlink (for plugin imports)");
-
   // Model configuration
   console.log();
   console.log("Model configuration");
@@ -638,7 +588,7 @@ async function cmdInit(niubotHome: string, flags: CliFlags): Promise<void> {
       hint("Credentials were NOT saved. Add them manually or re-run with --force");
     }
   } else {
-    fs.writeFileSync(configPath, generateConfigTemplate(defaultBackend, customBackendConfig, botId, appId, appSecret, model, liteModel));
+    fs.writeFileSync(configPath, generateConfigTemplate(defaultBackend, botId, appId, appSecret, model, liteModel));
     ok(`Created config.yaml`);
   }
 
@@ -652,12 +602,6 @@ async function cmdInit(niubotHome: string, flags: CliFlags): Promise<void> {
   console.log(`  Backend: ${defaultBackend}`);
   if (model) console.log(`  Model:   ${model}`);
   if (liteModel) console.log(`  Lite:    ${liteModel}`);
-
-  if (customBackendConfig) {
-    console.log();
-    hint(`Create your backend plugin at ~/.niubot/${customBackendConfig.plugin}`);
-    hint("See INSTALL.md 'Plugin API Reference' for the protocol");
-  }
 
   if (!appId || !appSecret) {
     console.log();
@@ -717,74 +661,42 @@ async function cmdAddBot(niubotHome: string): Promise<void> {
 
   // ── Backend selection ───────────────────────────────────
   console.log();
-  const customAnswer = await prompt("  Do you have a custom agent backend? (y/N): ");
-  const wantsCustom = customAnswer.toLowerCase() === "y" || customAnswer.toLowerCase() === "yes";
+  console.log("  Scanning agent backends...");
+  const { results: backendResults } = scanAllBackends();
+  for (const r of backendResults) {
+    if (r.available) ok(`${r.name} v${r.version}`);
+    else fail(`${r.name} — ${r.error}`);
+  }
 
+  const availableBackends = backendResults.filter((r) => r.available);
   let backend: string;
-  let customBackendConfig: { name: string; plugin: string } | undefined;
 
-  if (wantsCustom) {
+  if (availableBackends.length === 0) {
+    fail("No agent backend found");
+    hint("Install claude, codex, traecli, opencode, or cursor CLI");
     console.log();
-    console.log("  Custom backend setup");
-    console.log("  ─".repeat(36));
-    const backendName = await prompt("  Backend name (e.g. my-agent): ");
-    if (!backendName) {
-      fail("Backend name is required");
-      process.exit(1);
-    }
-    if (backendName in AGENT_REGISTRY) {
-      fail(`'${backendName}' is a built-in backend name, choose a different one`);
-      process.exit(1);
-    }
-    const existingBackends = (doc["backends"] as Record<string, unknown>) ?? {};
-    if (backendName in existingBackends) {
-      fail(`Backend '${backendName}' already defined in config.yaml`);
-      process.exit(1);
-    }
-    const defaultPlugin = `./backends/${backendName}.js`;
-    const pluginPath = (await prompt(`  Plugin path (default: ${defaultPlugin}): `)) || defaultPlugin;
-    customBackendConfig = { name: backendName, plugin: pluginPath };
-    backend = backendName;
+    process.exit(1);
+  }
 
-    const backendsDir = path.join(niubotHome, "backends");
-    fs.mkdirSync(backendsDir, { recursive: true });
+  if (availableBackends.length === 1) {
+    backend = availableBackends[0]!.name;
+    info(`→ Using '${backend}' as bot backend`);
   } else {
     console.log();
-    console.log("  Scanning agent backends...");
-    const { results: backendResults } = scanAllBackends();
-    for (const r of backendResults) {
-      if (r.available) ok(`${r.name} v${r.version}`);
-      else fail(`${r.name} — ${r.error}`);
+    console.log("  Available backends:");
+    for (let i = 0; i < availableBackends.length; i++) {
+      const r = availableBackends[i]!;
+      console.log(`    ${i + 1}) ${r.name} (v${r.version})`);
     }
-
-    const availableBackends = backendResults.filter((r) => r.available);
-    if (availableBackends.length === 0) {
-      fail("No agent backend found");
-      hint("Install claude, codex, or traecli CLI, or re-run with a custom backend");
-      console.log();
+    const answer = await prompt(`  Select backend [1-${availableBackends.length}] (default: 1): `);
+    const parsed = answer ? parseInt(answer, 10) : 1;
+    const idx = Number.isNaN(parsed) ? -1 : parsed - 1;
+    if (idx < 0 || idx >= availableBackends.length) {
+      fail("Invalid selection");
       process.exit(1);
     }
-
-    if (availableBackends.length === 1) {
-      backend = availableBackends[0]!.name;
-      info(`→ Using '${backend}' as bot backend`);
-    } else {
-      console.log();
-      console.log("  Available backends:");
-      for (let i = 0; i < availableBackends.length; i++) {
-        const r = availableBackends[i]!;
-        console.log(`    ${i + 1}) ${r.name} (v${r.version})`);
-      }
-      const answer = await prompt(`  Select backend [1-${availableBackends.length}] (default: 1): `);
-      const parsed = answer ? parseInt(answer, 10) : 1;
-      const idx = Number.isNaN(parsed) ? -1 : parsed - 1;
-      if (idx < 0 || idx >= availableBackends.length) {
-        fail("Invalid selection");
-        process.exit(1);
-      }
-      backend = availableBackends[idx]!.name;
-      info(`→ Using '${backend}' as bot backend`);
-    }
+    backend = availableBackends[idx]!.name;
+    info(`→ Using '${backend}' as bot backend`);
   }
 
   // ── Bot ID ──────────────────────────────────────────────
@@ -858,13 +770,6 @@ async function cmdAddBot(niubotHome: string): Promise<void> {
   existingBots.push(newBot);
   doc["bots"] = existingBots;
 
-  // Merge custom backend if needed
-  if (customBackendConfig) {
-    const backends = (doc["backends"] as Record<string, unknown>) ?? {};
-    backends[customBackendConfig.name] = { plugin: customBackendConfig.plugin };
-    doc["backends"] = backends;
-  }
-
   fs.writeFileSync(configPath, yaml.stringify(doc, { lineWidth: 0 }));
   ok("Updated config.yaml");
 
@@ -908,29 +813,12 @@ async function cmdAddBot(niubotHome: string): Promise<void> {
 
 export function generateConfigTemplate(
   backend: string,
-  customBackend?: { name: string; plugin: string },
   botId: string = "NiuBot",
   appId?: string,
   appSecret?: string,
   model?: string,
   liteModel?: string,
 ): string {
-  let backendsSection: string;
-  if (customBackend) {
-    backendsSection = `
-backends:
-  ${customBackend.name}:
-    plugin: "${customBackend.plugin}"
-`;
-  } else {
-    backendsSection = `
-# 自定义 backend 插件（可选）
-# backends:
-#   my-agent:
-#     plugin: "./backends/my-agent.js"
-`;
-  }
-
   const id = appId ? `"${appId}"` : '""';
   const secret = appSecret ? `"${appSecret}"` : '""';
   const modelLine = model
@@ -951,13 +839,13 @@ ${modelLine}${liteModelLine}    # workingDirectory: ~/niubot-workspace/NiuBot  #
 
 # queue:
 #   bufferMs: 1500         # 消息缓冲合并窗口（ms）
-
-${backendsSection}`;
+`;
 }
 
 function generateEnvTemplate(): string {
   return `# NiuBot 环境变量
 # NIUBOT_LOG_LEVEL=info
+# NIUBOT_DEBUG_AGENT_STDOUT=1   # 将每轮 agent 完整 stdout 追加到 logs/agent-stdout-YYYY-MM-DD.log
 `;
 }
 
@@ -1002,27 +890,13 @@ function cmdStart(niubotHome: string, flags: CliFlags): void {
   // Check backend availability (deduplicate across bots)
   const backendsToCheck = new Set(config.bots.map((b) => b.backend).filter((b): b is string => !!b));
   for (const be of backendsToCheck) {
-    const customDef = config.backends[be];
-    if (customDef) {
-      // Custom plugin backend — check plugin file exists
-      const pluginPath = path.resolve(niubotHome, expandHome(customDef.plugin));
-      if (fs.existsSync(pluginPath)) {
-        ok(`${be} plugin found (${customDef.plugin})`);
-      } else {
-        fail(`${be} plugin not found: ${pluginPath}`);
-        hint(`Create the plugin file, or change backend in config.yaml`);
-        issues.push("backend");
-      }
+    const backendScan = scanBackend(be);
+    if (backendScan.available) {
+      ok(`${be} CLI available${backendScan.version ? ` (v${backendScan.version})` : ""}`);
     } else {
-      // Built-in backend — check CLI command
-      const backendScan = scanBackend(be);
-      if (backendScan.available) {
-        ok(`${be} CLI available${backendScan.version ? ` (v${backendScan.version})` : ""}`);
-      } else {
-        fail(`${be} CLI not found`);
-        hint(`Install ${be} CLI, or change backend in config.yaml`);
-        issues.push("backend");
-      }
+      fail(`${be} CLI not found`);
+      hint(`Install ${be} CLI, or change backend in config.yaml`);
+      issues.push("backend");
     }
   }
 
@@ -1060,9 +934,6 @@ function cmdStart(niubotHome: string, flags: CliFlags): void {
     process.exit(1);
   }
 
-  // Ensure plugin symlink
-  ensurePluginSymlink(niubotHome);
-
   // Ensure working directories exist
   for (const bot of config.bots) {
     const workDir = path.join(niubotHome, bot.id, "workspace");
@@ -1088,6 +959,7 @@ function cmdStart(niubotHome: string, flags: CliFlags): void {
       ...process.env,
       NIUBOT_HOME: niubotHome,
       NIUBOT_LOG_LEVEL: process.env["NIUBOT_LOG_LEVEL"] ?? "info",
+      NIUBOT_DEBUG_AGENT_STDOUT: process.env["NIUBOT_DEBUG_AGENT_STDOUT"] ?? "",
     },
   });
 
@@ -1394,27 +1266,6 @@ function cmdUpdate(niubotHome: string): void {
   }
 
   console.log();
-}
-
-// ── Plugin symlink ────────────────────────────────────────
-
-/**
- * 确保 ~/.niubot/node_modules/niubot 符号链接指向当前包目录。
- * 这样插件文件中的 import("niubot/plugin") 才能正确解析。
- */
-function ensurePluginSymlink(niubotHome: string): void {
-  const linkPath = path.join(niubotHome, "node_modules", "niubot");
-
-  try {
-    if (fs.realpathSync(linkPath) === fs.realpathSync(PROJECT_ROOT)) return;
-    // 指向错误位置，删掉重建
-    fs.rmSync(linkPath, { recursive: true, force: true });
-  } catch {
-    // 不存在或无法解析 — 继续创建
-  }
-
-  fs.mkdirSync(path.dirname(linkPath), { recursive: true });
-  fs.symlinkSync(PROJECT_ROOT, linkPath);
 }
 
 // ── Utilities ──────────────────────────────────────────────

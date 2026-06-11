@@ -23,9 +23,6 @@ export interface CodexBackendOptions {
 export default class CodexBackend extends CliAgentBackend<CodexSession> {
   private sandboxMode: string;
 
-  /** Codex 不支持 system prompt 注入 */
-  readonly supportsSystemPrompt = false;
-
   constructor(options: CodexBackendOptions = {}) {
     super("codex");
     this.sandboxMode = options.sandboxMode ?? "danger-full-access";

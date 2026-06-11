@@ -21,8 +21,6 @@ export interface ClaudeBackendOptions {
 export default class ClaudeBackend extends CliAgentBackend<ClaudeSession> {
   private permissionMode: string;
 
-  readonly supportsSystemPrompt = true;
-
   constructor(options: ClaudeBackendOptions = {}) {
     super("claude");
     this.permissionMode = options.permissionMode ?? "bypassPermissions";
@@ -30,6 +28,10 @@ export default class ClaudeBackend extends CliAgentBackend<ClaudeSession> {
 
   command(): string {
     return "claude";
+  }
+
+  needsStableUserPrefix(): boolean {
+    return false;
   }
 
   buildSession(config: SessionConfig): ClaudeSession {
@@ -113,9 +115,10 @@ export default class ClaudeBackend extends CliAgentBackend<ClaudeSession> {
     if (agentSessionId) {
       session.agentSessionId = agentSessionId;
       const meta = this.scanJsonl(session);
-      model = meta.model ?? stdoutModel;
+      // stdout 来自当前这次调用，是权威来源；jsonl 增量扫描可能滞后一轮，只作兜底
+      model = stdoutModel ?? meta.model;
       contextTokens = meta.contextTokens ?? stdoutContextTokens;
-      const modelSource = meta.model ? "jsonl" : stdoutModel ? "stdout" : "none";
+      const modelSource = stdoutModel ? "stdout" : meta.model ? "jsonl" : "none";
       const tokensSource = meta.contextTokens ? "jsonl" : stdoutContextTokens ? "stdout" : "none";
       this.log.info("parseOutput: done", {
         agentSessionId, model, contextTokens,

@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { loadConfig, NIUBOT_HOME } from "./config.js";
+import { BUILTIN_BACKEND_LIST, DEFAULT_LITE_MODELS, loadConfig, NIUBOT_HOME, normalizeBackend } from "./config.js";
 
 const tempDirs: string[] = [];
 
@@ -13,6 +13,29 @@ afterEach(() => {
 });
 
 describe("loadConfig", () => {
+  it("rejects unsupported custom backend names", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-config-"));
+    tempDirs.push(dir);
+    const configPath = path.join(dir, "config.yaml");
+    fs.writeFileSync(configPath, `
+bots:
+  - id: NiuBot
+    backend: my-agent
+    appId: app-id
+    appSecret: app-secret
+    workingDirectory: ${dir}/workspace
+`, "utf-8");
+
+    expect(() => loadConfig(configPath)).toThrow(/unsupported backend 'my-agent'/);
+  });
+
+  it("registers cursor as a built-in backend with aliases and lite model", () => {
+    expect(BUILTIN_BACKEND_LIST).toContain("cursor");
+    expect(normalizeBackend("cursor")).toBe("cursor");
+    expect(normalizeBackend("cursor-agent")).toBe("cursor");
+    expect(DEFAULT_LITE_MODELS.cursor).toBe("composer-2.5");
+  });
+
   it("does not assign a workspace project context path by default", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-config-"));
     tempDirs.push(dir);

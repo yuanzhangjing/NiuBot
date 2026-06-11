@@ -15,8 +15,6 @@ import { DEFAULT_LITE_MODELS } from "../config.js";
 interface OpencodeSession extends BaseCliSession {}
 
 export default class OpencodeBackend extends CliAgentBackend<OpencodeSession> {
-  readonly supportsSystemPrompt = false;
-
   constructor() {
     super("opencode");
   }

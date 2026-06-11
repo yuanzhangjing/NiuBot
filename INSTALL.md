@@ -27,82 +27,29 @@ niubot version
 
 ## Step 2: Select Agent Backend
 
-NiuBot needs an agent backend to power conversations. There are two options:
-- **Built-in**: `claude` (Claude Code CLI), `codex` (OpenAI Codex CLI), or `traecli` (Trae CLI)
-- **Custom plugin**: any CLI tool, integrated via a JS plugin file
+NiuBot ships with built-in backends. Pick one whose CLI is installed:
 
-**Ask the user**: "Do you want to use a built-in backend (claude / codex / traecli), or do you have a custom agent CLI to integrate?"
+| Backend | CLI command |
+|---------|-------------|
+| `claude` | `claude` (Claude Code) |
+| `codex` | `codex` (OpenAI Codex) |
+| `traecli` | `traecli` (Trae CLI) |
+| `opencode` | `opencode` |
+| `cursor` | `cursor-agent` (Cursor Agent CLI) |
 
-### Option A: Built-in Backend
-
-Check which CLIs are available:
-
-```bash
-claude --version   # Check Claude CLI
-codex --version    # Check Codex CLI
-traecli --version  # Check Trae CLI
-```
-
-If at least one is available, note which one the user wants to use (e.g. `claude`). Before writing config, also ask whether they want to set a separate `liteModel` for cheaper background tasks. Proceed to [Step 2.1](#step-21-generate-config).
-
-If neither is available, tell the user to install one first:
-- Claude CLI: https://docs.anthropic.com/en/docs/claude-code
-- Codex CLI: https://github.com/openai/codex
-
-### Option B: Custom Backend Plugin
-
-If the user has their own coding agent CLI, help them create a plugin.
-
-#### 1. Create the plugin file
-
-Create `~/.niubot/backends/<name>.js`. The plugin extends `CliAgentBackend` and implements 4 methods:
-
-```js
-// ~/.niubot/backends/my-agent.js
-import { CliAgentBackend, buildNiubotEnv } from "niubot/plugin";
-
-export default class MyAgentBackend extends CliAgentBackend {
-  constructor(options = {}) {
-    super("my-agent");
-  }
-
-  command() { return "my-agent-cli"; }
-
-  buildSession(config) {
-    return {
-      workingDirectory: config.workingDirectory ?? process.cwd(),
-      model: config.modelTier === "lite" ? (config.liteModel ?? config.model) : config.model,
-      importantContext: config.importantContext,
-      extraEnv: buildNiubotEnv(config),
-      cumulativeBytes: 0,
-      compactCount: 0,
-      jsonlOffset: 0,
-    };
-  }
-
-  buildInput(session, message) {
-    const args = ["run", "--print"];
-    if (session.model) args.push("--model", session.model);
-    if (session.agentSessionId) args.push("--resume", session.agentSessionId);
-    if (session.importantContext) args.push("--system", session.importantContext);
-    return { args, stdin: message };
-  }
-
-  parseOutput(stdout, session) {
-    return { text: stdout.trim() };
-  }
-}
-```
-
-Adapt `command()`, `buildInput()`, and `parseOutput()` to match the user's CLI tool. See [Plugin API Reference](#plugin-api-reference) for details.
-
-#### 2. Verify the CLI is accessible
+Check availability:
 
 ```bash
-my-agent-cli --version   # Replace with actual command name
+claude --version
+codex --version
+traecli --version
+opencode --version
+cursor-agent --version
 ```
 
-Then proceed to [Step 2.1](#step-21-generate-config) with backend name = the custom plugin name (e.g. `my-agent`).
+If at least one is available, note which one the user wants (e.g. `claude`). Before writing config, also ask whether they want a separate `liteModel` for cheaper background tasks. Proceed to [Step 2.1](#step-21-generate-config).
+
+If none are available, tell the user to install one first.
 
 ### Step 2.1: Generate Config
 
@@ -126,8 +73,11 @@ Before filling the config, ask the user the following questions **one at a time*
 - `claude`: `haiku`
 - `codex`: `gpt-5.4-mini`
 - `traecli`: `Gemini-3-Flash-Preview`
+- `opencode`: `opencode-go/deepseek-v4-flash`
+- `cursor`: `composer-2.5`
 
-**For built-in backend** (e.g. `claude`):
+Example `config.yaml`:
+
 ```yaml
 bots:
   - id: NiuBot
@@ -139,25 +89,9 @@ bots:
     # workingDirectory: ~/niubot-workspace/<id>
 ```
 
-**For custom backend** (e.g. `my-agent`):
-```yaml
-backends:
-  my-agent:
-    plugin: "./backends/my-agent.js"
-
-bots:
-  - id: NiuBot
-    backend: my-agent
-    appId: ""
-    appSecret: ""
-    # model: ""
-    # liteModel: ""
-    # workingDirectory: ~/niubot-workspace/<id>
-```
-
 Config fields:
 - `id`: Unique bot identifier (immutable). Determines data directory (`~/.niubot/<id>/`) and default workspace (`~/niubot-workspace/<id>/`). **Do not change after setup.**
-- `backend`: Agent backend to use (required). Built-in: `claude`, `codex`, or `traecli`. Custom: the name registered under `backends:`.
+- `backend`: Agent backend to use (required). One of: `claude`, `codex`, `traecli`, `opencode`, `cursor`.
 - `model`: Main model for conversations. Omit to use the CLI's default.
 - `liteModel`: Cheaper model for background tasks (archive summaries). Omit = same as main model.
   Recommended examples for built-in backends:
@@ -394,7 +328,7 @@ bots:
     appSecret: "xxx"
 
   - id: NewBot                # ← append new bot
-    backend: claude            # claude / codex / traecli / custom plugin name
+    backend: claude            # claude / codex / traecli / opencode / cursor
     appId: "cli_yyy"          # from Feishu app (Step 4)
     appSecret: "yyy"
     # model: ""               # optional: main model
@@ -408,8 +342,8 @@ Recommended lite models by backend:
 | claude | `haiku` |
 | codex | `gpt-5.4-mini` |
 | traecli | `Gemini-3-Flash-Preview` |
-
-For custom backends, also add a `backends:` section if not already present (see [Plugin API Reference](#plugin-api-reference)).
+| opencode | `opencode-go/deepseek-v4-flash` |
+| cursor | `composer-2.5` |
 
 #### 4. Create Feishu App (if new)
 
@@ -438,83 +372,3 @@ After the engine is running with the new bot:
 2. **事件订阅** → add `im.message.receive_v1`
 3. **Create a version** → publish the app
 4. **Verify**: send a message to the bot in Feishu
-
----
-
-## Plugin API Reference
-
-NiuBot supports custom agent backends via plugins. A plugin is a JS file that extends `CliAgentBackend` and implements 4 required methods. The engine handles process management, cancellation, session resume, and all infrastructure — the plugin only defines how to talk to a specific CLI tool.
-
-### Import
-
-```js
-import { CliAgentBackend, buildNiubotEnv } from "niubot/plugin";
-```
-
-### Required Methods
-
-| Method | Purpose |
-|--------|---------|
-| `command()` | Returns the CLI executable name (e.g. `"my-agent"`) |
-| `buildSession(config)` | Create initial session state from `SessionConfig`. Must return an object extending `BaseCliSession` |
-| `buildInput(session, message)` | Build CLI invocation: returns `{ args: string[], stdin?: string }`. `args` = CLI arguments. `stdin` = content to write to child process stdin (omit to not write). `session.agentSessionId` is set automatically on resume |
-| `parseOutput(stdout, session)` | Parse CLI stdout -> `{ text, agentSessionId?, contextTokens?, model? }`. Has access to session for advanced use cases (e.g. reading log files) |
-
-### Optional Overrides
-
-| Property/Method | Default | Purpose |
-|----------------|---------|---------|
-| `supportsSystemPrompt` | `false` | Set to `true` if the CLI can accept a system prompt |
-| `checkAvailable()` | `exec(command(), ["--version"])` | Custom availability check |
-| `agentEnv()` | `{}` | Extra environment variables for the CLI process |
-
-### BaseCliSession Fields
-
-Every session returned by `buildSession()` must include:
-
-```js
-{
-  workingDirectory: string,    // from config.workingDirectory
-  model: string | undefined,   // resolved model ID
-  importantContext: string,    // system prompt content
-  agentSessionId: string,     // auto-managed by base class (for resume)
-  extraEnv: Record<string, string>,  // use buildNiubotEnv(config)
-  cumulativeBytes: 0,
-  compactCount: 0,
-  jsonlOffset: 0,
-}
-```
-
-### ParsedOutput Fields
-
-`parseOutput()` must return at minimum `{ text }`. Optional fields:
-
-```js
-{
-  text: string,                // required: the agent's response text
-  agentSessionId?: string,     // session ID for resume (auto-stored by base class)
-  contextTokens?: number,      // token count (shown in footer)
-  contextWindow?: number,      // model context window size
-  model?: string,              // model name (shown in footer)
-  compactCount?: number,       // context compaction count
-}
-```
-
-### Config Registration
-
-```yaml
-# ~/.niubot/config.yaml
-backends:
-  my-agent:
-    plugin: "./backends/my-agent.js"    # relative to ~/.niubot/
-    options:                            # optional, passed to constructor
-      timeout: 30000
-
-bots:
-  - id: NiuBot
-    backend: my-agent
-```
-
-Model configuration for custom backends works the same way — set `model` and `liteModel` on the bot entry. The values are passed to `buildSession()` via `config.model` and `config.liteModel`. These recommendation values are documentation only, not runtime defaults.
-
-After adding the plugin, use `/agent` in chat to verify it appears in the list. To switch: `/agent my-agent`. No engine restart required.

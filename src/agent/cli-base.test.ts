@@ -1,5 +1,9 @@
-import { describe, expect, test } from "vitest";
+import { mkdirSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import { CliAgentBackend, type BaseCliSession, type ParsedOutput } from "./cli-base.js";
+import { getAgentStdoutLogFilePath } from "./agent-stdout-log.js";
 import type { AgentSession, ExecHooks, SessionConfig } from "./types.js";
 
 class FailingCliBackend extends CliAgentBackend<BaseCliSession> {
@@ -86,6 +90,37 @@ class ThrowingHookBackend extends ParsedOutputBackend {
 }
 
 describe("CliAgentBackend diagnostic logging", () => {
+  const tempHome = join(tmpdir(), `niubot-cli-base-stdout-${process.pid}`);
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  test("dumps full stdout when NIUBOT_DEBUG_AGENT_STDOUT is enabled", async () => {
+    vi.stubEnv("NIUBOT_HOME", tempHome);
+    vi.stubEnv("NIUBOT_DEBUG_AGENT_STDOUT", "1");
+    mkdirSync(join(tempHome, "logs"), { recursive: true });
+
+    const backend = new ThrowingHookBackend({ text: "ok" });
+    const entries: Array<{ level: string; msg: string; data?: Record<string, unknown> }> = [];
+    (backend as any).log = {
+      debug: (msg: string, data?: Record<string, unknown>) => entries.push({ level: "debug", msg, data }),
+      info: (msg: string, data?: Record<string, unknown>) => entries.push({ level: "info", msg, data }),
+      warn: (msg: string, data?: Record<string, unknown>) => entries.push({ level: "warn", msg, data }),
+      error: (msg: string, data?: Record<string, unknown>) => entries.push({ level: "error", msg, data }),
+    };
+    const session = await backend.createSession({ workingDirectory: process.cwd() });
+
+    await expect(backend.sendMessage(session as AgentSession, "ping")).resolves.toMatchObject({ text: "ok" });
+
+    const dumpLog = entries.find((entry) => entry.msg === "agent stdout dumped");
+    expect(dumpLog?.data?.["reason"]).toBe("complete");
+    const logPath = String(dumpLog?.data?.["logPath"]);
+    expect(logPath).toBe(getAgentStdoutLogFilePath(tempHome));
+    expect(readFileSync(logPath, "utf8")).toContain("ok");
+  });
+
   test("logs stdin and stream tails when child process fails", async () => {
     const backend = new FailingCliBackend("test-cli");
     const entries: Array<{ level: string; msg: string; data?: Record<string, unknown> }> = [];

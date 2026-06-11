@@ -37,18 +37,15 @@ export const AGENT_REGISTRY = {
   opencode: {
     aliases: ["opencode"],
   },
+  cursor: {
+    aliases: ["cursor", "cursor-agent"],
+  },
 } as const;
 
 /** 内置 agent backend 类型 */
 export type BuiltinBackendType = keyof typeof AGENT_REGISTRY;
-/** 任意 backend 类型（内置 + 自定义插件） */
+/** 任意 backend 类型（内置） */
 export type AgentBackendType = string;
-
-/** 自定义 backend 插件配置 */
-export interface CustomBackendDef {
-  plugin: string;
-  options?: Record<string, unknown>;
-}
 
 /** 单个 Bot 的配置 */
 export interface BotConfig {
@@ -82,8 +79,6 @@ export interface RestartConfig {
 
 export interface NiuBotConfig {
   bots: BotConfig[];
-  /** 自定义 backend 插件注册 */
-  backends: Record<string, CustomBackendDef>;
   /** 可选：重启脚本配置。默认使用当前运行包目录。 */
   restart?: RestartConfig;
   queue: {
@@ -101,6 +96,7 @@ export const DEFAULT_LITE_MODELS: Partial<Record<BuiltinBackendType, string>> = 
   codex: "gpt-5.4-mini",
   traecli: "Gemini-3-Flash-Preview",
   opencode: "opencode-go/deepseek-v4-flash",
+  cursor: "composer-2.5",
 };
 
 const BACKEND_ALIAS_MAP = new Map<string, BuiltinBackendType>(
@@ -115,7 +111,17 @@ const DEFAULTS = {
   },
 };
 
-/** 标准化 backend 名称：内置别名映射，自定义名称原样返回 */
+function assertBuiltinBackend(backend: string | undefined, botId: string): void {
+  if (!backend) return;
+  if (!BUILTIN_BACKENDS.has(backend as BuiltinBackendType)) {
+    throw new Error(
+      `Config error: bot '${botId}' uses unsupported backend '${backend}'. ` +
+      `Supported backends: ${BUILTIN_BACKEND_LIST.join(", ")}`,
+    );
+  }
+}
+
+/** 标准化 backend 名称：内置别名映射 */
 export function normalizeBackend(raw: string | undefined): string | undefined {
   if (!raw) return undefined;
   // 内置 backend 支持别名（如 "claude-code" → "claude"）
@@ -200,26 +206,11 @@ export function loadConfig(configPath?: string): NiuBotConfig {
       instructionsPath: path.join(NIUBOT_HOME, "NiuBot", "instructions.md"),
       liteModel: process.env["NIUBOT_LITE_MODEL"] ?? (legacyAgentFile["liteModel"] as string | undefined) ?? undefined,
     }];
-  }
-
-  // 4. 解析自定义 backends
-  const backends: Record<string, CustomBackendDef> = {};
-  const backendsFile = fileConfig["backends"] as Record<string, Record<string, unknown>> | undefined;
-  if (backendsFile) {
-    for (const [name, def] of Object.entries(backendsFile)) {
-      if (!def["plugin"] || typeof def["plugin"] !== "string") {
-        throw new Error(`Config error: backend '${name}' missing 'plugin' path`);
-      }
-      backends[name] = {
-        plugin: def["plugin"] as string,
-        options: (def["options"] as Record<string, unknown>) ?? undefined,
-      };
-    }
+    assertBuiltinBackend(bots[0]!.backend, bots[0]!.id);
   }
 
   return {
     bots,
-    backends,
     restart: parseRestartConfig(fileConfig["restart"]),
     queue: queueConfig,
   };
@@ -254,6 +245,7 @@ function parseBotConfig(raw: Record<string, string>, legacyDefaultBackend?: stri
   const botDir = path.join(NIUBOT_HOME, id);
 
   const backend = normalizeBackend(raw["backend"]) ?? legacyDefaultBackend;
+  assertBuiltinBackend(backend, id);
   const workingDirectory = raw["workingDirectory"]
     ? path.resolve(expandHome(raw["workingDirectory"]))
     : path.join(os.homedir(), "niubot-workspace", id);

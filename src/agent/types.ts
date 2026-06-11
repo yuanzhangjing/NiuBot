@@ -18,7 +18,7 @@ export interface SessionConfig {
   model?: string;
   /** 轻量模型 ID（覆盖 backend 默认值） */
   liteModel?: string;
-  /** stable system context（通过后端 system prompt 注入） */
+  /** stable system context（backend 在 createSession/buildInput 自行交付；仅 needsStableUserPrefix 时由 pipeline 前缀注入） */
   importantContext?: string;
   /** 当前用户 ID（传递给 agent 环境变量） */
   userId?: string;
@@ -92,8 +92,11 @@ export interface AgentBackend {
   /** 获取 agent 侧 session ID（用于持久化，recover 时 resume） */
   getAgentSessionId?(sessionId: string): string | undefined;
 
-  /** 是否支持 system prompt 注入 */
-  supportsSystemPrompt?: boolean;
+  /**
+   * stable context 是否由 pipeline 前缀进首条 user（及 compact 后重灌）。
+   * false 时 backend 自行交付（如 system prompt、workspace rules）。
+   */
+  needsStableUserPrefix(): boolean;
 
   /** 探测模型名是否可用 */
   validateModel(modelName: string): Promise<{ valid: boolean; error?: string }>;

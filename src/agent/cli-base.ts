@@ -9,6 +9,7 @@ import type { AgentBackend, AgentSession, AgentResponse, SessionConfig, AgentSes
 import { createLogger } from "../logger.js";
 import { prependNiubotBinToPath } from "../niubot-cli.js";
 import { createInterface } from "node:readline";
+import { dumpAgentStdout, type AgentStdoutDumpReason } from "./agent-stdout-log.js";
 
 /** 子类 session 的基础字段 */
 export interface BaseCliSession {
@@ -54,6 +55,11 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
 
   constructor(protected name: string) {
     this.log = createLogger(name);
+  }
+
+  /** CLI 无持久 system 能力时，由 pipeline 把 stable 前缀进首条 user */
+  needsStableUserPrefix(): boolean {
+    return true;
   }
 
   /** 获取指定 session 的活动状态（供 watchdog / /list 读取） */
@@ -313,6 +319,58 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
     return this.sessions.get(sessionId)?.cumulativeBytes ?? 0;
   }
 
+  private maybeDumpAgentStdout(
+    sessionId: string | undefined,
+    reason: AgentStdoutDumpReason,
+    meta: {
+      cmd: string;
+      args: string[];
+      cwd?: string;
+      stdinLength: number;
+      stdinPreview: string;
+      stdout: string;
+      stderr?: string;
+      durationMs: number;
+      exitCode?: number | null;
+      signal?: string | null;
+      linesCollected?: number;
+    },
+  ): void {
+    if (!sessionId) return;
+    try {
+      const logPath = dumpAgentStdout({
+        backend: this.name,
+        sessionId,
+        reason,
+        cmd: meta.cmd,
+        args: meta.args,
+        cwd: meta.cwd,
+        stdinLength: meta.stdinLength,
+        stdinPreview: meta.stdinPreview,
+        stdout: meta.stdout,
+        stderr: meta.stderr,
+        durationMs: meta.durationMs,
+        exitCode: meta.exitCode,
+        signal: meta.signal,
+        linesCollected: meta.linesCollected,
+      });
+      if (logPath) {
+        this.log.info("agent stdout dumped", {
+          sessionId,
+          reason,
+          logPath,
+          stdoutLength: meta.stdout.length,
+        });
+      }
+    } catch (err) {
+      this.log.warn("agent stdout dump failed", {
+        sessionId,
+        reason,
+        error: String(err),
+      });
+    }
+  }
+
   // ── 子进程执行 ───────────────────────────────────────────
 
   protected exec(
@@ -410,6 +468,17 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
                   stdoutLength: stdout.length,
                   elapsedMs: earlyResolveAt - startedAt,
                 });
+                this.maybeDumpAgentStdout(sessionId, "complete", {
+                  cmd,
+                  args,
+                  cwd: opts?.cwd,
+                  stdinLength,
+                  stdinPreview,
+                  stdout,
+                  stderr: Buffer.concat(stderrChunks).toString(),
+                  durationMs: earlyResolveAt - startedAt,
+                  linesCollected: lines.length,
+                });
                 resolve(stdout);
                 // 进程继续在后台运行，等它自行退出；退不了的由 watchdog 收尸
               }
@@ -477,6 +546,19 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
             stdoutTail,
             stderrTail,
           });
+          this.maybeDumpAgentStdout(sessionId, "fail", {
+            cmd,
+            args,
+            cwd: opts?.cwd,
+            stdinLength,
+            stdinPreview,
+            stdout,
+            stderr,
+            durationMs,
+            exitCode: code,
+            signal: signal ?? null,
+            linesCollected: hooks ? lines.length : undefined,
+          });
           const err = new Error(`Command failed: ${cmd} (exit ${code ?? "null"}${signal ? `, signal ${signal}` : ""})`);
           (err as any).stdout = stdout;
           (err as any).stderr = stderr;
@@ -494,6 +576,19 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
             stdinLength,
             stdoutLength: stdout.length,
             stderrLength: stderr.length,
+          });
+          this.maybeDumpAgentStdout(sessionId, "exit", {
+            cmd,
+            args,
+            cwd: opts?.cwd,
+            stdinLength,
+            stdinPreview,
+            stdout,
+            stderr,
+            durationMs,
+            exitCode: code,
+            signal: signal ?? null,
+            linesCollected: hooks ? lines.length : undefined,
           });
           resolve(stdout);
         }

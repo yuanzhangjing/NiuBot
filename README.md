@@ -4,7 +4,7 @@ Persistent AI bot runtime — plug in any agent, get infinite conversation with 
 
 - infinite conversation flow with autonomous context management
 - long-term memory: user preferences, session summaries, message history
-- pluggable backends: Claude Code, Codex, or any custom CLI agent
+- built-in backends: Claude Code, Codex, Trae CLI, OpenCode, Cursor Agent
 - built-in tools: tasks, contacts, messages, cron jobs
 - configurable persona, multi-bot support
 

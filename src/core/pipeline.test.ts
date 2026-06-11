@@ -20,7 +20,7 @@ import { Pipeline, type BotIdentity } from "./pipeline.js";
 import { ResponseSender } from "./response-sender.js";
 
 class RecordingAgent implements AgentBackend {
-  supportsSystemPrompt = true;
+  needsStableUserPrefixFlag = false;
   readonly createSessionCalls: SessionConfig[] = [];
   readonly sendMessageCalls: string[] = [];
   readonly closeSessionCalls: string[] = [];
@@ -55,6 +55,10 @@ class RecordingAgent implements AgentBackend {
       model: "model" in models ? models.model : current.model,
       liteModel: "liteModel" in models ? models.liteModel : current.liteModel,
     });
+  }
+
+  needsStableUserPrefix(): boolean {
+    return this.needsStableUserPrefixFlag;
   }
 }
 
@@ -1993,7 +1997,7 @@ describe("Pipeline.recover", () => {
 
     const db = initDatabase(path.join(dir, "niubot.db"));
     const agent = new RecordingAgent();
-    agent.supportsSystemPrompt = false;
+    agent.needsStableUserPrefixFlag = true;
     const pipeline = new Pipeline(
       db,
       createImStub(),
@@ -2019,7 +2023,7 @@ describe("Pipeline.recover", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(agent.createSessionCalls).toHaveLength(1);
-    expect(agent.createSessionCalls[0]?.importantContext).toBeUndefined();
+    expect(agent.createSessionCalls[0]?.importantContext).toContain("<niubot-system-rules>");
     expect(agent.sendMessageCalls).toHaveLength(1);
     expect(agent.sendMessageCalls[0]).toContain("<niubot-system-rules>");
     expect(agent.sendMessageCalls[0]).toContain("<bot-identity>");
@@ -2027,6 +2031,49 @@ describe("Pipeline.recover", () => {
     expect(agent.sendMessageCalls[0]).toContain("fallback bot profile");
     expect(agent.sendMessageCalls[0]).toContain("<session-profile");
     expect(agent.sendMessageCalls[0]).toContain("这是一个全新的对话 session");
+    expect(agent.sendMessageCalls[0]).toContain("hello");
+  });
+
+  test("passes stable context to backend but not first user prompt when backend handles stable itself", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+    writeFileSync(path.join(dir, "bot_profile.md"), "cursor rules profile", "utf-8");
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const agent = new RecordingAgent();
+    agent.needsStableUserPrefixFlag = false;
+    const pipeline = new Pipeline(
+      db,
+      createImStub(),
+      agent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "cursor",
+      undefined,
+      undefined,
+      undefined,
+      {
+        botProfilePath: path.join(dir, "bot_profile.md"),
+      },
+    );
+
+    await pipeline.start();
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "hello",
+      platformMsgId: "m-workspace-rules-1",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(agent.createSessionCalls).toHaveLength(1);
+    expect(agent.createSessionCalls[0]?.importantContext).toContain("<niubot-system-rules>");
+    expect(agent.createSessionCalls[0]?.importantContext).toContain("cursor rules profile");
+    expect(agent.sendMessageCalls).toHaveLength(1);
+    expect(agent.sendMessageCalls[0]).toContain("<session-profile");
+    expect(agent.sendMessageCalls[0]).toContain("这是一个全新的对话 session");
+    expect(agent.sendMessageCalls[0]).not.toContain("<niubot-system-rules>");
+    expect(agent.sendMessageCalls[0]).not.toContain("cursor rules profile");
     expect(agent.sendMessageCalls[0]).toContain("hello");
   });
 
@@ -2180,7 +2227,7 @@ describe("Pipeline.recover", () => {
 
     const db = initDatabase(path.join(dir, "niubot.db"));
     const agent = new CompactCountingAgent([1, undefined]);
-    agent.supportsSystemPrompt = false;
+    agent.needsStableUserPrefixFlag = true;
     const pipeline = new Pipeline(
       db,
       createImStub(),
@@ -2216,6 +2263,52 @@ describe("Pipeline.recover", () => {
     expect(agent.sendMessageCalls[1]).toContain("<niubot-system-rules>");
     expect(agent.sendMessageCalls[1]).toContain("no-system profile");
     expect(agent.sendMessageCalls[1]).toContain("<session-profile");
+    expect(agent.sendMessageCalls[1]).toContain("second");
+  });
+
+  test("does not reassert stable context after compact when backend handles stable itself", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+    writeFileSync(path.join(dir, "bot_profile.md"), "cursor compact profile", "utf-8");
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const agent = new CompactCountingAgent([1, undefined]);
+    agent.needsStableUserPrefixFlag = false;
+    const pipeline = new Pipeline(
+      db,
+      createImStub(),
+      agent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "cursor",
+      undefined,
+      undefined,
+      undefined,
+      {
+        botProfilePath: path.join(dir, "bot_profile.md"),
+      },
+    );
+
+    await pipeline.start();
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "first",
+      platformMsgId: "m-compact-rules-1",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "second",
+      platformMsgId: "m-compact-rules-2",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(agent.sendMessageCalls).toHaveLength(2);
+    expect(agent.sendMessageCalls[1]).toContain(COMPACT_RECOVERY_REMINDER);
+    expect(agent.sendMessageCalls[1]).toContain("<session-profile");
+    expect(agent.sendMessageCalls[1]).not.toContain("<niubot-system-rules>");
+    expect(agent.sendMessageCalls[1]).not.toContain("cursor compact profile");
     expect(agent.sendMessageCalls[1]).toContain("second");
   });
 
@@ -2510,7 +2603,7 @@ describe("Pipeline.recover", () => {
     expect(sentCards.some((card) => card.content.includes("最近失败") && card.content.includes("agent failed"))).toBe(true);
   });
 
-  test("/status card shows latest data age", async () => {
+  test("/status card shows latest agent output age from stdout activity", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-06-09T04:03:20Z"));
 
@@ -2518,26 +2611,12 @@ describe("Pipeline.recover", () => {
     tempDirs.push(dir);
 
     const db = initDatabase(path.join(dir, "niubot.db"));
-    db.prepare(`
-      INSERT INTO messages (chat_id, sender_id, role, content_text, created_at, platform)
-      VALUES ('c1', 'u2', 'user', 'hello', '2026-06-09 04:00:00', 'feishu')
-    `).run();
-    recordRuntimeEvent(db, {
-      botId: "NiuBot",
-      chatId: "c1",
-      runId: "run-1",
-      messageIds: [1],
-      stage: "failed",
-      event: "failed",
-      error: "agent failed",
-    });
-    db.prepare("UPDATE runtime_events SET created_at = '2026-06-09 03:59:00'").run();
-
+    const agent = new WatchdogAgent();
     const { im, sentCards } = createRecordingImStub();
     const pipeline = new Pipeline(
       db,
       im,
-      new RecordingAgent(),
+      agent,
       createBotIdentity(),
       dir,
       path.join(dir, "niubot.db"),
@@ -2545,10 +2624,101 @@ describe("Pipeline.recover", () => {
       "codex",
     );
 
+    await pipeline.start();
+
+    const agentSessionId = "agent_status_1";
+    (agent as any).sessions.set(agentSessionId, agent.buildSession({ workingDirectory: dir }));
+    (pipeline as any).chatSessions.set("c1", {
+      agentSession: { id: agentSessionId },
+      sessionId: "sess1",
+      platformChatId: "chat-open-id",
+      userId: "u2",
+      hasReplied: true,
+    });
+    const run = (pipeline as any).runtimeState.createRun({
+      chatId: "c1",
+      triggerMessageIds: [1],
+      triggerPlatformMsgIds: ["m1"],
+      mergedText: "hello",
+    });
+    (pipeline as any).runtimeState.markRunStage(run.runId, "agent_running");
+
+    const threeMinutesAgo = Date.now() - 3 * 60_000;
+    agent.markRunning(agentSessionId);
+    (agent as any).activityMap.set(agentSessionId, {
+      status: "running",
+      startedAt: threeMinutesAgo,
+      lastActiveAt: threeMinutesAgo,
+      completionDetected: false,
+      compacting: false,
+      recentLines: ['{"type":"assistant"}'],
+      notifyCount: 0,
+    });
+
     const handled = (pipeline as any).handleBuiltinCommand("/status", "u2", "c1", "chat-open-id", "p2p", "status-msg");
 
     expect(handled).toBe(true);
     expect(sentCards[0]?.content).toContain("**最新数据:** 3 分钟前");
+  });
+
+  test("/status card latest data uses lastActiveAt only, not jsonl mtime", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-09T04:03:20Z"));
+
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const agent = new WatchdogAgent();
+    const { im, sentCards } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db,
+      im,
+      agent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+
+    await pipeline.start();
+
+    const agentSessionId = "agent_status_2";
+    (agent as any).sessions.set(agentSessionId, agent.buildSession({ workingDirectory: dir }));
+    (pipeline as any).chatSessions.set("c1", {
+      agentSession: { id: agentSessionId },
+      sessionId: "sess1",
+      platformChatId: "chat-open-id",
+      userId: "u2",
+      hasReplied: true,
+    });
+    const run = (pipeline as any).runtimeState.createRun({
+      chatId: "c1",
+      triggerMessageIds: [1],
+      triggerPlatformMsgIds: ["m1"],
+      mergedText: "hello",
+    });
+    (pipeline as any).runtimeState.markRunStage(run.runId, "agent_running");
+
+    const fiveMinutesAgo = Date.now() - 5 * 60_000;
+    const oneMinuteAgo = Date.now() - 60_000;
+    agent.markRunning(agentSessionId);
+    (agent as any).activityMap.set(agentSessionId, {
+      status: "running",
+      startedAt: fiveMinutesAgo,
+      lastActiveAt: fiveMinutesAgo,
+      completionDetected: false,
+      compacting: false,
+      recentLines: ['{"type":"assistant"}'],
+      notifyCount: 0,
+    });
+    vi.spyOn(agent as any, "probeSessionFileMtime").mockReturnValue(oneMinuteAgo);
+
+    const handled = (pipeline as any).handleBuiltinCommand("/status", "u2", "c1", "chat-open-id", "p2p", "status-msg");
+
+    expect(handled).toBe(true);
+    expect(sentCards[0]?.content).toContain("**最新数据:** 5 分钟前");
   });
 
   test("/stop marks the active runtime run stopped and clears pending messages", async () => {

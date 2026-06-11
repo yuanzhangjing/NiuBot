@@ -1,0 +1,25 @@
+/**
+ * 内置 backend 的 stable context 契约：
+ * - needsStableUserPrefix：pipeline 是否前缀注入 / compact 重灌
+ * - 其余交付由 backend 在 createSession / buildInput 自行处理
+ */
+import { describe, expect, it } from "vitest";
+import ClaudeBackend from "./claude.js";
+import CodexBackend from "./codex.js";
+import CursorAgentBackend from "./cursor-agent.js";
+import OpencodeBackend from "./opencode.js";
+import TraeCliBackend from "./traecli.js";
+
+const BUILTIN_BACKENDS = [
+  { name: "claude", backend: new ClaudeBackend(), needsPrefix: false },
+  { name: "codex", backend: new CodexBackend(), needsPrefix: true },
+  { name: "traecli", backend: new TraeCliBackend(), needsPrefix: true },
+  { name: "opencode", backend: new OpencodeBackend(), needsPrefix: true },
+  { name: "cursor", backend: new CursorAgentBackend(), needsPrefix: false },
+];
+
+describe("builtin backend stable context", () => {
+  it.each(BUILTIN_BACKENDS)("$name needsStableUserPrefix=$needsPrefix", ({ backend, needsPrefix }) => {
+    expect(backend.needsStableUserPrefix()).toBe(needsPrefix);
+  });
+});

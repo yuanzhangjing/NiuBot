@@ -18,8 +18,6 @@ interface TraeCliSession extends BaseCliSession {
 }
 
 export default class TraeCliBackend extends CliAgentBackend<TraeCliSession> {
-  readonly supportsSystemPrompt = false;
-
   constructor() {
     super("traecli");
   }

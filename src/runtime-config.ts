@@ -1,4 +1,4 @@
-import { type AgentBackendType, type BuiltinBackendType, DEFAULT_LITE_MODELS } from "./config.js";
+import { type AgentBackendType, type BuiltinBackendType, DEFAULT_LITE_MODELS, normalizeBackend } from "./config.js";
 import type { BotRuntimeState } from "./database/schema.js";
 
 export interface ResolvedBotRuntimeConfig {
@@ -17,12 +17,15 @@ export function resolveBotRuntimeConfig(
   runtimeState: BotRuntimeState | undefined,
   availableBackends: string[],
 ): ResolvedBotRuntimeConfig {
-  const runtimeBackend = runtimeState?.backendType;
-  const backendType = runtimeBackend && availableBackends.includes(runtimeBackend)
-    ? runtimeBackend
-    : configBackend && availableBackends.includes(configBackend)
-      ? configBackend
-      : availableBackends[0] ?? "claude";
+  const pickBackend = (raw: string | undefined): string | undefined => {
+    const normalized = normalizeBackend(raw);
+    return normalized && availableBackends.includes(normalized) ? normalized : undefined;
+  };
+
+  const backendType = pickBackend(runtimeState?.backendType)
+    ?? pickBackend(configBackend)
+    ?? availableBackends[0]
+    ?? "claude";
 
   const defaultLiteModel = getBackendDefaultLiteModel(backendType);
 

@@ -628,11 +628,9 @@ export class Pipeline {
       const stableContext = this.buildStableSystemContext();
 
       try {
-        const supportsSystemPrompt = this.agent.supportsSystemPrompt === true;
-
         const agentSession = await this.createAgentSession({
           workingDirectory: this.workingDirectory,
-          importantContext: supportsSystemPrompt ? (stableContext || undefined) : undefined,
+          importantContext: stableContext || undefined,
           userId: row.user_id ?? undefined,
           chatId: row.chat_id,
           chatType,
@@ -651,7 +649,7 @@ export class Pipeline {
         if (!isResuming) {
           this.pendingMessageContext.set(row.chat_id, sessionProfile);
         }
-        if (!supportsSystemPrompt && stableContext && !isResuming) {
+        if (this.agent.needsStableUserPrefix() && stableContext && !isResuming) {
           this.pendingStableContext.set(row.chat_id, stableContext);
         }
 
@@ -1281,8 +1279,10 @@ export class Pipeline {
       return;
     }
 
-    const latestDataAt = this.getLatestDataTimestamp();
-    const latestDataAge = latestDataAt ? formatRelativeAge(latestDataAt) : "无";
+    const latestAgentOutputAt = this.getLatestAgentOutputAt(chatId);
+    const latestDataAge = latestAgentOutputAt !== undefined
+      ? formatRelativeAgeMs(latestAgentOutputAt)
+      : "无";
     const content = [
       `**最新数据:** ${latestDataAge}`,
       ...sections,
@@ -1339,20 +1339,32 @@ export class Pipeline {
       .catch((err) => this.log.error("status send failed", { platformChatId, error: String(err) }));
   }
 
-  private getLatestDataTimestamp(): string | undefined {
-    const row = this.db.prepare(`
-      SELECT MAX(ts) AS latestAt
-      FROM (
-        SELECT MAX(created_at) AS ts FROM messages
-        UNION ALL SELECT MAX(started_at) AS ts FROM sessions
-        UNION ALL SELECT MAX(last_active_at) AS ts FROM sessions
-        UNION ALL SELECT MAX(ended_at) AS ts FROM sessions
-        UNION ALL SELECT MAX(created_at) AS ts FROM runtime_events
-        UNION ALL SELECT MAX(last_run_at) AS ts FROM cron_jobs
-      )
-      WHERE ts IS NOT NULL
-    `).get() as { latestAt: string | null } | undefined;
-    return row?.latestAt ?? undefined;
+  /** /status：与 watchdog 一致，取 agent activity.lastActiveAt */
+  private getLatestAgentOutputAt(chatId: string): number | undefined {
+    if (!(this.agent instanceof CliAgentBackend)) return undefined;
+    const cliAgent = this.agent as CliAgentBackend;
+
+    let latest: number | undefined;
+    const considerSession = (agentSessionId: string) => {
+      const activity = cliAgent.getActivity(agentSessionId);
+      if (activity?.lastActiveAt) {
+        latest = latest === undefined
+          ? activity.lastActiveAt
+          : Math.max(latest, activity.lastActiveAt);
+      }
+    };
+
+    const chatSession = this.chatSessions.get(chatId);
+    if (chatSession) {
+      considerSession(chatSession.agentSession.id);
+    }
+    for (const [sessionId, task] of this.runningTasks) {
+      if (task.chatId === chatId) {
+        considerSession(sessionId);
+      }
+    }
+
+    return latest;
   }
 
   // ── /cron command ─────────────────────────────────────────────
@@ -1497,10 +1509,9 @@ export class Pipeline {
     const normalContext = buildNormalContext(this.db, chatId, this.workingDirectory, undefined, chatType, userId);
 
     // Create independent agent session
-    const supportsSystemPrompt = this.agent.supportsSystemPrompt === true;
     const agentSession = await this.createAgentSession({
       workingDirectory: this.workingDirectory,
-      importantContext: supportsSystemPrompt ? (stableContext || undefined) : undefined,
+      importantContext: stableContext || undefined,
       userId: userId ?? undefined,
       chatId,
       chatType,
@@ -1533,7 +1544,7 @@ export class Pipeline {
     // Inject context prefix
     let messageToSend = prompt;
     const contextParts: string[] = [];
-    if (!supportsSystemPrompt && stableContext) {
+    if (this.agent.needsStableUserPrefix() && stableContext) {
       contextParts.push(stableContext);
     }
     contextParts.push(sessionProfile);
@@ -2387,7 +2398,7 @@ export class Pipeline {
         }
         if (compactRecovery) {
           const recoveryParts = [COMPACT_RECOVERY_REMINDER];
-          if (this.agent.supportsSystemPrompt !== true) {
+          if (this.agent.needsStableUserPrefix()) {
             recoveryParts.push(this.buildStableSystemContext());
           }
           const recoveryUserId = processChatType === "group" ? undefined : chatSession.userId;
@@ -2710,12 +2721,9 @@ export class Pipeline {
     }
     this.pendingMessageContext.set(chatId, messageContextParts.join("\n\n"));
 
-    // backend 不支持 persistent system prompt 时，stable context fallback 到首条消息前缀
-    const supportsSystemPrompt = this.agent.supportsSystemPrompt === true;
-
     const agentSession = await this.createAgentSession({
       workingDirectory: this.workingDirectory,
-      importantContext: supportsSystemPrompt ? (stableContext || undefined) : undefined,
+      importantContext: stableContext || undefined,
       userId: userId ?? undefined,
       chatId,
       chatType,
@@ -2728,7 +2736,7 @@ export class Pipeline {
       botProfilePath: this.stableContextOptions.botProfilePath,
     });
 
-    if (!supportsSystemPrompt && stableContext) {
+    if (this.agent.needsStableUserPrefix() && stableContext) {
       this.pendingStableContext.set(chatId, stableContext);
     }
     this.pendingNewSessionReminder.add(chatId);
@@ -2774,7 +2782,7 @@ export class Pipeline {
   /** 首条消息或恢复消息的动态上下文暂存 */
   private pendingMessageContext = new Map<string, string>();
 
-  /** stable context 暂存（backend 不支持 persistent system prompt 时 fallback） */
+  /** stable context 暂存（needsStableUserPrefix 时挂到首条 user 消息） */
   private pendingStableContext = new Map<string, string>();
 
   /** 新 session 首条消息提醒暂存 */
@@ -3350,8 +3358,11 @@ function formatUptime(ms: number): string {
 function formatRelativeAge(sqlUtcDatetime: string): string {
   const timestamp = parseSqlUtcDatetime(sqlUtcDatetime);
   if (timestamp === undefined) return "未知";
+  return formatRelativeAgeMs(timestamp);
+}
 
-  const diffMs = Math.max(0, Date.now() - timestamp);
+function formatRelativeAgeMs(epochMs: number): string {
+  const diffMs = Math.max(0, Date.now() - epochMs);
   if (diffMs < 60_000) return "刚刚";
 
   const minutes = Math.floor(diffMs / 60_000);

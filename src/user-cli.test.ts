@@ -93,11 +93,13 @@ describe("user-cli init model configuration", () => {
     expect(getSuggestedLiteModel("claude")).toBe("haiku");
     expect(getSuggestedLiteModel("codex")).toBe("gpt-5.4-mini");
     expect(getSuggestedLiteModel("traecli")).toBe("Gemini-3-Flash-Preview");
+    expect(getSuggestedLiteModel("cursor")).toBe("composer-2.5");
+    expect(getSuggestedLiteModel("cursor-agent")).toBe("composer-2.5");
     expect(getSuggestedLiteModel("my-agent")).toBeUndefined();
   });
 
   it("writes chosen model settings into config.yaml", () => {
-    const config = generateConfigTemplate("codex", undefined, "NiuBot", "app-id", "app-secret", "gpt-5.4", "gpt-5.4-mini");
+    const config = generateConfigTemplate("codex", "NiuBot", "app-id", "app-secret", "gpt-5.4", "gpt-5.4-mini");
 
     expect(config).toContain('model: "gpt-5.4"');
     expect(config).toContain('liteModel: "gpt-5.4-mini"');
@@ -106,7 +108,7 @@ describe("user-cli init model configuration", () => {
   });
 
   it("does not include an output rewrite placeholder in new config.yaml", () => {
-    const config = generateConfigTemplate("codex", undefined, "NiuBot", "app-id", "app-secret");
+    const config = generateConfigTemplate("codex", "NiuBot", "app-id", "app-secret");
 
     expect(config).not.toContain("outputRewrite");
     expect(config).not.toContain("deepseek-v4-flash");
