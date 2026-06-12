@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { describe, expect, it, afterEach, vi } from "vitest";
-import { CURSOR_ENGINE_RULE_BASENAME, CURSOR_RECOVERY_RULE_BASENAME, CURSOR_RULES_DIR } from "./cursor-workspace-rules.js";
+import { CURSOR_ENGINE_RULE_BASENAME, CURSOR_RULES_DIR } from "./cursor-workspace-rules.js";
 import CursorAgentBackend from "./cursor-agent.js";
 
 describe("CursorAgentBackend", () => {
@@ -18,6 +18,7 @@ describe("CursorAgentBackend", () => {
   it("does not prefix stable into user messages", () => {
     const backend = new CursorAgentBackend();
     expect(backend.needsStableUserPrefix()).toBe(false);
+    expect(backend.needsCompactRecoveryReminder()).toBe(false);
   });
 
   it("syncs stable context to .cursor/rules on createSession", async () => {
@@ -32,11 +33,8 @@ describe("CursorAgentBackend", () => {
     });
 
     const enginePath = join(workDir, CURSOR_RULES_DIR, CURSOR_ENGINE_RULE_BASENAME);
-    const recoveryPath = join(workDir, CURSOR_RULES_DIR, CURSOR_RECOVERY_RULE_BASENAME);
     expect(existsSync(enginePath)).toBe(true);
-    expect(existsSync(recoveryPath)).toBe(true);
     expect(readFileSync(enginePath, "utf8")).toContain("cursor stable");
-    expect(readFileSync(recoveryPath, "utf8")).toContain("nbt whoami");
   });
 
   it("builds a headless trusted stream-json request and reads prompt from stdin", () => {

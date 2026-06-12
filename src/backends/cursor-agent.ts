@@ -79,6 +79,10 @@ export default class CursorAgentBackend extends CliAgentBackend<CursorAgentSessi
     return false;
   }
 
+  needsCompactRecoveryReminder(): boolean {
+    return false;
+  }
+
   command(): string {
     return "cursor-agent";
   }
@@ -94,7 +98,6 @@ export default class CursorAgentBackend extends CliAgentBackend<CursorAgentSessi
       this.log.info("cursor workspace rules synced", {
         rulesDir: syncResult.rulesDir,
         engineUpdated: syncResult.engineUpdated,
-        recoveryUpdated: syncResult.recoveryUpdated,
       });
     }
     return super.createSession(config);

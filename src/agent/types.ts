@@ -98,6 +98,12 @@ export interface AgentBackend {
    */
   needsStableUserPrefix(): boolean;
 
+  /**
+   * compact 后是否在 user 消息里注入 COMPACT_RECOVERY_REMINDER。
+   * Cursor 通过 workspace rules 的 Compact Recovery 段交付。
+   */
+  needsCompactRecoveryReminder(): boolean;
+
   /** 探测模型名是否可用 */
   validateModel(modelName: string): Promise<{ valid: boolean; error?: string }>;
 }

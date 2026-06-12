@@ -1,6 +1,7 @@
 /**
  * 内置 backend 的 stable context 契约：
  * - needsStableUserPrefix：pipeline 是否前缀注入 / compact 重灌
+ * - needsCompactRecoveryReminder：compact 后是否注入恢复提醒
  * - 其余交付由 backend 在 createSession / buildInput 自行处理
  */
 import { describe, expect, it } from "vitest";
@@ -21,5 +22,10 @@ const BUILTIN_BACKENDS = [
 describe("builtin backend stable context", () => {
   it.each(BUILTIN_BACKENDS)("$name needsStableUserPrefix=$needsPrefix", ({ backend, needsPrefix }) => {
     expect(backend.needsStableUserPrefix()).toBe(needsPrefix);
+  });
+
+  it("cursor skips compact recovery reminder because workspace rules carry recovery", () => {
+    const backend = new CursorAgentBackend();
+    expect(backend.needsCompactRecoveryReminder()).toBe(false);
   });
 });

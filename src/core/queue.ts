@@ -12,7 +12,7 @@ export interface QueuedMessage {
   senderLabel?: string;
   /** 发送者内部 ID，用于群聊 speaker 注入 */
   senderId?: string;
-  /** 消息在 DB 中的 ID，用于 process() 标记 agent_seen */
+  /** 消息在 DB 中的 ID，用于 runtime 事件关联 */
   dbMsgId?: number;
 }
 

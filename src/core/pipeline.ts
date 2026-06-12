@@ -16,7 +16,6 @@ import type { QueuedMessage } from "./queue.js";
 import {
   ensureUser, ensureChat, storeMessage, updateChatName,
   getUserShortLabel, getChatShortLabel, formatSenderLabel, getMessageByPlatformId, updateMessageContent, updateMessagePlatformId,
-  getUnseenMessages, markMessagesSeen,
   setUserAdminRole, getAdminUserIds, getUserAdminRole, type AdminRole,
   getBotBackendModelState, setBotBackendModelState, setBotRuntimeState, clearBotRuntimeModels,
   hasUpdateNotification, recordUpdateNotification,
@@ -2397,7 +2396,10 @@ export class Pipeline {
           parts.push(messageCtx);
         }
         if (compactRecovery) {
-          const recoveryParts = [COMPACT_RECOVERY_REMINDER];
+          const recoveryParts: string[] = [];
+          if (this.agent.needsCompactRecoveryReminder()) {
+            recoveryParts.push(COMPACT_RECOVERY_REMINDER);
+          }
           if (this.agent.needsStableUserPrefix()) {
             recoveryParts.push(this.buildStableSystemContext());
           }
@@ -2439,30 +2441,6 @@ export class Pipeline {
         }
       }
 
-      // Inject unseen messages（agent 没见过的消息：内置命令回复、cron 结果等）
-      // 只对 p2p 生效，群聊不注入
-      if (processChatType === "p2p") {
-        const sessionRow = this.db.prepare("SELECT start_msg_id FROM sessions WHERE id = ?").get(chatSession.sessionId) as { start_msg_id: number | null } | undefined;
-        const baseline = sessionRow?.start_msg_id ?? 0;
-        // 先把走 agent 的用户消息标为已见，再查 unseen 时就不会查到它们
-        const agentMsgIds = messages.map((m) => m.dbMsgId).filter((id): id is number => id != null);
-        if (agentMsgIds.length > 0) {
-          markMessagesSeen(this.db, agentMsgIds);
-        }
-        const unseen = getUnseenMessages(this.db, chatId, baseline);
-        if (unseen.length > 0) {
-          const lines = unseen.map((m) => {
-            const sender = formatSenderLabel(m.senderId, m.senderName, m.role);
-            const text = m.contentText ?? "";
-            const truncated = text.length > 200 ? text.slice(0, 200) + "…" : text;
-            return `${sender}: ${truncated}`;
-          });
-          messageToSend = `<unseen-messages>\n${lines.join("\n")}\n以上消息已发送给用户。不必主动复述，但应将其作为上下文纳入后续回复。\n</unseen-messages>\n\n${messageToSend}`;
-          markMessagesSeen(this.db, unseen.map((m) => m.id));
-          this.log.info("injected unseen messages", { chatId, count: unseen.length });
-        }
-      }
-
       if (signal?.aborted) {
         this.log.info("process cancelled before sending to agent", { chatId });
         await this.archiveSession(chatId);
@@ -2497,7 +2475,7 @@ export class Pipeline {
         }
       }
 
-      // 存储 agent 回复并标记已见
+      // 存储 agent 回复
       const replyMsgId = storeMessage(this.db, {
         chatId,
         senderId: this.botUserId!,
@@ -2505,7 +2483,6 @@ export class Pipeline {
         role: "assistant",
         contentText: response.text,
         platform: this.botIdentity.platform,
-        agentSeen: true,
       });
 
       // 更新 session 统计（COALESCE 保证 agent_session_id 只写一次，后续不覆盖）

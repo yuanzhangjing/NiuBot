@@ -21,6 +21,7 @@ class RecordingAgent implements AgentBackend {
   async cancelSession(): Promise<void> {}
   async closeSession(): Promise<void> {}
   needsStableUserPrefix() { return false; }
+  needsCompactRecoveryReminder() { return true; }
   async validateModel(): Promise<{ valid: boolean }> { return { valid: true }; }
 }
 

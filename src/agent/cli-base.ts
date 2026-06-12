@@ -62,6 +62,11 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
     return true;
   }
 
+  /** compact 后是否注入恢复提醒；Cursor 由 workspace rules 承载 */
+  needsCompactRecoveryReminder(): boolean {
+    return true;
+  }
+
   /** 获取指定 session 的活动状态（供 watchdog / /list 读取） */
   getActivity(sessionId: string): AgentSessionActivity | undefined {
     const a = this.activityMap.get(sessionId);

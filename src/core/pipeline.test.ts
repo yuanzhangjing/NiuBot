@@ -21,6 +21,7 @@ import { ResponseSender } from "./response-sender.js";
 
 class RecordingAgent implements AgentBackend {
   needsStableUserPrefixFlag = false;
+  needsCompactRecoveryReminderFlag = true;
   readonly createSessionCalls: SessionConfig[] = [];
   readonly sendMessageCalls: string[] = [];
   readonly closeSessionCalls: string[] = [];
@@ -59,6 +60,10 @@ class RecordingAgent implements AgentBackend {
 
   needsStableUserPrefix(): boolean {
     return this.needsStableUserPrefixFlag;
+  }
+
+  needsCompactRecoveryReminder(): boolean {
+    return this.needsCompactRecoveryReminderFlag;
   }
 }
 
@@ -2274,6 +2279,7 @@ describe("Pipeline.recover", () => {
     const db = initDatabase(path.join(dir, "niubot.db"));
     const agent = new CompactCountingAgent([1, undefined]);
     agent.needsStableUserPrefixFlag = false;
+    agent.needsCompactRecoveryReminderFlag = false;
     const pipeline = new Pipeline(
       db,
       createImStub(),
@@ -2305,7 +2311,7 @@ describe("Pipeline.recover", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(agent.sendMessageCalls).toHaveLength(2);
-    expect(agent.sendMessageCalls[1]).toContain(COMPACT_RECOVERY_REMINDER);
+    expect(agent.sendMessageCalls[1]).not.toContain(COMPACT_RECOVERY_REMINDER);
     expect(agent.sendMessageCalls[1]).toContain("<session-profile");
     expect(agent.sendMessageCalls[1]).not.toContain("<niubot-system-rules>");
     expect(agent.sendMessageCalls[1]).not.toContain("cursor compact profile");
