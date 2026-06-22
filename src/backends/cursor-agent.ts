@@ -3,7 +3,7 @@
  * 通过 `cursor-agent -p` 命令驱动 agent，stream-json 输出。
  */
 
-import { closeSync, existsSync, openSync, readFileSync, readSync, statSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -223,7 +223,11 @@ export default class CursorAgentBackend extends CliAgentBackend<CursorAgentSessi
     try {
       const size = statSync(jsonlPath).size;
       if (size === 0) return;
-      activity.recentLines = this.readLastLines(jsonlPath, size, 3);
+      const lines = this.readLastLines(jsonlPath, size, 3);
+      // jsonl 尚未写入或路径不对时，保留 stdout 流式采集的 recentLines
+      if (lines.length > 0) {
+        activity.recentLines = lines;
+      }
     } catch { /* ignore */ }
   }
 
@@ -249,27 +253,60 @@ export default class CursorAgentBackend extends CliAgentBackend<CursorAgentSessi
     }
   }
 
+  private getCursorDataDir(): string {
+    const override = process.env.CURSOR_AGENT_HOME?.trim();
+    if (override) return resolve(override);
+    return join(homedir(), ".cursor");
+  }
+
   private getJsonlPath(session: CursorAgentSession): string | null {
     if (session.sessionLogPath && existsSync(session.sessionLogPath)) {
       return session.sessionLogPath;
     }
     if (!session.agentSessionId) return null;
 
-    const projectKey = this.getCursorProjectKey(session.workingDirectory);
-    const jsonlPath = join(
-      homedir(),
-      ".cursor",
-      "projects",
-      projectKey,
-      "agent-transcripts",
-      session.agentSessionId,
-      `${session.agentSessionId}.jsonl`,
-    );
-
-    if (existsSync(jsonlPath)) {
+    const jsonlPath = this.findJsonlPath(session.agentSessionId, session.workingDirectory);
+    if (jsonlPath) {
       session.sessionLogPath = jsonlPath;
       return jsonlPath;
     }
+    return null;
+  }
+
+  /** Cursor 可能用嵌套或扁平两种 jsonl 布局，project slug 也可能与 resolve 结果不一致。 */
+  private findJsonlPath(sessionId: string, workingDirectory: string): string | null {
+    for (const candidate of this.buildJsonlCandidates(sessionId, workingDirectory)) {
+      if (existsSync(candidate)) return candidate;
+    }
+    return this.scanProjectsForJsonl(sessionId);
+  }
+
+  private buildJsonlCandidates(sessionId: string, workingDirectory: string): string[] {
+    const transcriptsDir = join(
+      this.getCursorDataDir(),
+      "projects",
+      this.getCursorProjectKey(workingDirectory),
+      "agent-transcripts",
+    );
+    return [
+      join(transcriptsDir, sessionId, `${sessionId}.jsonl`),
+      join(transcriptsDir, `${sessionId}.jsonl`),
+    ];
+  }
+
+  private scanProjectsForJsonl(sessionId: string): string | null {
+    const projectsDir = join(this.getCursorDataDir(), "projects");
+    if (!existsSync(projectsDir)) return null;
+    try {
+      for (const projectKey of readdirSync(projectsDir)) {
+        const transcriptsDir = join(projectsDir, projectKey, "agent-transcripts");
+        if (!existsSync(transcriptsDir)) continue;
+        const nested = join(transcriptsDir, sessionId, `${sessionId}.jsonl`);
+        if (existsSync(nested)) return nested;
+        const flat = join(transcriptsDir, `${sessionId}.jsonl`);
+        if (existsSync(flat)) return flat;
+      }
+    } catch { /* ignore */ }
     return null;
   }
 

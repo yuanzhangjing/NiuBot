@@ -36,6 +36,7 @@ NiuBot ships with built-in backends. Pick one whose CLI is installed:
 | `traecli` | `traecli` (Trae CLI) |
 | `opencode` | `opencode` |
 | `cursor` | `cursor-agent` (Cursor Agent CLI) |
+| `pi` | `pi` (Pi coding agent) |
 
 Check availability:
 
@@ -45,11 +46,75 @@ codex --version
 traecli --version
 opencode --version
 cursor-agent --version
+pi --version
 ```
 
 If at least one is available, note which one the user wants (e.g. `claude`). Before writing config, also ask whether they want a separate `liteModel` for cheaper background tasks. Proceed to [Step 2.1](#step-21-generate-config).
 
 If none are available, tell the user to install one first.
+
+#### Pi backend
+
+Pi uses its own native config under `~/.pi/agent/`:
+
+| File | Purpose |
+|------|---------|
+| `auth.json` | API keys (`/login` or manual) — **primary key source** |
+| `models.json` | Custom providers/endpoints/models (no `apiKey` unless you manage env yourself) |
+| `settings.json` | `defaultProvider`, `defaultModel`, `defaultThinkingLevel` |
+
+NiuBot does **not** inject `~/.niubot/.env.deepseek-bak` or auto-edit Pi files. Configure Pi once, then set `backend: pi` in NiuBot. Provider, default model, and thinking level come from Pi `settings.json`; NiuBot only passes `--model` when you set `model` / `liteModel` in NiuBot config.
+
+Example DeepSeek via Anthropic-compatible API:
+
+```json
+// ~/.pi/agent/auth.json
+{
+  "anthropic": { "type": "api_key", "key": "your-api-key" }
+}
+```
+
+```json
+// ~/.pi/agent/models.json
+{
+  "providers": {
+    "anthropic": {
+      "baseUrl": "https://api.deepseek.com/anthropic",
+      "api": "anthropic-messages",
+      "models": [
+        {
+          "id": "deepseek-v4-pro",
+          "reasoning": true
+        },
+        {
+          "id": "deepseek-v4-flash",
+          "reasoning": true
+        }
+      ]
+    }
+  }
+}
+```
+
+Do **not** put `"apiKey": "$ANTHROPIC_API_KEY"` here unless that env var is always set — otherwise Pi may hang waiting for a key. Use `auth.json` instead.
+
+```json
+// ~/.pi/agent/settings.json
+{
+  "defaultProvider": "anthropic",
+  "defaultModel": "deepseek-v4-pro",
+  "defaultThinkingLevel": "xhigh"
+}
+```
+
+`defaultThinkingLevel` accepts `off`, `minimal`, `low`, `medium`, `high`, `xhigh`. NiuBot does not pass `--thinking`; change this file to adjust thinking depth.
+
+Install Pi CLI:
+
+```bash
+npm install -g @earendil-works/pi-coding-agent
+pi --version
+```
 
 ### Step 2.1: Generate Config
 
@@ -75,6 +140,7 @@ Before filling the config, ask the user the following questions **one at a time*
 - `traecli`: `Gemini-3-Flash-Preview`
 - `opencode`: `opencode-go/deepseek-v4-flash`
 - `cursor`: `composer-2.5`
+- `pi`: `deepseek-v4-flash`
 
 Example `config.yaml`:
 
@@ -91,7 +157,7 @@ bots:
 
 Config fields:
 - `id`: Unique bot identifier (immutable). Determines data directory (`~/.niubot/<id>/`) and default workspace (`~/niubot-workspace/<id>/`). **Do not change after setup.**
-- `backend`: Agent backend to use (required). One of: `claude`, `codex`, `traecli`, `opencode`, `cursor`.
+- `backend`: Agent backend to use (required). One of: `claude`, `codex`, `traecli`, `opencode`, `cursor`, `pi`.
 - `model`: Main model for conversations. Omit to use the CLI's default.
 - `liteModel`: Cheaper model for background tasks (archive summaries). Omit = same as main model.
   Recommended examples for built-in backends:
@@ -328,7 +394,7 @@ bots:
     appSecret: "xxx"
 
   - id: NewBot                # ← append new bot
-    backend: claude            # claude / codex / traecli / opencode / cursor
+    backend: claude            # claude / codex / traecli / opencode / cursor / pi
     appId: "cli_yyy"          # from Feishu app (Step 4)
     appSecret: "yyy"
     # model: ""               # optional: main model
@@ -344,6 +410,7 @@ Recommended lite models by backend:
 | traecli | `Gemini-3-Flash-Preview` |
 | opencode | `opencode-go/deepseek-v4-flash` |
 | cursor | `composer-2.5` |
+| pi | `deepseek-v4-flash` |
 
 #### 4. Create Feishu App (if new)
 

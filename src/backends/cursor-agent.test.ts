@@ -344,4 +344,101 @@ describe("CursorAgentBackend", () => {
     expect((backend as any).probeSessionFileMtime(session)).toBeGreaterThan(0);
     expect((backend as any).probeSessionLastLine(session)).toContain('"assistant"');
   });
+
+  it("finds flat Cursor Agent transcript JSONL layout", () => {
+    const backend = new CursorAgentBackend();
+    const homeDir = join(tmpdir(), `cursor-home-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+    const workDir = join(tmpdir(), `cursor-work-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+    tmpRoots.push(homeDir, workDir);
+    mkdirSync(homeDir, { recursive: true });
+    mkdirSync(workDir, { recursive: true });
+    vi.stubEnv("HOME", homeDir);
+
+    const session = backend.buildSession({ workingDirectory: workDir });
+    session.agentSessionId = "session-flat";
+
+    const projectKey = resolve(workDir).replace(/^[/\\]+/, "").replace(/[/\\]+/g, "-");
+    const transcriptPath = join(
+      homeDir,
+      ".cursor",
+      "projects",
+      projectKey,
+      "agent-transcripts",
+      "session-flat.jsonl",
+    );
+    mkdirSync(dirname(transcriptPath), { recursive: true });
+    writeFileSync(transcriptPath, `${JSON.stringify({ role: "assistant" })}\n`);
+
+    expect((backend as any).probeSessionLastLine(session)).toContain('"assistant"');
+  });
+
+  it("scans other project slugs when workspace key does not match", () => {
+    const backend = new CursorAgentBackend();
+    const homeDir = join(tmpdir(), `cursor-home-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+    const workDir = join(tmpdir(), `cursor-work-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+    tmpRoots.push(homeDir, workDir);
+    mkdirSync(homeDir, { recursive: true });
+    mkdirSync(workDir, { recursive: true });
+    vi.stubEnv("HOME", homeDir);
+
+    const session = backend.buildSession({ workingDirectory: workDir });
+    session.agentSessionId = "session-scan";
+
+    const transcriptPath = join(
+      homeDir,
+      ".cursor",
+      "projects",
+      "legacy-project-slug",
+      "agent-transcripts",
+      "session-scan",
+      "session-scan.jsonl",
+    );
+    mkdirSync(dirname(transcriptPath), { recursive: true });
+    writeFileSync(transcriptPath, `${JSON.stringify({ role: "assistant", text: "found" })}\n`);
+
+    expect((backend as any).probeSessionLastLine(session)).toContain('"found"');
+  });
+
+  it("refreshActivity keeps stdout recentLines when jsonl is still empty", () => {
+    const backend = new CursorAgentBackend();
+    const homeDir = join(tmpdir(), `cursor-home-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+    const workDir = join(tmpdir(), `cursor-work-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+    tmpRoots.push(homeDir, workDir);
+    mkdirSync(homeDir, { recursive: true });
+    mkdirSync(workDir, { recursive: true });
+    vi.stubEnv("HOME", homeDir);
+
+    const session = backend.buildSession({ workingDirectory: workDir });
+    session.agentSessionId = "session-empty-jsonl";
+    const sessionId = "niubot-session-1";
+    (backend as any).sessions.set(sessionId, session);
+
+    const projectKey = resolve(workDir).replace(/^[/\\]+/, "").replace(/[/\\]+/g, "-");
+    const transcriptPath = join(
+      homeDir,
+      ".cursor",
+      "projects",
+      projectKey,
+      "agent-transcripts",
+      "session-empty-jsonl",
+      "session-empty-jsonl.jsonl",
+    );
+    mkdirSync(dirname(transcriptPath), { recursive: true });
+    writeFileSync(transcriptPath, "");
+
+    const activity = {
+      status: "running" as const,
+      startedAt: Date.now(),
+      lastActiveAt: Date.now(),
+      completionDetected: false,
+      compacting: false,
+      recentLines: ['{"type":"assistant","message":"from stdout"}'],
+      notifyCount: 0,
+    };
+    (backend as any).activityMap.set(sessionId, activity);
+
+    (backend as any).refreshActivity(sessionId, activity);
+
+    expect(activity.recentLines).toEqual(['{"type":"assistant","message":"from stdout"}']);
+  });
 });

@@ -40,6 +40,9 @@ export const AGENT_REGISTRY = {
   cursor: {
     aliases: ["cursor", "cursor-agent"],
   },
+  pi: {
+    aliases: ["pi", "pi-agent", "pi-coding-agent"],
+  },
 } as const;
 
 /** 内置 agent backend 类型 */
@@ -97,6 +100,7 @@ export const DEFAULT_LITE_MODELS: Partial<Record<BuiltinBackendType, string>> = 
   traecli: "Gemini-3-Flash-Preview",
   opencode: "opencode-go/deepseek-v4-flash",
   cursor: "composer-2.5",
+  pi: "deepseek-v4-flash",
 };
 
 const BACKEND_ALIAS_MAP = new Map<string, BuiltinBackendType>(

@@ -26,6 +26,7 @@ const BUILTIN_BACKEND_PATHS: Record<string, () => Promise<{ default: new (option
   traecli: () => import("./backends/traecli.js"),
   opencode: () => import("./backends/opencode.js"),
   cursor: () => import("./backends/cursor-agent.js"),
+  pi: () => import("./backends/pi.js"),
 };
 
 const backendClassCache = new Map<string, new (options: Record<string, unknown>) => CliAgentBackend>();

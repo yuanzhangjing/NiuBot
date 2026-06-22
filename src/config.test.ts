@@ -36,6 +36,14 @@ bots:
     expect(DEFAULT_LITE_MODELS.cursor).toBe("composer-2.5");
   });
 
+  it("registers pi as a built-in backend with aliases and lite model", () => {
+    expect(BUILTIN_BACKEND_LIST).toContain("pi");
+    expect(normalizeBackend("pi")).toBe("pi");
+    expect(normalizeBackend("pi-agent")).toBe("pi");
+    expect(normalizeBackend("pi-coding-agent")).toBe("pi");
+    expect(DEFAULT_LITE_MODELS.pi).toBe("deepseek-v4-flash");
+  });
+
   it("does not assign a workspace project context path by default", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-config-"));
     tempDirs.push(dir);

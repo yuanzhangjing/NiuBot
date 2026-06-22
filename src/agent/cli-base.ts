@@ -434,7 +434,10 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
           // compact 检测（通用：所有 backend 共享）
           try {
             const parsed = JSON.parse(line);
-            if (parsed.type === "system" && parsed.subtype === "status" && parsed.status === "compacting") {
+            if (
+              (parsed.type === "system" && parsed.subtype === "status" && parsed.status === "compacting")
+              || parsed.type === "compaction_start"
+            ) {
               if (myActivity) myActivity.compacting = true;
               try {
                 hooks.onStatus?.("compacting");
@@ -444,6 +447,8 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
                   error: String(err),
                 });
               }
+            } else if (parsed.type === "compaction_end") {
+              if (myActivity) myActivity.compacting = false;
             } else {
               if (myActivity && myActivity.compacting) myActivity.compacting = false;
             }

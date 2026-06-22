@@ -347,6 +347,7 @@ function scanBackend(name: string): BackendScanResult {
     traecli: { cmd: "traecli", args: ["--version"] },
     opencode: { cmd: "opencode", args: ["--version"] },
     cursor: { cmd: "cursor-agent", args: ["--version"] },
+    pi: { cmd: "pi", args: ["--version"] },
   };
 
   const entry = commands[name];
