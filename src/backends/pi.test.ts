@@ -132,7 +132,7 @@ describe("PiBackend", () => {
     ].join("\n"), session);
 
     expect(parsed.model).toBe("deepseek-v4-pro[1m]");
-    expect(parsed.contextTokens).toBe(2042);
+    expect(parsed.contextTokens).toBe(2142);
     expect(parsed.compactCount).toBe(1);
   });
 

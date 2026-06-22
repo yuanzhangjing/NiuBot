@@ -340,7 +340,7 @@ function extractPiMessageText(message: PiAgentMessage): string {
 
 function estimatePiContextTokens(usage?: PiAgentMessage["usage"]): number {
   if (!usage) return 0;
-  return (usage.input ?? 0) + (usage.output ?? 0);
+  return (usage.input ?? 0) + (usage.output ?? 0) + (usage.cacheRead ?? 0);
 }
 
 function extractPiAssistantError(message: PiAgentMessage): string | undefined {
