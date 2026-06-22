@@ -2569,8 +2569,8 @@ describe("Pipeline.recover", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(handled).toBe(true);
-    expect(sentCards.some((card) => card.content.includes("sending_response"))).toBe(true);
-    expect(sentCards.some((card) => card.content.includes("pending: 1"))).toBe(true);
+    expect(sentCards.some((card) => card.content.includes("处理中"))).toBe(true);
+    expect(sentCards.some((card) => card.content.includes("队列: 1"))).toBe(true);
 
     resolveAgentCard?.("pmid-1");
     await new Promise((resolve) => setTimeout(resolve, 0));

@@ -1217,14 +1217,24 @@ export class Pipeline {
     if (activeRun) {
       count++;
       const elapsed = formatUptime(Date.now() - activeRun.startedAt);
-      sections.push(`**主会话**（${displayRunStage(activeRun.stage)} · ${elapsed}）`);
-      sections.push([
-        `stage: ${activeRun.stage}`,
-        `run: ${activeRun.runId}`,
-        `messages: ${activeRun.triggerMessageIds.length}`,
-        `pending: ${this.queue.pendingCount(chatId)}`,
-      ].join("\n"));
       const session = this.chatSessions.get(chatId);
+      const agentSid = (session && typeof cliAgent.getAgentSessionId === "function")
+        ? cliAgent.getAgentSessionId(session.agentSession.id)
+        : undefined;
+      const statusLabel = activeRun.stage === "agent_running" || activeRun.stage === "sending_response"
+        ? "处理中" : displayRunStage(activeRun.stage);
+
+      const mainLines: string[] = [];
+      mainLines.push(`**⚡ ${statusLabel}** · ${elapsed}`);
+      if (this.botIdentity.model) {
+        mainLines.push(`模型: ${this.botIdentity.model}`);
+      }
+      if (agentSid) {
+        mainLines.push(`Session: ${agentSid}`);
+      }
+      mainLines.push(`本轮: ${activeRun.triggerMessageIds.length} 条消息 · 队列: ${this.queue.pendingCount(chatId)}`);
+      sections.push(mainLines.join("\n"));
+
       const a = typeof cliAgent.getActivity === "function"
         ? (session ? cliAgent.getActivity(session.agentSession.id) : undefined)
         : undefined;
