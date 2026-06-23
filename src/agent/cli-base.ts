@@ -541,6 +541,23 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
         const stdoutTail = tailForLog(stdout, 6);
         const stderrTail = tailForLog(stderr, 6);
         if (code !== 0) {
+          // 检查 stdout 是否已有完整响应（子进程可能在输出完成后退出码非零）
+          const outputLines = stdout.split("\n");
+          const lastLines = outputLines.slice(-10);
+          const hasCompletion = hooks?.isComplete ? lastLines.some((l) => hooks.isComplete!(l)) : false;
+          if (hasCompletion) {
+            this.log.warn("child process exited non-zero but stdout complete, treating as success", {
+              sessionId: sessionId ?? null,
+              cmd,
+              code,
+              signal: signal ?? null,
+              durationMs,
+              stdoutLength: stdout.length,
+              stderrLength: stderr.length,
+            });
+            resolve(stdout);
+            return;
+          }
           this.log.error("child process failed", {
             sessionId: sessionId ?? null,
             cmd,

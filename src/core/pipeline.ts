@@ -164,6 +164,10 @@ export class Pipeline {
   /** 运行中的独立 task（agentSession.id → RunningTask） */
   private runningTasks = new Map<string, RunningTask>();
 
+  /** shell 命令历史（admin 专用） */
+  private shellHistory: Array<{ cmd: string; cwd: string; exitCode: number; output: string; timestamp: number }> = [];
+  private readonly MAX_SHELL_HISTORY = 20;
+
   /** agent 工作目录 */
   private workingDirectory: string;
 
@@ -1173,6 +1177,11 @@ export class Pipeline {
         this.sendRunningList(chatId, platformChatId, msgId);
         return true;
       }
+      case "/history": {
+        this.log.info("builtin command: history", { userId, chatId });
+        this.sendShellHistory(chatId, platformChatId, msgId);
+        return true;
+      }
     }
 
     // 2. 管理员 shell 命令：检查首个 token 是否在 PATH 中，是则执行，否则转发 agent
@@ -2103,6 +2112,7 @@ export class Pipeline {
       "`/flush`　　中断当前回复，合并处理排队消息",
       "`/task`　　独立执行任务（stop 停止）",
       "`/status`　查看运行中的任务",
+      "`/history`　shell 命令历史",
       "`/clear`　　仅清空排队消息（不停当前任务）",
       "`/service`　查看服务信息",
       "`/cron`　　查看定时任务",
@@ -2159,13 +2169,46 @@ export class Pipeline {
       env: { ...process.env, ...env },
     }).then(({ stdout, stderr }) => {
       const output = (stdout + stderr).trim();
+      this.recordShellHistory(cmd, output, 0);
       sendResult(formatShellOutput(this.workingDirectory, cmd, output, 0));
     }).catch((err: unknown) => {
       const execErr = err as { stdout?: string; stderr?: string; code?: number };
       const output = ((execErr.stdout ?? "") + (execErr.stderr ?? "")).trim();
       const exitCode = execErr.code ?? 1;
+      this.recordShellHistory(cmd, output, exitCode);
       sendResult(formatShellOutput(this.workingDirectory, cmd, output, exitCode));
     });
+  }
+
+  private recordShellHistory(cmd: string, output: string, exitCode: number): void {
+    this.shellHistory.unshift({
+      cmd,
+      cwd: this.workingDirectory,
+      exitCode,
+      output: output.slice(0, 500),
+      timestamp: Date.now(),
+    });
+    if (this.shellHistory.length > this.MAX_SHELL_HISTORY) {
+      this.shellHistory = this.shellHistory.slice(0, this.MAX_SHELL_HISTORY);
+    }
+  }
+
+  private sendShellHistory(chatId: string, platformChatId: string, msgId?: string): void {
+    if (this.shellHistory.length === 0) {
+      this.replyText(chatId, platformChatId, msgId, "暂无 shell 命令历史。");
+      return;
+    }
+    const lines = this.shellHistory.map((entry, i) => {
+      const elapsed = formatRelativeAgeMs(entry.timestamp);
+      const status = entry.exitCode === 0 ? "✓" : "✗";
+      const shortCmd = entry.cmd.length > 72 ? entry.cmd.slice(0, 69) + "..." : entry.cmd;
+      let line = `\`#${i + 1}\` ${status} \`${shortCmd}\` · ${elapsed}`;
+      if (entry.exitCode !== 0) line += ` (exit ${entry.exitCode})`;
+      return line;
+    });
+    this.im.sendCard(platformChatId, "Shell History", lines.join("\n"), undefined, msgId)
+      .then((pmid) => { this.storeBotResponse(chatId, lines.join("\n"), pmid); })
+      .catch(() => {});
   }
 
   private async runUpdateCommand(cmd: string, timeout: number): Promise<{ stdout: string; stderr: string }> {
