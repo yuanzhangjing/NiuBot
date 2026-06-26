@@ -93,8 +93,8 @@ describe("user-cli init model configuration", () => {
     expect(getSuggestedLiteModel("claude")).toBe("haiku");
     expect(getSuggestedLiteModel("codex")).toBe("gpt-5.4-mini");
     expect(getSuggestedLiteModel("traecli")).toBe("Gemini-3-Flash-Preview");
-    expect(getSuggestedLiteModel("cursor")).toBe("composer-2.5");
-    expect(getSuggestedLiteModel("cursor-agent")).toBe("composer-2.5");
+    expect(getSuggestedLiteModel("cursor")).toBe("composer-2.5-fast");
+    expect(getSuggestedLiteModel("cursor-agent")).toBe("composer-2.5-fast");
     expect(getSuggestedLiteModel("pi")).toBe("deepseek-v4-flash");
     expect(getSuggestedLiteModel("pi-agent")).toBe("deepseek-v4-flash");
     expect(getSuggestedLiteModel("my-agent")).toBeUndefined();

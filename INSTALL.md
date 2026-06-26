@@ -139,7 +139,7 @@ Before filling the config, ask the user the following questions **one at a time*
 - `codex`: `gpt-5.4-mini`
 - `traecli`: `Gemini-3-Flash-Preview`
 - `opencode`: `opencode-go/deepseek-v4-flash`
-- `cursor`: `composer-2.5`
+- `cursor`: `composer-2.5-fast`
 - `pi`: `deepseek-v4-flash`
 
 Example `config.yaml`:
@@ -409,7 +409,7 @@ Recommended lite models by backend:
 | codex | `gpt-5.4-mini` |
 | traecli | `Gemini-3-Flash-Preview` |
 | opencode | `opencode-go/deepseek-v4-flash` |
-| cursor | `composer-2.5` |
+| cursor | `composer-2.5-fast` |
 | pi | `deepseek-v4-flash` |
 
 #### 4. Create Feishu App (if new)

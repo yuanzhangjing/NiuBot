@@ -5,14 +5,6 @@ import { afterEach, describe, expect, it } from "vitest";
 import TraeCliBackend from "./traecli.js";
 
 const originalHome = process.env["HOME"];
-const originalXdgCacheHome = process.env["XDG_CACHE_HOME"];
-
-function getTraeLogDir(tempHome: string, sessionId: string): string {
-  if (process.platform === "darwin") {
-    return path.join(tempHome, "Library", "Caches", "coco", "sessions", sessionId);
-  }
-  return path.join(process.env["XDG_CACHE_HOME"] || path.join(tempHome, ".cache"), "coco", "sessions", sessionId);
-}
 
 describe("TraeCliBackend", () => {
   afterEach(() => {
@@ -21,37 +13,164 @@ describe("TraeCliBackend", () => {
     } else {
       process.env["HOME"] = originalHome;
     }
-
-    if (originalXdgCacheHome === undefined) {
-      delete process.env["XDG_CACHE_HOME"];
-    } else {
-      process.env["XDG_CACHE_HOME"] = originalXdgCacheHome;
-    }
   });
 
-  it("passes the new user message as an argument when resuming an existing session", () => {
-    const backend = new TraeCliBackend();
-    const session = backend.buildSession({
-      workingDirectory: "/tmp/workspace",
-    });
-    session.agentSessionId = "session-123";
+  it("hydrates model and current context usage from the session log", () => {
+    const threadId = "019f02c8-43c8-7da1-b78c-d7c2c81e544b";
+    const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "trae-home-"));
+    process.env["HOME"] = tempHome;
 
-    expect(backend.buildInput(session, "second turn")).toEqual({
-      args: ["-p", "--json", "--yolo", "--resume=session-123", "--", "second turn"],
-    });
+    const logDir = path.join(tempHome, ".trae", "cli", "sessions", "2026", "06", "26");
+    fs.mkdirSync(logDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(logDir, `rollout-2026-06-26T15-15-06-${threadId}.jsonl`),
+      [
+        JSON.stringify({
+          type: "turn_context",
+          payload: {
+            model: "Test-O-New-Thinking",
+            collaboration_mode: {
+              settings: { reasoning_effort: "max" },
+            },
+          },
+        }),
+        JSON.stringify({
+          type: "event_msg",
+          payload: {
+            type: "token_count",
+            info: {
+              model_context_window: 950000,
+              last_token_usage: {
+                input_tokens: 24624,
+                cached_input_tokens: 0,
+                output_tokens: 36,
+                total_tokens: 24660,
+              },
+            },
+          },
+        }),
+      ].join("\n"),
+    );
+
+    const backend = new TraeCliBackend();
+    const session = backend.buildSession({ workingDirectory: tempHome });
+    const parsed = backend.parseOutput([
+      JSON.stringify({ type: "thread.started", thread_id: threadId }),
+      JSON.stringify({
+        type: "item.completed",
+        item: { type: "agent_message", text: "pong" },
+      }),
+      JSON.stringify({
+        type: "turn.completed",
+        usage: { input_tokens: 24624, output_tokens: 36 },
+      }),
+    ].join("\n"), session);
+
+    expect(parsed.text).toBe("pong");
+    expect(parsed.model).toBe("Test-O-New-Thinking");
+    expect(parsed.contextWindow).toBe(950000);
+    expect(parsed.contextTokens).toBe(24660);
   });
 
-  it("preassigns a plain UUID session id for the first turn", () => {
-    const backend = new TraeCliBackend();
-    const session = backend.buildSession({
-      workingDirectory: "/tmp/workspace",
-    });
+  it("counts context_compacted events from the session log", () => {
+    const threadId = "019f02c8-1111-7da1-b78c-d7c2c81e544b";
+    const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "trae-home-"));
+    process.env["HOME"] = tempHome;
 
-    expect(session.preassignedSessionId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
-    expect(session.preassignedSessionId?.startsWith("niubot-")).toBe(false);
-    expect(backend.buildInput(session, "first turn")).toEqual({
-      args: ["-p", "--json", "--yolo", `--session-id=${session.preassignedSessionId}`, "--", "first turn"],
-    });
+    const logDir = path.join(tempHome, ".trae", "cli", "sessions", "2026", "06", "26");
+    fs.mkdirSync(logDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(logDir, `rollout-2026-06-26T10-00-00-${threadId}.jsonl`),
+      [
+        JSON.stringify({ type: "event_msg", payload: { type: "context_compacted" } }),
+        JSON.stringify({ type: "event_msg", payload: { type: "context_compacted" } }),
+      ].join("\n"),
+    );
+
+    const backend = new TraeCliBackend();
+    const session = backend.buildSession({ workingDirectory: tempHome });
+    const parsed = backend.parseOutput([
+      JSON.stringify({ type: "thread.started", thread_id: threadId }),
+      JSON.stringify({
+        type: "item.completed",
+        item: { type: "agent_message", text: "ok" },
+      }),
+    ].join("\n"), session);
+
+    expect(parsed.compactCount).toBe(2);
+  });
+
+  it("resumes scanning incrementally across turns", () => {
+    const threadId = "019f02c8-2222-7da1-b78c-d7c2c81e544b";
+    const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "trae-home-"));
+    process.env["HOME"] = tempHome;
+
+    const logDir = path.join(tempHome, ".trae", "cli", "sessions", "2026", "06", "26");
+    fs.mkdirSync(logDir, { recursive: true });
+    const logPath = path.join(logDir, `rollout-2026-06-26T10-00-00-${threadId}.jsonl`);
+    fs.writeFileSync(
+      logPath,
+      [
+        JSON.stringify({
+          type: "event_msg",
+          payload: {
+            type: "token_count",
+            info: {
+              model_context_window: 950000,
+              last_token_usage: {
+                input_tokens: 241890,
+                output_tokens: 409,
+                total_tokens: 242299,
+              },
+            },
+          },
+        }),
+      ].join("\n"),
+    );
+
+    const backend = new TraeCliBackend();
+    const session = backend.buildSession({ workingDirectory: tempHome });
+    const first = backend.parseOutput([
+      JSON.stringify({ type: "thread.started", thread_id: threadId }),
+      JSON.stringify({
+        type: "item.completed",
+        item: { type: "agent_message", text: "first" },
+      }),
+    ].join("\n"), session);
+
+    expect(first.contextTokens).toBe(242299);
+    expect(first.compactCount).toBeUndefined();
+
+    fs.appendFileSync(
+      logPath,
+      "\n" + [
+        JSON.stringify({ type: "event_msg", payload: { type: "context_compacted" } }),
+        JSON.stringify({
+          type: "event_msg",
+          payload: {
+            type: "token_count",
+            info: {
+              model_context_window: 950000,
+              last_token_usage: {
+                input_tokens: 27056,
+                output_tokens: 443,
+                total_tokens: 27499,
+              },
+            },
+          },
+        }),
+      ].join("\n"),
+    );
+
+    const second = backend.parseOutput([
+      JSON.stringify({
+        type: "item.completed",
+        item: { type: "agent_message", text: "second" },
+      }),
+    ].join("\n"), session);
+
+    expect(second.contextTokens).toBe(27499);
+    expect(second.compactCount).toBe(1);
   });
 
   it("uses backend default lite model when liteModel is not configured", () => {
@@ -65,247 +184,179 @@ describe("TraeCliBackend", () => {
     expect(session.model).toBe("Gemini-3-Flash-Preview");
   });
 
-  it("parses stdout fields from the traecli json response", () => {
+  it("builds correct args for a new session", () => {
     const backend = new TraeCliBackend();
-    const session = backend.buildSession({ workingDirectory: "/tmp/workspace" });
-    const sessionId = session.preassignedSessionId!;
+    const session = backend.buildSession({
+      workingDirectory: "/tmp/project",
+      model: "Test-O-New-Thinking",
+    });
 
-    const parsed = backend.parseOutput(JSON.stringify({
-      message: {
-        content: "hello from trae",
-        response_meta: {
-          usage: {
-            total_tokens: 321,
-          },
-        },
-        extra: {
-          _source_model: "trae-main",
-        },
-      },
-      session_id: sessionId,
-    }), session);
-
-    expect(parsed).toMatchObject({
-      text: "hello from trae",
-      agentSessionId: sessionId,
-      contextTokens: 321,
-      model: "trae-main",
+    expect(backend.buildInput(session, "hello")).toEqual({
+      args: [
+        "exec",
+        "--json",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--skip-git-repo-check",
+        "-C",
+        "/tmp/project",
+        "-m",
+        "Test-O-New-Thinking",
+      ],
+      stdin: "hello",
     });
   });
 
-  it("hydrates model, current context tokens, and compact count from the session log", () => {
-    const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "trae-home-"));
-    process.env["HOME"] = tempHome;
-    process.env["XDG_CACHE_HOME"] = path.join(tempHome, ".cache");
-
-    const sessionId = "session-log-1";
-    const logDir = getTraeLogDir(tempHome, sessionId);
-    fs.mkdirSync(logDir, { recursive: true });
-    fs.writeFileSync(
-      path.join(logDir, "events.jsonl"),
-      [
-        JSON.stringify({
-          message: {
-            message: {
-              role: "assistant",
-              response_meta: {
-                usage: {
-                  total_tokens: 901,
-                },
-              },
-              extra: {
-                _source_model: "trae-log-model",
-              },
-            },
-          },
-        }),
-        JSON.stringify({ compaction_end: { id: 1 } }),
-        JSON.stringify({ compaction_end: { id: 2 } }),
-      ].join("\n"),
-    );
-
+  it("builds correct args when resuming an existing session", () => {
     const backend = new TraeCliBackend();
-    const session = backend.buildSession({ workingDirectory: "/tmp/workspace" });
-    session.agentSessionId = sessionId;
+    const session = backend.buildSession({
+      workingDirectory: "/tmp/project",
+      model: "Test-O-New-Thinking",
+    });
+    session.agentSessionId = "019f02c8-43c8-7da1-b78c-d7c2c81e544b";
 
-    const parsed = backend.parseOutput(JSON.stringify({
-      message: {
-        content: "ok",
-        response_meta: {
-          usage: {
-            total_tokens: 123,
-          },
-        },
-        extra: {
-          _source_model: "trae-stdout-model",
-        },
-      },
-      session_id: sessionId,
-    }), session);
-
-    expect(parsed.text).toBe("ok");
-    expect(parsed.model).toBe("trae-log-model");
-    expect(parsed.contextTokens).toBe(901);
-    expect(parsed.compactCount).toBe(2);
+    expect(backend.buildInput(session, "second turn")).toEqual({
+      args: [
+        "exec", "resume",
+        "019f02c8-43c8-7da1-b78c-d7c2c81e544b",
+        "-",
+        "--json",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--skip-git-repo-check",
+        "-m",
+        "Test-O-New-Thinking",
+      ],
+      stdin: "second turn",
+    });
   });
 
-  it("surfaces agent_end error_message from events.jsonl when stdout content is empty", () => {
+  it("returns the last agent message when multiple appear in one turn", () => {
+    const backend = new TraeCliBackend();
+    const session = backend.buildSession({ workingDirectory: "/tmp" });
+
+    const parsed = backend.parseOutput([
+      JSON.stringify({
+        type: "item.completed",
+        item: { type: "agent_message", text: "commentary" },
+      }),
+      JSON.stringify({
+        type: "item.completed",
+        item: { type: "agent_message", text: "final answer" },
+      }),
+      JSON.stringify({
+        type: "turn.completed",
+        usage: { input_tokens: 12, output_tokens: 3 },
+      }),
+    ].join("\n"), session);
+
+    expect(parsed.text).toBe("final answer");
+  });
+
+  it("returns the original error message when no agent message is available", () => {
+    const backend = new TraeCliBackend();
+    const session = backend.buildSession({ workingDirectory: "/tmp" });
+
+    const parsed = backend.parseOutput(JSON.stringify({
+      type: "error",
+      message: "model not available",
+    }), session);
+
+    expect(parsed.text).toBe("");
+    expect(parsed.error).toBe("model not available");
+    expect(parsed.failed).toBe(true);
+  });
+
+  it("keeps a completed agent message when an error event also appears", () => {
+    const backend = new TraeCliBackend();
+    const session = backend.buildSession({ workingDirectory: "/tmp" });
+
+    const parsed = backend.parseOutput([
+      JSON.stringify({
+        type: "item.completed",
+        item: { type: "agent_message", text: "already generated reply" },
+      }),
+      JSON.stringify({
+        type: "error",
+        message: "stream disconnected",
+      }),
+    ].join("\n"), session);
+
+    expect(parsed.text).toBe("already generated reply");
+    expect(parsed.error).toBeUndefined();
+  });
+
+  it("waits for turn.completed instead of finishing on the first agent message", () => {
+    const backend = new TraeCliBackend();
+    const session = backend.buildSession({ workingDirectory: "/tmp" });
+    const hooks = (backend as any).getExecHooks(session) as { isComplete?: (line: string) => boolean };
+
+    expect(hooks.isComplete?.(JSON.stringify({
+      type: "item.completed",
+      item: { type: "agent_message", text: "commentary" },
+    }))).toBe(false);
+
+    expect(hooks.isComplete?.(JSON.stringify({
+      type: "turn.completed",
+      usage: { input_tokens: 12, output_tokens: 3 },
+    }))).toBe(true);
+  });
+
+  it("captures thread_id from onLine hook", () => {
+    const backend = new TraeCliBackend();
+    const session = backend.buildSession({ workingDirectory: "/tmp" });
+    const hooks = (backend as any).getExecHooks(session) as { onLine?: (line: string) => void };
+
+    hooks.onLine?.(JSON.stringify({
+      type: "thread.started",
+      thread_id: "019f02c8-43c8-7da1-b78c-d7c2c81e544b",
+    }));
+
+    expect(session.agentSessionId).toBe("019f02c8-43c8-7da1-b78c-d7c2c81e544b");
+  });
+
+  it("skips non-directory entries while locating session logs", () => {
+    const threadId = "019f02c8-3333-7da1-b78c-d7c2c81e544b";
     const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "trae-home-"));
     process.env["HOME"] = tempHome;
-    process.env["XDG_CACHE_HOME"] = path.join(tempHome, ".cache");
 
-    const sessionId = "session-error-1";
-    const logDir = getTraeLogDir(tempHome, sessionId);
+    const sessionsRoot = path.join(tempHome, ".trae", "cli", "sessions");
+    const logDir = path.join(sessionsRoot, "2026", "06", "26");
     fs.mkdirSync(logDir, { recursive: true });
+    fs.writeFileSync(path.join(sessionsRoot, "rollout-legacy.json"), "{}");
+    fs.writeFileSync(path.join(sessionsRoot, "2026", "legacy-file.json"), "{}");
+    fs.writeFileSync(path.join(sessionsRoot, "2026", "06", "legacy-file.json"), "{}");
     fs.writeFileSync(
-      path.join(logDir, "events.jsonl"),
+      path.join(logDir, `rollout-2026-06-26T10-00-00-${threadId}.jsonl`),
       JSON.stringify({
-        agent_end: {
-          error_message: "model 'Test-O-New': ValidationException: The value at messages.30.content.0.toolUse.input is empty.",
-        },
+        type: "turn_context",
+        payload: { model: "Test-O-New-Thinking" },
       }),
     );
 
     const backend = new TraeCliBackend();
-    const session = backend.buildSession({ workingDirectory: "/tmp/workspace" });
-    session.agentSessionId = sessionId;
+    const session = backend.buildSession({ workingDirectory: tempHome });
+    const parsed = backend.parseOutput([
+      JSON.stringify({ type: "thread.started", thread_id: threadId }),
+      JSON.stringify({
+        type: "item.completed",
+        item: { type: "agent_message", text: "ok" },
+      }),
+    ].join("\n"), session);
 
-    const parsed = backend.parseOutput(JSON.stringify({
-      message: { content: "" },
-      session_id: sessionId,
-    }), session);
-
-    expect(parsed.text).toContain("Coco 错误");
-    expect(parsed.text).toContain("ValidationException");
+    expect(parsed.model).toBe("Test-O-New-Thinking");
   });
 
-  it("uses the preassigned session id to find the log when stdout omits session_id", () => {
+  it("returns null from mtime probe when sessions root contains only files", () => {
     const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "trae-home-"));
     process.env["HOME"] = tempHome;
-    process.env["XDG_CACHE_HOME"] = path.join(tempHome, ".cache");
+
+    const sessionsRoot = path.join(tempHome, ".trae", "cli", "sessions");
+    fs.mkdirSync(sessionsRoot, { recursive: true });
+    fs.writeFileSync(path.join(sessionsRoot, "rollout-legacy.json"), "{}");
 
     const backend = new TraeCliBackend();
-    const session = backend.buildSession({ workingDirectory: "/tmp/workspace" });
-    const sessionId = session.preassignedSessionId!;
-    const logDir = getTraeLogDir(tempHome, sessionId);
-    fs.mkdirSync(logDir, { recursive: true });
-    fs.writeFileSync(
-      path.join(logDir, "events.jsonl"),
-      JSON.stringify({
-        agent_end: {
-          error_message: "preassigned log error",
-        },
-      }),
-    );
+    const session = backend.buildSession({ workingDirectory: tempHome });
+    session.agentSessionId = "missing-thread";
 
-    const parsed = backend.parseOutput(JSON.stringify({
-      message: { content: "" },
-    }), session);
-
-    expect(parsed.agentSessionId).toBe(sessionId);
-    expect(parsed.text).toContain("preassigned log error");
-    expect(session.agentSessionId).toBe(sessionId);
-  });
-
-  it("does not override non-empty content with error_message", () => {
-    const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "trae-home-"));
-    process.env["HOME"] = tempHome;
-    process.env["XDG_CACHE_HOME"] = path.join(tempHome, ".cache");
-
-    const sessionId = "session-error-2";
-    const logDir = getTraeLogDir(tempHome, sessionId);
-    fs.mkdirSync(logDir, { recursive: true });
-    fs.writeFileSync(
-      path.join(logDir, "events.jsonl"),
-      JSON.stringify({
-        agent_end: {
-          error_message: "some error",
-        },
-      }),
-    );
-
-    const backend = new TraeCliBackend();
-    const session = backend.buildSession({ workingDirectory: "/tmp/workspace" });
-    session.agentSessionId = sessionId;
-
-    const parsed = backend.parseOutput(JSON.stringify({
-      message: { content: "actual reply" },
-      session_id: sessionId,
-    }), session);
-
-    expect(parsed.text).toBe("actual reply");
-  });
-
-  it("keeps scanning incrementally across resume turns", () => {
-    const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "trae-home-"));
-    process.env["HOME"] = tempHome;
-    process.env["XDG_CACHE_HOME"] = path.join(tempHome, ".cache");
-
-    const sessionId = "session-log-2";
-    const logDir = getTraeLogDir(tempHome, sessionId);
-    const logPath = path.join(logDir, "events.jsonl");
-    fs.mkdirSync(logDir, { recursive: true });
-    fs.writeFileSync(
-      logPath,
-      JSON.stringify({
-        message: {
-          message: {
-            role: "assistant",
-            response_meta: {
-              usage: {
-                total_tokens: 400,
-              },
-            },
-            extra: {
-              _source_model: "trae-first-model",
-            },
-          },
-        },
-      }),
-    );
-
-    const backend = new TraeCliBackend();
-    const session = backend.buildSession({ workingDirectory: "/tmp/workspace" });
-    session.agentSessionId = sessionId;
-
-    const first = backend.parseOutput(JSON.stringify({
-      message: { content: "first" },
-      session_id: sessionId,
-    }), session);
-
-    expect(first.contextTokens).toBe(400);
-    expect(first.model).toBe("trae-first-model");
-    expect(first.compactCount).toBeUndefined();
-
-    fs.appendFileSync(
-      logPath,
-      "\n" + [
-        JSON.stringify({ compaction_end: { id: 1 } }),
-        JSON.stringify({
-          message: {
-            message: {
-              role: "assistant",
-              response_meta: {
-                usage: {
-                  total_tokens: 777,
-                },
-              },
-              extra: {
-                _source_model: "trae-second-model",
-              },
-            },
-          },
-        }),
-      ].join("\n"),
-    );
-
-    const second = backend.parseOutput(JSON.stringify({
-      message: { content: "second" },
-      session_id: sessionId,
-    }), session);
-
-    expect(second.contextTokens).toBe(777);
-    expect(second.model).toBe("trae-second-model");
-    expect(second.compactCount).toBe(1);
+    expect((backend as any).probeSessionFileMtime(session)).toBeNull();
   });
 });

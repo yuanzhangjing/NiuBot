@@ -2609,6 +2609,49 @@ describe("Pipeline.recover", () => {
     expect(sentCards.some((card) => card.content.includes("最近失败") && card.content.includes("agent failed"))).toBe(true);
   });
 
+  test("/status hides failure after a successful run in the same chat", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    recordRuntimeEvent(db, {
+      botId: "NiuBot",
+      chatId: "c1",
+      runId: "run-fail",
+      messageIds: [1],
+      stage: "failed",
+      event: "failed",
+      error: "old error",
+    });
+    recordRuntimeEvent(db, {
+      botId: "NiuBot",
+      chatId: "c1",
+      runId: "run-ok",
+      messageIds: [2],
+      stage: "done",
+      event: "done",
+    });
+
+    const { im, sentCards } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db,
+      im,
+      new RecordingAgent(),
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+    await pipeline.start();
+
+    const handled = (pipeline as any).handleBuiltinCommand("/status", "u2", "c1", "chat-open-id", "p2p", "status-msg");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(handled).toBe(true);
+    expect(sentCards.some((card: any) => card.content.includes("最近失败"))).toBe(false);
+  });
+
   test("/status card shows latest agent output age from stdout activity", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-06-09T04:03:20Z"));

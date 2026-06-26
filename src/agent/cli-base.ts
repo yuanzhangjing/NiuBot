@@ -6,6 +6,7 @@
 import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import type { AgentBackend, AgentSession, AgentResponse, SessionConfig, AgentSessionActivity, ExecHooks } from "./types.js";
+import { NIUBOT_HOME } from "../config.js";
 import { createLogger } from "../logger.js";
 import { prependNiubotBinToPath } from "../niubot-cli.js";
 import { createInterface } from "node:readline";
@@ -692,6 +693,7 @@ function tailForLog(text: string, maxLines: number): string {
 export function buildNiubotEnv(config: SessionConfig): Record<string, string> {
   const env: Record<string, string> = {};
   env["PATH"] = prependNiubotBinToPath();
+  env["NIUBOT_HOME"] = NIUBOT_HOME;
   if (config.userId) env["NIUBOT_USER_ID"] = config.userId;
   if (config.chatId) env["NIUBOT_CHAT_ID"] = config.chatId;
   if (config.chatType) env["NIUBOT_CHAT_TYPE"] = config.chatType;

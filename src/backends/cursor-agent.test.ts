@@ -84,7 +84,7 @@ describe("CursorAgentBackend", () => {
       model: "gpt-5.5-high",
     });
 
-    expect(session.model).toBe("composer-2.5");
+    expect(session.model).toBe("composer-2.5-fast");
   });
 
   it("parses stream-json result, session id, configured model, and token usage", () => {

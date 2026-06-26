@@ -33,7 +33,7 @@ bots:
     expect(BUILTIN_BACKEND_LIST).toContain("cursor");
     expect(normalizeBackend("cursor")).toBe("cursor");
     expect(normalizeBackend("cursor-agent")).toBe("cursor");
-    expect(DEFAULT_LITE_MODELS.cursor).toBe("composer-2.5");
+    expect(DEFAULT_LITE_MODELS.cursor).toBe("composer-2.5-fast");
   });
 
   it("registers pi as a built-in backend with aliases and lite model", () => {

@@ -1261,12 +1261,14 @@ export class Pipeline {
           latestRun.lastError ? `error: ${latestRun.lastError}` : undefined,
         ].filter((line): line is string => !!line).join("\n"));
       } else {
-        const latestFailedEvent = getRecentRuntimeEvents(this.db, {
+        const recentEvents = getRecentRuntimeEvents(this.db, {
           botId: this.botIdentity.name,
           chatId,
           limit: 20,
-        }).find((event) => event.event === "failed" || event.event === "failed_by_restart");
-        if (latestFailedEvent) {
+        });
+        const latestDoneEvent = recentEvents.find((event) => event.event === "done");
+        const latestFailedEvent = recentEvents.find((event) => event.event === "failed" || event.event === "failed_by_restart");
+        if (latestFailedEvent && !(latestDoneEvent && latestDoneEvent.id > latestFailedEvent.id)) {
           sections.push("**最近失败**");
           sections.push([
             `stage: ${latestFailedEvent.stage}`,

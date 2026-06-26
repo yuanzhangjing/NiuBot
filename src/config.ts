@@ -99,7 +99,7 @@ export const DEFAULT_LITE_MODELS: Partial<Record<BuiltinBackendType, string>> = 
   codex: "gpt-5.4-mini",
   traecli: "Gemini-3-Flash-Preview",
   opencode: "opencode-go/deepseek-v4-flash",
-  cursor: "composer-2.5",
+  cursor: "composer-2.5-fast",
   pi: "deepseek-v4-flash",
 };
 

@@ -63,7 +63,7 @@ describe("resolveBotRuntimeConfig", () => {
     );
 
     expect(resolved.backendType).toBe("cursor");
-    expect(resolved.liteModel).toBe("composer-2.5");
+    expect(resolved.liteModel).toBe("composer-2.5-fast");
   });
 
   test("model is undefined when no runtime model set — backend uses its own default", () => {

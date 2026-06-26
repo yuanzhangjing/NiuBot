@@ -1,20 +1,20 @@
 /**
  * Trae CLI backend plugin.
- * 通过 `traecli -p` 命令驱动 agent，JSON 输出。
+ * 通过 `traecli exec` 命令驱动 agent，JSON 事件流输出。
+ * 新版 traecli (v0.200+) 基于 codex 协议，stdout/session log 格式与 codex 一致。
  */
 
-import { randomUUID } from "node:crypto";
-import { existsSync, openSync, readSync, closeSync, statSync } from "node:fs";
+import { existsSync, openSync, readSync, closeSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { CliAgentBackend, buildNiubotEnv, type BaseCliSession, type ParsedOutput } from "../agent/cli-base.js";
-import { ERROR_DISPLAY_MAX_LEN } from "../agent/types.js";
-import type { AgentSessionActivity, SessionConfig } from "../agent/types.js";
+import type { SessionConfig, ExecHooks } from "../agent/types.js";
 import { DEFAULT_LITE_MODELS } from "../config.js";
 
 interface TraeCliSession extends BaseCliSession {
   sessionLogPath?: string;
-  preassignedSessionId?: string;
+  sandboxMode: string;
+  modelTier: SessionConfig["modelTier"];
 }
 
 export default class TraeCliBackend extends CliAgentBackend<TraeCliSession> {
@@ -35,163 +35,131 @@ export default class TraeCliBackend extends CliAgentBackend<TraeCliSession> {
       cumulativeBytes: 0,
       compactCount: 0,
       jsonlOffset: 0,
-      preassignedSessionId: randomUUID(),
+      sandboxMode: "danger-full-access",
+      modelTier: config.modelTier,
     };
   }
 
   buildInput(session: TraeCliSession, message: string): { args: string[]; stdin?: string } {
-    const args = ["-p", "--json", "--yolo"];
-    if (session.model) args.push("-c", `model.name=${session.model}`);
-    if (session.agentSessionId) args.push(`--resume=${session.agentSessionId}`);
-    else if (session.preassignedSessionId) args.push(`--session-id=${session.preassignedSessionId}`);
-    args.push("--", message);
-    return { args };
-  }
+    if (session.agentSessionId) {
+      const args = [
+        "exec", "resume",
+        session.agentSessionId,
+        "-",
+        "--json",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--skip-git-repo-check",
+      ];
+      if (session.model) {
+        args.push("-m", session.model);
+      }
+      return { args, stdin: message };
+    }
 
-  protected isProbeError(err: any): boolean {
-    const stderr = err.stderr as string | undefined;
-    return !!(stderr?.includes("model") || stderr?.includes("Model"));
+    const args = [
+      "exec",
+      "--json",
+      "--dangerously-bypass-approvals-and-sandbox",
+      "--skip-git-repo-check",
+      "-C", session.workingDirectory,
+    ];
+
+    if (session.model) {
+      args.push("-m", session.model);
+    }
+
+    return { args, stdin: message };
   }
 
   parseOutput(stdout: string, session: TraeCliSession): ParsedOutput {
-    try {
-      const data = JSON.parse(stdout) as {
-        message?: {
-          content?: string;
-          response_meta?: {
-            usage?: {
-              total_tokens?: number;
-              prompt_tokens?: number;
-            };
-          };
-          extra?: {
-            _source_model?: string;
-          };
-        };
-        session_id?: string;
-      };
+    let threadId: string | undefined;
+    let lastAgentText = "";
+    let genericErrorMsg: string | undefined;
+    let sawError = false;
+    let stdoutContextTokens: number | undefined;
 
-      const result: ParsedOutput = {
-        text: data.message?.content ?? "",
-      };
-
-      const returnedSessionId = data.session_id;
-      if (!session.agentSessionId && returnedSessionId && session.preassignedSessionId && returnedSessionId !== session.preassignedSessionId) {
-        this.log.warn("preassigned session id mismatch", {
-          preassignedSessionId: session.preassignedSessionId,
-          returnedSessionId,
-        });
-        session.sessionLogPath = undefined;
-      }
-      const resolvedSessionId = returnedSessionId ?? session.agentSessionId ?? session.preassignedSessionId;
-      if (resolvedSessionId) {
-        result.agentSessionId = resolvedSessionId;
-        session.agentSessionId = resolvedSessionId;
-      }
-
-      const usage = data.message?.response_meta?.usage;
-      if (usage?.total_tokens !== undefined) {
-        result.contextTokens = usage.total_tokens;
-      } else if (usage?.prompt_tokens !== undefined) {
-        result.contextTokens = usage.prompt_tokens;
-      }
-
-      if (data.message?.extra?._source_model) {
-        result.model = data.message.extra._source_model;
-      }
-
-      const meta = this.scanJsonl(session);
-      if (meta.model !== undefined) result.model = meta.model;
-      if (meta.contextTokens !== undefined) result.contextTokens = meta.contextTokens;
-      if (session.compactCount > 0) result.compactCount = session.compactCount;
-
-      // Coco CLI bug workaround: exit 0 + empty content when LLM API errors.
-      // The error is only in events.jsonl agent_end.error_message.
-      if (!result.text && meta.errorMessage) {
-        result.text = `（Coco 错误）\n\`\`\`\n${String(meta.errorMessage).slice(0, ERROR_DISPLAY_MAX_LEN).replace(/`{3,}/g, "``")}\n\`\`\``;
-      }
-
-      return result;
-    } catch {
-      const err: Error & { stdout?: string } = new Error("Coco CLI 输出解析失败");
-      err.stdout = stdout;
-      throw err;
-    }
-  }
-
-  protected refreshActivity(sessionId: string, activity: AgentSessionActivity): void {
-    const session = this.sessions.get(sessionId);
-    if (!session) return;
-    const jsonlPath = this.getJsonlPath(session);
-    if (!jsonlPath) return;
-    try {
-      const size = statSync(jsonlPath).size;
-      if (size === 0) return;
-      const lines = this.readLastLines(jsonlPath, size, 3);
-      activity.recentLines = lines;
-    } catch { /* ignore */ }
-  }
-
-  /** 从文件尾部倒读，获取最后 N 个完整行（每行可能很长，不限 chunk 大小） */
-  private readLastLines(filePath: string, fileSize: number, count: number): string[] {
-    const CHUNK = 65536;
-    const fd = openSync(filePath, "r");
-    try {
-      let offset = fileSize;
-      let collected = "";
-      while (offset > 0) {
-        const readSize = Math.min(CHUNK, offset);
-        offset -= readSize;
-        const buf = Buffer.alloc(readSize);
-        readSync(fd, buf, 0, readSize, offset);
-        collected = buf.toString("utf-8") + collected;
-        const lines = collected.split("\n").filter((l) => l.trim());
-        if (lines.length > count) return lines.slice(-count);
-      }
-      return collected.split("\n").filter((l) => l.trim()).slice(-count);
-    } finally {
-      closeSync(fd);
-    }
-  }
-
-  protected probeSessionFileMtime(session: TraeCliSession): number | null {
-    const jsonlPath = this.getJsonlPath(session);
-    if (!jsonlPath) return null;
-    try {
-      return statSync(jsonlPath).mtimeMs;
-    } catch {
-      return null;
-    }
-  }
-
-  protected probeSessionLastLine(session: TraeCliSession): string | null {
-    const jsonlPath = this.getJsonlPath(session);
-    if (!jsonlPath) return null;
-    try {
-      const stat = statSync(jsonlPath);
-      const tailSize = Math.min(stat.size, 2048);
-      if (tailSize === 0) return null;
-      const fd = openSync(jsonlPath, "r");
+    for (const line of stdout.split("\n")) {
+      if (!line) continue;
       try {
-        const buf = Buffer.alloc(tailSize);
-        readSync(fd, buf, 0, tailSize, stat.size - tailSize);
-        const lines = buf.toString("utf-8").split("\n").filter((l) => l.trim());
-        return lines.length > 0 ? lines[lines.length - 1]! : null;
-      } finally {
-        closeSync(fd);
-      }
-    } catch {
-      return null;
+        const event = JSON.parse(line) as {
+          type?: string;
+          thread_id?: string;
+          item?: {
+            type?: string;
+            text?: string;
+          };
+          usage?: {
+            input_tokens?: number;
+            output_tokens?: number;
+            cached_input_tokens?: number;
+          };
+          error?: { message?: string };
+          message?: string;
+        };
+
+        if (event.type === "thread.started" && event.thread_id) {
+          threadId = event.thread_id;
+        }
+
+        if (event.type === "error" || event.type === "turn.failed") {
+          sawError = true;
+          const eventMessage = event.error?.message ?? event.message;
+          genericErrorMsg ??= eventMessage;
+        }
+
+        if (event.type === "item.completed" && event.item?.type === "agent_message" && event.item.text) {
+          lastAgentText = event.item.text;
+        }
+
+        if (event.usage) {
+          const total = (event.usage.input_tokens ?? 0) + (event.usage.output_tokens ?? 0);
+          if (total > 0) stdoutContextTokens = total;
+        }
+      } catch { /* skip non-JSON lines */ }
     }
+
+    let model: string | undefined;
+    let contextTokens: number | undefined;
+    let contextWindow: number | undefined;
+    const resolvedThreadId = threadId ?? session.agentSessionId;
+    if (resolvedThreadId) {
+      session.agentSessionId = resolvedThreadId;
+      const meta = this.scanJsonl(session);
+      model = meta.model;
+      contextTokens = meta.contextTokens ?? stdoutContextTokens;
+      contextWindow = meta.contextWindow;
+      const tokensSource = meta.contextTokens ? "jsonl" : stdoutContextTokens ? "stdout" : "none";
+      this.log.info("parseOutput: done", {
+        agentSessionId: resolvedThreadId, model, contextTokens,
+        modelSource: meta.model ? "jsonl" : "none",
+        tokensSource,
+        stdoutContextTokens: stdoutContextTokens ?? null,
+      });
+    }
+
+    return {
+      text: lastAgentText.trim(),
+      agentSessionId: resolvedThreadId,
+      model,
+      contextTokens,
+      contextWindow,
+      compactCount: session.compactCount > 0 ? session.compactCount : undefined,
+      error: lastAgentText ? undefined : genericErrorMsg,
+      failed: !lastAgentText && sawError,
+    };
   }
 
-  private scanJsonl(session: TraeCliSession): { model?: string; contextTokens?: number; errorMessage?: string } {
+  private scanJsonl(session: TraeCliSession): {
+    model?: string;
+    contextTokens?: number;
+    contextWindow?: number;
+  } {
     const jsonlPath = this.getJsonlPath(session);
     if (!jsonlPath) return {};
 
     let model: string | undefined;
     let contextTokens: number | undefined;
-    let errorMessage: string | undefined;
+    let contextWindow: number | undefined;
 
     try {
       const stat = statSync(jsonlPath);
@@ -209,39 +177,38 @@ export default class TraeCliBackend extends CliAgentBackend<TraeCliSession> {
           if (!line) continue;
           try {
             const entry = JSON.parse(line) as {
-              compaction_end?: unknown;
-              agent_end?: {
-                error_message?: string;
-              };
-              message?: {
-                message?: {
-                  role?: string;
-                  response_meta?: {
-                    usage?: {
-                      total_tokens?: number;
-                    };
+              type?: string;
+              payload?: {
+                model?: string;
+                collaboration_mode?: {
+                  settings?: {
+                    model?: string;
                   };
-                  extra?: {
-                    _source_model?: string;
+                };
+                type?: string;
+                info?: {
+                  last_token_usage?: {
+                    input_tokens?: number;
+                    output_tokens?: number;
+                    total_tokens?: number;
                   };
+                  model_context_window?: number;
                 };
               };
             };
 
-            if (entry.compaction_end !== undefined) {
+            if (entry.type === "turn_context") {
+              model = entry.payload?.model ?? entry.payload?.collaboration_mode?.settings?.model ?? model;
+            } else if (entry.type === "event_msg" && entry.payload?.type === "context_compacted") {
               session.compactCount++;
-            }
-
-            if (entry.agent_end?.error_message) {
-              errorMessage = entry.agent_end.error_message;
-            }
-
-            const msg = entry.message?.message;
-            if (msg?.role === "assistant" && msg.response_meta?.usage?.total_tokens !== undefined) {
-              contextTokens = msg.response_meta.usage.total_tokens;
-            }
-            if (msg?.extra?._source_model) {
-              model = msg.extra._source_model;
+            } else if (entry.type === "event_msg" && entry.payload?.type === "token_count") {
+              const lastUsage = entry.payload.info?.last_token_usage;
+              const visibleTokens = lastUsage?.total_tokens
+                ?? ((lastUsage?.input_tokens ?? 0) + (lastUsage?.output_tokens ?? 0));
+              if (visibleTokens > 0) {
+                contextTokens = visibleTokens;
+              }
+              contextWindow = entry.payload.info?.model_context_window ?? contextWindow;
             }
           } catch { /* skip malformed lines */ }
         }
@@ -252,25 +219,84 @@ export default class TraeCliBackend extends CliAgentBackend<TraeCliSession> {
       return {};
     }
 
-    return { model, contextTokens, errorMessage };
+    return { model, contextTokens, contextWindow };
+  }
+
+  protected getExecHooks(session: TraeCliSession): ExecHooks {
+    return {
+      onLine: (line) => {
+        try {
+          const e = JSON.parse(line);
+          if (e.type === "thread.started" && e.thread_id && !session.agentSessionId) {
+            session.agentSessionId = e.thread_id;
+          }
+        } catch { /* non-JSON line */ }
+      },
+      isComplete: (line) => {
+        try {
+          const e = JSON.parse(line);
+          return e.type === "turn.completed";
+        } catch { return false; }
+      },
+    };
+  }
+
+  protected probeSessionFileMtime(session: TraeCliSession): number | null {
+    const jsonlPath = this.getJsonlPath(session);
+    if (!jsonlPath) return null;
+    try {
+      return statSync(jsonlPath).mtimeMs;
+    } catch {
+      return null;
+    }
   }
 
   private getJsonlPath(session: TraeCliSession): string | null {
     if (session.sessionLogPath && existsSync(session.sessionLogPath)) {
       return session.sessionLogPath;
     }
-    const sessionId = session.agentSessionId ?? session.preassignedSessionId;
-    if (!sessionId) return null;
+    if (!session.agentSessionId) return null;
 
-    const cacheBase = process.platform === "darwin"
-      ? join(homedir(), "Library", "Caches", "coco")
-      : join(process.env["XDG_CACHE_HOME"] || join(homedir(), ".cache"), "coco");
+    const sessionsRoot = resolve(homedir(), ".trae", "cli", "sessions");
+    if (!existsSync(sessionsRoot)) return null;
 
-    const jsonlPath = join(cacheBase, "sessions", sessionId, "events.jsonl");
-    if (existsSync(jsonlPath)) {
-      session.sessionLogPath = jsonlPath;
-      return jsonlPath;
+    for (const year of this.readDirectoryNames(sessionsRoot)) {
+      const yearDir = join(sessionsRoot, year);
+      for (const month of this.readDirectoryNames(yearDir)) {
+        const monthDir = join(yearDir, month);
+        for (const day of this.readDirectoryNames(monthDir)) {
+          const dayDir = join(monthDir, day);
+          const match = this.readFileNames(dayDir).find((name) => name.endsWith(`${session.agentSessionId}.jsonl`));
+          if (match) {
+            session.sessionLogPath = join(dayDir, match);
+            return session.sessionLogPath;
+          }
+        }
+      }
     }
+
     return null;
+  }
+
+  private readDirectoryNames(dir: string): string[] {
+    try {
+      return readdirSync(dir, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => entry.name);
+    } catch (err) {
+      this.log.warn("getJsonlPath: directory scan failed", { dir, error: String(err) });
+      return [];
+    }
+  }
+
+  private readFileNames(dir: string): string[] {
+    try {
+      return readdirSync(dir, { withFileTypes: true })
+        .filter((entry) => entry.isFile() || entry.isSymbolicLink())
+        .map((entry) => entry.name);
+    } catch (err) {
+      this.log.warn("getJsonlPath: file scan failed", { dir, error: String(err) });
+      return [];
+    }
   }
 }
