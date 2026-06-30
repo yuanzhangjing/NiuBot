@@ -291,7 +291,7 @@ start_service() {
     local package_dir="${1:-$SCRIPT_DIR_REAL}"
     debug "starting new process from $package_dir..."
     cd "$package_dir"
-    NIUBOT_SOURCE_DIR="$SOURCE_DIR_REAL" NIUBOT_LOG_LEVEL="${NIUBOT_LOG_LEVEL:-info}" nohup node dist/index.js >> "$LOG_FILE" 2>&1 &
+    NIUBOT_SOURCE_DIR="$SOURCE_DIR_REAL" NIUBOT_LOG_LEVEL="${NIUBOT_LOG_LEVEL:-info}" nohup "${SHELL:-/bin/zsh}" -l -c 'exec node dist/index.js' >> "$LOG_FILE" 2>&1 &
     echo "$!" > "$CANDIDATE_PID_FILE"
     STATE_CANDIDATE_PID="$!"
     debug "new process launched, PID=$!"
@@ -354,7 +354,7 @@ run_preflight() {
     rm -f "$PREFLIGHT_SOCKET"
 
     # Run preflight in background, capture PID
-    (cd "$package_dir" && NIUBOT_SOURCE_DIR="$SOURCE_DIR_REAL" NIUBOT_LOG_LEVEL="${NIUBOT_LOG_LEVEL:-info}" node dist/index.js --preflight >> "$LOG_FILE" 2>&1) &
+    (cd "$package_dir" && NIUBOT_SOURCE_DIR="$SOURCE_DIR_REAL" NIUBOT_LOG_LEVEL="${NIUBOT_LOG_LEVEL:-info}" "${SHELL:-/bin/zsh}" -l -c 'exec node dist/index.js --preflight' >> "$LOG_FILE" 2>&1) &
     local preflight_pid=$!
     debug "preflight: PID=$preflight_pid"
 

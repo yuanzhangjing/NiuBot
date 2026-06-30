@@ -1021,7 +1021,9 @@ export class Pipeline {
           return true;
         }
         this.log.info("builtin command: restart", { userId });
-        this.triggerRestart({ platformChatId });
+        const sourceEnvMatch = text.match(/--source-env\s+(\S+)/);
+        const sourceEnvPath = sourceEnvMatch ? sourceEnvMatch[1]!.replace(/^~/, process.env["HOME"] ?? "/") : undefined;
+        this.triggerRestart({ platformChatId, sourceEnvPath });
         return true;
       }
       case "/update": {
@@ -2336,7 +2338,7 @@ export class Pipeline {
    * restart.sh 负责：sleep → build → preflight → kill old → start new → health check → notify。
    * 可通过 platformChatId 或 chatId 指定通知目标，都不传则不发通知。
    */
-  triggerRestart(opts?: { platformChatId?: string; chatId?: string }): void {
+  triggerRestart(opts?: { platformChatId?: string; chatId?: string; sourceEnvPath?: string }): void {
     const runtimeRoot = path.resolve(
       path.dirname(fileURLToPath(import.meta.url)),
       "../..",
@@ -2372,6 +2374,7 @@ export class Pipeline {
         NIUBOT_SOURCE_DIR: projectRoot,
         NIUBOT_RESTART_NOTIFY_CHAT_ID: chatId ?? "",
         NIUBOT_API_SOCKET: socketPath,
+        ...(opts?.sourceEnvPath ? { NIUBOT_RESTART_SOURCE_ENV: opts.sourceEnvPath } : {}),
       },
     });
     child.unref();

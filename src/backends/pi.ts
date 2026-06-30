@@ -80,8 +80,7 @@ export default class PiBackend extends CliAgentBackend<PiSession> {
       args.push("--session", session.agentSessionId);
     }
 
-    args.push(message);
-    return { args };
+    return { args, stdin: message };
   }
 
   protected isProbeError(err: any): boolean {

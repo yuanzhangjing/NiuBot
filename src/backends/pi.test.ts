@@ -31,9 +31,8 @@ describe("PiBackend", () => {
       "-p",
       "--model", "deepseek-v4-flash",
       "--append-system-prompt", "You are NiuBot.",
-      "hello",
     ]);
-    expect(input.stdin).toBeUndefined();
+    expect(input.stdin).toBe("hello");
   });
 
   it("omits --model when NiuBot config does not set one", () => {
@@ -41,7 +40,8 @@ describe("PiBackend", () => {
     const session = backend.buildSession({ workingDirectory: "/tmp" });
     const input = backend.buildInput(session, "hello");
 
-    expect(input.args).toEqual(["--mode", "json", "-a", "-p", "hello"]);
+    expect(input.args).toEqual(["--mode", "json", "-a", "-p"]);
+    expect(input.stdin).toBe("hello");
   });
 
   it("resumes with --session when agentSessionId is present", () => {
