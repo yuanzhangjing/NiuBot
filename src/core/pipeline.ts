@@ -1920,9 +1920,16 @@ export class Pipeline {
     const candidates = this.buildModelCandidates();
     const resolvedModel = this.resolveModelArg(modelArg, candidates);
 
-    // 新模型名不在候选列表中 → 探测验证
+    // 新模型名不在候选列表中 → 探测验证（同步等待，先发进度避免看起来卡住）
     if (!candidates.includes(resolvedModel) && this.agent.validateModel) {
       this.log.info("probing unknown model", { model: resolvedModel, backend: this.backendType });
+      const progress = `正在探测模型 **${resolvedModel}**，可能需要几十秒，请稍等…`;
+      try {
+        // 进度提示不入库，避免污染会话历史；发送失败不阻断探测
+        await this.im.sendCard(platformChatId, "Model", progress, undefined, msgId);
+      } catch (err) {
+        this.log.warn("model probe progress send failed", { model: resolvedModel, error: String(err) });
+      }
       try {
         const result = await this.agent.validateModel(resolvedModel);
         if (!result.valid) {

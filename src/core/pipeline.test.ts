@@ -26,6 +26,8 @@ class RecordingAgent implements AgentBackend {
   readonly sendMessageCalls: string[] = [];
   readonly closeSessionCalls: string[] = [];
   readonly backendSessions = new Map<string, { model?: string; liteModel?: string }>();
+  validateModelImpl?: (modelName: string) => Promise<{ valid: boolean; error?: string }>;
+  readonly validateModelCalls: string[] = [];
 
   async start(): Promise<void> {}
   async stop(): Promise<void> {}
@@ -56,6 +58,12 @@ class RecordingAgent implements AgentBackend {
       model: "model" in models ? models.model : current.model,
       liteModel: "liteModel" in models ? models.liteModel : current.liteModel,
     });
+  }
+
+  async validateModel(modelName: string): Promise<{ valid: boolean; error?: string }> {
+    this.validateModelCalls.push(modelName);
+    if (this.validateModelImpl) return this.validateModelImpl(modelName);
+    return { valid: true };
   }
 
   needsStableUserPrefix(): boolean {
@@ -1270,8 +1278,7 @@ describe("Pipeline.recover", () => {
       hasReplied: false,
     });
 
-    (pipeline as any).handleModelCommand(["new-model"], "c1", "chat-open-id");
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await (pipeline as any).handleModelCommand(["new-model"], "c1", "chat-open-id");
 
     expect(identity.model).toBe("new-model");
     expect(activeAgentSession.model).toBe("new-model");
@@ -1282,13 +1289,166 @@ describe("Pipeline.recover", () => {
     });
     expect((pipeline as any).chatSessions.has("c1")).toBe(true);
     expect(agent.closeSessionCalls).toHaveLength(0);
-    expect(sentCards[0]?.content).toContain("主模型已切换为 **new-model**");
-    expect(sentCards[0]?.content).not.toContain("下次会话生效");
+    expect(sentCards).toHaveLength(2);
+    expect(sentCards[0]?.content).toContain("正在探测模型 **new-model**");
+    expect(sentCards[1]?.content).toContain("主模型已切换为 **new-model**");
+    expect(sentCards[1]?.content).not.toContain("下次会话生效");
+    expect(agent.validateModelCalls).toEqual(["new-model"]);
     expect(getBotRuntimeState(db, "NiuBot")).toEqual({
       backendType: "codex",
       model: "new-model",
       liteModel: undefined,
     });
+  });
+
+  test("sends progress before probing an unknown model", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare(`
+      INSERT INTO users (id, name, platform, platform_id)
+      VALUES ('u1', 'NiuBot', 'feishu', 'bot-open-id')
+    `).run();
+    db.prepare(`
+      INSERT INTO chats (id, type, platform, platform_id)
+      VALUES ('c1', 'p2p', 'feishu', 'chat-open-id')
+    `).run();
+
+    const agent = new RecordingAgent();
+    let releaseProbe!: (value: { valid: boolean }) => void;
+    const probeGate = new Promise<{ valid: boolean }>((resolve) => {
+      releaseProbe = resolve;
+    });
+    let progressSeen!: () => void;
+    const progressGate = new Promise<void>((resolve) => {
+      progressSeen = resolve;
+    });
+    let probeEntered!: () => void;
+    const probeEnteredGate = new Promise<void>((resolve) => {
+      probeEntered = resolve;
+    });
+    agent.validateModelImpl = async (modelName) => {
+      expect(modelName).toBe("unknown-model");
+      probeEntered();
+      return probeGate;
+    };
+    const { im, sentCards } = createRecordingImStub();
+    const originalSendCard = im.sendCard.bind(im);
+    im.sendCard = async (...args) => {
+      const result = await originalSendCard(...args);
+      if (String(args[2]).includes("正在探测模型")) progressSeen();
+      return result;
+    };
+    const identity = createBotIdentity();
+    const pipeline = new Pipeline(
+      db,
+      im,
+      agent,
+      identity,
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+    await pipeline.start();
+
+    const done = (pipeline as any).handleModelCommand(["unknown-model"], "c1", "chat-open-id");
+    await progressGate;
+    await probeEnteredGate;
+
+    expect(sentCards).toHaveLength(1);
+    expect(sentCards[0]?.content).toContain("正在探测模型 **unknown-model**");
+    expect(agent.validateModelCalls).toEqual(["unknown-model"]);
+    expect(identity.model).toBeUndefined();
+    expect(
+      db.prepare("SELECT COUNT(*) as c FROM messages WHERE content_text LIKE ?").get("%正在探测模型%") as { c: number },
+    ).toEqual({ c: 0 });
+
+    releaseProbe({ valid: true });
+    await done;
+
+    expect(identity.model).toBe("unknown-model");
+    expect(sentCards).toHaveLength(2);
+    expect(sentCards[1]?.content).toContain("主模型已切换为 **unknown-model**");
+
+    let assistantRows: Array<{ content_text: string }> = [];
+    for (let i = 0; i < 20; i++) {
+      assistantRows = db.prepare(
+        "SELECT content_text FROM messages WHERE role = 'assistant' ORDER BY id",
+      ).all() as Array<{ content_text: string }>;
+      if (assistantRows.length > 0) break;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    expect(assistantRows).toHaveLength(1);
+    expect(assistantRows[0]?.content_text).toContain("主模型已切换为 **unknown-model**");
+    expect(assistantRows[0]?.content_text).not.toContain("正在探测模型");
+  });
+
+  test("continues probing when progress send fails", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const agent = new RecordingAgent();
+    agent.validateModelImpl = async () => ({ valid: true });
+    const { im, sentCards } = createRecordingImStub();
+    const originalSendCard = im.sendCard.bind(im);
+    let sendCardCalls = 0;
+    im.sendCard = async (...args) => {
+      sendCardCalls++;
+      if (sendCardCalls === 1) throw new Error("send failed");
+      return originalSendCard(...args);
+    };
+    const identity = createBotIdentity();
+    const pipeline = new Pipeline(
+      db,
+      im,
+      agent,
+      identity,
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+
+    await (pipeline as any).handleModelCommand(["fragile-model"], "c1", "chat-open-id");
+
+    expect(agent.validateModelCalls).toEqual(["fragile-model"]);
+    expect(identity.model).toBe("fragile-model");
+    expect(sendCardCalls).toBe(2);
+    expect(sentCards).toHaveLength(1);
+    expect(sentCards[0]?.content).toContain("主模型已切换为 **fragile-model**");
+  });
+
+  test("reports unavailable model after progress card", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const agent = new RecordingAgent();
+    agent.validateModelImpl = async () => ({ valid: false, error: "模型不存在或无权限" });
+    const { im, sentCards } = createRecordingImStub();
+    const identity = createBotIdentity();
+    const pipeline = new Pipeline(
+      db,
+      im,
+      agent,
+      identity,
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+
+    await (pipeline as any).handleModelCommand(["bad-model"], "c1", "chat-open-id");
+
+    expect(identity.model).toBeUndefined();
+    expect(agent.validateModelCalls).toEqual(["bad-model"]);
+    expect(sentCards).toHaveLength(2);
+    expect(sentCards[0]?.content).toContain("正在探测模型 **bad-model**");
+    expect(sentCards[1]?.content).toContain("模型 **bad-model** 不可用");
+    expect(sentCards[1]?.content).toContain("模型不存在或无权限");
   });
 
   test("orders model candidates deterministically when history timestamps tie", () => {
@@ -1355,10 +1515,11 @@ describe("Pipeline.recover", () => {
 
     const db = initDatabase(path.join(dir, "niubot.db"));
     const agent = new RecordingAgent();
+    const { im, sentCards } = createRecordingImStub();
     const identity = createBotIdentity();
     const pipeline = new Pipeline(
       db,
-      createImStub(),
+      im,
       agent,
       identity,
       dir,
@@ -1376,7 +1537,7 @@ describe("Pipeline.recover", () => {
       hasReplied: false,
     });
 
-    (pipeline as any).handleModelCommand(["lite", "new-lite"], "c1", "chat-open-id");
+    await (pipeline as any).handleModelCommand(["lite", "new-lite"], "c1", "chat-open-id");
 
     expect(identity.liteModel).toBe("new-lite");
     expect(activeAgentSession.model).toBe("old-model");
@@ -1387,6 +1548,10 @@ describe("Pipeline.recover", () => {
     });
     expect((pipeline as any).chatSessions.has("c1")).toBe(true);
     expect(agent.closeSessionCalls).toHaveLength(0);
+    expect(sentCards).toHaveLength(2);
+    expect(sentCards[0]?.content).toContain("正在探测模型 **new-lite**");
+    expect(sentCards[1]?.content).toContain("Lite 模型已切换为 **new-lite**");
+    expect(agent.validateModelCalls).toEqual(["new-lite"]);
     expect(getBotRuntimeState(db, "NiuBot")).toEqual({
       backendType: "codex",
       model: undefined,
