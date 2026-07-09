@@ -107,6 +107,20 @@ DIST_DIR="$SOURCE_DIR_REAL/dist"
 HEALTH_TIMEOUT=15
 HEALTH_INTERVAL=1
 PREFLIGHT_TIMEOUT=20
+DEPENDENCY_INSTALL_TIMEOUT="${NIUBOT_RESTART_INSTALL_TIMEOUT:-120}"
+case "$DEPENDENCY_INSTALL_TIMEOUT" in
+    ""|*[!0-9]*) DEPENDENCY_INSTALL_TIMEOUT=120 ;;
+esac
+if [ "$DEPENDENCY_INSTALL_TIMEOUT" -le 0 ]; then
+    DEPENDENCY_INSTALL_TIMEOUT=120
+fi
+PROXY_CHECK_TIMEOUT="${NIUBOT_RESTART_PROXY_CHECK_TIMEOUT:-3}"
+case "$PROXY_CHECK_TIMEOUT" in
+    ""|*[!0-9]*) PROXY_CHECK_TIMEOUT=3 ;;
+esac
+if [ "$PROXY_CHECK_TIMEOUT" -le 0 ]; then
+    PROXY_CHECK_TIMEOUT=3
+fi
 PREFLIGHT_SOCKET="$NIUBOT_HOME/$BOT_NAME/api.sock.preflight"
 RESTART_ID="$(date '+%Y%m%d-%H%M%S')-$$"
 RESTART_STARTED_AT="$(date '+%Y-%m-%dT%H:%M:%S%z')"
@@ -387,6 +401,183 @@ run_preflight() {
     return 1
 }
 
+redact_proxy_value() {
+    local value="${1:-}"
+    if [ -z "$value" ]; then
+        printf "unset"
+        return
+    fi
+    # Cover both scheme://user:pass@host and user:pass@host forms.
+    printf "%s" "$value" | sed -E \
+        -e 's#(://)[^/@]+@#\1***@#' \
+        -e 's#^[^/@]+@#***@#'
+}
+
+proxy_endpoint() {
+    local value="${1:-}"
+    if [ -z "$value" ]; then
+        return 1
+    fi
+    case "$value" in
+        *://*) value="${value#*://}" ;;
+    esac
+    value="${value#*@}"
+    value="${value%%/*}"
+
+    local host port
+    case "$value" in
+        \[*\])
+            # Bracketed IPv6 without port — cannot probe.
+            return 1
+            ;;
+        \[*\]:*)
+            host="${value%]*}"
+            host="${host#\[}"
+            port="${value##*\]:}"
+            ;;
+        *:*)
+            host="${value%:*}"
+            port="${value##*:}"
+            # Unbracketed IPv6 with multiple colons is ambiguous; skip probe.
+            case "$host" in
+                *:*) return 1 ;;
+            esac
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+
+    if [ -z "$host" ] || [ -z "$port" ]; then
+        return 1
+    fi
+    case "$port" in
+        ""|*[!0-9]*) return 1 ;;
+    esac
+    printf "%s %s" "$host" "$port"
+}
+
+is_loopback_host() {
+    case "${1:-}" in
+        localhost|127.*|::1|\[::1\]) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+is_ipv6_host() {
+    case "${1:-}" in
+        *:*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+check_local_proxy_reachable() {
+    local name="$1"
+    local value="${2:-}"
+    local endpoint host port
+    endpoint="$(proxy_endpoint "$value" 2>/dev/null)" || return 0
+    host="${endpoint% *}"
+    port="${endpoint#* }"
+    if ! is_loopback_host "$host"; then
+        return 0
+    fi
+    # macOS bash 3.2 /dev/tcp is unreliable for IPv6; skip rather than fail-closed.
+    if is_ipv6_host "$host"; then
+        debug "skipping local proxy check for IPv6 endpoint $name=$(redact_proxy_value "$value") endpoint=$host:$port"
+        return 0
+    fi
+
+    debug "checking local proxy $name=$(redact_proxy_value "$value") endpoint=$host:$port"
+    # Bound the TCP probe so a DROP/half-open local proxy cannot hang restart.
+    ( exec 3<>"/dev/tcp/$host/$port" ) >/dev/null 2>&1 &
+    local probe_pid=$!
+    local elapsed=0
+    while [ "$elapsed" -lt "$PROXY_CHECK_TIMEOUT" ]; do
+        if ! kill -0 "$probe_pid" 2>/dev/null; then
+            local status=0
+            wait "$probe_pid" 2>/dev/null || status=$?
+            if [ "$status" -eq 0 ]; then
+                return 0
+            fi
+            debug "local proxy check FAILED: $name=$(redact_proxy_value "$value") endpoint=$host:$port is unreachable"
+            return 1
+        fi
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
+    kill -KILL "$probe_pid" 2>/dev/null || true
+    wait "$probe_pid" 2>/dev/null || true
+    debug "local proxy check FAILED: $name=$(redact_proxy_value "$value") endpoint=$host:$port timed out after ${PROXY_CHECK_TIMEOUT}s"
+    return 1
+}
+
+preflight_npm_proxy_environment() {
+    local http_proxy_value="${HTTP_PROXY:-${http_proxy:-}}"
+    local https_proxy_value="${HTTPS_PROXY:-${https_proxy:-}}"
+    local all_proxy_value="${ALL_PROXY:-${all_proxy:-}}"
+
+    debug "candidate dependency install proxy env HTTP_PROXY=$(redact_proxy_value "$http_proxy_value") HTTPS_PROXY=$(redact_proxy_value "$https_proxy_value") ALL_PROXY=$(redact_proxy_value "$all_proxy_value")"
+
+    local failed=0
+    check_local_proxy_reachable "HTTP_PROXY" "$http_proxy_value" || failed=1
+    check_local_proxy_reachable "HTTPS_PROXY" "$https_proxy_value" || failed=1
+    check_local_proxy_reachable "ALL_PROXY" "$all_proxy_value" || failed=1
+
+    if [ "$failed" -ne 0 ]; then
+        debug "candidate dependency install aborted before npm because local proxy env is unreachable"
+        return 1
+    fi
+    return 0
+}
+
+kill_process_tree() {
+    local pid="$1"
+    local signal="${2:-TERM}"
+    if [ -z "$pid" ]; then
+        return 0
+    fi
+    # Child was started with setsid, so PGID == PID.
+    # Avoid GNU-style "--": macOS/BSD kill does not accept it.
+    kill -s "$signal" "-$pid" 2>/dev/null || kill -s "$signal" "$pid" 2>/dev/null || true
+}
+
+install_candidate_dependencies() {
+    local package_dir="$1"
+    preflight_npm_proxy_environment || return 1
+
+    # Own session/process group so timeout can stop npm and its children cleanly.
+    (
+        cd "$package_dir"
+        exec perl -e 'use POSIX "setsid"; setsid(); exec @ARGV' \
+            npm install --omit=dev --no-audit --no-fund >> "$DEBUG_LOG" 2>&1
+    ) &
+    local install_pid=$!
+
+    local elapsed=0
+    while [ "$elapsed" -lt "$DEPENDENCY_INSTALL_TIMEOUT" ]; do
+        if ! kill -0 "$install_pid" 2>/dev/null; then
+            local status=0
+            wait "$install_pid" 2>/dev/null || status=$?
+            return "$status"
+        fi
+        sleep "$HEALTH_INTERVAL"
+        elapsed=$((elapsed + HEALTH_INTERVAL))
+        if [ $((elapsed % 10)) -eq 0 ]; then
+            debug "  candidate dependency install: waiting... ($elapsed/${DEPENDENCY_INSTALL_TIMEOUT})"
+        fi
+    done
+
+    debug "candidate dependency install timed out after ${DEPENDENCY_INSTALL_TIMEOUT}s, killing PID $install_pid"
+    kill_process_tree "$install_pid" TERM
+    sleep 5
+    if kill -0 "$install_pid" 2>/dev/null; then
+        debug "candidate dependency install still alive, force killing PID $install_pid"
+        kill_process_tree "$install_pid" KILL
+    fi
+    wait "$install_pid" 2>/dev/null || true
+    return 1
+}
+
 bootstrap_last_known_good() {
     if [ -n "$(resolve_release_link "$LKG_LINK")" ]; then
         return 0
@@ -454,7 +645,7 @@ build_candidate_release() {
     tar -xzf "$pack_path" -C "$package_dir" --strip-components=1
 
     debug "installing production dependencies for candidate..."
-    if ! (cd "$package_dir" && npm install --omit=dev --no-audit --no-fund >> "$DEBUG_LOG" 2>&1); then
+    if ! install_candidate_dependencies "$package_dir"; then
         debug "candidate dependency install FAILED"
         return 1
     fi
@@ -515,8 +706,8 @@ if $DEV_MODE; then
 
     write_state "build_candidate" || true
     if ! candidate_release="$(build_candidate_release)"; then
-        write_state "build_package_failed" "build or package failed" || true
-        notify "重启失败：构建或打包错误，当前服务不受影响。"
+        write_state "build_package_failed" "build, package, or dependency install failed" || true
+        notify "重启失败：构建、打包或依赖安装错误，当前服务不受影响。"
         debug "=== restart.sh done (build/package failed) ==="
         exit 1
     fi

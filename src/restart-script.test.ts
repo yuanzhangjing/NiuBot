@@ -74,4 +74,32 @@ describe("restart.sh", () => {
 
     expect(pipeline).toContain("NIUBOT_BOT_NAME: this.botIdentity.name");
   });
+
+  test("bounds candidate dependency install and checks local proxy env first", () => {
+    const script = readScript();
+    const installIndex = script.indexOf("installing production dependencies for candidate");
+    const timeoutIndex = script.indexOf("DEPENDENCY_INSTALL_TIMEOUT=");
+    const proxyCheckIndex = script.indexOf("preflight_npm_proxy_environment");
+    const installFunctionIndex = script.indexOf("install_candidate_dependencies");
+    const installSetsidIndex = script.indexOf(
+      'exec perl -e \'use POSIX "setsid"; setsid(); exec @ARGV\'',
+      installFunctionIndex,
+    );
+    const redactBareAuthIndex = script.indexOf("s#^[^/@]+@#***@#");
+
+    expect(timeoutIndex).toBeGreaterThan(-1);
+    expect(proxyCheckIndex).toBeGreaterThan(-1);
+    expect(installFunctionIndex).toBeGreaterThan(-1);
+    expect(script).toContain("timed out after ${DEPENDENCY_INSTALL_TIMEOUT}s");
+    expect(script).toContain("/dev/tcp/");
+    expect(script).toContain("PROXY_CHECK_TIMEOUT=");
+    expect(script).toContain("wait \"$install_pid\" 2>/dev/null || status=$?");
+    expect(script).toContain("skipping local proxy check for IPv6 endpoint");
+    expect(script).toContain("kill_process_tree");
+    expect(script).not.toContain("kill -s \"$signal\" --");
+    expect(installSetsidIndex).toBeGreaterThan(installFunctionIndex);
+    expect(redactBareAuthIndex).toBeGreaterThan(-1);
+    expect(proxyCheckIndex).toBeLessThan(installIndex);
+    expect(installFunctionIndex).toBeLessThan(installIndex);
+  });
 });
