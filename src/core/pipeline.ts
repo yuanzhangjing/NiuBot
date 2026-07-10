@@ -2114,7 +2114,11 @@ export class Pipeline {
     const send = this.im.sendCard(platformChatId, header, content, undefined, msgId);
     send
       .then((pmid) => { this.storeBotResponse(chatId, content, pmid); })
-      .catch(() => {});
+      .catch((err) => this.log.warn("agent card send failed", {
+        chatId,
+        header,
+        error: String(err),
+      }));
   }
 
   /** 发送 /help 卡片 */

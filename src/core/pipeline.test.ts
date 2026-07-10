@@ -1081,6 +1081,36 @@ describe("Pipeline.recover", () => {
     expect(formatted).toContain("exit code: 1");
   });
 
+  test("logs agent card delivery failures", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const im = createImStub();
+    im.sendCard = async () => { throw new Error("feishu unavailable"); };
+    const pipeline = new Pipeline(
+      db,
+      im,
+      new RecordingAgent(),
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+    const warn = vi.fn();
+    (pipeline as any).log = { warn };
+
+    (pipeline as any).sendAgentCard("c1", "chat-open-id", "m1", "Model", "switched");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(warn).toHaveBeenCalledWith("agent card send failed", {
+      chatId: "c1",
+      header: "Model",
+      error: "Error: feishu unavailable",
+    });
+  });
+
   test("notifies admins about the same newer version only once", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
