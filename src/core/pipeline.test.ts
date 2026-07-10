@@ -16,7 +16,13 @@ import {
 import type { NormalizedMessage, PlatformAdapter } from "../im/types.js";
 import { COMPACT_RECOVERY_REMINDER } from "../memory/inject.js";
 import { SYSTEM_RULES } from "../system-rules.js";
-import { Pipeline, type BotIdentity } from "./pipeline.js";
+import {
+  formatShellExecError,
+  Pipeline,
+  SHELL_COMMAND_TIMEOUT_MS,
+  UPDATE_INSTALL_TIMEOUT_MS,
+  type BotIdentity,
+} from "./pipeline.js";
 import { ResponseSender } from "./response-sender.js";
 
 class RecordingAgent implements AgentBackend {
@@ -1020,6 +1026,59 @@ describe("Pipeline.recover", () => {
     expect(restarted).toBe(true);
     expect(sentTexts.at(-2)).toContain("正在安装");
     expect(sentTexts.at(-1)).toContain("正在重启");
+  });
+
+  test("/update install command uses a ten minute timeout", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const agent = new RecordingAgent();
+    const pipeline = new Pipeline(
+      db,
+      createImStub(),
+      agent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+    const timeouts: number[] = [];
+    (pipeline as any).runUpdateCommand = async (cmd: string, timeout: number) => {
+      timeouts.push(timeout);
+      if (cmd.startsWith("npm view ")) return { stdout: "9.9.9\n", stderr: "" };
+      return { stdout: "", stderr: "" };
+    };
+    (pipeline as any).triggerRestart = () => {};
+
+    await (pipeline as any).handleUpdate("c1", "chat-open-id", undefined, true);
+
+    expect(timeouts).toEqual([15_000, UPDATE_INSTALL_TIMEOUT_MS]);
+    expect(UPDATE_INSTALL_TIMEOUT_MS).toBe(600_000);
+  });
+
+  test("shell command timeout is five minutes and shown in output", () => {
+    const err = new Error("Command failed") as Error & {
+      stdout?: string;
+      stderr?: string;
+      code?: number | null;
+      killed?: boolean;
+      signal?: NodeJS.Signals;
+    };
+    err.stdout = "Downloading...\n";
+    err.stderr = "";
+    err.code = null;
+    err.killed = true;
+    err.signal = "SIGTERM";
+
+    const formatted = formatShellExecError("/tmp/work", "codex update", err);
+
+    expect(SHELL_COMMAND_TIMEOUT_MS).toBe(300_000);
+    expect(formatted).toContain("Downloading...");
+    expect(formatted).toContain("command timed out after 300000ms");
+    expect(formatted).toContain("signal: SIGTERM");
+    expect(formatted).toContain("exit code: 1");
   });
 
   test("notifies admins about the same newer version only once", async () => {

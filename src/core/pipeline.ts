@@ -52,6 +52,8 @@ const PROCESSING_EMOJI = "Get";
 const MERGED_EMOJI = "Pin";
 const EMPTY_RESPONSE_FALLBACK = "（处理完成，但未生成回复。如果没收到预期结果，请重试）";
 const UPDATE_CONFIRM_COMMAND = "/update 1";
+export const SHELL_COMMAND_TIMEOUT_MS = 300_000;
+export const UPDATE_INSTALL_TIMEOUT_MS = 600_000;
 
 /** 过期消息阈值（ms）：超过 2 分钟的消息丢弃 */
 const STALE_MESSAGE_THRESHOLD_MS = 2 * 60 * 1000;
@@ -2175,7 +2177,7 @@ export class Pipeline {
     });
 
     execAsync(cmd, {
-      timeout: 30_000,
+      timeout: SHELL_COMMAND_TIMEOUT_MS,
       cwd: this.workingDirectory,
       env: { ...process.env, ...env },
     }).then(({ stdout, stderr }) => {
@@ -2183,11 +2185,9 @@ export class Pipeline {
       this.recordShellHistory(cmd, output, 0);
       sendResult(formatShellOutput(this.workingDirectory, cmd, output, 0));
     }).catch((err: unknown) => {
-      const execErr = err as { stdout?: string; stderr?: string; code?: number };
-      const output = ((execErr.stdout ?? "") + (execErr.stderr ?? "")).trim();
-      const exitCode = execErr.code ?? 1;
+      const { output, exitCode, formatted } = formatShellExecErrorDetails(this.workingDirectory, cmd, err);
       this.recordShellHistory(cmd, output, exitCode);
-      sendResult(formatShellOutput(this.workingDirectory, cmd, output, exitCode));
+      sendResult(formatted);
     });
   }
 
@@ -2262,7 +2262,7 @@ export class Pipeline {
 
       this.replyText(chatId, platformChatId, undefined, `发现新版本：${currentVersion} → ${latest}，正在安装...`);
 
-      await this.runUpdateCommand(`npm install -g ${PKG}@${latest}`, 120_000);
+      await this.runUpdateCommand(`npm install -g ${PKG}@${latest}`, UPDATE_INSTALL_TIMEOUT_MS);
       this.replyText(chatId, platformChatId, undefined, `${latest} 安装完成，正在重启...`);
       this.triggerRestart({ platformChatId });
     } catch (err: unknown) {
@@ -3359,6 +3359,35 @@ function commandExistsSync(cmd: string): boolean {
 
 /** Shell 输出最大字符数（超出截断） */
 const SHELL_MAX_OUTPUT_LEN = 4000;
+
+type ShellExecError = {
+  stdout?: string;
+  stderr?: string;
+  code?: number | null;
+  killed?: boolean;
+  signal?: NodeJS.Signals | string | null;
+};
+
+function formatShellExecErrorDetails(cwd: string, cmd: string, err: unknown): { output: string; exitCode: number; formatted: string } {
+  const execErr = err as ShellExecError;
+  const lines: string[] = [];
+  const output = ((execErr.stdout ?? "") + (execErr.stderr ?? "")).trim();
+  if (output) lines.push(output);
+  if (execErr.killed) lines.push(`command timed out after ${SHELL_COMMAND_TIMEOUT_MS}ms`);
+  if (execErr.signal) lines.push(`signal: ${execErr.signal}`);
+
+  const exitCode = execErr.code ?? 1;
+  const formattedOutput = lines.join("\n");
+  return {
+    output: formattedOutput,
+    exitCode,
+    formatted: formatShellOutput(cwd, cmd, formattedOutput, exitCode),
+  };
+}
+
+export function formatShellExecError(cwd: string, cmd: string, err: unknown): string {
+  return formatShellExecErrorDetails(cwd, cmd, err).formatted;
+}
 
 /** 格式化 shell 命令输出 */
 function formatShellOutput(cwd: string, cmd: string, output: string, exitCode: number): string {
