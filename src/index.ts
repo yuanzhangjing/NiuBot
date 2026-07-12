@@ -27,6 +27,7 @@ const BUILTIN_BACKEND_PATHS: Record<string, () => Promise<{ default: new (option
   opencode: () => import("./backends/opencode.js"),
   cursor: () => import("./backends/cursor-agent.js"),
   pi: () => import("./backends/pi.js"),
+  grok: () => import("./backends/grok.js"),
 };
 
 const backendClassCache = new Map<string, new (options: Record<string, unknown>) => CliAgentBackend>();

@@ -43,6 +43,9 @@ export const AGENT_REGISTRY = {
   pi: {
     aliases: ["pi", "pi-agent", "pi-coding-agent"],
   },
+  grok: {
+    aliases: ["grok", "grok-build"],
+  },
 } as const;
 
 /** 内置 agent backend 类型 */

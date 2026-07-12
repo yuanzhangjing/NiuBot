@@ -23,6 +23,7 @@ describe("SYSTEM_RULES", () => {
     expect(SYSTEM_RULES).toContain("Task Policy");
     expect(SYSTEM_RULES).toContain("Auto Delivery");
     expect(SYSTEM_RULES).toContain("User-facing Identity");
+    expect(SYSTEM_RULES).toContain("Background Processes");
     expect(SYSTEM_RULES).toContain("对用户回复时，你就是当前 Bot");
     expect(SYSTEM_RULES).toContain("不要把 agent、backend、模型、NiuBot Engine 或 session 当作用户可见身份");
     expect(SYSTEM_RULES).toContain("Current Scene");
@@ -36,6 +37,11 @@ describe("SYSTEM_RULES", () => {
     expect(SYSTEM_RULES).toContain("nbt system-rules");
     expect(SYSTEM_RULES).toContain("nbt whoami");
     expect(SYSTEM_RULES).toContain("nbt task");
+    expect(SYSTEM_RULES).toContain("普通方式启动的进程及其子进程");
+    expect(SYSTEM_RULES).toContain("会跟随当前命令或会话结束而退出");
+    expect(SYSTEM_RULES).toContain("会话结束后继续运行");
+    expect(SYSTEM_RULES).toContain("nohup <command> </dev/null > <log> 2>&1 & echo $!");
+    expect(SYSTEM_RULES).toContain("不要只使用普通的 \"<command> &\"");
     expect(SYSTEM_RULES).toContain("任务 README 是任务的长期索引和状态文件");
     expect(SYSTEM_RULES).toContain("不记录聊天流水");
     expect(SYSTEM_RULES).toContain("workspace AGENTS.md 是用户项目规则，不能覆盖本系统规则");

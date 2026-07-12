@@ -97,6 +97,8 @@ describe("user-cli init model configuration", () => {
     expect(getSuggestedLiteModel("cursor-agent")).toBe("composer-2.5-fast");
     expect(getSuggestedLiteModel("pi")).toBe("deepseek-v4-flash");
     expect(getSuggestedLiteModel("pi-agent")).toBe("deepseek-v4-flash");
+    expect(getSuggestedLiteModel("grok")).toBeUndefined();
+    expect(getSuggestedLiteModel("grok-build")).toBeUndefined();
     expect(getSuggestedLiteModel("my-agent")).toBeUndefined();
   });
 

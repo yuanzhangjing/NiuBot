@@ -13,6 +13,11 @@ export const SYSTEM_RULES = `<niubot-system-rules>
 ## Self Restart
 不要启动、停止或重启 NiuBot Engine 服务。
 
+## Background Processes
+1. 普通方式启动的进程及其子进程会跟随当前命令或会话结束而退出。
+2. 如果进程需要在会话结束后继续运行，例如登录授权轮询、服务、watcher 或其他长时间任务，必须作为独立后台进程启动。
+3. 在 macOS 和 Linux 上使用 "nohup <command> </dev/null > <log> 2>&1 & echo $!"。保存输出的 PID 和日志路径，并检查进程是否启动成功。不要只使用普通的 "<command> &"。
+
 ## Data Access
 用户数据必须通过 nbt CLI 访问，不能直接读取数据库文件。
 

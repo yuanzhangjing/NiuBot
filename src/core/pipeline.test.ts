@@ -588,6 +588,85 @@ describe("Pipeline.recover", () => {
     expect(sentCards).toHaveLength(0);
   });
 
+  test("does not treat an active agent tool call as an idle main chat session", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const { im, sentCards } = createRecordingImStub();
+    const agent = new WatchdogAgent();
+    const agentSession = await agent.createSession({ workingDirectory: dir });
+    agent.markRunning(agentSession.id);
+    const activity = (agent as any).activityMap.get(agentSession.id);
+    activity.startedAt = Date.now() - 30 * 60_000;
+    activity.lastActiveAt = Date.now() - 20 * 60_000;
+    activity.executingTool = true;
+
+    const pipeline = new Pipeline(
+      db,
+      im,
+      agent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+    (pipeline as any).platformChatIds.set("c1", "chat-open-id");
+    (pipeline as any).chatSessions.set("c1", {
+      agentSession,
+      sessionId: "s1",
+      platformChatId: "chat-open-id",
+      userId: "u2",
+      hasReplied: false,
+    });
+
+    (pipeline as any).runIdleWatchdog();
+
+    expect(sentCards).toHaveLength(0);
+  });
+
+  test("does not let stale agent tool state bypass the independent idle timeout", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const { im, sentCards } = createRecordingImStub();
+    const agent = new WatchdogAgent();
+    const cancelSpy = vi.spyOn(agent, "cancelSession").mockResolvedValue();
+    const agentSession = await agent.createSession({ workingDirectory: dir });
+    agent.markRunning(agentSession.id);
+    const activity = (agent as any).activityMap.get(agentSession.id);
+    const now = Date.now();
+    activity.startedAt = now - 61 * 60_000;
+    activity.lastActiveAt = now - 61 * 60_000;
+    activity.executingTool = true;
+
+    const pipeline = new Pipeline(
+      db,
+      im,
+      agent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+    (pipeline as any).platformChatIds.set("c1", "chat-open-id");
+    (pipeline as any).runningTasks.set(agentSession.id, {
+      agentSession,
+      chatId: "c1",
+      description: "stale tool job",
+      startedAt: now - 61 * 60_000,
+    });
+
+    (pipeline as any).runIdleWatchdog();
+
+    expect(cancelSpy).toHaveBeenCalledWith(agentSession);
+    expect(sentCards).toHaveLength(1);
+    expect(sentCards[0].header).toContain("卡住已终止");
+  });
+
   test("notifies softly when an independent task keeps running for one hour", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);

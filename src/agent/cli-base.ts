@@ -84,6 +84,11 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
   /** 子类可 override，在 getActivity 返回前刷新 recentLines 等字段 */
   protected refreshActivity(_sessionId: string, _activity: AgentSessionActivity): void {}
 
+  /** 子类可 override，隐藏命令参数中的消息、系统提示词等敏感内容。 */
+  protected argsForLog(args: string[]): string[] {
+    return args;
+  }
+
   /** 获取所有活动状态（供 watchdog 遍历） */
   getAllActivities(): ReadonlyMap<string, AgentSessionActivity> {
     return this.activityMap;
@@ -391,10 +396,11 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
       const stdinDefined = opts?.stdin !== undefined;
       const stdinLength = opts?.stdin?.length ?? 0;
       const stdinPreview = summarizeForLog(opts?.stdin, 120);
+      const logArgs = this.argsForLog(args);
       this.log.debug("spawning child process", {
         sessionId: sessionId ?? null,
         cmd,
-        args,
+        args: logArgs,
         cwd: opts?.cwd ?? process.cwd(),
         stdinDefined,
         stdinLength,
@@ -481,7 +487,7 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
                 });
                 this.maybeDumpAgentStdout(sessionId, "complete", {
                   cmd,
-                  args,
+                  args: logArgs,
                   cwd: opts?.cwd,
                   stdinLength,
                   stdinPreview,
@@ -562,7 +568,7 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
           this.log.error("child process failed", {
             sessionId: sessionId ?? null,
             cmd,
-            args,
+            args: logArgs,
             code,
             signal: signal ?? null,
             durationMs,
@@ -576,7 +582,7 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
           });
           this.maybeDumpAgentStdout(sessionId, "fail", {
             cmd,
-            args,
+            args: logArgs,
             cwd: opts?.cwd,
             stdinLength,
             stdinPreview,
@@ -596,7 +602,7 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
           this.log.debug("child process completed", {
             sessionId: sessionId ?? null,
             cmd,
-            args,
+            args: logArgs,
             code,
             signal: signal ?? null,
             durationMs,
@@ -607,7 +613,7 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
           });
           this.maybeDumpAgentStdout(sessionId, "exit", {
             cmd,
-            args,
+            args: logArgs,
             cwd: opts?.cwd,
             stdinLength,
             stdinPreview,
@@ -638,7 +644,7 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
         this.log.error("child process spawn error", {
           sessionId: sessionId ?? null,
           cmd,
-          args,
+          args: logArgs,
           stdinDefined,
           stdinLength,
           stdinPreview,
@@ -653,7 +659,7 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
             this.log.error("stdin write failed", {
               sessionId: sessionId ?? null,
               cmd,
-              args,
+              args: logArgs,
               stdinLength,
               error: String(err),
             });
@@ -661,7 +667,7 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
             this.log.debug("stdin write completed", {
               sessionId: sessionId ?? null,
               cmd,
-              args,
+              args: logArgs,
               stdinLength,
             });
           }

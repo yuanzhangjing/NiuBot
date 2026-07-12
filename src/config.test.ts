@@ -44,6 +44,13 @@ bots:
     expect(DEFAULT_LITE_MODELS.pi).toBe("deepseek-v4-flash");
   });
 
+  it("registers Grok Build as a built-in backend without a forced lite model", () => {
+    expect(BUILTIN_BACKEND_LIST).toContain("grok");
+    expect(normalizeBackend("grok")).toBe("grok");
+    expect(normalizeBackend("grok-build")).toBe("grok");
+    expect(DEFAULT_LITE_MODELS.grok).toBeUndefined();
+  });
+
   it("does not assign a workspace project context path by default", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-config-"));
     tempDirs.push(dir);

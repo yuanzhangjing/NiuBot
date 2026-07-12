@@ -1290,7 +1290,7 @@ export class Pipeline {
       count++;
       const elapsed = formatUptime(Date.now() - t.startedAt);
       const a = typeof cliAgent.getActivity === "function" ? cliAgent.getActivity(sessionId) : undefined;
-      const status = a?.compacting ? "压缩上下文" : "处理中";
+      const status = a?.compacting ? "压缩上下文" : a?.executingTool ? "执行工具" : "处理中";
       sections.push(`**⚡ ${t.description}**（${status} · ${elapsed}）`);
       if (a && a.recentLines.length > 0) {
         const logBlock = a.recentLines.map((l) => l.replace(/`{3,}/g, "``").slice(0, ERROR_DISPLAY_MAX_LEN)).join("\n");
@@ -3174,6 +3174,10 @@ export class Pipeline {
         continue;
       }
 
+      // 工具执行期间可能长时间没有新日志；一小时内先不按“无输出”误报。
+      // tool_started 不是持续心跳，超过一小时仍恢复原 idle 策略，避免永久挂住。
+      if (a.executingTool && idleMs <= INDEPENDENT_IDLE_KILL_MS) continue;
+
       // ── 策略 3: 无 completion + 长时间无活动 → 通知 ──
       if (!a.completionDetected) {
         if (a.notifyCount >= 2) continue;  // 两次封顶
@@ -3232,6 +3236,9 @@ export class Pipeline {
         a.lastLongRunningNotifiedAt = now;
         continue;
       }
+
+      // 同上：只在一小时内豁免；超过后恢复原 idle kill。
+      if (a.executingTool && idleMs <= INDEPENDENT_IDLE_KILL_MS) continue;
 
       // 1 小时无活动 → 通知用户 + kill（重试最多 3 次）
       if (!a.completionDetected && a.notifyCount < 3 && idleMs > INDEPENDENT_IDLE_KILL_MS) {

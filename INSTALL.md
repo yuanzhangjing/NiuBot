@@ -37,6 +37,7 @@ NiuBot ships with built-in backends. Pick one whose CLI is installed:
 | `opencode` | `opencode` |
 | `cursor` | `cursor-agent` (Cursor Agent CLI) |
 | `pi` | `pi` (Pi coding agent) |
+| `grok` | `grok` (Grok Build CLI) |
 
 Check availability:
 
@@ -47,6 +48,7 @@ traecli --version
 opencode --version
 cursor-agent --version
 pi --version
+grok --version
 ```
 
 If at least one is available, note which one the user wants (e.g. `claude`). Before writing config, also ask whether they want a separate `liteModel` for cheaper background tasks. Proceed to [Step 2.1](#step-21-generate-config).
@@ -141,6 +143,7 @@ Before filling the config, ask the user the following questions **one at a time*
 - `opencode`: `opencode-go/deepseek-v4-flash`
 - `cursor`: `composer-2.5-fast`
 - `pi`: `deepseek-v4-flash`
+- `grok`: 不预设，由 Grok Build 使用账号默认模型
 
 Example `config.yaml`:
 
@@ -157,7 +160,7 @@ bots:
 
 Config fields:
 - `id`: Unique bot identifier (immutable). Determines data directory (`~/.niubot/<id>/`) and default workspace (`~/niubot-workspace/<id>/`). **Do not change after setup.**
-- `backend`: Agent backend to use (required). One of: `claude`, `codex`, `traecli`, `opencode`, `cursor`, `pi`.
+- `backend`: Agent backend to use (required). One of: `claude`, `codex`, `traecli`, `opencode`, `cursor`, `pi`, `grok`.
 - `model`: Main model for conversations. Omit to use the CLI's default.
 - `liteModel`: Cheaper model for background tasks (archive summaries). Omit = same as main model.
   Recommended examples for built-in backends:
@@ -394,7 +397,7 @@ bots:
     appSecret: "xxx"
 
   - id: NewBot                # ← append new bot
-    backend: claude            # claude / codex / traecli / opencode / cursor / pi
+    backend: claude            # claude / codex / traecli / opencode / cursor / pi / grok
     appId: "cli_yyy"          # from Feishu app (Step 4)
     appSecret: "yyy"
     # model: ""               # optional: main model
@@ -411,6 +414,7 @@ Recommended lite models by backend:
 | opencode | `opencode-go/deepseek-v4-flash` |
 | cursor | `composer-2.5-fast` |
 | pi | `deepseek-v4-flash` |
+| grok | 不预设（使用 Grok Build 默认模型） |
 
 #### 4. Create Feishu App (if new)
 

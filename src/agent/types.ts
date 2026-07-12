@@ -122,6 +122,8 @@ export interface AgentSessionActivity {
   completionDetected?: boolean;
   /** 是否正在做上下文压缩 */
   compacting?: boolean;
+  /** 是否有尚未结束的 agent 工具调用 */
+  executingTool?: boolean;
   /** 当前 exec 的子进程 PID（用于 watchdog kill） */
   pid?: number;
   /** 最近 3 条原始 stdout 行（环形 buffer，供 /progress 卡片展示） */
