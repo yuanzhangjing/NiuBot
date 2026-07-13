@@ -1,10 +1,10 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import yaml from "yaml";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { CliAgentBackend, type BaseCliSession, type ParsedOutput } from "../agent/cli-base.js";
-import type { AgentBackend, AgentResponse, AgentSession, SessionConfig } from "../agent/types.js";
+import { AgentSessionNotStartedError, type AgentBackend, type AgentResponse, type AgentSession, type SessionConfig } from "../agent/types.js";
 import {
   getBotBackendModelState,
   getBotRuntimeState,
@@ -30,8 +30,9 @@ class RecordingAgent implements AgentBackend {
   needsCompactRecoveryReminderFlag = true;
   readonly createSessionCalls: SessionConfig[] = [];
   readonly sendMessageCalls: string[] = [];
+  readonly cancelSessionCalls: string[] = [];
   readonly closeSessionCalls: string[] = [];
-  readonly backendSessions = new Map<string, { model?: string; liteModel?: string }>();
+  readonly backendSessions = new Map<string, { model?: string }>();
   validateModelImpl?: (modelName: string) => Promise<{ valid: boolean; error?: string }>;
   readonly validateModelCalls: string[] = [];
 
@@ -43,7 +44,6 @@ class RecordingAgent implements AgentBackend {
     const id = `agent_${this.createSessionCalls.length}`;
     this.backendSessions.set(id, {
       model: config.model,
-      liteModel: config.liteModel,
     });
     return { id };
   }
@@ -53,16 +53,23 @@ class RecordingAgent implements AgentBackend {
     return { text: "" };
   }
 
-  async cancelSession(): Promise<void> {}
+  async cancelSession(session: AgentSession): Promise<void> { this.cancelSessionCalls.push(session.id); }
   async closeSession(session: AgentSession): Promise<void> {
     this.closeSessionCalls.push(session.id);
   }
 
-  updateSessionModels(sessionId: string, models: { model?: string; liteModel?: string }): void {
+  async exportSessionTranscript(session: AgentSession) {
+    return {
+      backend: "test",
+      agentSessionId: session.id,
+      events: [{ type: "assistant" as const, content: "test transcript" }],
+    };
+  }
+
+  updateSessionModels(sessionId: string, models: { model?: string }): void {
     const current = this.backendSessions.get(sessionId) ?? {};
     this.backendSessions.set(sessionId, {
       model: "model" in models ? models.model : current.model,
-      liteModel: "liteModel" in models ? models.liteModel : current.liteModel,
     });
   }
 
@@ -78,6 +85,32 @@ class RecordingAgent implements AgentBackend {
 
   needsCompactRecoveryReminder(): boolean {
     return this.needsCompactRecoveryReminderFlag;
+  }
+}
+
+class FailingTranscriptAgent extends RecordingAgent {
+  override async exportSessionTranscript(): Promise<never> {
+    throw new Error("transcript unavailable");
+  }
+}
+
+class NotStartedTranscriptAgent extends RecordingAgent {
+  override async exportSessionTranscript(session: AgentSession): Promise<never> {
+    throw new AgentSessionNotStartedError(session.id);
+  }
+}
+
+class DeferredCreateAgent extends RecordingAgent {
+  private resolvePending?: (session: AgentSession) => void;
+
+  override async createSession(config: SessionConfig): Promise<AgentSession> {
+    this.createSessionCalls.push(config);
+    return new Promise<AgentSession>((resolve) => { this.resolvePending = resolve; });
+  }
+
+  resolveCreate(id = "deferred-agent-session"): void {
+    this.backendSessions.set(id, {});
+    this.resolvePending?.({ id });
   }
 }
 
@@ -655,6 +688,8 @@ describe("Pipeline.recover", () => {
     (pipeline as any).platformChatIds.set("c1", "chat-open-id");
     (pipeline as any).runningTasks.set(agentSession.id, {
       agentSession,
+      backend: agent,
+      backendType: "codex",
       chatId: "c1",
       description: "stale tool job",
       startedAt: now - 61 * 60_000,
@@ -694,6 +729,8 @@ describe("Pipeline.recover", () => {
     (pipeline as any).platformChatIds.set("c1", "chat-open-id");
     (pipeline as any).runningTasks.set(agentSession.id, {
       agentSession,
+      backend: agent,
+      backendType: "codex",
       chatId: "c1",
       description: "daily job",
       startedAt: now - 61 * 60_000,
@@ -707,6 +744,28 @@ describe("Pipeline.recover", () => {
     expect(sentCards[0].content).toContain("输出状态：最近 1 分钟内有输出，按输出看任务还活跃。");
     expect(sentCards[0].content).not.toContain("/stop");
     expect(sentCards[0].content).not.toContain("still working");
+  });
+
+  test("stops an independent task through the backend that created it", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const oldBackend = new RecordingAgent();
+    const currentBackend = new RecordingAgent();
+    const pipeline = new Pipeline(
+      db, createImStub(), currentBackend, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "claude",
+    );
+    const agentSession = { id: "old-task-session" };
+    (pipeline as any).runningTasks.set(agentSession.id, {
+      agentSession, backend: oldBackend, backendType: "codex", chatId: "c1",
+      description: "old backend task", startedAt: Date.now(),
+    });
+
+    (pipeline as any).stopAllTasks("c1", "chat-open-id");
+    await Promise.resolve();
+
+    expect(oldBackend.cancelSessionCalls).toEqual([agentSession.id]);
+    expect(currentBackend.cancelSessionCalls).toHaveLength(0);
   });
 
   test("does not recover active sessions when the stored backend is missing", async () => {
@@ -747,8 +806,8 @@ describe("Pipeline.recover", () => {
 
     expect(agent.createSessionCalls).toHaveLength(0);
     expect(row).toEqual({
-      status: "archived",
-      agent_session_id: null,
+      status: "archive_failed",
+      agent_session_id: "legacy-session-id",
       backend_type: null,
     });
   });
@@ -791,8 +850,8 @@ describe("Pipeline.recover", () => {
 
     expect(agent.createSessionCalls).toHaveLength(0);
     expect(row).toEqual({
-      status: "archived",
-      agent_session_id: null,
+      status: "archive_failed",
+      agent_session_id: "codex-thread-id",
       backend_type: "codex",
     });
   });
@@ -1436,8 +1495,8 @@ describe("Pipeline.recover", () => {
       0,
       "codex",
     );
-    const activeAgentSession = { id: "agent_1", model: "old-model", liteModel: "old-lite" };
-    agent.backendSessions.set("agent_1", { model: "old-model", liteModel: "old-lite" });
+    const activeAgentSession = { id: "agent_1", model: "old-model" };
+    agent.backendSessions.set("agent_1", { model: "old-model" });
     (pipeline as any).chatSessions.set("c1", {
       agentSession: activeAgentSession,
       sessionId: "s1",
@@ -1450,22 +1509,19 @@ describe("Pipeline.recover", () => {
 
     expect(identity.model).toBe("new-model");
     expect(activeAgentSession.model).toBe("new-model");
-    expect(activeAgentSession.liteModel).toBe("old-lite");
     expect(agent.backendSessions.get("agent_1")).toEqual({
       model: "new-model",
-      liteModel: "old-lite",
     });
     expect((pipeline as any).chatSessions.has("c1")).toBe(true);
     expect(agent.closeSessionCalls).toHaveLength(0);
     expect(sentCards).toHaveLength(2);
     expect(sentCards[0]?.content).toContain("正在探测模型 **new-model**");
-    expect(sentCards[1]?.content).toContain("主模型已切换为 **new-model**");
+    expect(sentCards[1]?.content).toContain("模型已切换为 **new-model**");
     expect(sentCards[1]?.content).not.toContain("下次会话生效");
     expect(agent.validateModelCalls).toEqual(["new-model"]);
     expect(getBotRuntimeState(db, "NiuBot")).toEqual({
       backendType: "codex",
       model: "new-model",
-      liteModel: undefined,
     });
   });
 
@@ -1538,7 +1594,7 @@ describe("Pipeline.recover", () => {
 
     expect(identity.model).toBe("unknown-model");
     expect(sentCards).toHaveLength(2);
-    expect(sentCards[1]?.content).toContain("主模型已切换为 **unknown-model**");
+    expect(sentCards[1]?.content).toContain("模型已切换为 **unknown-model**");
 
     let assistantRows: Array<{ content_text: string }> = [];
     for (let i = 0; i < 20; i++) {
@@ -1549,7 +1605,7 @@ describe("Pipeline.recover", () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
     }
     expect(assistantRows).toHaveLength(1);
-    expect(assistantRows[0]?.content_text).toContain("主模型已切换为 **unknown-model**");
+    expect(assistantRows[0]?.content_text).toContain("模型已切换为 **unknown-model**");
     expect(assistantRows[0]?.content_text).not.toContain("正在探测模型");
   });
 
@@ -1586,7 +1642,7 @@ describe("Pipeline.recover", () => {
     expect(identity.model).toBe("fragile-model");
     expect(sendCardCalls).toBe(2);
     expect(sentCards).toHaveLength(1);
-    expect(sentCards[0]?.content).toContain("主模型已切换为 **fragile-model**");
+    expect(sentCards[0]?.content).toContain("模型已切换为 **fragile-model**");
   });
 
   test("reports unavailable model after progress card", async () => {
@@ -1633,7 +1689,6 @@ describe("Pipeline.recover", () => {
 
     const identity = createBotIdentity();
     identity.model = "gpt-5.4";
-    identity.liteModel = "gpt-5.4-mini";
     const pipeline = new Pipeline(
       db,
       createImStub(),
@@ -1647,7 +1702,6 @@ describe("Pipeline.recover", () => {
 
     expect((pipeline as any).buildModelCandidates()).toEqual([
       "gpt-5.4",
-      "gpt-5.4-mini",
       "history-new",
       "history-old",
     ]);
@@ -1677,56 +1731,6 @@ describe("Pipeline.recover", () => {
     expect(row.last_used_at).toMatch(/\.\d{3}$/);
   });
 
-  test("updates the active chat session lite model without starting a new session", async () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
-    tempDirs.push(dir);
-
-    const db = initDatabase(path.join(dir, "niubot.db"));
-    const agent = new RecordingAgent();
-    const { im, sentCards } = createRecordingImStub();
-    const identity = createBotIdentity();
-    const pipeline = new Pipeline(
-      db,
-      im,
-      agent,
-      identity,
-      dir,
-      path.join(dir, "niubot.db"),
-      0,
-      "codex",
-    );
-    const activeAgentSession = { id: "agent_1", model: "old-model", liteModel: "old-lite" };
-    agent.backendSessions.set("agent_1", { model: "old-model", liteModel: "old-lite" });
-    (pipeline as any).chatSessions.set("c1", {
-      agentSession: activeAgentSession,
-      sessionId: "s1",
-      platformChatId: "chat-open-id",
-      userId: "u2",
-      hasReplied: false,
-    });
-
-    await (pipeline as any).handleModelCommand(["lite", "new-lite"], "c1", "chat-open-id");
-
-    expect(identity.liteModel).toBe("new-lite");
-    expect(activeAgentSession.model).toBe("old-model");
-    expect(activeAgentSession.liteModel).toBe("new-lite");
-    expect(agent.backendSessions.get("agent_1")).toEqual({
-      model: "old-model",
-      liteModel: "new-lite",
-    });
-    expect((pipeline as any).chatSessions.has("c1")).toBe(true);
-    expect(agent.closeSessionCalls).toHaveLength(0);
-    expect(sentCards).toHaveLength(2);
-    expect(sentCards[0]?.content).toContain("正在探测模型 **new-lite**");
-    expect(sentCards[1]?.content).toContain("Lite 模型已切换为 **new-lite**");
-    expect(agent.validateModelCalls).toEqual(["new-lite"]);
-    expect(getBotRuntimeState(db, "NiuBot")).toEqual({
-      backendType: "codex",
-      model: undefined,
-      liteModel: "new-lite",
-    });
-  });
-
   test("clears runtime models on /model reset while keeping backend", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
@@ -1734,7 +1738,6 @@ describe("Pipeline.recover", () => {
     const db = initDatabase(path.join(dir, "niubot.db"));
     const identity = createBotIdentity();
     identity.model = "runtime-model";
-    identity.liteModel = "runtime-lite";
     const pipeline = new Pipeline(
       db,
       createImStub(),
@@ -1749,11 +1752,9 @@ describe("Pipeline.recover", () => {
     (pipeline as any).handleModelCommand(["reset"], "c1", "chat-open-id");
 
     expect(identity.model).toBeUndefined();
-    expect(identity.liteModel).toBe("gpt-5.4-mini");
     expect(getBotRuntimeState(db, "NiuBot")).toEqual({
       backendType: "codex",
       model: undefined,
-      liteModel: undefined,
     });
   });
 
@@ -1764,7 +1765,6 @@ describe("Pipeline.recover", () => {
     const db = initDatabase(path.join(dir, "niubot.db"));
     const identity = createBotIdentity();
     identity.model = "codex-model";
-    identity.liteModel = "codex-lite";
     const { im, sentCards } = createRecordingImStub();
     const pipeline = new Pipeline(
       db,
@@ -1781,20 +1781,105 @@ describe("Pipeline.recover", () => {
 
     (pipeline as any).backendModelCache.set("claude", {
       model: "claude-model",
-      liteModel: "claude-lite",
     });
 
     (pipeline as any).handleAgentCommand(["claude"], "c1", "chat-open-id");
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(identity.model).toBe("claude-model");
-    expect(identity.liteModel).toBe("claude-lite");
     expect(getBotRuntimeState(db, "NiuBot")).toEqual({
       backendType: "claude",
       model: "claude-model",
-      liteModel: "claude-lite",
     });
     expect(sentCards[0]?.content).toContain("重启后仍保持当前选择");
+  });
+
+  test("defers a new chat that first appears while the backend is switching", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    let resolveBackend!: (backend: AgentBackend) => void;
+    const backendReady = new Promise<AgentBackend>((resolve) => { resolveBackend = resolve; });
+    const pipeline = new Pipeline(
+      db, createImStub(), new RecordingAgent(), createBotIdentity(), dir, path.join(dir, "niubot.db"), 1000, "codex",
+      async () => backendReady,
+      () => ["codex", "claude"],
+    );
+
+    (pipeline as any).handleAgentCommand(["claude"], "trigger-chat", "trigger-platform-chat");
+    (pipeline as any).handleMessage(createMessage({
+      chatPlatformId: "brand-new-platform-chat",
+      platformMsgId: "new-chat-message",
+    }));
+
+    const pendingChatId = (db.prepare("SELECT id FROM chats WHERE platform_id = ?").get("brand-new-platform-chat") as { id: string }).id;
+    expect((pipeline as any).pendingTransitionMessages.get(pendingChatId)).toHaveLength(1);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM messages WHERE chat_id = ?").get(pendingChatId)).toEqual({ count: 0 });
+
+    resolveBackend(new RecordingAgent());
+    await (pipeline as any).globalSessionTransition;
+    expect((pipeline as any).pendingTransitionMessages.has(pendingChatId)).toBe(false);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM messages WHERE chat_id = ?").get(pendingChatId)).toEqual({ count: 1 });
+  });
+
+  test("waits for another chat's session transition before switching backends", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+    const pipeline = new Pipeline(
+      initDatabase(path.join(dir, "niubot.db")), createImStub(), new RecordingAgent(),
+      createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex",
+    );
+    let finishLocal!: () => void;
+    const localPending = new Promise<void>((resolve) => { finishLocal = resolve; });
+    let globalStarted = false;
+
+    (pipeline as any).startSessionTransition("chat-a", async () => localPending);
+    (pipeline as any).startGlobalSessionTransition("chat-b", async () => { globalStarted = true; });
+    await Promise.resolve();
+    expect(globalStarted).toBe(false);
+
+    finishLocal();
+    await (pipeline as any).globalSessionTransition;
+    expect(globalStarted).toBe(true);
+  });
+
+  test("holds a message already buffered in the queue until a global transition finishes", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare(`
+      INSERT INTO sessions (id, chat_id, user_id, status, backend_type, started_at, last_active_at)
+      VALUES ('old-session', 'c1', 'u2', 'active', 'codex', datetime('now'), datetime('now'))
+    `).run();
+    const agent = new ReplyAgent("done");
+    const pipeline = new Pipeline(
+      db, createImStub(), agent,
+      createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex",
+    );
+    await pipeline.start();
+    (pipeline as any).chatSessions.set("c1", {
+      agentSession: { id: "old-agent-session" }, sessionId: "old-session",
+      platformChatId: "chat-open-id", userId: "u2", hasReplied: false,
+    });
+    let finishTransition!: () => void;
+    const transitionPending = new Promise<void>((resolve) => { finishTransition = resolve; });
+
+    (pipeline as any).handleMessage(createMessage({ platformMsgId: "buffered-before-switch" }));
+    (pipeline as any).startGlobalSessionTransition("c1", async () => {
+      await (pipeline as any).archiveSession("c1");
+      await transitionPending;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(agent.sendMessageCalls).toHaveLength(0);
+
+    finishTransition();
+    await (pipeline as any).globalSessionTransition;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(agent.sendMessageCalls).toHaveLength(1);
+    const message = db.prepare("SELECT session_key FROM messages WHERE platform_msg_id = ?").get("buffered-before-switch") as { session_key: string };
+    expect(message.session_key).not.toBe("old-session");
+    expect((db.prepare("SELECT status FROM sessions WHERE id = ?").get(message.session_key) as { status: string }).status).toBe("active");
+    pipeline.stop();
   });
 
   test("restores persisted backend-specific models on /agent switch after restart", async () => {
@@ -1804,7 +1889,6 @@ describe("Pipeline.recover", () => {
     const db = initDatabase(path.join(dir, "niubot.db"));
     setBotBackendModelState(db, "NiuBot", "claude", {
       model: "claude-opus-4-6",
-      liteModel: "haiku",
     });
 
     const identity = createBotIdentity();
@@ -1827,15 +1911,12 @@ describe("Pipeline.recover", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(identity.model).toBe("claude-opus-4-6");
-    expect(identity.liteModel).toBe("haiku");
     expect(getBotRuntimeState(db, "NiuBot")).toEqual({
       backendType: "claude",
       model: "claude-opus-4-6",
-      liteModel: "haiku",
     });
     expect(getBotBackendModelState(db, "NiuBot", "claude")).toEqual({
       model: "claude-opus-4-6",
-      liteModel: "haiku",
     });
     expect(sentCards[0]?.content).toContain("claude-opus-4-6");
   });
@@ -1873,7 +1954,7 @@ describe("Pipeline.recover", () => {
     (pipeline as any).lastCompactCounts.set("c1", 1);
 
     const handled = (pipeline as any).handleBuiltinCommand("/new", "u2", "c1", "chat-open-id");
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await (pipeline as any).sessionTransitionLocks.get("c1");
 
     const row = db.prepare("SELECT status FROM sessions WHERE id = 's1'").get() as { status: string };
 
@@ -1881,9 +1962,141 @@ describe("Pipeline.recover", () => {
     expect(row.status).toBe("archived");
     expect(agent.closeSessionCalls).toEqual(["agent_1"]);
     expect(sentTexts).toContain("已开始新会话，当前上下文已清空。");
+    expect(existsSync(path.join(dir, ".niubot-test", "NiuBot", "session-archives", "c1"))).toBe(true);
     expect((pipeline as any).chatSessions.has("c1")).toBe(false);
     expect((pipeline as any).pendingCompactRecovery.has("c1")).toBe(false);
     expect((pipeline as any).lastCompactCounts.has("c1")).toBe(false);
+  });
+
+  test("keeps the current session active when /new cannot write its transcript", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare(`
+      INSERT INTO sessions (id, chat_id, user_id, status, backend_type, started_at, last_active_at)
+      VALUES ('s1', 'c1', 'u2', 'active', 'codex', datetime('now'), datetime('now'))
+    `).run();
+    const agent = new FailingTranscriptAgent();
+    const { im, sentTexts } = createRecordingImStub();
+    const pipeline = new Pipeline(db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");
+    (pipeline as any).chatSessions.set("c1", {
+      agentSession: { id: "agent_1" }, sessionId: "s1", platformChatId: "chat-open-id",
+      userId: "u2", hasReplied: false,
+    });
+
+    (pipeline as any).handleBuiltinCommand("/new", "u2", "c1", "chat-open-id");
+    await (pipeline as any).sessionTransitionLocks.get("c1");
+
+    const row = db.prepare("SELECT status, ended_at FROM sessions WHERE id = 's1'").get() as { status: string; ended_at: string | null };
+    expect(row).toEqual({ status: "active", ended_at: null });
+    expect((pipeline as any).chatSessions.has("c1")).toBe(true);
+    expect(agent.closeSessionCalls).toHaveLength(0);
+    expect(sentTexts.some((text) => text.includes("新建会话失败"))).toBe(true);
+  });
+
+  test("does not claim an orphaned active session was archived without a file", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare(`
+      INSERT INTO sessions (id, chat_id, user_id, status, agent_session_id, backend_type, started_at, last_active_at)
+      VALUES ('orphan', 'c1', 'u2', 'active', 'native-session-id', 'codex', datetime('now'), datetime('now'))
+    `).run();
+    const pipeline = new Pipeline(
+      db, createImStub(), new RecordingAgent(), createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex",
+    );
+
+    await (pipeline as any).archiveSession("c1");
+
+    expect(db.prepare("SELECT status, agent_session_id FROM sessions WHERE id = 'orphan'").get()).toEqual({
+      status: "archive_failed",
+      agent_session_id: "native-session-id",
+    });
+  });
+
+  test("does not change an active independent session when /new has no main session", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare(`
+      INSERT INTO sessions (id, chat_id, user_id, source, status, agent_session_id, backend_type, started_at, last_active_at)
+      VALUES ('cron-session', 'c1', 'u2', 'cron', 'active', 'native-cron-id', 'codex', datetime('now'), datetime('now'))
+    `).run();
+    const pipeline = new Pipeline(
+      db, createImStub(), new RecordingAgent(), createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex",
+    );
+
+    expect(await (pipeline as any).archiveSession("c1")).toBe(false);
+    expect(db.prepare("SELECT status, agent_session_id FROM sessions WHERE id = 'cron-session'").get()).toEqual({
+      status: "active", agent_session_id: "native-cron-id",
+    });
+  });
+
+  test("discards a session that was cancelled before the backend assigned an id", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare(`
+      INSERT INTO sessions (id, chat_id, user_id, status, backend_type, started_at, last_active_at)
+      VALUES ('not-started', 'c1', 'u2', 'active', 'codex', datetime('now'), datetime('now'))
+    `).run();
+    const agent = new NotStartedTranscriptAgent();
+    const { im, sentTexts } = createRecordingImStub();
+    const pipeline = new Pipeline(db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");
+    (pipeline as any).chatSessions.set("c1", {
+      agentSession: { id: "engine-only-session" }, sessionId: "not-started",
+      platformChatId: "chat-open-id", userId: "u2", hasReplied: false,
+    });
+
+    (pipeline as any).handleBuiltinCommand("/new", "u2", "c1", "chat-open-id", "p2p", "new-command");
+    await (pipeline as any).sessionTransitionLocks.get("c1");
+
+    expect((db.prepare("SELECT status FROM sessions WHERE id = 'not-started'").get() as { status: string }).status).toBe("discarded");
+    expect(agent.closeSessionCalls).toEqual(["engine-only-session"]);
+    expect(sentTexts).toContain("已开始新会话，当前上下文已清空。");
+  });
+
+  test("cancels an active run before archiving on /new", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare(`INSERT INTO sessions (id, chat_id, user_id, status, backend_type, started_at, last_active_at) VALUES ('s1', 'c1', 'u2', 'active', 'codex', datetime('now'), datetime('now'))`).run();
+    const agent = new RecordingAgent();
+    const pipeline = new Pipeline(db, createImStub(), agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");
+    (pipeline as any).chatSessions.set("c1", { agentSession: { id: "agent_1" }, sessionId: "s1", platformChatId: "chat-open-id", userId: "u2", hasReplied: false });
+    const run = (pipeline as any).runtimeState.createRun({ chatId: "c1", triggerMessageIds: [], triggerPlatformMsgIds: [], mergedText: "running" });
+    (pipeline as any).runtimeState.markRunStage(run.runId, "agent_running");
+
+    (pipeline as any).handleBuiltinCommand("/new", "u2", "c1", "chat-open-id");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(agent.cancelSessionCalls).toContain("agent_1");
+    expect((pipeline as any).runtimeState.getRun(run.runId).stage).toBe("stopped");
+  });
+
+  test("waits for an asynchronously created session before handling /new", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const agent = new DeferredCreateAgent();
+    const { im, sentTexts } = createRecordingImStub();
+    const pipeline = new Pipeline(db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");
+
+    (pipeline as any).handleMessage(createMessage({ platformMsgId: "initial-message" }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(agent.createSessionCalls).toHaveLength(1);
+
+    (pipeline as any).handleBuiltinCommand("/new", "u2", "c1", "chat-open-id", "p2p", "new-command");
+    await Promise.resolve();
+    expect(sentTexts).toHaveLength(0);
+
+    agent.resolveCreate();
+    await (pipeline as any).sessionTransitionLocks.get("c1");
+
+    expect(agent.sendMessageCalls).toHaveLength(0);
+    expect(agent.closeSessionCalls).toEqual(["deferred-agent-session"]);
+    expect((db.prepare("SELECT status FROM sessions ORDER BY started_at DESC LIMIT 1").get() as { status: string }).status).toBe("archived");
+    expect(sentTexts).toContain("已开始新会话，当前上下文已清空。");
   });
 
   test("refreshes agent context files before creating a new chat session", async () => {
@@ -2710,6 +2923,29 @@ describe("Pipeline.recover", () => {
     expect(sentTexts).toContain("已开始新会话，当前上下文已清空。");
     expect(agent.sendMessageCalls).toHaveLength(1);
     expect(agent.sendMessageCalls[0]).toContain("hi");
+  });
+
+  test("does not drop a transition-deferred message when the transition exceeds the stale threshold", () => {
+    vi.useFakeTimers();
+    const now = new Date("2026-07-13T00:00:00Z");
+    vi.setSystemTime(now);
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const pipeline = new Pipeline(
+      db, createImStub(), new RecordingAgent(), createBotIdentity(), dir, path.join(dir, "niubot.db"), 1000, "codex",
+    );
+    (pipeline as any).globalSessionTransition = new Promise<void>(() => {});
+    (pipeline as any).handleMessage(createMessage({
+      platformMsgId: "deferred-for-three-minutes", platformTs: now.getTime(),
+    }));
+
+    vi.advanceTimersByTime(3 * 60_000);
+    (pipeline as any).globalSessionTransition = undefined;
+    (pipeline as any).drainPendingTransitionMessages("c1");
+
+    expect(db.prepare("SELECT COUNT(*) AS count FROM messages WHERE platform_msg_id = ?").get("deferred-for-three-minutes"))
+      .toEqual({ count: 1 });
   });
 
   test("adds pin for pending messages and get for non-pending ones on receipt", async () => {

@@ -91,8 +91,6 @@ export async function createBotInstance(
     platform: "feishu",
     platformBotId: `_bot_${botConfig.id}_`,
     model: runtimeConfig?.model,
-    liteModel: runtimeConfig?.liteModel,
-    defaultLiteModel: runtimeConfig?.defaultLiteModel,
   };
 
   const pipeline = new Pipeline(

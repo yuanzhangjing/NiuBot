@@ -10,7 +10,7 @@ import Database from "better-sqlite3";
 import { CliAgentBackend, buildNiubotEnv, type BaseCliSession, type ParsedOutput } from "../agent/cli-base.js";
 import { ERROR_DISPLAY_MAX_LEN } from "../agent/types.js";
 import type { SessionConfig, ExecHooks } from "../agent/types.js";
-import { DEFAULT_LITE_MODELS } from "../config.js";
+import { transcriptFromOpencodeRows } from "../session-archive/native-transcript.js";
 
 interface OpencodeSession extends BaseCliSession {}
 
@@ -26,7 +26,7 @@ export default class OpencodeBackend extends CliAgentBackend<OpencodeSession> {
   buildSession(config: SessionConfig): OpencodeSession {
     return {
       workingDirectory: config.workingDirectory ?? process.cwd(),
-      model: config.modelTier === "lite" ? (config.liteModel ?? DEFAULT_LITE_MODELS.opencode ?? config.model) : config.model,
+      model: config.model,
       importantContext: config.importantContext,
       extraEnv: buildNiubotEnv(config),
       cumulativeBytes: 0,
@@ -153,6 +153,21 @@ export default class OpencodeBackend extends CliAgentBackend<OpencodeSession> {
       error: errorMsg,
       failed,
     };
+  }
+
+  protected async loadSessionTranscript(session: OpencodeSession) {
+    if (!session.agentSessionId) throw new Error("OpenCode backend session ID is unavailable");
+    const db = this.getOpencodeDb();
+    if (!db) throw new Error("OpenCode session database not found");
+    const rows = db.prepare(`
+      SELECT m.data AS message_data, p.data AS part_data,
+             COALESCE(p.time_created, m.time_created) AS time_created
+      FROM message m
+      JOIN part p ON p.message_id = m.id
+      WHERE m.session_id = ?
+      ORDER BY COALESCE(p.time_created, m.time_created), p.id
+    `).iterate(session.agentSessionId) as IterableIterator<{ message_data: string; part_data: string; time_created: number | null }>;
+    return transcriptFromOpencodeRows(session.agentSessionId, rows);
   }
 
   /** 从 opencode DB 的 message 表查最新 assistant 消息的 modelID */

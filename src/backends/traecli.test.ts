@@ -173,17 +173,6 @@ describe("TraeCliBackend", () => {
     expect(second.compactCount).toBe(1);
   });
 
-  it("uses backend default lite model when liteModel is not configured", () => {
-    const backend = new TraeCliBackend();
-    const session = backend.buildSession({
-      workingDirectory: "/tmp/workspace",
-      modelTier: "lite",
-      model: "trae-main-model",
-    });
-
-    expect(session.model).toBe("Gemini-3-Flash-Preview");
-  });
-
   it("builds correct args for a new session", () => {
     const backend = new TraeCliBackend();
     const session = backend.buildSession({

@@ -36,7 +36,6 @@ import { handleContacts } from "./cli/contacts.js";
 import { handleSend } from "./cli/send.js";
 import { handleCron } from "./cli/cron.js";
 import { handleTask } from "./cli/task.js";
-import { handleSession } from "./cli/session.js";
 import { formatLocalDateTimeWithTZ } from "./tz.js";
 
 // ─── Context ───────────────────────────────────────────────
@@ -51,7 +50,6 @@ const sessionCommands = new Set([
   "send",
   "cron",
   "task",
-  "sessions",
   "whoami",
 ]);
 const publicCommands = new Set([
@@ -176,9 +174,6 @@ async function main(): Promise<void> {
       break;
     case "task":
       handleTask(args.slice(1), WORK_DIR, CHAT_ID, CHAT_TYPE, USER_ID, parseArgs);
-      break;
-    case "sessions":
-      handleSession(openDb(), args.slice(1), CHAT_ID, CHAT_TYPE, parseArgs);
       break;
     case "system-rules":
       handleSystemRules(args.slice(1));
@@ -444,7 +439,6 @@ Usage: nbt <command> <subcommand> [options]
 Commands:
   user-memory   add|list|get|update|del     Manage user memories
   messages      list|search|get             Query message history
-  sessions      list|search|get             Query session history
   contacts      list-users|list-chats|get-user|get-chat|set-name
                Manage users and chats directory
   send          <text>                      Send text, card, or file

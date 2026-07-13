@@ -76,17 +76,6 @@ describe("CursorAgentBackend", () => {
     });
   });
 
-  it("uses backend default lite model when liteModel is not configured", () => {
-    const backend = new CursorAgentBackend();
-    const session = backend.buildSession({
-      workingDirectory: "/tmp/workspace",
-      modelTier: "lite",
-      model: "gpt-5.5-high",
-    });
-
-    expect(session.model).toBe("composer-2.5-fast");
-  });
-
   it("parses stream-json result, session id, configured model, and token usage", () => {
     const backend = new CursorAgentBackend();
     const session = backend.buildSession({

@@ -8,7 +8,7 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { CliAgentBackend, buildNiubotEnv, type BaseCliSession, type ParsedOutput } from "../agent/cli-base.js";
 import type { AgentSessionActivity, SessionConfig, ExecHooks } from "../agent/types.js";
-import { DEFAULT_LITE_MODELS } from "../config.js";
+import { readPiTranscript } from "../session-archive/native-transcript.js";
 
 interface PiSession extends BaseCliSession {
   sessionLogPath?: string;
@@ -48,13 +48,9 @@ export default class PiBackend extends CliAgentBackend<PiSession> {
   }
 
   buildSession(config: SessionConfig): PiSession {
-    const model = config.modelTier === "lite"
-      ? (config.liteModel ?? DEFAULT_LITE_MODELS.pi ?? config.model)
-      : config.model;
-
     return {
       workingDirectory: config.workingDirectory ?? process.cwd(),
-      model,
+      model: config.model,
       importantContext: config.importantContext,
       extraEnv: buildNiubotEnv(config),
       cumulativeBytes: 0,
@@ -196,6 +192,12 @@ export default class PiBackend extends CliAgentBackend<PiSession> {
       error: lastAssistantText ? undefined : genericErrorMsg,
       failed: !lastAssistantText && sawError,
     };
+  }
+
+  protected async loadSessionTranscript(session: PiSession) {
+    const file = this.getJsonlPath(session);
+    if (!file || !session.agentSessionId) throw new Error("Pi session transcript not found");
+    return readPiTranscript(file, session.agentSessionId);
   }
 
   protected refreshActivity(sessionId: string, activity: AgentSessionActivity): void {

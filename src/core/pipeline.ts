@@ -8,14 +8,14 @@ import type Database from "better-sqlite3";
 import type { PlatformAdapter, NormalizedMessage } from "../im/types.js";
 import { escapeYamlContent, renderMessageNodes } from "../im/render.js";
 import { ERROR_DISPLAY_MAX_LEN } from "../agent/types.js";
-import type { AgentBackend, AgentSession, AgentSessionActivity, SessionConfig } from "../agent/types.js";
+import { AgentSessionNotStartedError, type AgentBackend, type AgentSession, type AgentSessionActivity, type SessionConfig } from "../agent/types.js";
 import { CliAgentBackend, buildNiubotEnv } from "../agent/cli-base.js";
-import { BUILTIN_BACKEND_LIST, DEFAULT_LITE_MODELS, NIUBOT_HOME, normalizeBackend, type AgentBackendType, type BuiltinBackendType, type RestartConfig } from "../config.js";
+import { BUILTIN_BACKEND_LIST, NIUBOT_HOME, normalizeBackend, type AgentBackendType, type RestartConfig } from "../config.js";
 import { ChatManager } from "./chat-manager.js";
 import type { QueuedMessage } from "./queue.js";
 import {
   ensureUser, ensureChat, storeMessage, updateChatName,
-  getUserShortLabel, getChatShortLabel, formatSenderLabel, getMessageByPlatformId, updateMessageContent, updateMessagePlatformId,
+  getUserShortLabel, getChatShortLabel, getMessageByPlatformId, updateMessageContent, updateMessagePlatformId,
   setUserAdminRole, getAdminUserIds, getUserAdminRole, type AdminRole,
   getBotBackendModelState, setBotBackendModelState, setBotRuntimeState, clearBotRuntimeModels,
   hasUpdateNotification, recordUpdateNotification,
@@ -27,6 +27,7 @@ import {
   buildActiveTaskContext,
   buildImportantContext,
   buildNormalContext,
+  buildSessionArchiveContext,
   buildSpeakerContext,
   buildStableSystemContext,
   COMPACT_RECOVERY_REMINDER,
@@ -36,8 +37,6 @@ import {
   type StableSystemContextOptions,
 } from "../memory/inject.js";
 import { labelLocalDateTime, labelLocalTime, utcDateTimeForSql } from "../tz.js";
-import { buildArchiveSummaryPrompt } from "./prompts.js";
-import { decideRoute, type RouteDecision } from "./routing.js";
 import { listCronJobs, deleteCronJob, getCronJob } from "./cron.js";
 import { createLogger } from "../logger.js";
 import { buildResponseFooter } from "./footer.js";
@@ -45,6 +44,8 @@ import { ResponseSender } from "./response-sender.js";
 import { TimeoutError, withTimeout } from "./timeout.js";
 import { RuntimeStateStore, type RunStage, type RuntimeStateEvent } from "./runtime-state.js";
 import { RunManager } from "./run-manager.js";
+import { archiveAgentSession, getSessionArchiveDirectory } from "../session-archive/archive.js";
+import { wrapInjectedUserMessage } from "../session-archive/native-transcript.js";
 
 const execAsync = promisify(exec);
 
@@ -72,7 +73,6 @@ const AGENT_LONG_RUNNING_FIRST_NOTIFY_MS = 3_600_000;  // 1 小时：主会话�
 const AGENT_LONG_RUNNING_REPEAT_NOTIFY_MS = 3_600_000; // 1 小时：主会话长运行重复提醒
 const INDEPENDENT_IDLE_KILL_MS = 3_600_000;    // 1 小时：独立 session 无活动自动 kill
 const INDEPENDENT_LONG_RUNNING_NOTIFY_MS = 3_600_000;  // 1 小时：独立 session 仍活跃时提醒
-const SUMMARY_TIMEOUT_MS = 60_000;             // 归档摘要最长等待 60 秒
 const UPDATE_CHECK_HOUR = 10;                  // 本地时间 10:00 检查 npm latest
 const UPDATE_NOTIFY_END_HOUR = 18;             // 10:00-18:00 启动时允许立即通知
 const STARTUP_PLATFORM_TIMEOUT_MS = 5_000;      // 平台启动探测超时后降级继续启动
@@ -104,10 +104,6 @@ export interface BotIdentity {
   platformBotId: string;
   /** 主模型 ID（可选，覆盖 backend 默认值） */
   model?: string;
-  /** 轻量模型 ID（可选，覆盖 backend 默认值） */
-  liteModel?: string;
-  /** 当前 backend 的默认轻量模型，用于 reset */
-  defaultLiteModel?: string;
 }
 
 interface ChatSession {
@@ -123,6 +119,8 @@ interface ChatSession {
 
 interface RunningTask {
   agentSession: AgentSession;
+  backend: AgentBackend;
+  backendType: AgentBackendType;
   chatId: string;
   description: string;
   startedAt: number;
@@ -150,6 +148,9 @@ export class Pipeline {
 
   /** 每个 chat 的当前 agent session */
   private chatSessions = new Map<string, ChatSession>();
+
+  /** 异步创建中、尚未加入 chatSessions 的 session */
+  private sessionCreations = new Map<string, Promise<ChatSession>>();
 
   /** chatId → platformChatId 映射 */
   private platformChatIds = new Map<string, string>();
@@ -191,14 +192,13 @@ export class Pipeline {
   private processedMsgIds = new Set<string>();
   private static readonly MAX_PROCESSED_IDS = 10000;
 
-  /** chatId → 待完成的归档摘要 promise，新 session 创建前 await 确保 summary 就绪 */
-  private pendingSummary = new Map<string, Promise<void>>();
-
   /** chatId → triggerPlatformMsgId，暂存触发消息 ID */
   private triggerMsgIds = new Map<string, string>();
 
   /** chatId → transition promise，session 切换期间后续消息先挂起 */
   private sessionTransitionLocks = new Map<string, Promise<void>>();
+  /** backend 切换期间阻塞所有 chat，包括切换开始后首次出现的 chat */
+  private globalSessionTransition?: Promise<void>;
 
   /** chatId → transition 期间暂存的后续消息 */
   private pendingTransitionMessages = new Map<string, PendingTransitionMessage[]>();
@@ -210,7 +210,7 @@ export class Pipeline {
   private processingMsgIds = new Set<string>();
 
   /** 每个 backend 的模型配置快照，切换时保存/恢复 */
-  private backendModelCache = new Map<string, { model?: string; liteModel?: string }>();
+  private backendModelCache = new Map<string, { model?: string }>();
 
   /** Watchdog 定时器 */
   private watchdogTimer: ReturnType<typeof setInterval> | null = null;
@@ -231,6 +231,7 @@ export class Pipeline {
   private refreshAgentContextFiles?: () => void;
 
   private stableContextOptions: StableSystemContextOptions;
+  private archiveHome: string;
 
   constructor(
     db: Database.Database,
@@ -247,6 +248,7 @@ export class Pipeline {
     stableContextOptions?: StableSystemContextOptions,
     restartConfig?: RestartConfig,
     autoUpdateNotificationsEnabled = true,
+    archiveHome?: string,
   ) {
     this.db = db;
     this.im = im;
@@ -261,6 +263,9 @@ export class Pipeline {
     this.stableContextOptions = stableContextOptions ?? {};
     this.restartConfig = restartConfig;
     this.autoUpdateNotificationsEnabled = autoUpdateNotificationsEnabled;
+    this.archiveHome = archiveHome ?? (process.env["VITEST"]
+      ? path.join(path.dirname(dbPath), ".niubot-test")
+      : NIUBOT_HOME);
     this.log = createLogger("pipeline", botIdentity.name);
     this.runtimeState = new RuntimeStateStore({
       onEvent: (event) => this.persistRuntimeEvent(event),
@@ -272,7 +277,6 @@ export class Pipeline {
     // 初始 backend 的模型配置入缓存，确保切走再切回来能恢复
     this.backendModelCache.set(backendType, {
       model: botIdentity.model,
-      liteModel: botIdentity.liteModel,
     });
 
     this.queue.onProcess((runId, chatId, mergedText, messages, signal) => (
@@ -280,13 +284,13 @@ export class Pipeline {
     ));
   }
 
-  private async createAgentSession(config: SessionConfig): Promise<AgentSession> {
+  private async createAgentSession(config: SessionConfig, backend: AgentBackend = this.agent): Promise<AgentSession> {
     try {
       this.refreshAgentContextFiles?.();
     } catch (err) {
       this.log.warn("failed to refresh agent context files", { error: String(err) });
     }
-    return this.agent.createSession(config);
+    return backend.createSession(config);
   }
 
   /** 启动管道：注册 IM 消息回调 */
@@ -324,7 +328,6 @@ export class Pipeline {
       adminCount: this.adminRoles.size,
       backend: this.backendType,
       model: this.botIdentity.model ?? "default",
-      liteModel: this.botIdentity.liteModel ?? "default",
       autoUpdateNotifications: this.autoUpdateNotificationsEnabled,
     });
 
@@ -596,10 +599,9 @@ export class Pipeline {
       if (!canResumeRecoveredSession && storedBackendType !== this.backendType) {
         this.db.prepare(`
           UPDATE sessions
-          SET status = 'archived',
+          SET status = 'archive_failed',
               ended_at = datetime('now'),
-              last_active_at = datetime('now'),
-              agent_session_id = NULL
+              last_active_at = datetime('now')
           WHERE id = ?
         `).run(row.id);
         this.log.warn("resetting unrecoverable active session during startup", {
@@ -643,7 +645,6 @@ export class Pipeline {
           botId: this.botIdentity.platformBotId,
           platform: this.botIdentity.platform,
           model: this.botIdentity.model,
-          liteModel: this.botIdentity.liteModel,
           isAdmin,
           botProfilePath: this.stableContextOptions.botProfilePath,
           agentSessionId: canResumeRecoveredSession ? (row.agent_session_id ?? undefined) : undefined,
@@ -685,7 +686,7 @@ export class Pipeline {
     }
   }
 
-  private handleMessage(msg: NormalizedMessage): void {
+  private handleMessage(msg: NormalizedMessage, replayedAfterTransition = false): void {
     const platform = this.botIdentity.platform;
 
     // 消息去重（飞书 WebSocket 可能重复推送）
@@ -701,7 +702,7 @@ export class Pipeline {
     }
 
     // 过期消息检测（>2min 丢弃）
-    if (msg.platformTs) {
+    if (!replayedAfterTransition && msg.platformTs) {
       const delay = Date.now() - msg.platformTs;
       if (delay > STALE_MESSAGE_THRESHOLD_MS) {
         this.log.warn("stale message, dropping", {
@@ -752,7 +753,7 @@ export class Pipeline {
     const chatUserId = msg.chatType === "p2p" ? msg.senderPlatformId : undefined;
     const chatId = ensureChat(this.db, platform, msg.chatPlatformId, msg.chatType, msg.chatName, chatUserId);
 
-    if (this.sessionTransitionLocks.has(chatId)) {
+    if (this.globalSessionTransition || this.sessionTransitionLocks.has(chatId)) {
       this.log.info("message deferred during session transition", {
         chatId,
         msgId: msg.platformMsgId,
@@ -1289,7 +1290,8 @@ export class Pipeline {
     for (const [sessionId, t] of tasks) {
       count++;
       const elapsed = formatUptime(Date.now() - t.startedAt);
-      const a = typeof cliAgent.getActivity === "function" ? cliAgent.getActivity(sessionId) : undefined;
+      const taskCliAgent = t.backend instanceof CliAgentBackend ? t.backend : undefined;
+      const a = taskCliAgent?.getActivity(sessionId);
       const status = a?.compacting ? "压缩上下文" : a?.executingTool ? "执行工具" : "处理中";
       sections.push(`**⚡ ${t.description}**（${status} · ${elapsed}）`);
       if (a && a.recentLines.length > 0) {
@@ -1324,7 +1326,7 @@ export class Pipeline {
       return;
     }
     for (const [, t] of tasks) {
-      this.agent.cancelSession(t.agentSession).catch(() => {});
+      t.backend.cancelSession(t.agentSession).catch(() => {});
     }
     this.replyText(chatId, platformChatId, msgId, `正在停止 ${tasks.length} 个 task。`);
   }
@@ -1346,7 +1348,6 @@ export class Pipeline {
       `**Platform:** ${this.botIdentity.platform}`,
       `**Backend:** ${displayBackendType(this.backendType)}`,
       `**Model:** ${this.botIdentity.model ?? "default"}`,
-      `**Lite model:** ${formatLiteModel(this.botIdentity.liteModel, this.backendType)}`,
       `**Uptime:** ${uptimeStr}`,
       `**Active sessions:** ${activeSessions}`,
       `**Cron jobs:** ${cronCount}`,
@@ -1365,12 +1366,10 @@ export class Pipeline {
 
   /** /status：与 watchdog 一致，取 agent activity.lastActiveAt */
   private getLatestAgentOutputAt(chatId: string): number | undefined {
-    if (!(this.agent instanceof CliAgentBackend)) return undefined;
-    const cliAgent = this.agent as CliAgentBackend;
-
     let latest: number | undefined;
-    const considerSession = (agentSessionId: string) => {
-      const activity = cliAgent.getActivity(agentSessionId);
+    const considerSession = (backend: AgentBackend, agentSessionId: string) => {
+      if (!(backend instanceof CliAgentBackend)) return;
+      const activity = backend.getActivity(agentSessionId);
       if (activity?.lastActiveAt) {
         latest = latest === undefined
           ? activity.lastActiveAt
@@ -1380,11 +1379,11 @@ export class Pipeline {
 
     const chatSession = this.chatSessions.get(chatId);
     if (chatSession) {
-      considerSession(chatSession.agentSession.id);
+      considerSession(this.agent, chatSession.agentSession.id);
     }
     for (const [sessionId, task] of this.runningTasks) {
       if (task.chatId === chatId) {
-        considerSession(sessionId);
+        considerSession(task.backend, sessionId);
       }
     }
 
@@ -1485,6 +1484,8 @@ export class Pipeline {
     chatId: string, userId: string, prompt: string, description: string,
     source: "cron" | "task",
   ): Promise<void> {
+    const sessionBackend = this.agent;
+    const sessionBackendType = this.backendType;
     // Resolve platform chat ID
     let platformChatId = this.platformChatIds.get(chatId);
     if (!platformChatId) {
@@ -1521,16 +1522,11 @@ export class Pipeline {
     });
     const stableContext = this.buildStableSystemContext();
 
-    // 等待上一个 session 的归档摘要完成，超时后放行
-    const _pendingSummary = this.pendingSummary.get(chatId);
-    if (_pendingSummary) {
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      await Promise.race([_pendingSummary, new Promise<void>((r) => { timer = setTimeout(r, SUMMARY_TIMEOUT_MS); })]);
-      clearTimeout(timer);
-    }
-
-    // Build task and conversation context（任务索引 + 最近 session summaries）
-    const normalContext = buildNormalContext(this.db, chatId, this.workingDirectory, undefined, chatType, userId);
+    // Build task and conversation context（任务索引 + 归档目录 + 最近消息）
+    const normalContext = buildNormalContext(
+      this.db, chatId, this.workingDirectory, undefined, chatType, userId,
+      getSessionArchiveDirectory(this.archiveHome, this.botIdentity.name, chatId),
+    );
 
     // Create independent agent session
     const agentSession = await this.createAgentSession({
@@ -1543,17 +1539,16 @@ export class Pipeline {
       botId: this.botIdentity.platformBotId,
       platform: this.botIdentity.platform,
       model: this.botIdentity.model,
-      liteModel: this.botIdentity.liteModel,
       isAdmin,
       botProfilePath: this.stableContextOptions.botProfilePath,
-    });
+    }, sessionBackend);
 
     // Create session record
     const sessionId = randomUUID().slice(0, 8);
     this.db.prepare(`
       INSERT INTO sessions (id, chat_id, user_id, source, status, started_at, last_active_at, backend_type)
       VALUES (?, ?, ?, ?, 'active', datetime('now'), datetime('now'), ?)
-    `).run(sessionId, chatId, userId, source, this.backendType);
+    `).run(sessionId, chatId, userId, source, sessionBackendType);
 
     // Store prompt as user message
     storeMessage(this.db, {
@@ -1568,7 +1563,7 @@ export class Pipeline {
     // Inject context prefix
     let messageToSend = prompt;
     const contextParts: string[] = [];
-    if (this.agent.needsStableUserPrefix() && stableContext) {
+    if (sessionBackend.needsStableUserPrefix() && stableContext) {
       contextParts.push(stableContext);
     }
     contextParts.push(sessionProfile);
@@ -1577,15 +1572,18 @@ export class Pipeline {
     }
     contextParts.push(NEW_SESSION_SEARCH_REMINDER);
     if (contextParts.length > 0) {
-      messageToSend = `${contextParts.join("\n\n")}\n\n${prompt}`;
+      messageToSend = `${contextParts.join("\n\n")}\n\n${wrapInjectedUserMessage(prompt)}`;
     }
 
     this.log.info(`executing ${source} job`, { chatId, sessionId, userId, description });
 
-    this.runningTasks.set(agentSession.id, { agentSession, chatId, description, startedAt: Date.now() });
+    this.runningTasks.set(agentSession.id, {
+      agentSession, backend: sessionBackend, backendType: sessionBackendType,
+      chatId, description, startedAt: Date.now(),
+    });
 
     try {
-      const response = await this.agent.sendMessage(agentSession, messageToSend);
+      const response = await sessionBackend.sendMessage(agentSession, messageToSend);
 
       if (response.cancelled) {
         this.log.warn(`${source} job was cancelled`, { chatId, sessionId });
@@ -1608,7 +1606,7 @@ export class Pipeline {
       });
 
       // Update session stats
-      const agentSessionId = this.agent.getAgentSessionId?.(agentSession.id);
+      const agentSessionId = sessionBackend.getAgentSessionId?.(agentSession.id);
       this.db.prepare(`
         UPDATE sessions
         SET message_count = 2,
@@ -1618,7 +1616,7 @@ export class Pipeline {
             agent_session_id = ?,
             backend_type = ?
         WHERE id = ?
-      `).run(replyMsgId, agentSessionId ?? null, this.backendType, sessionId);
+      `).run(replyMsgId, agentSessionId ?? null, sessionBackendType, sessionId);
 
       // Build footer
       const footer = buildResponseFooter({
@@ -1643,13 +1641,30 @@ export class Pipeline {
     } finally {
       this.runningTasks.delete(agentSession.id);
 
-      // Archive session（turn=1，不触发 archive summary）
-      this.db.prepare(`
-        UPDATE sessions SET status = 'archived', ended_at = datetime('now'), last_active_at = datetime('now')
-        WHERE id = ?
-      `).run(sessionId);
+      const archivedAt = utcDateTimeForSql(new Date());
+      try {
+        await this.archiveTranscript(chatId, sessionId, agentSession, sessionBackend, archivedAt);
+        this.db.prepare(`
+          UPDATE sessions SET status = 'archived', ended_at = ?, last_active_at = datetime('now'),
+              agent_session_id = COALESCE(agent_session_id, ?), backend_type = ?
+          WHERE id = ?
+        `).run(archivedAt, sessionBackend.getAgentSessionId?.(agentSession.id) ?? null, sessionBackendType, sessionId);
+      } catch (archiveErr) {
+        const failedStatus = archiveErr instanceof AgentSessionNotStartedError ? "discarded" : "archive_failed";
+        this.db.prepare(`
+          UPDATE sessions SET status = ?, ended_at = ?, last_active_at = datetime('now'),
+              agent_session_id = COALESCE(agent_session_id, ?), backend_type = ?
+          WHERE id = ?
+        `).run(failedStatus, archivedAt, sessionBackend.getAgentSessionId?.(agentSession.id) ?? null, sessionBackendType, sessionId);
+        const details = { chatId, sessionId, backend: sessionBackendType, error: String(archiveErr) };
+        if (failedStatus === "discarded") {
+          this.log.info(`${source} session ended before backend assigned an id`, details);
+        } else {
+          this.log.error(`failed to archive ${source} session`, details);
+        }
+      }
 
-      await this.agent.closeSession(agentSession).catch((closeErr) => {
+      await sessionBackend.closeSession(agentSession).catch((closeErr) => {
         this.log.warn(`failed to close ${source} session`, { chatId, sessionId, error: String(closeErr) });
       });
     }
@@ -1657,6 +1672,8 @@ export class Pipeline {
 
   /** /new：归档当前 session，让下一条消息自然创建新 session。 */
   private async resetSession(chatId: string, platformChatId: string, msgId?: string): Promise<void> {
+    await this.stopActiveRunForSessionTransition(chatId);
+    await this.waitForSessionCreation(chatId);
     await this.archiveSession(chatId)
       .then((archived) => {
         const text = archived
@@ -1678,10 +1695,42 @@ export class Pipeline {
         if (this.sessionTransitionLocks.get(chatId) === transitionPromise) {
           this.sessionTransitionLocks.delete(chatId);
         }
-        this.drainPendingTransitionMessages(chatId);
+        if (!this.globalSessionTransition) this.drainPendingTransitionMessages(chatId);
       });
 
     this.sessionTransitionLocks.set(chatId, transitionPromise);
+  }
+
+  private startGlobalSessionTransition(_triggerChatId: string, task: () => Promise<void>): void {
+    if (this.globalSessionTransition) return;
+    const localTransitions = [...new Set(this.sessionTransitionLocks.values())];
+    const transitionPromise = Promise.resolve().then(async () => {
+      await Promise.allSettled(localTransitions);
+      await task();
+    }).finally(() => {
+      if (this.globalSessionTransition !== transitionPromise) return;
+      this.globalSessionTransition = undefined;
+      for (const chatId of [...this.pendingTransitionMessages.keys()]) this.drainPendingTransitionMessages(chatId);
+    });
+    this.globalSessionTransition = transitionPromise;
+  }
+
+  private async stopActiveRunForSessionTransition(chatId: string): Promise<void> {
+    const activeRun = this.runtimeState.getActiveRun(chatId);
+    const shouldCancelAgent = !!activeRun && !isTerminalRunStage(activeRun.stage);
+    if (shouldCancelAgent) this.markRuntimeRun(activeRun.runId, "stopped");
+    if (activeRun || this.queue.isBusy(chatId)) this.queue.cancel(chatId);
+    const session = this.chatSessions.get(chatId);
+    if (session && shouldCancelAgent) await this.agent.cancelSession(session.agentSession).catch((err) => {
+      this.log.warn("failed to cancel session before transition", { chatId, error: String(err) });
+    });
+  }
+
+  private async waitForSessionCreation(chatId: string): Promise<void> {
+    const creation = this.sessionCreations.get(chatId);
+    if (creation) await creation.catch((err) => {
+      this.log.warn("session creation failed during transition", { chatId, error: String(err) });
+    });
   }
 
   private enqueuePendingTransitionMessage(chatId: string, msg: NormalizedMessage): void {
@@ -1700,7 +1749,7 @@ export class Pipeline {
       if (entry.msg.platformMsgId) {
         this.processedMsgIds.delete(entry.msg.platformMsgId);
       }
-      this.handleMessage(entry.msg);
+      this.handleMessage(entry.msg, true);
     }
   }
 
@@ -1785,11 +1834,9 @@ export class Pipeline {
       // 显示当前 agent（卡片）
       const backends = this.getAvailableBackends();
       const currentModel = this.botIdentity.model ?? "default";
-      const currentLite = formatLiteModel(this.botIdentity.liteModel, this.backendType);
       const lines: string[] = [
         `**Agent:** ${this.backendType}`,
         `**Model:** ${currentModel}`,
-        `**Lite:** ${currentLite}`,
         "",
       ];
       lines.push("**可选 Agent:**");
@@ -1832,16 +1879,21 @@ export class Pipeline {
     // 归档所有当前 session，获取新 backend（含 start），然后切换
     // 切 backend 时保存当前模型配置，恢复目标 backend 的历史配置（如有），否则走默认。
     const doSwitch = async () => {
-      const archivePromises: Promise<boolean>[] = [];
-      for (const [cid] of this.chatSessions) {
-        archivePromises.push(this.archiveSession(cid));
+      const transitioningChats = new Set(this.chatSessions.keys());
+      for (const cid of this.platformChatIds.keys()) {
+        if (this.queue.isBusy(cid) || this.runtimeState.getActiveRun(cid)) transitioningChats.add(cid);
       }
-      await Promise.all(archivePromises);
+      for (const cid of transitioningChats) {
+        await this.stopActiveRunForSessionTransition(cid);
+      }
+      await Promise.allSettled([...this.sessionCreations.values()]);
+      for (const cid of [...this.chatSessions.keys()]) {
+        await this.archiveSession(cid);
+      }
 
       // 保存当前 backend 的模型配置
       this.backendModelCache.set(this.backendType, {
         model: this.botIdentity.model,
-        liteModel: this.botIdentity.liteModel,
       });
 
       const newBackend = await this.backendResolver!(target);
@@ -1852,36 +1904,31 @@ export class Pipeline {
       // 恢复目标 backend 的模型配置（如有），否则不指定，让 backend 用自己的默认
       const cached = this.backendModelCache.get(target)
         ?? getBotBackendModelState(this.db, this.botIdentity.name, target);
-      const backendDefaultLiteModel = DEFAULT_LITE_MODELS[target as BuiltinBackendType];
       this.botIdentity.model = cached?.model;
-      this.botIdentity.liteModel = cached?.liteModel ?? backendDefaultLiteModel;
-      this.botIdentity.defaultLiteModel = backendDefaultLiteModel;
       this.persistRuntimeState();
     };
 
-    doSwitch()
-      .then(() => {
+    this.startGlobalSessionTransition(chatId, async () => {
+      try {
+        await doSwitch();
         const model = this.botIdentity.model ?? "default";
-        const lite = formatLiteModel(this.botIdentity.liteModel, target);
         this.sendAgentCard(chatId, platformChatId, msgId, "Agent",
-          `已切换到 **${displayBackendType(target)}** (Model: ${model}, Lite: ${lite})\n上下文已重置，重启后仍保持当前选择。`);
+          `已切换到 **${displayBackendType(target)}** (Model: ${model})\n上下文已重置，重启后仍保持当前选择。`);
         this.log.info("agent backend switched (runtime only)", {
           backend: target,
           model: this.botIdentity.model ?? null,
-          liteModel: this.botIdentity.liteModel ?? null,
         });
-      })
-      .catch((err) => {
+      } catch (err) {
         this.log.error("failed to switch agent backend", { error: String(err) });
         this.sendAgentCard(chatId, platformChatId, msgId, "Agent", `切换失败: ${String(err)}`);
-      });
+      }
+    });
   }
 
   /**
    * /model 命令：查看或切换模型。
    * - /model              → 显示当前模型 + 可选列表
    * - /model <name|index> → 切主模型
-   * - /model lite <name|index> → 切 lite 模型
    * - /model reset        → 恢复为配置初始值
    */
   private async handleModelCommand(args: string[], chatId: string, platformChatId: string, msgId?: string): Promise<void> {
@@ -1891,27 +1938,25 @@ export class Pipeline {
     }
 
     if (args[0] === "reset") {
-      const defaultLiteModel = DEFAULT_LITE_MODELS[this.backendType as BuiltinBackendType];
       this.botIdentity.model = undefined;
-      this.botIdentity.liteModel = defaultLiteModel;
-      this.botIdentity.defaultLiteModel = defaultLiteModel;
       this.backendModelCache.set(this.backendType, {
         model: undefined,
-        liteModel: defaultLiteModel,
       });
       this.updateActiveChatSessionModels(chatId, {
         model: undefined,
-        liteModel: defaultLiteModel,
       });
       this.clearRuntimeModels();
-      const lite = formatLiteModel(defaultLiteModel, this.backendType);
-      this.sendAgentCard(chatId, platformChatId, msgId, "Model", `已恢复为默认 (Model: default, Lite: ${lite})\n当前会话立即生效。`);
+      this.sendAgentCard(chatId, platformChatId, msgId, "Model", "已恢复为默认模型。\n当前会话立即生效。");
       this.log.info("model reset to backend defaults", { backend: this.backendType });
       return;
     }
 
-    const isLite = args[0] === "lite";
-    const modelArg = isLite ? args.slice(1).join(" ") : args.join(" ");
+    if (args[0] === "lite") {
+      this.sendAgentCard(chatId, platformChatId, msgId, "Model", "Lite 模型已移除。使用 `/model <名字或编号>` 切换当前模型。");
+      return;
+    }
+
+    const modelArg = args.join(" ");
 
     if (!modelArg) {
       this.sendModelList(chatId, platformChatId, msgId);
@@ -1953,21 +1998,12 @@ export class Pipeline {
       }
     }
 
-    if (isLite) {
-      this.botIdentity.liteModel = resolvedModel;
-      this.updateActiveChatSessionModels(chatId, { liteModel: resolvedModel });
-      this.recordModelHistory(this.backendType, resolvedModel);
-      this.persistRuntimeState();
-      this.sendAgentCard(chatId, platformChatId, msgId, "Model", `Lite 模型已切换为 **${resolvedModel}**\n当前会话立即生效，重启后仍保持当前选择。`);
-      this.log.info("lite model switched (runtime)", { model: resolvedModel, backend: this.backendType });
-    } else {
-      this.botIdentity.model = resolvedModel;
-      this.updateActiveChatSessionModels(chatId, { model: resolvedModel });
-      this.recordModelHistory(this.backendType, resolvedModel);
-      this.persistRuntimeState();
-      this.sendAgentCard(chatId, platformChatId, msgId, "Model", `主模型已切换为 **${resolvedModel}**\n当前会话立即生效，重启后仍保持当前选择。`);
-      this.log.info("model switched (runtime)", { model: resolvedModel, backend: this.backendType });
-    }
+    this.botIdentity.model = resolvedModel;
+    this.updateActiveChatSessionModels(chatId, { model: resolvedModel });
+    this.recordModelHistory(this.backendType, resolvedModel);
+    this.persistRuntimeState();
+    this.sendAgentCard(chatId, platformChatId, msgId, "Model", `模型已切换为 **${resolvedModel}**\n当前会话立即生效，重启后仍保持当前选择。`);
+    this.log.info("model switched (runtime)", { model: resolvedModel, backend: this.backendType });
   }
 
   /** 保存当前 agent/model 运行时选择；失败不影响当前命令执行。 */
@@ -1976,11 +2012,9 @@ export class Pipeline {
       setBotRuntimeState(this.db, this.botIdentity.name, {
         backendType: this.backendType,
         model: this.botIdentity.model,
-        liteModel: this.botIdentity.liteModel,
       });
       setBotBackendModelState(this.db, this.botIdentity.name, this.backendType, {
         model: this.botIdentity.model,
-        liteModel: this.botIdentity.liteModel,
       });
     } catch (err) {
       this.log.warn("failed to persist bot runtime state", { error: String(err) });
@@ -1998,25 +2032,21 @@ export class Pipeline {
   }
 
   /** 同步当前 chat 已存在的 backend session；各 backend resume 时会从 session 对象读取 model。 */
-  private updateActiveChatSessionModels(chatId: string, models: { model?: string; liteModel?: string }): void {
+  private updateActiveChatSessionModels(chatId: string, models: { model?: string }): void {
     const chatSession = this.chatSessions.get(chatId);
     if (!chatSession) return;
 
     const agentSession = chatSession.agentSession as AgentSession & {
       model?: string;
-      liteModel?: string;
     };
     if ("model" in models) {
       agentSession.model = models.model;
-    }
-    if ("liteModel" in models) {
-      agentSession.liteModel = models.liteModel;
     }
 
     this.agent.updateSessionModels?.(chatSession.agentSession.id, models);
   }
 
-  /** 构建模型候选列表：初始配置 → 默认 lite → 历史 → 运行时新增，顺序稳定 */
+  /** 构建模型候选列表：初始配置 → 历史 → 运行时新增，顺序稳定 */
   private buildModelCandidates(): string[] {
     const seen = new Set<string>();
     const list: string[] = [];
@@ -2031,12 +2061,8 @@ export class Pipeline {
     // 1. 初始配置值（顺序锚点，不随运行时切换而变动）
     const initCache = this.backendModelCache.get(this.backendType);
     add(initCache?.model);
-    add(initCache?.liteModel);
 
-    // 2. backend 推荐的 lite model
-    add(DEFAULT_LITE_MODELS[this.backendType as BuiltinBackendType]);
-
-    // 3. 历史记录
+    // 2. 历史记录
     try {
       const rows = this.db.prepare(
         "SELECT model_name FROM model_history WHERE backend = ? ORDER BY last_used_at DESC, id DESC LIMIT 10",
@@ -2046,9 +2072,8 @@ export class Pipeline {
       }
     } catch { /* table may not exist yet */ }
 
-    // 4. 运行时新值（手动输入的新模型名，追加到末尾）
+    // 3. 运行时新值（手动输入的新模型名，追加到末尾）
     add(this.botIdentity.model);
-    add(this.botIdentity.liteModel);
 
     return list;
   }
@@ -2076,13 +2101,10 @@ export class Pipeline {
   private sendModelList(chatId: string, platformChatId: string, msgId?: string): void {
     const candidates = this.buildModelCandidates();
     const currentModel = this.botIdentity.model;
-    const currentLite = this.botIdentity.liteModel;
-    const defaultLite = DEFAULT_LITE_MODELS[this.backendType as BuiltinBackendType];
 
     const lines: string[] = [
       `**Agent:** ${this.backendType}`,
       `**Model:** ${currentModel ?? "default"}`,
-      `**Lite:** ${formatLiteModel(currentLite, this.backendType)}`,
       "",
     ];
 
@@ -2092,13 +2114,11 @@ export class Pipeline {
         const name = candidates[i]!;
         const tags: string[] = [];
         if (name === currentModel) tags.push("✓ Model");
-        if (name === (currentLite ?? defaultLite)) tags.push("✓ Lite");
         const suffix = tags.length > 0 ? `  ${tags.join("  ")}` : "";
         lines.push(`  ${i + 1}. ${name}${suffix}`);
       }
       lines.push("");
-      lines.push("`/model <名字或编号>` 切 Model");
-      lines.push("`/model lite <名字或编号>` 切 Lite");
+      lines.push("`/model <名字或编号>` 切换");
       lines.push("`/model reset` 恢复初始值");
     }
 
@@ -2412,6 +2432,12 @@ export class Pipeline {
   }
 
   private async process(chatId: string, mergedText: string, messages: QueuedMessage[] = [], signal?: AbortSignal, runId?: string): Promise<void> {
+    const transition = this.globalSessionTransition ?? this.sessionTransitionLocks.get(chatId);
+    if (transition) {
+      this.log.info("queued run waiting for session transition", { chatId, runId: runId ?? null });
+      await transition;
+    }
+
     const platformChatId = this.chatSessions.get(chatId)?.platformChatId
       ?? this.platformChatIds.get(chatId);
 
@@ -2435,9 +2461,6 @@ export class Pipeline {
     }
 
     try {
-      // M3: 路由决策 — 判断是否需要切换 session
-      await this.maybeRouteSession(chatId, mergedText);
-
       if (signal?.aborted) {
         this.log.info("process cancelled before session creation", { chatId });
         this.markRuntimeRun(runId, "stopped");
@@ -2474,6 +2497,9 @@ export class Pipeline {
           }
           const recoveryUserId = processChatType === "group" ? undefined : chatSession.userId;
           recoveryParts.push(this.buildSessionProfile(chatId, processChatType, recoveryUserId));
+          recoveryParts.push(buildSessionArchiveContext(
+            getSessionArchiveDirectory(this.archiveHome, this.botIdentity.name, chatId),
+          ));
           const taskContext = buildActiveTaskContext(this.workingDirectory, processChatType, recoveryUserId);
           if (taskContext) {
             recoveryParts.push(`<session-state>\n${taskContext}\n</session-state>`);
@@ -2510,11 +2536,28 @@ export class Pipeline {
         }
       }
 
+      if (messageToSend !== mergedText && messageToSend.endsWith(mergedText)) {
+        messageToSend = `${messageToSend.slice(0, messageToSend.length - mergedText.length)}${wrapInjectedUserMessage(mergedText)}`;
+      }
+
       if (signal?.aborted) {
         this.log.info("process cancelled before sending to agent", { chatId });
-        await this.archiveSession(chatId);
+        if (!this.globalSessionTransition && !this.sessionTransitionLocks.has(chatId)) {
+          await this.archiveSession(chatId);
+        }
         this.markRuntimeRun(runId, "stopped");
         return;
+      }
+
+      if (msgIds.length > 0) {
+        const assignMessage = this.db.prepare("UPDATE messages SET session_key = ? WHERE id = ?");
+        const assignMessages = this.db.transaction((ids: number[]) => {
+          for (const id of ids) assignMessage.run(chatSession.sessionId, id);
+          this.db.prepare(`
+            UPDATE sessions SET start_msg_id = COALESCE(start_msg_id, ?) WHERE id = ?
+          `).run(Math.min(...ids), chatSession.sessionId);
+        });
+        assignMessages(msgIds);
       }
 
       this.log.info("sending to agent", {
@@ -2703,6 +2746,17 @@ export class Pipeline {
   private async getOrCreateSession(chatId: string, beforeMsgId?: number, signal?: AbortSignal): Promise<ChatSession> {
     const existing = this.chatSessions.get(chatId);
     if (existing) return existing;
+    const pending = this.sessionCreations.get(chatId);
+    if (pending) return pending;
+
+    const creation = this.createChatSession(chatId, beforeMsgId, signal).finally(() => {
+      if (this.sessionCreations.get(chatId) === creation) this.sessionCreations.delete(chatId);
+    });
+    this.sessionCreations.set(chatId, creation);
+    return creation;
+  }
+
+  private async createChatSession(chatId: string, beforeMsgId?: number, signal?: AbortSignal): Promise<ChatSession> {
 
     const platformChatId = this.platformChatIds.get(chatId);
     if (!platformChatId) {
@@ -2714,9 +2768,6 @@ export class Pipeline {
     // 查 chatType 用于 memory 可见性控制
     const chatRow = this.db.prepare("SELECT type FROM chats WHERE id = ?").get(chatId) as { type: string } | undefined;
     const chatType = (chatRow?.type ?? "p2p") as "p2p" | "group";
-
-    // 消费路由决策（如有）
-    this.pendingRouteDecisions.delete(chatId);
 
     // 构建 session dynamic context（当前场景 + 用户记忆）
     // 群聊：只注入 bot + chat 信息，不注入用户身份（由消息级 speaker 注入）
@@ -2739,28 +2790,11 @@ export class Pipeline {
     });
     const stableContext = this.buildStableSystemContext();
 
-    // 等待上一个 session 的归档摘要完成，确保 context 注入拿到最新 summary
-    // 超时或 /stop 中断时放行，不阻塞新会话
-    const _pendingSummary = this.pendingSummary.get(chatId);
-    if (_pendingSummary) {
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      let abortHandler: (() => void) | undefined;
-      await Promise.race([
-        _pendingSummary,
-        new Promise<void>((resolve) => {
-          timer = setTimeout(resolve, SUMMARY_TIMEOUT_MS);
-          if (signal) {
-            abortHandler = () => { clearTimeout(timer); resolve(); };
-            signal.addEventListener("abort", abortHandler, { once: true });
-          }
-        }),
-      ]);
-      clearTimeout(timer);
-      if (abortHandler) signal?.removeEventListener("abort", abortHandler);
-    }
-
-    // 构建 task/conversation context（会话定位 + task 索引 + 最近 session summaries）— 后续拼到首条消息前缀
-    const normalContext = buildNormalContext(this.db, chatId, this.workingDirectory, beforeMsgId, chatType, userId);
+    // 构建 task/conversation context（任务索引 + 归档目录 + 最近消息）
+    const normalContext = buildNormalContext(
+      this.db, chatId, this.workingDirectory, beforeMsgId, chatType, userId,
+      getSessionArchiveDirectory(this.archiveHome, this.botIdentity.name, chatId),
+    );
     const messageContextParts = [sessionProfile];
     if (normalContext) {
       messageContextParts.push(`<session-state>\n${normalContext}\n</session-state>`);
@@ -2777,7 +2811,6 @@ export class Pipeline {
       botId: this.botIdentity.platformBotId,
       platform: this.botIdentity.platform,
       model: this.botIdentity.model,
-      liteModel: this.botIdentity.liteModel,
       isAdmin,
       botProfilePath: this.stableContextOptions.botProfilePath,
     });
@@ -2821,9 +2854,6 @@ export class Pipeline {
     this.log.info("session created", { chatId, sessionId, userId, agentSessionId: agentSession.id });
     return chatSession;
   }
-
-  /** 路由决策结果暂存 */
-  private pendingRouteDecisions = new Map<string, RouteDecision>();
 
   /** 首条消息或恢复消息的动态上下文暂存 */
   private pendingMessageContext = new Map<string, string>();
@@ -2878,59 +2908,20 @@ export class Pipeline {
     this.pendingCompactRecovery.add(chatId);
   }
 
-  /** 路由判断的最小轮次门槛 */
-  private static readonly ROUTE_MIN_TURNS = 10;
-
-  private async maybeRouteSession(chatId: string, newMessage: string): Promise<void> {
-    const existing = this.chatSessions.get(chatId);
-    if (!existing) return;
-
-    const sessionRow = this.db.prepare(
-      "SELECT last_active_at, turn_count FROM sessions WHERE id = ?",
-    ).get(existing.sessionId) as { last_active_at: string | null; turn_count: number } | undefined;
-
-    if (!sessionRow?.last_active_at) return;
-    if (sessionRow.turn_count < Pipeline.ROUTE_MIN_TURNS) return;
-
-    const decision = await decideRoute(
-      this.agent,
-      this.db,
-      chatId,
-      sessionRow.last_active_at,
-      newMessage,
-      existing.sessionId,
-      this.botIdentity.liteModel,
-    );
-
-    if (decision.action === "continue") return;
-
-    this.log.info("route decision: switching session", {
-      chatId,
-      action: decision.action,
-      reason: decision.reason,
-    });
-
-    await this.archiveSession(chatId);
-
-    this.db.prepare(`
-      UPDATE messages SET session_key = NULL
-      WHERE chat_id = ? AND session_key = ?
-        AND id > COALESCE((SELECT end_msg_id FROM sessions WHERE id = ?), 0)
-    `).run(chatId, existing.sessionId, existing.sessionId);
-
-    this.pendingRouteDecisions.set(chatId, decision);
-  }
-
   private async archiveSession(chatId: string): Promise<boolean> {
     const session = this.chatSessions.get(chatId);
     if (!session) {
       const result = this.db.prepare(`
         UPDATE sessions
-        SET status = 'archived',
+        SET status = 'archive_failed',
             ended_at = datetime('now'),
-            last_active_at = datetime('now'),
-            agent_session_id = NULL
-        WHERE chat_id = ? AND status = 'active'
+            last_active_at = datetime('now')
+        WHERE id = (
+          SELECT id FROM sessions
+          WHERE chat_id = ? AND status = 'active' AND source = 'user'
+          ORDER BY last_active_at DESC, started_at DESC
+          LIMIT 1
+        )
       `).run(chatId);
 
       this.clearChatRuntimeState(chatId);
@@ -2938,122 +2929,60 @@ export class Pipeline {
     }
 
     const { agentSession, sessionId } = session;
+    const archivedAt = utcDateTimeForSql(new Date());
+    let archiveStatus = "archived";
+    try {
+      await this.archiveTranscript(chatId, sessionId, agentSession, this.agent, archivedAt);
+    } catch (err) {
+      if (!(err instanceof AgentSessionNotStartedError)) throw err;
+      archiveStatus = "discarded";
+      this.log.info("discarding session that never started in backend", { chatId, sessionId });
+    }
 
-    const sessionRow = this.db.prepare(
-      "SELECT source, start_msg_id, end_msg_id FROM sessions WHERE id = ?",
-    ).get(sessionId) as { source: string | null; start_msg_id: number | null; end_msg_id: number | null } | undefined;
-
-    const isUserSession = (sessionRow?.source ?? "user") === "user";
-
-    // 先关闭 agent session，不阻塞摘要生成
     this.db.prepare(`
-      UPDATE sessions SET status = 'archived', ended_at = datetime('now'), last_active_at = datetime('now')
+      UPDATE sessions SET status = ?, ended_at = ?, last_active_at = datetime('now')
       WHERE id = ?
-    `).run(sessionId);
+    `).run(archiveStatus, archivedAt, sessionId);
 
     this.chatSessions.delete(chatId);
     this.clearChatRuntimeState(chatId);
+
     await this.agent.closeSession(agentSession).catch((err) => {
       this.log.warn("failed to close backend session during archive", { chatId, sessionId, error: String(err) });
     });
 
     this.log.info("session archived", { chatId, sessionId });
-
-    // 用 lite model 异步生成归档摘要，promise 存起来供新 session 创建时 await
-    if (isUserSession && sessionRow?.start_msg_id != null && sessionRow?.end_msg_id != null) {
-      const summaryPromise = this.generateArchiveSummary(chatId, sessionId, sessionRow.start_msg_id, sessionRow.end_msg_id)
-        .catch((err) => this.log.warn("archive summary failed", { chatId, sessionId, error: String(err) }))
-        .finally(() => this.pendingSummary.delete(chatId));
-      this.pendingSummary.set(chatId, summaryPromise);
-    }
     return true;
   }
 
-  /** 用 lite model 从 DB 消息生成归档摘要 */
-  private async generateArchiveSummary(chatId: string, sessionId: string, startMsgId: number, endMsgId: number): Promise<void> {
-    // 从 DB 捞消息，拼成对话文本
-    const rows = this.db.prepare(`
-      SELECT m.role, m.sender_id, m.content_text, u.name as sender_name
-      FROM messages m
-      LEFT JOIN users u ON m.sender_id = u.id
-      WHERE m.id BETWEEN ? AND ? AND m.chat_id = ? AND m.content_text IS NOT NULL
-      ORDER BY m.id ASC
-    `).all(startMsgId, endMsgId, chatId) as Array<{
-      role: string;
-      sender_id: string | null;
-      content_text: string;
-      sender_name: string | null;
-    }>;
-
-    if (rows.length === 0) {
-      this.log.info("archive summary skipped (no messages)", { chatId, sessionId });
-      return;
-    }
-
-    const lines = rows.map((r) => {
-      const sender = formatSenderLabel(r.sender_id, r.sender_name, r.role);
-      const text = r.content_text.length > 500 ? r.content_text.slice(0, 500) + "..." : r.content_text;
-      return `${sender}: ${text}`;
-    });
-
-    // 总长度限制 ~150K 字符，超了砍头部保留最近的消息
-    const MAX_TOTAL_LEN = 150_000;
-    let conversationText = lines.join("\n");
-    if (conversationText.length > MAX_TOTAL_LEN) {
-      conversationText = "...(早期对话省略)...\n\n" + conversationText.slice(-MAX_TOTAL_LEN);
-    }
-
-    const prompt = buildArchiveSummaryPrompt(conversationText);
-
-    let session;
-    try {
-      session = await this.createAgentSession({ modelTier: "lite", liteModel: this.botIdentity.liteModel });
-    } catch (err) {
-      this.log.warn("failed to create archive summary session", { chatId, sessionId, error: String(err) });
-      return;
-    }
-
-    const killTimer = setTimeout(() => {
-      this.log.warn("archive summary timeout, cancelling session", { chatId, sessionId });
-      this.agent.cancelSession(session).catch(() => {});
-    }, SUMMARY_TIMEOUT_MS);
-
-    try {
-      const response = await this.agent.sendMessage(session, prompt);
-
-      if (response.cancelled) {
-        this.log.warn("archive summary cancelled (timeout or stop)", { chatId, sessionId });
-        return;
-      }
-
-      const text = response.text.trim();
-
-      if (text === "null") {
-        this.log.info("archive summary skipped (null)", { chatId, sessionId });
-      } else {
-        const jsonMatch = text.match(/\{[\s\S]*\}/);
-        if (jsonMatch) {
-          const parsed = JSON.parse(jsonMatch[0]);
-          // topics 列存放搜索用关键词：旧格式的 topic titles + 新格式的 tags
-          const topicTitles = Array.isArray(parsed.topics)
-            ? parsed.topics.map((t: any) => typeof t === "string" ? t : t.title).filter(Boolean)
-            : [];
-          const tags = Array.isArray(parsed.tags) ? parsed.tags.filter(Boolean) : [];
-          const searchTerms = [...new Set([...topicTitles, ...tags])];
-          this.db.prepare(
-            "UPDATE sessions SET summary = ?, topics = ? WHERE id = ?",
-          ).run(JSON.stringify(parsed), JSON.stringify(searchTerms), sessionId);
-          this.log.info("archive summary generated", { chatId, sessionId });
-        } else {
-          this.log.warn("archive summary response has no JSON", { chatId, sessionId });
-        }
-      }
-    } catch (err) {
-      this.log.warn("failed to generate archive summary", { chatId, sessionId, error: String(err) });
-    } finally {
-      clearTimeout(killTimer);
-      await this.agent.closeSession(session).catch(() => {});
-    }
+  private async archiveTranscript(
+    chatId: string,
+    sessionId: string,
+    agentSession: AgentSession,
+    backend: AgentBackend = this.agent,
+    archivedAt?: string,
+  ): Promise<void> {
+    const row = this.db.prepare(`
+      SELECT source, backend_type, started_at, ended_at
+      FROM sessions WHERE id = ?
+    `).get(sessionId) as {
+      source: string | null;
+      backend_type: string | null;
+      started_at: string;
+      ended_at: string | null;
+    } | undefined;
+    const archiveTime = archivedAt ?? row?.ended_at;
+    if (!row || !archiveTime) throw new Error(`session archive metadata is incomplete: ${sessionId}`);
+    const file = await archiveAgentSession(this.archiveHome, backend, agentSession, {
+        botId: this.botIdentity.name,
+        chatId,
+        sessionId,
+        source: row.source ?? "user",
+        backend: row.backend_type ?? this.backendType,
+        startedAt: row.started_at,
+        archivedAt: archiveTime,
+      });
+    this.log.info("session transcript archived", { chatId, sessionId, file });
   }
 
   private async cancelChat(chatId: string): Promise<void> {
@@ -3102,11 +3031,11 @@ export class Pipeline {
   }
 
   private runIdleWatchdog(): void {
-    if (!(this.agent instanceof CliAgentBackend)) return;
-    const cliAgent = this.agent as CliAgentBackend;
+    const cliAgent = this.agent instanceof CliAgentBackend ? this.agent : undefined;
 
     const now = Date.now();
     for (const [chatId, session] of this.chatSessions) {
+      if (!cliAgent) continue;
       const a = cliAgent.getActivity(session.agentSession.id);
       if (!a || (a.status !== "running")) continue;
 
@@ -3204,7 +3133,8 @@ export class Pipeline {
 
     // ── 独立 session（cron/task）idle 检测 ──
     for (const [sessionId, task] of this.runningTasks) {
-      const a = cliAgent.getActivity(sessionId);
+      if (!(task.backend instanceof CliAgentBackend)) continue;
+      const a = task.backend.getActivity(sessionId);
       if (!a || a.status !== "running") continue;
 
       const idleMs = now - a.lastActiveAt;
@@ -3215,7 +3145,7 @@ export class Pipeline {
         this.log.info("watchdog: auto-kill independent session, completion + idle", {
           sessionId, chatId: task.chatId, description: task.description, idleMs,
         });
-        this.agent.cancelSession(task.agentSession).catch(() => {});
+        task.backend.cancelSession(task.agentSession).catch(() => {});
         continue;
       }
 
@@ -3253,7 +3183,7 @@ export class Pipeline {
           const content = `「${task.description}」运行 ${totalMin} 分钟，其中 ${idleMin} 分钟无输出，已自动终止。`;
           this.sendWatchdogCard(task.chatId, header, content);
         }
-        this.agent.cancelSession(task.agentSession).catch(() => {});
+        task.backend.cancelSession(task.agentSession).catch(() => {});
         a.notifyCount++;
       }
     }
@@ -3480,11 +3410,4 @@ function displayRunStage(stage: RunStage): string {
     case "failed": return "失败";
     case "stopped": return "已停止";
   }
-}
-
-/** 格式化 lite model 显示：优先显示用户配置值，否则显示 backend 默认值 */
-function formatLiteModel(liteModel: string | undefined, backend: string): string {
-  if (liteModel) return liteModel;
-  const defaultModel = DEFAULT_LITE_MODELS[backend as BuiltinBackendType];
-  return defaultModel ? `${defaultModel} (默认)` : "同 Model";
 }

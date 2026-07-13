@@ -10,7 +10,8 @@ import { closeSync, existsSync, openSync, readFileSync, readSync, statSync } fro
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { CliAgentBackend, buildNiubotEnv, type BaseCliSession, type ParsedOutput } from "../agent/cli-base.js";
-import type { AgentSessionActivity, ExecHooks, SessionConfig } from "../agent/types.js";
+import { AgentSessionNotStartedError, type AgentSessionActivity, type ExecHooks, type SessionConfig } from "../agent/types.js";
+import { readGrokTranscript } from "../session-archive/native-transcript.js";
 
 interface GrokSession extends BaseCliSession {
   /** 首轮使用 --session-id，后续使用 --resume。 */
@@ -59,7 +60,7 @@ export default class GrokBackend extends CliAgentBackend<GrokSession> {
   buildSession(config: SessionConfig): GrokSession {
     return {
       workingDirectory: config.workingDirectory ?? process.cwd(),
-      model: config.modelTier === "lite" ? (config.liteModel ?? config.model) : config.model,
+      model: config.model,
       importantContext: config.importantContext,
       agentSessionId: config.agentSessionId ?? randomUUID(),
       isNewSession: !config.agentSessionId,
@@ -174,6 +175,15 @@ export default class GrokBackend extends CliAgentBackend<GrokSession> {
       error,
       failed: Boolean(error),
     };
+  }
+
+  protected async loadSessionTranscript(session: GrokSession) {
+    const file = this.getSessionFile(session, "chat_history.jsonl");
+    if (!file || !session.agentSessionId) {
+      if (session.isNewSession) throw new AgentSessionNotStartedError(session.agentSessionId ?? "grok-pending");
+      throw new Error("Grok session transcript not found");
+    }
+    return readGrokTranscript(file, session.agentSessionId, this.getSessionFile(session, "events.jsonl") ?? undefined);
   }
 
   protected getExecHooks(session: GrokSession): ExecHooks {

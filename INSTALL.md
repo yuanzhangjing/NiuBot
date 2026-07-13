@@ -51,7 +51,7 @@ pi --version
 grok --version
 ```
 
-If at least one is available, note which one the user wants (e.g. `claude`). Before writing config, also ask whether they want a separate `liteModel` for cheaper background tasks. Proceed to [Step 2.1](#step-21-generate-config).
+If at least one is available, note which one the user wants (e.g. `claude`). Proceed to [Step 2.1](#step-21-generate-config).
 
 If none are available, tell the user to install one first.
 
@@ -65,7 +65,7 @@ Pi uses its own native config under `~/.pi/agent/`:
 | `models.json` | Custom providers/endpoints/models (no `apiKey` unless you manage env yourself) |
 | `settings.json` | `defaultProvider`, `defaultModel`, `defaultThinkingLevel` |
 
-NiuBot does **not** inject `~/.niubot/.env.deepseek-bak` or auto-edit Pi files. Configure Pi once, then set `backend: pi` in NiuBot. Provider, default model, and thinking level come from Pi `settings.json`; NiuBot only passes `--model` when you set `model` / `liteModel` in NiuBot config.
+NiuBot does **not** inject `~/.niubot/.env.deepseek-bak` or auto-edit Pi files. Configure Pi once, then set `backend: pi` in NiuBot. Provider, default model, and thinking level come from Pi `settings.json`; NiuBot only passes `--model` when you set `model` in NiuBot config.
 
 Example DeepSeek via Anthropic-compatible API:
 
@@ -136,15 +136,6 @@ Before filling the config, ask the user the following questions **one at a time*
 
 **Ask 3 — Model** (optional): main model for conversations. Skip to use the CLI's default.
 
-**Ask 4 — Lite model** (optional): cheaper model for background tasks. Recommended defaults:
-- `claude`: `haiku`
-- `codex`: `gpt-5.4-mini`
-- `traecli`: `Gemini-3-Flash-Preview`
-- `opencode`: `opencode-go/deepseek-v4-flash`
-- `cursor`: `composer-2.5-fast`
-- `pi`: `deepseek-v4-flash`
-- `grok`: 不预设，由 Grok Build 使用账号默认模型
-
 Example `config.yaml`:
 
 ```yaml
@@ -154,7 +145,6 @@ bots:
     appId: ""
     appSecret: ""
     # model: ""
-    # liteModel: ""
     # workingDirectory: ~/niubot-workspace/<id>
 ```
 
@@ -162,11 +152,6 @@ Config fields:
 - `id`: Unique bot identifier (immutable). Determines data directory (`~/.niubot/<id>/`) and default workspace (`~/niubot-workspace/<id>/`). **Do not change after setup.**
 - `backend`: Agent backend to use (required). One of: `claude`, `codex`, `traecli`, `opencode`, `cursor`, `pi`, `grok`.
 - `model`: Main model for conversations. Omit to use the CLI's default.
-- `liteModel`: Cheaper model for background tasks (archive summaries). Omit = same as main model.
-  Recommended examples for built-in backends:
-  - `claude`: `haiku`
-  - `codex`: `gpt-5.4-mini`
-  - `traecli`: `Gemini-3-Flash-Preview`
 - `workingDirectory`: Where the agent runs. Default: `~/niubot-workspace/<id>`.
 
 Optional restart source directory for local development:
@@ -401,20 +386,8 @@ bots:
     appId: "cli_yyy"          # from Feishu app (Step 4)
     appSecret: "yyy"
     # model: ""               # optional: main model
-    # liteModel: ""           # optional: lite model for background tasks
     # workingDirectory: ~/niubot-workspace/NewBot  # optional
 ```
-
-Recommended lite models by backend:
-| Backend | Suggested liteModel |
-|---------|-------------------|
-| claude | `haiku` |
-| codex | `gpt-5.4-mini` |
-| traecli | `Gemini-3-Flash-Preview` |
-| opencode | `opencode-go/deepseek-v4-flash` |
-| cursor | `composer-2.5-fast` |
-| pi | `deepseek-v4-flash` |
-| grok | 不预设（使用 Grok Build 默认模型） |
 
 #### 4. Create Feishu App (if new)
 

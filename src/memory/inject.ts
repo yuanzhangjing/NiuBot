@@ -3,19 +3,14 @@ import type Database from "better-sqlite3";
 import { listUserMemory } from "./user-memory.js";
 import { formatShortLabel, formatSenderLabel } from "../database/schema.js";
 import { listContinuationMessages } from "../messages/store.js";
-import { hasUserArchivedSession, listRecentUserArchivedSessions } from "../sessions/store.js";
+import { hasEndedUserSession } from "../sessions/store.js";
 import { listTasks, type TaskEntry } from "../tasks/store.js";
-import { utcDateTimeForSql, utcToLocalDateTime } from "../tz.js";
 import { SYSTEM_RULES } from "../system-rules.js";
 
-/** 冷启动注入最近 session 的时间窗口（小时） */
-const RECENT_SESSION_HOURS = 168;
-/** 冷启动注入最近 session 的最大条数 */
-const RECENT_SESSION_MAX_COUNT = 10;
 /** 续接上下文：注入该 chat 最近消息条数 */
-const CONTINUATION_TAIL_COUNT = 10;
-/** 续接上下文：每条消息最大长度 */
-const CONTINUATION_MSG_MAX_LEN = 200;
+const CONTINUATION_TAIL_COUNT = 20;
+/** 续接上下文总字符预算，超出时从最旧消息开始移除 */
+const CONTINUATION_TOTAL_MAX_LEN = 20_000;
 const LEGACY_DEFAULT_BOT_PROFILE = `# Bot Profile
 
 在这里写 bot 的角色、语气和长期行为边界。`;
@@ -23,7 +18,7 @@ const LEGACY_DEFAULT_BOT_PROFILE = `# Bot Profile
 /** 新 session 首条消息：引导 agent 按需检索历史上下文 */
 export const NEW_SESSION_SEARCH_REMINDER =
 `<system-reminder>
-这是一个全新的对话 session。如果用户提到历史决策、旧任务或你不确定的背景，先用 nbt 检索再回答，不要凭记忆猜测。
+这是一个全新的对话 session。如果用户提到历史决策、旧任务或你不确定的背景，先搜索当前聊天的 session 归档目录并读取对应 Markdown，不要凭记忆猜测。
 </system-reminder>`;
 
 /** compact 后下一条消息：提醒 agent 恢复可能被压缩掉的规则和状态 */
@@ -33,7 +28,7 @@ export const COMPACT_RECOVERY_REMINDER =
 如果 NiuBot 系统规则丢失，先运行 nbt system-rules。
 如果当前身份、会话或用户记忆丢失，运行 nbt whoami。
 如果最近对话丢失，运行 nbt messages list。
-如果历史 session 摘要丢失，运行 nbt sessions list/search/get。
+如果历史对话细节丢失，使用 rg 搜索当前聊天的 session 归档目录并读取对应 Markdown。
 如果任务状态丢失，运行 nbt task list，并读取对应 task README。
 如果问题涉及项目规则原文，重新读取 workspace 的 AGENTS.md。
 不要把 compact 摘要当成原文。
@@ -241,7 +236,7 @@ export function buildSpeakerContext(
 // ── Task and conversation context (可以接受 compact 压缩) ──────
 
 /**
- * 构建 task/conversation 上下文：task 索引 + 最近 session summary + 续接消息。
+ * 构建 task/conversation 上下文：task 索引 + session 归档目录 + 续接消息。
  * 注入 user prompt 前缀。
  */
 export function buildNormalContext(
@@ -251,6 +246,7 @@ export function buildNormalContext(
   beforeMsgId?: number,
   chatType: "p2p" | "group" = "p2p",
   userId?: string,
+  sessionArchiveDirectory?: string,
 ): string {
   const parts: string[] = [];
 
@@ -258,17 +254,8 @@ export function buildNormalContext(
   const taskContext = buildActiveTaskContext(workingDirectory, chatType, userId);
   if (taskContext) parts.push(taskContext);
 
-  // 2. 最近归档 session 的摘要（短期记忆）— 最近一条完整，其余精简
-  const recentSessions = getRecentArchivedSessions(db, chatId, RECENT_SESSION_HOURS, RECENT_SESSION_MAX_COUNT);
-  if (recentSessions.length > 0) {
-    const blocks = recentSessions.map((s, i) => {
-      const header = formatSessionHeader(s);
-      return i === 0
-        ? formatSessionBrief(header, s.parsed)
-        : formatSessionMeta(header, s.parsed);
-    });
-    parts.push(`<recent-sessions>\n${blocks.join("\n")}\n</recent-sessions>`);
-  }
+  // 2. 当前 chat 的完整 session 归档入口
+  if (sessionArchiveDirectory) parts.push(buildSessionArchiveContext(sessionArchiveDirectory));
 
   // 3. 续接上下文：最近对话尾部消息 — 最微观，紧接用户新消息
   const continuation = buildContinuationContext(db, chatId, beforeMsgId);
@@ -277,6 +264,10 @@ export function buildNormalContext(
   }
 
   return parts.join("\n\n");
+}
+
+export function buildSessionArchiveContext(sessionArchiveDirectory: string): string {
+  return `<session-archives path=${JSON.stringify(sessionArchiveDirectory)}>\n这里保存当前聊天已归档 session 的完整记录。需要恢复更早的事实、决策或执行过程时，使用 rg 搜索并读取对应 Markdown。\n</session-archives>`;
 }
 
 export function buildActiveTaskContext(
@@ -290,98 +281,6 @@ export function buildActiveTaskContext(
     : "";
 }
 
-// ── Internal helpers ────────────────────────────────────────
-
-interface TopicDetail {
-  title: string;
-  summary?: string;
-  progress?: string;
-  next?: string;
-  /** 未闭合的线头：提出但未落地的意图、待验证项 */
-  open?: string;
-  decisions?: string[];
-  open_items?: string[];
-}
-
-interface ParsedSessionSummary {
-  summary?: string;
-  /** 新格式（平铺）：details + open */
-  details?: string;
-  open?: string;
-  /** 旧格式（topics）：兼容已有归档数据 */
-  topics?: (string | TopicDetail)[];
-  decisions?: string[];
-  open_items?: string[];
-}
-
-/** Session 元信息头：[id] 时间 ~ 时间, N条, #start~#end */
-function formatSessionHeader(s: ArchivedSessionInfo): string {
-  const shortId = s.id.slice(0, 8);
-  const start = utcToLocalDateTime(s.startedAt);
-  const end = utcToLocalDateTime(s.endedAt);
-  // 同一天只显示一次日期：2026-04-10 16:30 ~ 17:46
-  const endDisplay = start.slice(0, 10) === end.slice(0, 10) ? end.slice(11) : end;
-  const meta = s.startMsgId > 0 ? `, ${s.msgCount}条, #${s.startMsgId}~#${s.endMsgId}` : "";
-  return `[${shortId}] ${start} ~ ${endDisplay}${meta}`;
-}
-
-/** 注入用（完整）：summary + details + open，用于最近一条 session */
-function formatSessionBrief(header: string, parsed: ParsedSessionSummary): string {
-  const lines: string[] = [];
-  lines.push(`- ${header}`);
-  lines.push(`  ${parsed.summary ?? "(无摘要)"}`);
-  if (parsed.details) lines.push(`  ${parsed.details}`);
-  if (parsed.open) lines.push(`  [未完成] ${parsed.open}`);
-  return lines.join("\n");
-}
-
-/** 注入用（精简）：仅 meta + summary，用于较早的 session */
-function formatSessionMeta(header: string, parsed: ParsedSessionSummary): string {
-  return `- ${header}\n  ${parsed.summary ?? "(无摘要)"}`;
-}
-
-interface ArchivedSessionInfo {
-  id: string;
-  startedAt: string;
-  endedAt: string;
-  msgCount: number;
-  startMsgId: number;
-  endMsgId: number;
-  parsed: ParsedSessionSummary;
-}
-
-function getRecentArchivedSessions(
-  db: Database.Database,
-  chatId: string,
-  hours: number,
-  maxCount: number,
-): ArchivedSessionInfo[] {
-  const since = utcDateTimeForSql(new Date(Date.now() - hours * 3600_000));
-  const rows = listRecentUserArchivedSessions(db, { chatId, since, limit: maxCount });
-
-  const results: ArchivedSessionInfo[] = [];
-  for (const r of rows) {
-    if (!r.ended_at) continue;
-    try {
-      const parsed = JSON.parse(r.summary ?? "") as ParsedSessionSummary;
-      const msgCount = (r.start_msg_id != null && r.end_msg_id != null)
-        ? r.end_msg_id - r.start_msg_id + 1
-        : 0;
-      results.push({
-        id: r.id,
-        startedAt: r.started_at,
-        endedAt: r.ended_at,
-        msgCount,
-        startMsgId: r.start_msg_id ?? 0,
-        endMsgId: r.end_msg_id ?? 0,
-        parsed,
-      });
-    } catch { /* skip malformed */ }
-  }
-
-  return results;
-}
-
 /**
  * 构建续接上下文：该 chat 最近的尾部消息 + 引导提示。
  * 让模型意识到自己是在延续一个对话流，而不是从零开始。
@@ -393,7 +292,7 @@ function buildContinuationContext(
   beforeMsgId?: number,
 ): string | null {
   // 确认该 chat 存在已归档的 session（没有历史 session 则不需要续接）
-  if (!hasUserArchivedSession(db, chatId)) return null;
+  if (!hasEndedUserSession(db, chatId)) return null;
 
   // 捞该 chat 最近 N 条消息（截止到当前消息之前，避免把用户刚发的消息当历史注入）
   const rows = listContinuationMessages(db, { chatId, beforeMsgId, limit: CONTINUATION_TAIL_COUNT });
@@ -402,12 +301,16 @@ function buildContinuationContext(
 
   const lines = rows.map((r) => {
     const sender = formatSenderLabel(r.sender_id, r.sender_name, r.role);
-    let text = r.content_text.replace(/\s+/g, " ").trim();
-    if (text.length > CONTINUATION_MSG_MAX_LEN) {
-      text = text.slice(0, CONTINUATION_MSG_MAX_LEN) + "…";
-    }
+    const text = r.content_text.trim();
     return `${sender}: ${text}`;
   });
+
+  while (lines.length > 1 && lines.join("\n").length > CONTINUATION_TOTAL_MAX_LEN) {
+    lines.shift();
+  }
+  if (lines.length === 1 && lines[0]!.length > CONTINUATION_TOTAL_MAX_LEN) {
+    lines[0] = `…${lines[0]!.slice(-(CONTINUATION_TOTAL_MAX_LEN - 1))}`;
+  }
 
   return `<recent-messages>\n以下是最近的对话记录：\n\n${lines.join("\n")}\n\n不必复述，结合全局状态自然延续即可。\n</recent-messages>`;
 }

@@ -145,7 +145,6 @@ async function main(): Promise<void> {
         configBackend: botConfig.backend,
         runtimeBackend: runtimeState?.backendType,
         model: runtimeConfig.model,
-        liteModel: runtimeConfig.liteModel,
         autoUpdateNotifications: autoUpdateNotificationsEnabled,
       });
     } catch (err) {

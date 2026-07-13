@@ -9,11 +9,11 @@ NiuBot 是一个 AI 人格运行时：有记忆、有性格、能自主管理上
 
 ```
 src/
-├── core/        # 核心引擎（pipeline, queue, routing, cron）
+├── core/        # 核心引擎（pipeline, queue, runtime state, cron）
 ├── agent/       # Agent backend 抽象和公共类型
-├── backends/    # 内置 backend（claude / codex / traecli）
+├── backends/    # 内置 backend
 ├── im/          # IM 平台适配（feishu）+ 消息渲染（render.ts）
-├── memory/      # 上下文注入（inject）+ 记忆管理（user-memory, chat-summary）
+├── memory/      # 上下文注入与用户记忆
 ├── database/    # SQLite schema + migrations
 ├── cli/         # nbt CLI 工具（messages, contacts, task, cron, send）
 └── index.ts     # 入口
@@ -58,10 +58,10 @@ NIUBOT_HOME=~/.niubot bash restart.sh
 - 保持 IM 卡片、footer、命令输出格式一致，避免同类功能各写一套样式
 
 ### 关键架构
-- **Pipeline**（`src/core/pipeline.ts`）：消息入口 → 存 DB → 队列缓冲（3s）→ flush（platformTs 排序 + YAML 合并）→ 路由决策 → session 管理 → agent 调用 → IM 发送
+- **Pipeline**（`src/core/pipeline.ts`）：消息入口 → 存 DB → 队列缓冲（3s）→ flush（platformTs 排序 + YAML 合并）→ session 管理 → agent 调用 → IM 发送
 - **消息渲染**（`src/im/render.ts`）：统一 YAML 格式 — 独立消息纯文本，回复 `- msg: + quoted:`，转发 `- forward: + messages:`，多条合并为 YAML 列表
-- **三层上下文注入**：Static（AGENTS.md）→ Important（system prompt: 场景+记忆）→ Normal（user prompt 前缀: 摘要+归档+recall）
-- **Session 生命周期**：new → active（每条消息 --resume）→ archive（归档摘要）；进程重启 recover（DB 读 agent_session_id → --resume）
+- **三层上下文注入**：Static（AGENTS.md）→ Important（system prompt: 场景+记忆）→ Normal（user prompt 前缀: task + 最近消息 + session 归档目录）
+- **Session 生命周期**：new → active（每条消息 --resume）→ archive（完整 Markdown transcript）；进程重启 recover（DB 读 agent_session_id → --resume）
 - **Built-in backends**（`src/backends/*.ts`）：Claude、Codex、Trae CLI 的内置适配；公共抽象在 `src/agent/`
 - **内置命令**：三层分发 — builtin switch → shell exec（admin）→ forward to agent
 

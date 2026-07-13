@@ -8,12 +8,11 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { CliAgentBackend, buildNiubotEnv, type BaseCliSession, type ParsedOutput } from "../agent/cli-base.js";
 import type { SessionConfig, ExecHooks } from "../agent/types.js";
-import { DEFAULT_LITE_MODELS } from "../config.js";
+import { readCodexTranscript } from "../session-archive/native-transcript.js";
 
 interface CodexSession extends BaseCliSession {
   sessionLogPath?: string;
   sandboxMode: string;
-  modelTier: SessionConfig["modelTier"];
 }
 
 export interface CodexBackendOptions {
@@ -35,14 +34,13 @@ export default class CodexBackend extends CliAgentBackend<CodexSession> {
   buildSession(config: SessionConfig): CodexSession {
     return {
       workingDirectory: config.workingDirectory ?? process.cwd(),
-      model: config.modelTier === "lite" ? (config.liteModel ?? DEFAULT_LITE_MODELS.codex ?? config.model) : config.model,
+      model: config.model,
       importantContext: config.importantContext,
       extraEnv: buildNiubotEnv(config),
       cumulativeBytes: 0,
       compactCount: 0,
       jsonlOffset: 0,
       sandboxMode: this.sandboxMode,
-      modelTier: config.modelTier,
     };
   }
 
@@ -155,6 +153,12 @@ export default class CodexBackend extends CliAgentBackend<CodexSession> {
       error: lastAgentText ? undefined : genericErrorMsg,
       failed: !lastAgentText && sawError,
     };
+  }
+
+  protected async loadSessionTranscript(session: CodexSession) {
+    const file = this.getJsonlPath(session);
+    if (!file || !session.agentSessionId) throw new Error("Codex session transcript not found");
+    return readCodexTranscript(file, session.agentSessionId);
   }
 
   private scanJsonl(session: CodexSession): {

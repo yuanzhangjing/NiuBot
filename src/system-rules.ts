@@ -41,7 +41,7 @@ bot profile 只放 bot 级长期人格、语气和抽象行为规则，不放具
 ## Compact Recovery
 如果系统规则丢失，运行 nbt system-rules。
 如果最近消息丢失，运行 nbt messages list。
-如果历史决策丢失，运行 nbt sessions list/search/get。
+如果历史决策丢失，使用 rg 搜索当前聊天的 session 归档目录并读取对应 Markdown。
 如果任务状态丢失，运行 nbt task list，并读取对应 task README。
 不要把 compact 摘要当成原文。
 

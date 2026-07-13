@@ -5,7 +5,7 @@
 
 import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
-import type { AgentBackend, AgentSession, AgentResponse, SessionConfig, AgentSessionActivity, ExecHooks } from "./types.js";
+import { AgentSessionNotStartedError, type AgentBackend, type AgentSession, type AgentResponse, type SessionConfig, type AgentSessionActivity, type ExecHooks, type SessionTranscript } from "./types.js";
 import { NIUBOT_HOME } from "../config.js";
 import { createLogger } from "../logger.js";
 import { prependNiubotBinToPath } from "../niubot-cli.js";
@@ -111,6 +111,11 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
 
   /** 解析 CLI 输出 → 结构化结果（可访问 session 获取额外信息） */
   abstract parseOutput(stdout: string, session: S): ParsedOutput;
+
+  /** 读取 backend 原生 session 记录。子类必须在接入归档前实现。 */
+  protected async loadSessionTranscript(_session: S): Promise<SessionTranscript> {
+    throw new Error(`${this.name} backend does not support session transcript export`);
+  }
 
   /** 探测模型名是否可用：用 CLI 发送最小请求，检查 parseOutput 是否报错 */
   async validateModel(modelName: string): Promise<{ valid: boolean; error?: string }> {
@@ -310,15 +315,44 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
     this.log.info("session closed", { sessionId: session.id });
   }
 
-  updateSessionModels(sessionId: string, models: { model?: string; liteModel?: string }): void {
+  async exportSessionTranscript(session: AgentSession): Promise<SessionTranscript> {
+    const internal = this.sessions.get(session.id);
+    if (!internal) throw new Error(`Session not found: ${session.id}`);
+    if (!internal.agentSessionId) throw new AgentSessionNotStartedError(session.id);
+    let exited = await this.waitForSessionProcessExit(session.id, 10_000);
+    if (!exited) {
+      this.activeProcesses.get(session.id)?.kill("SIGTERM");
+      exited = await this.waitForSessionProcessExit(session.id, 2_000);
+    }
+    if (!exited) throw new Error(`Backend process is still running: ${session.id}`);
+    return this.loadSessionTranscript(internal);
+  }
+
+  private async waitForSessionProcessExit(sessionId: string, timeoutMs: number): Promise<boolean> {
+    const child = this.activeProcesses.get(sessionId);
+    if (!child || child.exitCode !== null || child.signalCode !== null) return true;
+    const activeChild = child;
+    return new Promise<boolean>((resolve) => {
+      let settled = false;
+      const timer = setTimeout(() => done(false), timeoutMs);
+      const onClose = () => done(true);
+      function done(exited: boolean) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        activeChild.off("close", onClose);
+        resolve(exited);
+      }
+      activeChild.once("close", onClose);
+    });
+  }
+
+  updateSessionModels(sessionId: string, models: { model?: string }): void {
     const session = this.sessions.get(sessionId);
     if (!session) return;
 
     if ("model" in models) {
       session.model = models.model;
-    }
-    if ("liteModel" in models) {
-      (session as S & { liteModel?: string }).liteModel = models.liteModel;
     }
   }
 

@@ -289,50 +289,6 @@ describe("CodexBackend session metadata", () => {
     expect((backend as any).probeSessionFileMtime(session)).toBeNull();
   });
 
-  it("lite tier with no liteModel uses backend default lite model", () => {
-    const backend = new CodexBackend();
-    const session = backend.buildSession({
-      workingDirectory: "/tmp",
-      modelTier: "lite",
-      model: "gpt-5.4",
-    });
-
-    expect(session.model).toBe("gpt-5.4-mini");
-  });
-
-  it("lite tier with no liteModel and no model uses backend default lite model", () => {
-    const backend = new CodexBackend();
-    const session = backend.buildSession({
-      workingDirectory: "/tmp",
-      modelTier: "lite",
-    });
-
-    expect(session.model).toBe("gpt-5.4-mini");
-  });
-
-  it("passes liteModel via SessionConfig for lite tier sessions", () => {
-    const backend = new CodexBackend();
-    const session = backend.buildSession({
-      workingDirectory: "/tmp/project",
-      modelTier: "lite",
-      liteModel: "gpt-5.4-mini",
-    });
-
-    expect(backend.buildInput(session, "ping")).toEqual({
-      args: [
-        "exec",
-        "--json",
-        "--dangerously-bypass-approvals-and-sandbox",
-        "--skip-git-repo-check",
-        "-C",
-        "/tmp/project",
-        "-m",
-        "gpt-5.4-mini",
-      ],
-      stdin: "ping",
-    });
-  });
-
   it("passes the new user message when resuming an existing codex thread", () => {
     const backend = new CodexBackend();
     const session = backend.buildSession({

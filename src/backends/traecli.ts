@@ -9,12 +9,11 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { CliAgentBackend, buildNiubotEnv, type BaseCliSession, type ParsedOutput } from "../agent/cli-base.js";
 import type { SessionConfig, ExecHooks } from "../agent/types.js";
-import { DEFAULT_LITE_MODELS } from "../config.js";
+import { readCodexTranscript } from "../session-archive/native-transcript.js";
 
 interface TraeCliSession extends BaseCliSession {
   sessionLogPath?: string;
   sandboxMode: string;
-  modelTier: SessionConfig["modelTier"];
 }
 
 export default class TraeCliBackend extends CliAgentBackend<TraeCliSession> {
@@ -29,14 +28,13 @@ export default class TraeCliBackend extends CliAgentBackend<TraeCliSession> {
   buildSession(config: SessionConfig): TraeCliSession {
     return {
       workingDirectory: config.workingDirectory ?? process.cwd(),
-      model: config.modelTier === "lite" ? (config.liteModel ?? DEFAULT_LITE_MODELS.traecli ?? config.model) : config.model,
+      model: config.model,
       importantContext: config.importantContext,
       extraEnv: buildNiubotEnv(config),
       cumulativeBytes: 0,
       compactCount: 0,
       jsonlOffset: 0,
       sandboxMode: "danger-full-access",
-      modelTier: config.modelTier,
     };
   }
 
@@ -147,6 +145,12 @@ export default class TraeCliBackend extends CliAgentBackend<TraeCliSession> {
       error: lastAgentText ? undefined : genericErrorMsg,
       failed: !lastAgentText && sawError,
     };
+  }
+
+  protected async loadSessionTranscript(session: TraeCliSession) {
+    const file = this.getJsonlPath(session);
+    if (!file || !session.agentSessionId) throw new Error("Trae CLI session transcript not found");
+    return readCodexTranscript(file, session.agentSessionId, "traecli");
   }
 
   private scanJsonl(session: TraeCliSession): {

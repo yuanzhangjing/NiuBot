@@ -75,8 +75,6 @@ export interface BotConfig {
   projectContextPath?: string;
   /** 主模型（可选，覆盖 backend 默认值） */
   model?: string;
-  /** 轻量模型（可选，覆盖 backend 默认值） */
-  liteModel?: string;
 }
 
 export interface RestartConfig {
@@ -96,15 +94,6 @@ export interface NiuBotConfig {
 export const BUILTIN_BACKENDS = new Set<BuiltinBackendType>(Object.keys(AGENT_REGISTRY) as BuiltinBackendType[]);
 export const BUILTIN_BACKEND_LIST = Object.keys(AGENT_REGISTRY) as BuiltinBackendType[];
 
-/** 内置 backend 默认轻量模型 */
-export const DEFAULT_LITE_MODELS: Partial<Record<BuiltinBackendType, string>> = {
-  claude: "haiku",
-  codex: "gpt-5.4-mini",
-  traecli: "Gemini-3-Flash-Preview",
-  opencode: "opencode-go/deepseek-v4-flash",
-  cursor: "composer-2.5-fast",
-  pi: "deepseek-v4-flash",
-};
 
 const BACKEND_ALIAS_MAP = new Map<string, BuiltinBackendType>(
   Object.entries(AGENT_REGISTRY).flatMap(([backend, meta]) =>
@@ -211,7 +200,6 @@ export function loadConfig(configPath?: string): NiuBotConfig {
       botProfilePath: path.join(NIUBOT_HOME, "NiuBot", "bot_profile.md"),
       personaPath: path.join(NIUBOT_HOME, "NiuBot", "persona.md"),
       instructionsPath: path.join(NIUBOT_HOME, "NiuBot", "instructions.md"),
-      liteModel: process.env["NIUBOT_LITE_MODEL"] ?? (legacyAgentFile["liteModel"] as string | undefined) ?? undefined,
     }];
     assertBuiltinBackend(bots[0]!.backend, bots[0]!.id);
   }
@@ -268,7 +256,6 @@ function parseBotConfig(raw: Record<string, string>, legacyDefaultBackend?: stri
     instructionsPath: raw["instructionsPath"] ? path.resolve(expandHome(raw["instructionsPath"])) : undefined,
     projectContextPath: raw["projectContextPath"] ? path.resolve(expandHome(raw["projectContextPath"])) : undefined,
     model: raw["model"] ?? undefined,
-    liteModel: raw["liteModel"] ?? undefined,
   };
 }
 

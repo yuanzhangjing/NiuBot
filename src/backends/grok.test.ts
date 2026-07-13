@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { AgentSessionNotStartedError } from "../agent/types.js";
 import GrokBackend from "./grok.js";
 
 const originalHome = process.env["HOME"];
@@ -19,6 +20,15 @@ function grokSessionDir(home: string, workingDirectory: string, sessionId: strin
 }
 
 describe("GrokBackend", () => {
+  it("reports a preallocated session as not started before history exists", async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "grok-home-"));
+    process.env["HOME"] = home;
+    const backend = new GrokBackend();
+    const session = backend.buildSession({ workingDirectory: path.join(home, "workspace") });
+
+    await expect((backend as any).loadSessionTranscript(session)).rejects.toBeInstanceOf(AgentSessionNotStartedError);
+  });
+
   it("creates a named headless session with stable context on the first turn", () => {
     const backend = new GrokBackend();
     const session = backend.buildSession({

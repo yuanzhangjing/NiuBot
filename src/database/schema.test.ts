@@ -24,7 +24,7 @@ afterEach(() => {
 });
 
 describe("bot runtime state", () => {
-  test("persists backend, model, and lite model for a bot", () => {
+  test("persists backend and model for a bot", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-test-"));
     tempDirs.push(dir);
     const db = initDatabase(path.join(dir, "niubot.db"));
@@ -32,13 +32,11 @@ describe("bot runtime state", () => {
     setBotRuntimeState(db, "NiuBot", {
       backendType: "codex",
       model: "gpt-5.5",
-      liteModel: "gpt-5.4-mini",
     });
 
     expect(getBotRuntimeState(db, "NiuBot")).toEqual({
       backendType: "codex",
       model: "gpt-5.5",
-      liteModel: "gpt-5.4-mini",
     });
   });
 
@@ -50,15 +48,29 @@ describe("bot runtime state", () => {
     setBotRuntimeState(db, "NiuBot", {
       backendType: "codex",
       model: "gpt-5.5",
-      liteModel: "gpt-5.4-mini",
     });
     clearBotRuntimeModels(db, "NiuBot");
 
     expect(getBotRuntimeState(db, "NiuBot")).toEqual({
       backendType: "codex",
       model: undefined,
-      liteModel: undefined,
     });
+  });
+
+  test("does not erase legacy lite model columns when updating the main model", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-test-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    setBotRuntimeState(db, "NiuBot", { backendType: "codex", model: "old" });
+    setBotBackendModelState(db, "NiuBot", "codex", { model: "old" });
+    db.prepare("UPDATE bot_runtime_state SET lite_model = 'legacy-lite' WHERE bot_name = 'NiuBot'").run();
+    db.prepare("UPDATE bot_backend_model_state SET lite_model = 'legacy-lite' WHERE bot_name = 'NiuBot' AND backend_type = 'codex'").run();
+
+    setBotRuntimeState(db, "NiuBot", { backendType: "codex", model: "new" });
+    setBotBackendModelState(db, "NiuBot", "codex", { model: "new" });
+
+    expect((db.prepare("SELECT lite_model FROM bot_runtime_state WHERE bot_name = 'NiuBot'").get() as { lite_model: string }).lite_model).toBe("legacy-lite");
+    expect((db.prepare("SELECT lite_model FROM bot_backend_model_state WHERE bot_name = 'NiuBot' AND backend_type = 'codex'").get() as { lite_model: string }).lite_model).toBe("legacy-lite");
   });
 
   test("persists model cache separately for each backend", () => {
@@ -68,20 +80,16 @@ describe("bot runtime state", () => {
 
     setBotBackendModelState(db, "NiuBot", "claude", {
       model: "claude-opus-4-6",
-      liteModel: "haiku",
     });
     setBotBackendModelState(db, "NiuBot", "codex", {
       model: "gpt-5.5",
-      liteModel: "gpt-5.4-mini",
     });
 
     expect(getBotBackendModelState(db, "NiuBot", "claude")).toEqual({
       model: "claude-opus-4-6",
-      liteModel: "haiku",
     });
     expect(getBotBackendModelState(db, "NiuBot", "codex")).toEqual({
       model: "gpt-5.5",
-      liteModel: "gpt-5.4-mini",
     });
   });
 
@@ -94,17 +102,14 @@ describe("bot runtime state", () => {
     setBotRuntimeState(db, "NiuBot", {
       backendType: "codex",
       model: "legacy-model",
-      liteModel: "legacy-lite",
     });
     setBotBackendModelState(db, "NiuBot", "codex", {
       model: "gpt-5.5",
-      liteModel: "gpt-5.4-mini",
     });
 
     expect(loadPersistedBotRuntimeState(dbPath, "NiuBot")).toEqual({
       backendType: "codex",
       model: "gpt-5.5",
-      liteModel: "gpt-5.4-mini",
     });
   });
 });

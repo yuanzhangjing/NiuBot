@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import yaml from "yaml";
 import { afterEach, describe, expect, it } from "vitest";
-import { initDatabase } from "../database/schema.js";
+import { ensureChat, ensureUser, initDatabase, storeMessage } from "../database/schema.js";
 import {
   buildImportantContext,
   buildNormalContext,
@@ -52,6 +52,34 @@ describe("buildNormalContext task injection", () => {
 
     expect(context).toContain("own-private");
     expect(context).not.toContain("other-private");
+  });
+
+  it("keeps a single oversized recent message within the total budget", () => {
+    const workingDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-inject-"));
+    tempDirs.push(workingDirectory);
+    const db = initDatabase(path.join(workingDirectory, "niubot.db"));
+    const userId = ensureUser(db, "feishu", "user-open-id", "Zen");
+    const chatId = ensureChat(db, "feishu", "chat-open-id", "p2p");
+    db.prepare(`INSERT INTO sessions (id, chat_id, user_id, source, status, started_at, ended_at) VALUES ('s1', ?, ?, 'user', 'archived', datetime('now'), datetime('now'))`).run(chatId, userId);
+    storeMessage(db, { chatId, senderId: userId, role: "user", contentText: "x".repeat(30_000), platform: "feishu" });
+
+    const context = buildNormalContext(db, chatId, workingDirectory);
+    const recent = context.match(/<recent-messages>([\s\S]*?)<\/recent-messages>/)?.[1] ?? "";
+    expect(recent.length).toBeLessThan(20_500);
+    expect(recent).toContain("…");
+  });
+
+  it.each(["archive_failed", "discarded"])("keeps recent messages after a %s user session", (status) => {
+    const workingDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-inject-"));
+    tempDirs.push(workingDirectory);
+    const db = initDatabase(path.join(workingDirectory, "niubot.db"));
+    const userId = ensureUser(db, "feishu", "user-open-id", "Zen");
+    const chatId = ensureChat(db, "feishu", "chat-open-id", "p2p");
+    db.prepare(`INSERT INTO sessions (id, chat_id, user_id, source, status, started_at, ended_at) VALUES ('s1', ?, ?, 'user', ?, datetime('now'), datetime('now'))`)
+      .run(chatId, userId, status);
+    storeMessage(db, { chatId, senderId: userId, role: "user", contentText: "still useful", platform: "feishu" });
+
+    expect(buildNormalContext(db, chatId, workingDirectory)).toContain("still useful");
   });
 });
 
@@ -182,7 +210,8 @@ describe("COMPACT_RECOVERY_REMINDER", () => {
     expect(COMPACT_RECOVERY_REMINDER).toContain("nbt system-rules");
     expect(COMPACT_RECOVERY_REMINDER).toContain("nbt whoami");
     expect(COMPACT_RECOVERY_REMINDER).toContain("nbt messages list");
-    expect(COMPACT_RECOVERY_REMINDER).toContain("nbt sessions");
+    expect(COMPACT_RECOVERY_REMINDER).toContain("rg");
+    expect(COMPACT_RECOVERY_REMINDER).toContain("session 归档目录");
     expect(COMPACT_RECOVERY_REMINDER).toContain("nbt task list");
     expect(COMPACT_RECOVERY_REMINDER).toContain("AGENTS.md");
   });

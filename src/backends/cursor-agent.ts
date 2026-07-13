@@ -9,8 +9,8 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CliAgentBackend, buildNiubotEnv, type BaseCliSession, type ParsedOutput } from "../agent/cli-base.js";
 import type { AgentSession, AgentSessionActivity, ExecHooks, SessionConfig } from "../agent/types.js";
-import { DEFAULT_LITE_MODELS } from "../config.js";
 import { syncCursorWorkspaceRules } from "./cursor-workspace-rules.js";
+import { readCursorTranscript } from "../session-archive/native-transcript.js";
 
 interface CursorAgentSession extends BaseCliSession {
   sessionLogPath?: string;
@@ -106,7 +106,7 @@ export default class CursorAgentBackend extends CliAgentBackend<CursorAgentSessi
   buildSession(config: SessionConfig): CursorAgentSession {
     return {
       workingDirectory: config.workingDirectory ?? process.cwd(),
-      model: config.modelTier === "lite" ? (config.liteModel ?? DEFAULT_LITE_MODELS.cursor ?? config.model) : config.model,
+      model: config.model,
       importantContext: config.importantContext,
       extraEnv: buildNiubotEnv(config),
       cumulativeBytes: 0,
@@ -189,6 +189,12 @@ export default class CursorAgentBackend extends CliAgentBackend<CursorAgentSessi
       parsed.failed = true;
     }
     return parsed;
+  }
+
+  protected async loadSessionTranscript(session: CursorAgentSession) {
+    const file = this.getJsonlPath(session);
+    if (!file || !session.agentSessionId) throw new Error("Cursor session transcript not found");
+    return readCursorTranscript(file, session.agentSessionId);
   }
 
   protected getExecHooks(session: CursorAgentSession): ExecHooks {

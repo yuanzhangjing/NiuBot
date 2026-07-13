@@ -355,12 +355,10 @@ export function getBotRuntimeBackend(db: Database.Database, botName: string): Ag
 export interface BotRuntimeState {
   backendType?: AgentBackendType;
   model?: string;
-  liteModel?: string;
 }
 
 export interface BotBackendModelState {
   model?: string;
-  liteModel?: string;
 }
 
 export type RuntimeEventName =
@@ -397,14 +395,13 @@ export interface RuntimeEventQuery {
 
 export function getBotRuntimeState(db: Database.Database, botName: string): BotRuntimeState | undefined {
   const row = db.prepare(
-    "SELECT backend_type, model, lite_model FROM bot_runtime_state WHERE bot_name = ?",
-  ).get(botName) as { backend_type: string | null; model: string | null; lite_model: string | null } | undefined;
+    "SELECT backend_type, model FROM bot_runtime_state WHERE bot_name = ?",
+  ).get(botName) as { backend_type: string | null; model: string | null } | undefined;
 
   if (!row) return undefined;
   return {
     backendType: normalizeBackend(row.backend_type ?? undefined),
     model: row.model ?? undefined,
-    liteModel: row.lite_model ?? undefined,
   };
 }
 
@@ -417,7 +414,6 @@ export function setBotRuntimeState(
   const next = {
     backendType: state.backendType ?? existing?.backendType,
     model: "model" in state ? state.model : existing?.model,
-    liteModel: "liteModel" in state ? state.liteModel : existing?.liteModel,
   };
 
   if (!next.backendType) {
@@ -430,9 +426,8 @@ export function setBotRuntimeState(
     ON CONFLICT(bot_name) DO UPDATE SET
       backend_type = excluded.backend_type,
       model = excluded.model,
-      lite_model = excluded.lite_model,
       updated_at = excluded.updated_at
-  `).run(botName, next.backendType, next.model ?? null, next.liteModel ?? null);
+  `).run(botName, next.backendType, next.model ?? null, null);
 }
 
 export function setBotRuntimeBackend(
@@ -449,13 +444,12 @@ export function getBotBackendModelState(
   backendType: AgentBackendType,
 ): BotBackendModelState | undefined {
   const row = db.prepare(
-    "SELECT model, lite_model FROM bot_backend_model_state WHERE bot_name = ? AND backend_type = ?",
-  ).get(botName, backendType) as { model: string | null; lite_model: string | null } | undefined;
+    "SELECT model FROM bot_backend_model_state WHERE bot_name = ? AND backend_type = ?",
+  ).get(botName, backendType) as { model: string | null } | undefined;
 
   if (!row) return undefined;
   return {
     model: row.model ?? undefined,
-    liteModel: row.lite_model ?? undefined,
   };
 }
 
@@ -468,7 +462,6 @@ export function setBotBackendModelState(
   const existing = getBotBackendModelState(db, botName, backendType);
   const next = {
     model: "model" in state ? state.model : existing?.model,
-    liteModel: "liteModel" in state ? state.liteModel : existing?.liteModel,
   };
 
   db.prepare(`
@@ -476,9 +469,8 @@ export function setBotBackendModelState(
     VALUES (?, ?, ?, ?, datetime('now'))
     ON CONFLICT(bot_name, backend_type) DO UPDATE SET
       model = excluded.model,
-      lite_model = excluded.lite_model,
       updated_at = excluded.updated_at
-  `).run(botName, backendType, next.model ?? null, next.liteModel ?? null);
+  `).run(botName, backendType, next.model ?? null, null);
 }
 
 export function clearBotRuntimeModels(db: Database.Database, botName: string): void {
@@ -487,11 +479,9 @@ export function clearBotRuntimeModels(db: Database.Database, botName: string): v
   setBotRuntimeState(db, botName, {
     backendType: existing.backendType,
     model: undefined,
-    liteModel: undefined,
   });
   setBotBackendModelState(db, botName, existing.backendType, {
     model: undefined,
-    liteModel: undefined,
   });
 }
 
@@ -518,7 +508,6 @@ export function loadPersistedBotRuntimeState(dbPath: string, botName: string): B
     return {
       backendType: runtime.backendType,
       model: backendModels.model,
-      liteModel: backendModels.liteModel,
     };
   } finally {
     db.close();

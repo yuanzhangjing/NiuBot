@@ -3,21 +3,14 @@
  * 换 agent 只需实现 AgentBackend，不改 Core。
  */
 
-/** 模型档位：default 用主力模型，lite 用轻量模型（成本低、速度快） */
-export type ModelTier = "default" | "lite";
-
 /** 用户可见错误信息最大长度（字符数），超出则截断 */
 export const ERROR_DISPLAY_MAX_LEN = 2000;
 
 export interface SessionConfig {
   /** agent 工作目录 */
   workingDirectory?: string;
-  /** 模型档位，不设则用 default */
-  modelTier?: ModelTier;
   /** 主模型 ID（覆盖 backend 默认值） */
   model?: string;
-  /** 轻量模型 ID（覆盖 backend 默认值） */
-  liteModel?: string;
   /** stable system context（backend 在 createSession/buildInput 自行交付；仅 needsStableUserPrefix 时由 pipeline 前缀注入） */
   importantContext?: string;
   /** 当前用户 ID（传递给 agent 环境变量） */
@@ -42,6 +35,29 @@ export interface SessionConfig {
 
 export interface AgentSession {
   id: string;
+}
+
+export class AgentSessionNotStartedError extends Error {
+  constructor(sessionId: string) {
+    super(`Backend session ID is unavailable: ${sessionId}`);
+    this.name = "AgentSessionNotStartedError";
+  }
+}
+
+export type TranscriptEventType = "user" | "assistant" | "tool_call" | "tool_result";
+
+export interface TranscriptEvent {
+  timestamp?: string;
+  type: TranscriptEventType;
+  name?: string;
+  callId?: string;
+  content: string;
+}
+
+export interface SessionTranscript {
+  backend: string;
+  agentSessionId: string;
+  events: Iterable<TranscriptEvent> | AsyncIterable<TranscriptEvent>;
 }
 
 export interface AgentResponse {
@@ -80,10 +96,13 @@ export interface AgentBackend {
   /** 关闭 session */
   closeSession(session: AgentSession): Promise<void>;
 
+  /** 从 backend 原生记录导出完整 session transcript */
+  exportSessionTranscript?(session: AgentSession): Promise<SessionTranscript>;
+
   /** 更新已存在 session 的模型配置（可选，用于运行时 /model 切换） */
   updateSessionModels?(
     sessionId: string,
-    models: { model?: string; liteModel?: string },
+    models: { model?: string },
   ): void;
 
   /** 获取 session 累计字节数（可选，用于统计） */

@@ -9,7 +9,6 @@ import {
   generateBotProfileTemplate,
   generateConfigTemplate,
   getTodayLogFilePath,
-  getSuggestedLiteModel,
   resolveRunningStatusDetails,
   parseNiubotVersionOutput,
   deriveNpmPrefixFromPackageRoot,
@@ -89,26 +88,12 @@ describe("user-cli init model configuration", () => {
     ])).toEqual(["/tmp/niubot-default", "/tmp/niubot-a", "/tmp/niubot-b"]);
   });
 
-  it("suggests built-in lite models per backend", () => {
-    expect(getSuggestedLiteModel("claude")).toBe("haiku");
-    expect(getSuggestedLiteModel("codex")).toBe("gpt-5.4-mini");
-    expect(getSuggestedLiteModel("traecli")).toBe("Gemini-3-Flash-Preview");
-    expect(getSuggestedLiteModel("cursor")).toBe("composer-2.5-fast");
-    expect(getSuggestedLiteModel("cursor-agent")).toBe("composer-2.5-fast");
-    expect(getSuggestedLiteModel("pi")).toBe("deepseek-v4-flash");
-    expect(getSuggestedLiteModel("pi-agent")).toBe("deepseek-v4-flash");
-    expect(getSuggestedLiteModel("grok")).toBeUndefined();
-    expect(getSuggestedLiteModel("grok-build")).toBeUndefined();
-    expect(getSuggestedLiteModel("my-agent")).toBeUndefined();
-  });
-
-  it("writes chosen model settings into config.yaml", () => {
-    const config = generateConfigTemplate("codex", "NiuBot", "app-id", "app-secret", "gpt-5.4", "gpt-5.4-mini");
+  it("writes the chosen model into config.yaml", () => {
+    const config = generateConfigTemplate("codex", "NiuBot", "app-id", "app-secret", "gpt-5.4");
 
     expect(config).toContain('model: "gpt-5.4"');
-    expect(config).toContain('liteModel: "gpt-5.4-mini"');
     expect(config).not.toContain('# model: ""');
-    expect(config).not.toContain('# liteModel: ""');
+    expect(config).not.toContain("liteModel");
   });
 
   it("does not include an output rewrite placeholder in new config.yaml", () => {

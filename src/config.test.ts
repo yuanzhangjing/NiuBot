@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { BUILTIN_BACKEND_LIST, DEFAULT_LITE_MODELS, loadConfig, NIUBOT_HOME, normalizeBackend } from "./config.js";
+import { BUILTIN_BACKEND_LIST, loadConfig, NIUBOT_HOME, normalizeBackend } from "./config.js";
 
 const tempDirs: string[] = [];
 
@@ -29,26 +29,23 @@ bots:
     expect(() => loadConfig(configPath)).toThrow(/unsupported backend 'my-agent'/);
   });
 
-  it("registers cursor as a built-in backend with aliases and lite model", () => {
+  it("registers cursor as a built-in backend with aliases", () => {
     expect(BUILTIN_BACKEND_LIST).toContain("cursor");
     expect(normalizeBackend("cursor")).toBe("cursor");
     expect(normalizeBackend("cursor-agent")).toBe("cursor");
-    expect(DEFAULT_LITE_MODELS.cursor).toBe("composer-2.5-fast");
   });
 
-  it("registers pi as a built-in backend with aliases and lite model", () => {
+  it("registers pi as a built-in backend with aliases", () => {
     expect(BUILTIN_BACKEND_LIST).toContain("pi");
     expect(normalizeBackend("pi")).toBe("pi");
     expect(normalizeBackend("pi-agent")).toBe("pi");
     expect(normalizeBackend("pi-coding-agent")).toBe("pi");
-    expect(DEFAULT_LITE_MODELS.pi).toBe("deepseek-v4-flash");
   });
 
-  it("registers Grok Build as a built-in backend without a forced lite model", () => {
+  it("registers Grok Build as a built-in backend", () => {
     expect(BUILTIN_BACKEND_LIST).toContain("grok");
     expect(normalizeBackend("grok")).toBe("grok");
     expect(normalizeBackend("grok-build")).toBe("grok");
-    expect(DEFAULT_LITE_MODELS.grok).toBeUndefined();
   });
 
   it("does not assign a workspace project context path by default", () => {
