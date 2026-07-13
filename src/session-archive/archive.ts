@@ -1,9 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { chmodSync, createWriteStream, existsSync, mkdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { once } from "node:events";
+import { chmodSync, existsSync, mkdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { finished } from "node:stream/promises";
-import type { AgentBackend, AgentSession, SessionTranscript } from "../agent/types.js";
+import type { AgentBackend, AgentSession } from "../agent/types.js";
 import { TZ } from "../tz.js";
 
 export const SESSION_ARCHIVE_MANIFEST = "manifest.json";
@@ -16,10 +14,6 @@ export type SessionArchiveSource = {
   path: string;
   role: string;
   format: "opencode-db";
-} | {
-  name: string;
-  role: string;
-  format: "normalized-jsonl";
 };
 
 export interface SessionArchiveManifest {
@@ -72,12 +66,7 @@ export async function archiveAgentSession(
         const role = safeSourceRole(source.role ?? `source-${index + 1}`);
         sources.push({ path: target, role, format: source.format ?? "native-jsonl" });
       }
-    } else {
-      const name = "events.jsonl";
-      const eventCount = await writeNormalizedTranscript(join(temporary, name), transcript);
-      if (eventCount === 0) throw new Error("backend transcript contains no recoverable events");
-      sources.push({ name, role: "normalized", format: "normalized-jsonl" });
-    }
+    } else throw new Error("backend transcript does not provide a native data source");
 
     const manifest: SessionArchiveManifest = {
       schema_version: 1,
@@ -108,36 +97,6 @@ export function getSessionArchiveDirectory(niubotHome: string, botId: string, ch
 
 export function buildArchiveDirectoryName(metadata: Pick<SessionArchiveMetadata, "startedAt" | "archivedAt" | "sessionId">): string {
   return `${fileTime(metadata.startedAt)}--${fileTime(metadata.archivedAt)}_${safeSegment(metadata.sessionId, "sessionId")}`;
-}
-
-async function writeNormalizedTranscript(file: string, transcript: SessionTranscript): Promise<number> {
-  return writeJsonlRecords(file, transcript.events);
-}
-
-async function writeJsonlRecords(
-  file: string,
-  records: Iterable<unknown> | AsyncIterable<unknown>,
-): Promise<number> {
-  const output = createWriteStream(file, { encoding: "utf-8", flags: "wx", mode: 0o600 });
-  const completion = finished(output);
-  void completion.catch(() => {});
-  const write = async (content: string) => {
-    if (!output.write(content)) await once(output, "drain");
-  };
-  try {
-    let eventCount = 0;
-    for await (const record of records) {
-      await write(`${JSON.stringify(record)}\n`);
-      eventCount++;
-    }
-    output.end();
-    await completion;
-    return eventCount;
-  } catch (err) {
-    output.destroy();
-    await completion.catch(() => {});
-    throw err;
-  }
 }
 
 function safeSourceRole(value: string): string {

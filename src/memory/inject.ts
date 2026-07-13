@@ -267,7 +267,7 @@ export function buildNormalContext(
 }
 
 export function buildSessionArchiveContext(sessionArchiveDirectory: string): string {
-  return `<session-archives path=${JSON.stringify(sessionArchiveDirectory)}>\n这里保存当前聊天已归档 session 的原生记录链接和元数据。需要恢复更早的事实、决策或执行过程时，使用 nbt sessions list/search/get 检索和解析。\n</session-archives>`;
+  return `<session-archives path=${JSON.stringify(sessionArchiveDirectory)}>\n这里保存当前聊天已归档 session 的原生数据源引用和元数据。需要恢复更早的事实、决策或执行过程时，使用 nbt sessions list/search/get 检索和解析。\n</session-archives>`;
 }
 
 export function buildActiveTaskContext(

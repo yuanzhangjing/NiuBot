@@ -1,8 +1,7 @@
-import { createReadStream, existsSync, readFileSync, readdirSync } from "node:fs";
-import { createInterface } from "node:readline";
-import { dirname, isAbsolute, join } from "node:path";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { isAbsolute, join } from "node:path";
 import Database from "better-sqlite3";
-import type { SessionTranscript, TranscriptEvent, TranscriptEventType } from "../agent/types.js";
+import type { SessionTranscript } from "../agent/types.js";
 import {
   readClaudeTranscript,
   readCodexTranscript,
@@ -40,12 +39,7 @@ export function readSessionArchiveManifest(file: string): SessionArchiveManifest
     if (!source || typeof source.role !== "string" || !source.role) {
       throw new Error(`invalid session archive source in ${file}`);
     }
-    if (source.format === "normalized-jsonl") {
-      if (typeof source.name !== "string" || source.name === "." || source.name === ".."
-        || source.name.includes("/") || source.name.includes("\\") || source.name.includes("\0")) {
-        throw new Error(`invalid session archive source in ${file}`);
-      }
-    } else if (source.format === "native-jsonl" || source.format === "opencode-db") {
+    if (source.format === "native-jsonl" || source.format === "opencode-db") {
       if (typeof source.path !== "string" || !isAbsolute(source.path) || source.path.includes("\0")) {
         throw new Error(`invalid session archive source in ${file}`);
       }
@@ -61,18 +55,6 @@ export function loadArchivedTranscript(manifestFile: string): {
   transcript: SessionTranscript;
 } {
   const manifest = readSessionArchiveManifest(manifestFile);
-  const directory = dirname(manifestFile);
-  const normalized = manifest.sources.find((source) => source.format === "normalized-jsonl");
-  if (normalized) {
-    return {
-      manifest,
-      transcript: {
-        backend: manifest.backend,
-        agentSessionId: manifest.agent_session_id,
-        events: readNormalizedEvents(join(directory, normalized.name)),
-      },
-    };
-  }
   const opencodeDb = manifest.sources.find((source) => source.format === "opencode-db");
   if (opencodeDb) {
     return {
@@ -123,19 +105,7 @@ export function loadArchivedTranscript(manifestFile: string): {
   return { manifest, transcript };
 }
 
-async function* readNormalizedEvents(file: string): AsyncGenerator<TranscriptEvent> {
-  const input = createReadStream(file, { encoding: "utf-8" });
-  const lines = createInterface({ input, crlfDelay: Infinity });
-  for await (const line of lines) {
-    if (!line.trim()) continue;
-    try {
-      const value = JSON.parse(line) as Partial<TranscriptEvent>;
-      if (isEventType(value.type) && typeof value.content === "string") yield value as TranscriptEvent;
-    } catch { /* skip malformed normalized event lines */ }
-  }
-}
-
-export async function* readOpencodeDatabaseRows(file: string, sessionId: string): AsyncGenerator<{
+async function* readOpencodeDatabaseRows(file: string, sessionId: string): AsyncGenerator<{
   message_data: string;
   part_data: string;
   time_created: number | null;
@@ -160,8 +130,4 @@ export async function* readOpencodeDatabaseRows(file: string, sessionId: string)
   } finally {
     db.close();
   }
-}
-
-function isEventType(value: unknown): value is TranscriptEventType {
-  return value === "user" || value === "assistant" || value === "tool_call" || value === "tool_result";
 }

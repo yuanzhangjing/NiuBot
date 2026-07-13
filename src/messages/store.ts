@@ -19,6 +19,12 @@ export interface ContinuationMessageRow {
   content_text: string;
 }
 
+export interface SessionMessageRow {
+  id: number;
+  role: "user" | "assistant";
+  content_text: string;
+}
+
 export interface MessageFilter {
   since?: string;
   before?: string;
@@ -168,6 +174,15 @@ export function listContinuationMessages(
   `).all(...params) as ContinuationMessageRow[];
   rows.reverse();
   return rows;
+}
+
+export function listSessionMessages(db: Database.Database, sessionId: string): SessionMessageRow[] {
+  return db.prepare(`
+    SELECT id, role, content_text
+    FROM messages
+    WHERE session_key = ? AND role IN ('user', 'assistant') AND content_text IS NOT NULL
+    ORDER BY id
+  `).all(sessionId) as SessionMessageRow[];
 }
 
 function appendMessageFilters(sql: string, params: unknown[], filters: MessageFilter): string {

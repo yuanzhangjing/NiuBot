@@ -1,20 +1,22 @@
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
 import type Database from "better-sqlite3";
 import type { SessionTranscript, TranscriptEvent } from "../agent/types.js";
 import { getSessionArchiveDirectory } from "../session-archive/archive.js";
 import {
   findSessionArchive,
   loadArchivedTranscript,
-  readOpencodeDatabaseRows,
-  readSessionArchiveManifest,
   type LocatedSessionArchive,
 } from "../session-archive/reader.js";
+import { listSessionMessages } from "../messages/store.js";
 import { getSessionForAccess, listSessions, type SessionRow } from "../sessions/store.js";
 import { formatLocalDateTimeWithTZ } from "../tz.js";
 
 type ParseArgs = (args: string[]) => { positional: string[]; flags: Record<string, string> };
+
+const DEFAULT_EVENT_MAX_CHARS = 20_000;
+const DEFAULT_SESSION_MAX_CHARS = 100_000;
+const MAX_OUTPUT_CHARS = 1_000_000;
+const TRUNCATED_NOTICE = "\n\n[内容已截断；使用 --max-chars <n> 调高限制]";
 
 export async function handleSessions(
   db: Database.Database,
@@ -129,32 +131,38 @@ async function sessionGet(
   parseArgs: ParseArgs,
 ): Promise<void> {
   const { positional, flags } = parseArgs(args);
+  if (flags["raw"] === "true") throw new Error("--raw is not supported; use parsed session output");
   const idArg = positional[0];
   if (!idArg) throw new Error("Usage: nbt sessions get <session-id|event-id>");
   const separator = idArg.indexOf(":e");
   const sessionId = separator >= 0 ? idArg.slice(0, separator) : idArg;
   const requestedEventId = separator >= 0 ? idArg : flags["event"];
+  const maxChars = boundedNumberFlag(
+    flags["max-chars"],
+    requestedEventId ? DEFAULT_EVENT_MAX_CHARS : DEFAULT_SESSION_MAX_CHARS,
+    MAX_OUTPUT_CHARS,
+  );
   const row = getSessionForAccess(db, sessionId, { currentChatId, chatType });
   if (!row) throw new Error(`Session not found: ${sessionId}`);
   const archive = locate(niubotHome, botName, row);
   if (!archive) throw new Error(`Session archive not found: ${sessionId}`);
 
-  if (flags["raw"] === "true") {
-    await printRawArchive(archive);
-    return;
-  }
   const transcript = transcriptFor(row, archive);
   const seen = new Map<string, number>();
+  let remainingChars = maxChars;
   if (!requestedEventId && flags["format"] !== "jsonl") printSessionHeader(row, transcript.agentSessionId);
   for await (const event of transcript.events) {
     const eventId = makeEventId(row.id, event, seen);
     if (requestedEventId && eventId !== requestedEventId) continue;
+    const { event: outputEvent, truncated } = limitEventContent(event, remainingChars);
     if (flags["format"] === "jsonl") {
-      console.log(JSON.stringify({ event_id: eventId, ...event }));
+      console.log(JSON.stringify({ event_id: eventId, ...outputEvent, ...(truncated ? { truncated: true } : {}) }));
     } else {
-      printEvent(eventId, event);
+      printEvent(eventId, outputEvent);
     }
+    remainingChars -= outputEvent.content.length;
     if (requestedEventId) return;
+    if (truncated || remainingChars <= 0) return;
   }
   if (requestedEventId) throw new Error(`Transcript event not found: ${requestedEventId}`);
 }
@@ -182,25 +190,6 @@ async function* inferToolResultNames(
   }
 }
 
-async function printRawArchive(archive: LocatedSessionArchive): Promise<void> {
-  const manifest = readSessionArchiveManifest(archive.path);
-  for (const source of manifest.sources) {
-    const location = source.format === "normalized-jsonl" ? source.name : source.path;
-    console.log(`--- ${source.role}: ${location} ---`);
-    if (source.format === "opencode-db") {
-      for await (const row of readOpencodeDatabaseRows(source.path, manifest.agent_session_id)) {
-        console.log(JSON.stringify(row));
-      }
-    } else {
-      const file = source.format === "normalized-jsonl"
-        ? join(dirname(archive.path), source.name)
-        : source.path;
-      process.stdout.write(readFileSync(file, "utf-8"));
-    }
-    console.log("");
-  }
-}
-
 function printSessionHeader(row: SessionRow, agentSessionId: string): void {
   console.log(`---\nsession_id: ${JSON.stringify(row.id)}`);
   console.log(`chat_id: ${JSON.stringify(row.chat_id)}`);
@@ -214,11 +203,12 @@ function printSessionHeader(row: SessionRow, agentSessionId: string): void {
 
 function printEvent(eventId: string, event: TranscriptEvent): void {
   console.log(`## ${eventLabel(event)}`);
-  console.log(`<!-- event_id: ${eventId}${event.callId ? `; call_id: ${event.callId}` : ""} -->\n`);
+  console.log(`<!-- event_id: ${eventId}${event.callId ? `; call_id: ${escapeComment(event.callId)}` : ""} -->\n`);
   if (event.type === "tool_call" || event.type === "tool_result") {
-    console.log("```text");
+    const fence = markdownCodeFence(event.content);
+    console.log(`${fence}text`);
     console.log(event.content);
-    console.log("```\n");
+    console.log(`${fence}\n`);
   } else {
     console.log(`${event.content}\n`);
   }
@@ -238,14 +228,8 @@ function makeEventId(sessionId: string, event: TranscriptEvent, seen: Map<string
 }
 
 function sessionMessageIds(db: Database.Database, sessionId: string): Map<string, number[]> {
-  const rows = db.prepare(`
-    SELECT id, role, content_text
-    FROM messages
-    WHERE session_key = ? AND role IN ('user', 'assistant') AND content_text IS NOT NULL
-    ORDER BY id
-  `).all(sessionId) as Array<{ id: number; role: string; content_text: string }>;
   const result = new Map<string, number[]>();
-  for (const row of rows) {
+  for (const row of listSessionMessages(db, sessionId)) {
     const key = `${row.role}\0${row.content_text}`;
     const ids = result.get(key) ?? [];
     ids.push(row.id);
@@ -281,6 +265,41 @@ function numberFlag(value: string | undefined, fallback: number): number {
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
 }
 
+function boundedNumberFlag(value: string | undefined, fallback: number, maximum: number): number {
+  return Math.max(100, Math.min(numberFlag(value, fallback), maximum));
+}
+
+function limitEventContent(event: TranscriptEvent, maxChars: number): {
+  event: TranscriptEvent;
+  truncated: boolean;
+} {
+  if (event.content.length <= maxChars) return { event, truncated: false };
+  const notice = TRUNCATED_NOTICE.slice(0, maxChars);
+  const contentLength = Math.max(0, maxChars - notice.length);
+  return {
+    event: { ...event, content: `${event.content.slice(0, contentLength)}${notice}` },
+    truncated: true,
+  };
+}
+
+function escapeComment(value: string): string {
+  return value.replace(/--/g, "—");
+}
+
+export function markdownCodeFence(content: string): string {
+  let longest = 0;
+  let current = 0;
+  for (const char of content) {
+    if (char === "`") {
+      current++;
+      if (current > longest) longest = current;
+    } else {
+      current = 0;
+    }
+  }
+  return "`".repeat(Math.max(3, longest + 1));
+}
+
 function printHelp(): void {
   console.log(`Query archived backend transcripts.
 
@@ -291,8 +310,8 @@ Commands:
   get <event-id>               Show one complete event returned by search
 
 Options:
-  --raw                        Show backend-native JSONL
   --format jsonl               Output normalized events as JSONL
+  --max-chars <count>          Limit get output (default: event 20000, session 100000; max 1000000)
   --since/--before <datetime>  Filter sessions by archive time
   -n, --limit <count>          Limit list or search results`);
 }

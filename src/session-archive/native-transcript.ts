@@ -195,7 +195,8 @@ export function transcriptFromOpencodeRows(
       : undefined;
     if ((role === "user" || role === "assistant") && type === "text") {
       const text = string(part?.["text"]);
-      if (text) yield { timestamp, type: role, content: text };
+      const content = role === "user" && text ? extractInjectedUserMessage(text) : text;
+      if (content) yield { timestamp, type: role, content: sanitizeTranscriptString(content) };
     } else if (type === "tool") {
       const state = object(part?.["state"]);
       const callId = string(part?.["callID"] ?? part?.["callId"]);
@@ -219,7 +220,7 @@ function messageContentEvents(
   const events: TranscriptEvent[] = [];
   if (typeof value === "string") {
     const content = role === "user" ? extractInjectedUserMessage(value, omitCodexHarnessContext) : value;
-    if (content) events.push({ timestamp, type: role, content });
+    if (content) events.push({ timestamp, type: role, content: sanitizeTranscriptString(content) });
     return events;
   }
   if (!Array.isArray(value)) return events;
@@ -230,7 +231,7 @@ function messageContentEvents(
     if (type === "text" || type === "input_text" || type === "output_text") {
       const text = string(block["text"]);
       const content = role === "user" && text ? extractInjectedUserMessage(text, omitCodexHarnessContext) : text;
-      if (content) events.push({ timestamp, type: role, content });
+      if (content) events.push({ timestamp, type: role, content: sanitizeTranscriptString(content) });
     } else if (type === "tool_use" || type === "tool_call" || type === "toolCall" || type === "function_call") {
       events.push({
         timestamp,
@@ -365,11 +366,12 @@ function timestamp(value: unknown): string | undefined {
 }
 
 function contentText(value: unknown): string {
-  if (typeof value === "string") return value;
+  if (typeof value === "string") return sanitizeTranscriptString(value);
   if (!Array.isArray(value)) return pretty(value);
   return value.map((part) => {
     const block = object(part);
-    return string(block?.["text"]) ?? pretty(part);
+    const text = string(block?.["text"]);
+    return text ? sanitizeTranscriptString(text) : pretty(part);
   }).filter(Boolean).join("\n");
 }
 
@@ -381,7 +383,7 @@ function toolResultText(value: unknown): string {
     const type = string(block?.["type"]);
     const text = string(block?.["text"]);
     if (!text || (type !== "text" && type !== "input_text" && type !== "output_text")) return pretty(value);
-    texts.push(text);
+    texts.push(sanitizeTranscriptString(text));
   }
   return texts.join("");
 }
@@ -412,10 +414,12 @@ function sanitizeTranscriptValue(value: unknown, key?: string): unknown {
 }
 
 function sanitizeTranscriptString(value: string): string {
-  const dataUrl = /^data:([^;,]+)?(?:;[^,]*)?;base64,/i.exec(value);
-  if (dataUrl) return `[binary data omitted${dataUrl[1] ? `: ${dataUrl[1]}` : ""}]`;
-  if (value.length > 4096 && /^[A-Za-z0-9+/\r\n]+={0,2}$/.test(value)) {
-    return `[binary data omitted: ${value.length} chars]`;
+  const withoutDataUrls = value.replace(
+    /data:([^;,\s]+)?(?:;[^,\s]*)*;base64,[A-Za-z0-9+/\r\n]+={0,2}/gi,
+    (_match, mediaType: string | undefined) => `[binary data omitted${mediaType ? `: ${mediaType}` : ""}]`,
+  );
+  if (withoutDataUrls.length > 4096 && /^[A-Za-z0-9+/\r\n]+={0,2}$/.test(withoutDataUrls)) {
+    return `[binary data omitted: ${withoutDataUrls.length} chars]`;
   }
-  return value;
+  return withoutDataUrls;
 }

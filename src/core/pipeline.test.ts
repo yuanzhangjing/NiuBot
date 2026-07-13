@@ -32,7 +32,7 @@ class RecordingAgent implements AgentBackend {
   readonly sendMessageCalls: string[] = [];
   readonly cancelSessionCalls: string[] = [];
   readonly closeSessionCalls: string[] = [];
-  readonly backendSessions = new Map<string, { model?: string }>();
+  readonly backendSessions = new Map<string, { model?: string; transcriptPath?: string }>();
   validateModelImpl?: (modelName: string) => Promise<{ valid: boolean; error?: string }>;
   readonly validateModelCalls: string[] = [];
 
@@ -42,8 +42,10 @@ class RecordingAgent implements AgentBackend {
   async createSession(config: SessionConfig): Promise<AgentSession> {
     this.createSessionCalls.push(config);
     const id = `agent_${this.createSessionCalls.length}`;
+    const transcriptPath = this.createTestTranscript(id, config.workingDirectory);
     this.backendSessions.set(id, {
       model: config.model,
+      transcriptPath,
     });
     return { id };
   }
@@ -59,10 +61,14 @@ class RecordingAgent implements AgentBackend {
   }
 
   async exportSessionTranscript(session: AgentSession) {
+    const current = this.backendSessions.get(session.id) ?? {};
+    const transcriptPath = current.transcriptPath ?? this.createTestTranscript(session.id);
+    this.backendSessions.set(session.id, { ...current, transcriptPath });
     return {
       backend: "test",
       agentSessionId: session.id,
       events: [{ type: "assistant" as const, content: "test transcript" }],
+      sources: [{ path: transcriptPath, role: "session" }],
     };
   }
 
@@ -70,6 +76,7 @@ class RecordingAgent implements AgentBackend {
     const current = this.backendSessions.get(sessionId) ?? {};
     this.backendSessions.set(sessionId, {
       model: "model" in models ? models.model : current.model,
+      transcriptPath: current.transcriptPath,
     });
   }
 
@@ -85,6 +92,15 @@ class RecordingAgent implements AgentBackend {
 
   needsCompactRecoveryReminder(): boolean {
     return this.needsCompactRecoveryReminderFlag;
+  }
+
+  protected createTestTranscript(sessionId: string, directory?: string): string {
+    const transcriptDirectory = directory ?? mkdtempSync(path.join(os.tmpdir(), "niubot-recording-agent-"));
+    if (!directory) tempDirs.push(transcriptDirectory);
+    mkdirSync(transcriptDirectory, { recursive: true });
+    const transcriptPath = path.join(transcriptDirectory, `.test-transcript-${sessionId}.jsonl`);
+    writeFileSync(transcriptPath, '{"type":"test"}\n');
+    return transcriptPath;
   }
 }
 
@@ -109,7 +125,7 @@ class DeferredCreateAgent extends RecordingAgent {
   }
 
   resolveCreate(id = "deferred-agent-session"): void {
-    this.backendSessions.set(id, {});
+    this.backendSessions.set(id, { transcriptPath: this.createTestTranscript(id) });
     this.resolvePending?.({ id });
   }
 }

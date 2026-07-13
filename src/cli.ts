@@ -41,7 +41,7 @@ import { formatLocalDateTimeWithTZ } from "./tz.js";
 
 // ─── Context ───────────────────────────────────────────────
 
-// 命令行参数解析（全局 flags 优先于环境变量）
+// 当前用户和会话只取 Engine 注入的环境变量，不允许命令行参数覆盖。
 const cliArgs = process.argv.slice(2);
 const requestedCommand = cliArgs[0];
 const sessionCommands = new Set([
@@ -79,13 +79,12 @@ if (!IS_AGENT_SESSION && sessionCommands.has(requestedCommand)) {
   console.error("Error: NIUBOT_AGENT_SESSION is not set.");
   process.exit(1);
 }
-
 const DB_PATH = globalFlags["db-path"]
   ?? process.env["NIUBOT_DB_PATH"]
   ?? (NIUBOT_HOME ? path.join(NIUBOT_HOME, "niubot.db") : "");
-const USER_ID = globalFlags["user-id"] ?? process.env["NIUBOT_USER_ID"];
-const CHAT_ID = globalFlags["chat-id"] ?? process.env["NIUBOT_CHAT_ID"];
-const CHAT_TYPE = (globalFlags["chat-type"] ?? process.env["NIUBOT_CHAT_TYPE"] ?? "p2p") as "p2p" | "group";
+const USER_ID = process.env["NIUBOT_USER_ID"];
+const CHAT_ID = process.env["NIUBOT_CHAT_ID"];
+const CHAT_TYPE = (process.env["NIUBOT_CHAT_TYPE"] ?? "p2p") as "p2p" | "group";
 const WORK_DIR = process.env["NIUBOT_WORK_DIR"] ?? ".";
 const PLATFORM = process.env["NIUBOT_PLATFORM"];
 const BOT_ID = process.env["NIUBOT_BOT_ID"];
@@ -97,7 +96,7 @@ const BOT_NAME = process.env["NIUBOT_BOT_NAME"]
 /** 提取全局 flags 并从 argv 中移除 */
 function extractGlobalFlags(args: string[]): Record<string, string> {
   const flags: Record<string, string> = {};
-  const globalKeys = new Set(["user-id", "chat-id", "db-path", "chat-type"]);
+  const globalKeys = new Set(["db-path"]);
   let i = 0;
   while (i < args.length) {
     const arg = args[i]!;
@@ -458,9 +457,6 @@ Commands:
 Use "nbt <command> --help" for detailed syntax.
 
 Global flags:
-  --user-id <id>     Override NIUBOT_USER_ID
-  --chat-id <id>     Override NIUBOT_CHAT_ID
-  --chat-type <type> Override NIUBOT_CHAT_TYPE (p2p/group)
   --db-path <path>   Override NIUBOT_DB_PATH`);
 }
 

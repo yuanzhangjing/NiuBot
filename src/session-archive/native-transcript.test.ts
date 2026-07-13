@@ -60,6 +60,19 @@ describe("native transcript parsers", () => {
     expect((await collectEvents(transcript)).map((event) => event.type)).toEqual(["user", "tool_call", "tool_result"]);
   });
 
+  it("keeps only the original OpenCode user text when Engine context was injected", async () => {
+    const original = "检查 OpenCode 归档";
+    const injected = `<niubot-system-rules>private rules</niubot-system-rules>\n\n<session-profile>private profile</session-profile>\n\n${wrapInjectedUserMessage(original)}`;
+    const transcript = transcriptFromOpencodeRows("s1", [{
+      message_data: '{"role":"user"}',
+      part_data: JSON.stringify({ type: "text", text: injected }),
+      time_created: 1_700_000_000_000,
+    }]);
+    expect(await collectEvents(transcript)).toEqual([
+      { type: "user", content: original, timestamp: "2023-11-14T22:13:20.000Z" },
+    ]);
+  });
+
   it("extracts OpenCode failed tool errors as results", async () => {
     const transcript = transcriptFromOpencodeRows("s1", [
       { message_data: '{"role":"assistant"}', part_data: '{"type":"tool","tool":"exec","callID":"c1","state":{"status":"error","input":{"cmd":"false"},"error":"exit 1"}}', time_created: 1_700_000_000_100 },
@@ -126,6 +139,55 @@ describe("native transcript parsers", () => {
     expect(await collectEvents(await readCodexTranscript(file, "s1"))).toMatchObject([
       { type: "tool_result", callId: "c1", content: "first\nsecond" },
     ]);
+  });
+
+  it("omits binary data from Pi and Codex text-block tool results", async () => {
+    const binary = "A".repeat(5000);
+    const piFile = jsonl([{ type: "message", message: {
+      role: "toolResult", toolName: "view", content: [{ type: "text", text: binary }],
+    } }]);
+    const codexFile = jsonl([{ type: "response_item", payload: {
+      type: "custom_tool_call_output", call_id: "c1", output: [{ type: "input_text", text: binary }],
+    } }]);
+
+    const contents = [
+      ...(await collectEvents(await readPiTranscript(piFile, "s1"))),
+      ...(await collectEvents(await readCodexTranscript(codexFile, "s1"))),
+    ].map((event) => event.content);
+    expect(contents.join("\n")).not.toContain(binary);
+    expect(contents).toEqual([
+      `[binary data omitted: ${binary.length} chars]`,
+      `[binary data omitted: ${binary.length} chars]`,
+    ]);
+  });
+
+  it("omits binary data from ordinary user and assistant text", async () => {
+    const binary = "A".repeat(5000);
+    const claudeFile = jsonl([{ type: "assistant", message: { content: binary } }]);
+    const codexFile = jsonl([{ type: "response_item", payload: {
+      type: "message", role: "user", content: [{ type: "input_text", text: `data:image/png;base64,${binary}` }],
+    } }]);
+
+    const contents = [
+      ...(await collectEvents(await readClaudeTranscript(claudeFile, "s1"))),
+      ...(await collectEvents(await readCodexTranscript(codexFile, "s1"))),
+    ].map((event) => event.content);
+    expect(contents.join("\n")).not.toContain(binary);
+    expect(contents).toEqual([
+      `[binary data omitted: ${binary.length} chars]`,
+      "[binary data omitted: image/png]",
+    ]);
+  });
+
+  it("omits a data URL embedded in surrounding text", async () => {
+    const binary = "A".repeat(5000);
+    const file = jsonl([{ type: "assistant", message: {
+      content: `screenshot: data:image/png;base64,${binary} done`,
+    } }]);
+    expect(await collectEvents(await readClaudeTranscript(file, "s1"))).toMatchObject([{
+      type: "assistant",
+      content: "screenshot: [binary data omitted: image/png] done",
+    }]);
   });
 
   it("keeps only the original user text when Engine context was injected", async () => {

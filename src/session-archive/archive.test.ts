@@ -61,31 +61,16 @@ describe("session archive", () => {
     expect(statSync(join(home, "NiuBot", "session-archives", "c1")).mode & 0o777).toBe(0o700);
   });
 
-  it("writes normalized JSONL snapshots for backends without native files", async () => {
+  it("rejects backends without a native data source", async () => {
     const home = mkdtempSync(join(tmpdir(), "niubot-archive-stream-"));
     tempDirs.push(home);
-    let produced = 0;
-    async function* events() {
-      produced++;
-      yield { type: "user" as const, content: "first" };
-      await Promise.resolve();
-      produced++;
-      yield { type: "assistant" as const, content: "second" };
-    }
     const backend = {
-      exportSessionTranscript: async () => ({ backend: "test", agentSessionId: "stream-1", events: events() }),
+      exportSessionTranscript: async () => ({ backend: "test", agentSessionId: "stream-1", events: [] }),
     } as AgentBackend;
 
-    const manifestFile = await archiveAgentSession(home, backend, { id: "internal-stream" }, {
+    await expect(archiveAgentSession(home, backend, { id: "internal-stream" }, {
       ...metadata, sessionId: "streamed",
-    });
-
-    expect(produced).toBe(2);
-    const manifest = JSON.parse(readFileSync(manifestFile, "utf-8"));
-    expect(manifest.sources).toEqual([{ name: "events.jsonl", role: "normalized", format: "normalized-jsonl" }]);
-    const snapshot = readFileSync(join(dirname(manifestFile), "events.jsonl"), "utf-8");
-    expect(snapshot).toContain('"content":"first"');
-    expect(snapshot).toContain('"content":"second"');
+    })).rejects.toThrow("does not provide a native data source");
   });
 
   it("queries OpenCode rows directly from its database", async () => {
