@@ -128,8 +128,52 @@ describe("native transcript parsers", () => {
     ]);
   });
 
+  it("omits Codex AGENTS and environment context emitted as user messages", async () => {
+    const original = "检查归档";
+    const file = jsonl([
+      { type: "response_item", payload: { type: "message", role: "user", content: [
+        { type: "input_text", text: "# AGENTS.md instructions for /tmp/project\n\n<INSTRUCTIONS>\nproject rules\n</INSTRUCTIONS>" },
+        { type: "input_text", text: "<environment_context>\n  <cwd>/tmp/project</cwd>\n</environment_context>" },
+      ] } },
+      { type: "response_item", payload: { type: "message", role: "user", content: [
+        { type: "input_text", text: `<niubot-system-rules>private</niubot-system-rules>\n\n${wrapInjectedUserMessage(original)}` },
+      ] } },
+    ]);
+
+    expect(await collectEvents(await readCodexTranscript(file, "s1"))).toEqual([
+      { type: "user", content: original, timestamp: undefined },
+    ]);
+  });
+
+  it("recovers user text from sessions created before user-message markers", async () => {
+    const file = jsonl([
+      { type: "response_item", payload: { type: "message", role: "user", content: [{
+        type: "input_text",
+        text: [
+          "<niubot-system-rules>private</niubot-system-rules>",
+          "<session-profile>private scene</session-profile>",
+          "<session-state>private task</session-state>",
+          "<system-reminder>search first</system-reminder>",
+          "继续处理归档",
+        ].join("\n\n"),
+      }] } },
+    ]);
+
+    expect(await collectEvents(await readCodexTranscript(file, "s1"))).toEqual([
+      { type: "user", content: "继续处理归档", timestamp: undefined },
+    ]);
+  });
+
   it("keeps a marker-shaped ordinary user message unchanged", async () => {
     const raw = '<niubot-user-message id="00000000-0000-0000-0000-000000000000" length="3">\nraw\n</niubot-user-message id="00000000-0000-0000-0000-000000000000">';
+    const file = jsonl([
+      { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: raw }] } },
+    ]);
+    expect(await collectEvents(await readCodexTranscript(file, "s1"))).toMatchObject([{ content: raw }]);
+  });
+
+  it("keeps ordinary user text that starts with an Engine-shaped tag", async () => {
+    const raw = "<session-profile>这是用户贴出的示例</session-profile>\n\n请解释这段内容";
     const file = jsonl([
       { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: raw }] } },
     ]);

@@ -5,7 +5,20 @@ import type { SessionTranscript, TranscriptEvent } from "../agent/types.js";
 
 type JsonObject = Record<string, unknown>;
 const INJECTED_USER_MARKER = /<niubot-user-message id="([a-f0-9-]+)" length="(\d+)">\n/g;
-const ENGINE_CONTEXT_PREFIX = /<(?:niubot-system-rules|session-profile|session-state|system-reminder|current-speaker|speakers|session-archives)\b/;
+const INJECTED_CONTEXT_TAGS = new Set([
+  "bot-identity",
+  "bot-profile",
+  "compact-recovery",
+  "current-speaker",
+  "environment_context",
+  "niubot-system-rules",
+  "session-archives",
+  "session-profile",
+  "session-state",
+  "speakers",
+  "system-reminder",
+]);
+const CODEX_AGENTS_CONTEXT_PREFIX = "# AGENTS.md instructions for ";
 const MEDIA_TYPES = new Set(["image", "input_image", "output_image", "audio", "video", "file", "media"]);
 
 export function wrapInjectedUserMessage(content: string): string {
@@ -31,7 +44,7 @@ export function readCodexTranscript(file: string, agentSessionId: string, backen
     if (payloadType === "message") {
       const role = string(payload["role"]);
       if (role === "user" || role === "assistant") {
-        return messageContentEvents(role, payload["content"], timestamp);
+        return messageContentEvents(role, payload["content"], timestamp, true);
       }
     } else if (payloadType === "function_call" || payloadType === "custom_tool_call") {
       return [{
@@ -200,10 +213,11 @@ function messageContentEvents(
   role: "user" | "assistant",
   value: unknown,
   timestamp?: string,
+  omitCodexHarnessContext = false,
 ): TranscriptEvent[] {
   const events: TranscriptEvent[] = [];
   if (typeof value === "string") {
-    const content = role === "user" ? extractInjectedUserMessage(value) : value;
+    const content = role === "user" ? extractInjectedUserMessage(value, omitCodexHarnessContext) : value;
     if (content) events.push({ timestamp, type: role, content });
     return events;
   }
@@ -214,7 +228,7 @@ function messageContentEvents(
     const type = string(block["type"]);
     if (type === "text" || type === "input_text" || type === "output_text") {
       const text = string(block["text"]);
-      const content = role === "user" && text ? extractInjectedUserMessage(text) : text;
+      const content = role === "user" && text ? extractInjectedUserMessage(text, omitCodexHarnessContext) : text;
       if (content) events.push({ timestamp, type: role, content });
     } else if (type === "tool_use" || type === "tool_call" || type === "toolCall" || type === "function_call") {
       events.push({
@@ -239,11 +253,12 @@ function messageContentEvents(
   return events;
 }
 
-function extractInjectedUserMessage(content: string): string {
+function extractInjectedUserMessage(content: string, omitCodexHarnessContext = false): string {
   INJECTED_USER_MARKER.lastIndex = 0;
   let match: RegExpExecArray | null;
   while ((match = INJECTED_USER_MARKER.exec(content)) !== null) {
-    if (!ENGINE_CONTEXT_PREFIX.test(content.slice(0, match.index))) continue;
+    const prefix = stripInjectedContextPrefix(content.slice(0, match.index));
+    if (!prefix.stripped || prefix.content.length > 0) continue;
     const length = Number(match[2]);
     const start = match.index + match[0].length;
     const closing = `\n</niubot-user-message id="${match[1]}">`;
@@ -251,7 +266,64 @@ function extractInjectedUserMessage(content: string): string {
       return content.slice(start, start + length);
     }
   }
-  return content;
+  const legacy = stripInjectedContextPrefix(content);
+  if (omitCodexHarnessContext && legacy.content.length === 0
+    && (legacy.first === "codex-agents" || legacy.first === "environment_context")) {
+    return "";
+  }
+  const legacyEnginePrompt = legacy.blocks >= 2
+    && (legacy.first === "niubot-system-rules" || legacy.first === "compact-recovery");
+  return legacyEnginePrompt ? legacy.content : content;
+}
+
+/**
+ * Codex 会把 AGENTS.md、environment_context 和通过 user prompt 注入的 Engine
+ * 上下文都记成 user message。新记录用 niubot-user-message 标记精确取回原文；
+ * 这里同时清理 Codex 自带上下文，并兼容标记上线前已存在的 active session。
+ */
+function stripInjectedContextPrefix(content: string): {
+  content: string;
+  stripped: boolean;
+  blocks: number;
+  first?: string;
+} {
+  let cursor = 0;
+  let stripped = false;
+  let blocks = 0;
+  let first: string | undefined;
+
+  while (cursor < content.length) {
+    let start = cursor;
+    while (start < content.length && /\s/.test(content[start]!)) start++;
+
+    if (content.startsWith(CODEX_AGENTS_CONTEXT_PREFIX, start)) {
+      const closing = content.indexOf("</INSTRUCTIONS>", start + CODEX_AGENTS_CONTEXT_PREFIX.length);
+      if (closing < 0) break;
+      cursor = closing + "</INSTRUCTIONS>".length;
+      stripped = true;
+      blocks++;
+      first ??= "codex-agents";
+      continue;
+    }
+
+    const opening = /^<([a-z0-9_-]+)(?:\s[^>]*)?>/.exec(content.slice(start));
+    const tag = opening?.[1];
+    if (!opening || !tag || !INJECTED_CONTEXT_TAGS.has(tag)) break;
+    const closingTag = `</${tag}>`;
+    const closing = content.indexOf(closingTag, start + opening[0].length);
+    if (closing < 0) break;
+    cursor = closing + closingTag.length;
+    stripped = true;
+    blocks++;
+    first ??= tag;
+  }
+
+  return {
+    content: stripped ? content.slice(cursor).replace(/^\s+/, "") : content,
+    stripped,
+    blocks,
+    first,
+  };
 }
 
 async function* messageJsonlEvents(
