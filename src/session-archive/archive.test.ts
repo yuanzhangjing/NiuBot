@@ -1,9 +1,10 @@
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { lstatSync, mkdtempSync, readFileSync, readlinkSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AgentBackend, AgentSession, SessionTranscript } from "../agent/types.js";
-import { archiveAgentSession, buildArchiveFileName, formatSessionArchive, getSessionArchiveDirectory } from "./archive.js";
+import { archiveAgentSession, buildArchiveDirectoryName, getSessionArchiveDirectory } from "./archive.js";
+import { loadArchivedTranscript } from "./reader.js";
 
 const tempDirs: string[] = [];
 
@@ -33,33 +34,34 @@ const transcript: SessionTranscript = {
 };
 
 describe("session archive", () => {
-  it("formats metadata and transcript events as Markdown", () => {
-    const output = formatSessionArchive(metadata, transcript);
-    expect(output).toContain("schema_version: 1");
-    expect(output).toContain('session_id: "f876dcde"');
-    expect(output).toContain('timezone:');
-    expect(output).toContain("· tool call · exec");
-    expect(output).toContain("<!-- call_id: call-1 -->");
-    expect(output).toContain("```json\n{\"cmd\":\"pwd\"}\n```");
-    expect(output).toContain("## time unavailable · assistant");
-  });
-
-  it("writes atomically and is idempotent", async () => {
+  it("creates a manifest and native JSONL symlink atomically and idempotently", async () => {
     const home = mkdtempSync(join(tmpdir(), "niubot-archive-"));
     tempDirs.push(home);
+    const native = join(home, "native.jsonl");
+    writeFileSync(native, '{"type":"message"}\n');
     let exportCount = 0;
-    const backend = { exportSessionTranscript: async () => { exportCount++; return transcript; } } as AgentBackend;
+    const backend = {
+      exportSessionTranscript: async () => {
+        exportCount++;
+        return { ...transcript, sources: [{ path: native, role: "session" }] };
+      },
+    } as AgentBackend;
     const session: AgentSession = { id: "internal-1" };
     const first = await archiveAgentSession(home, backend, session, metadata);
     const second = await archiveAgentSession(home, backend, session, metadata);
     expect(second).toBe(first);
     expect(exportCount).toBe(1);
-    expect(readFileSync(first, "utf-8")).toContain("检查问题");
+    const manifest = JSON.parse(readFileSync(first, "utf-8"));
+    expect(manifest).toMatchObject({ session_id: "f876dcde", backend: "codex" });
+    const linked = join(dirname(first), manifest.sources[0].name);
+    expect(lstatSync(linked).isSymbolicLink()).toBe(true);
+    expect(readlinkSync(linked)).toBe(native);
     expect(statSync(first).mode & 0o777).toBe(0o600);
+    expect(statSync(dirname(first)).mode & 0o777).toBe(0o700);
     expect(statSync(join(home, "NiuBot", "session-archives", "c1")).mode & 0o777).toBe(0o700);
   });
 
-  it("writes async transcript events as they are produced", async () => {
+  it("writes normalized JSONL snapshots for backends without native files", async () => {
     const home = mkdtempSync(join(tmpdir(), "niubot-archive-stream-"));
     tempDirs.push(home);
     let produced = 0;
@@ -74,21 +76,53 @@ describe("session archive", () => {
       exportSessionTranscript: async () => ({ backend: "test", agentSessionId: "stream-1", events: events() }),
     } as AgentBackend;
 
-    const file = await archiveAgentSession(home, backend, { id: "internal-stream" }, {
+    const manifestFile = await archiveAgentSession(home, backend, { id: "internal-stream" }, {
       ...metadata, sessionId: "streamed",
     });
 
     expect(produced).toBe(2);
-    expect(readFileSync(file, "utf-8")).toContain("first");
-    expect(readFileSync(file, "utf-8")).toContain("second");
+    const manifest = JSON.parse(readFileSync(manifestFile, "utf-8"));
+    expect(manifest.sources).toEqual([{ name: "events.jsonl", role: "normalized", format: "normalized-jsonl" }]);
+    const snapshot = readFileSync(join(dirname(manifestFile), "events.jsonl"), "utf-8");
+    expect(snapshot).toContain('"content":"first"');
+    expect(snapshot).toContain('"content":"second"');
+  });
+
+  it("stores and reparses raw OpenCode rows without pre-rendering Markdown", async () => {
+    const home = mkdtempSync(join(tmpdir(), "niubot-archive-opencode-"));
+    tempDirs.push(home);
+    const backend = {
+      exportSessionTranscript: async () => ({
+        backend: "opencode",
+        agentSessionId: "open-1",
+        events: [],
+        snapshots: [{
+          role: "rows",
+          format: "opencode-rows-jsonl" as const,
+          records: [{
+            message_data: '{"role":"user"}',
+            part_data: '{"type":"text","text":"raw row text"}',
+            time_created: 1_700_000_000_000,
+          }],
+        }],
+      }),
+    } as AgentBackend;
+    const manifestFile = await archiveAgentSession(home, backend, { id: "open-internal" }, {
+      ...metadata, backend: "opencode", sessionId: "open-session",
+    });
+    const loaded = loadArchivedTranscript(manifestFile);
+    const events = [];
+    for await (const event of loaded.transcript.events) events.push(event);
+    expect(loaded.manifest.sources[0]?.format).toBe("opencode-rows-jsonl");
+    expect(events).toMatchObject([{ type: "user", content: "raw row text" }]);
   });
 
   it("rejects path traversal segments", () => {
     expect(() => getSessionArchiveDirectory("/tmp", "NiuBot", "../private")).toThrow("invalid chatId");
   });
 
-  it("includes local start/end times and session id in file name", () => {
-    const name = buildArchiveFileName(metadata);
-    expect(name).toMatch(/^2026-07-12_\d\d-\d\d-\d\d--2026-07-12_\d\d-\d\d-\d\d_f876dcde\.md$/);
+  it("includes local start/end times and session id in directory name", () => {
+    const name = buildArchiveDirectoryName(metadata);
+    expect(name).toMatch(/^2026-07-12_\d\d-\d\d-\d\d--2026-07-12_\d\d-\d\d-\d\d_f876dcde$/);
   });
 });

@@ -1,6 +1,6 @@
 # NiuBot Engine Context Injection Plan
 
-> 注：本文记录上下文注入重构的早期方案。Session 历史恢复后来改为按 chat 保存完整 Markdown，并使用 `rg` 检索；不再生成 session 摘要，也不再提供 `nbt sessions`。
+> 注：本文记录上下文注入重构的早期方案。当前 Session 历史恢复按 chat 保存原始 JSONL 链接和元数据，并通过 `nbt sessions list/search/get` 按需解析；不再生成 session 摘要或预先渲染完整 Markdown。
 
 ## 目标
 

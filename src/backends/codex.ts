@@ -158,7 +158,7 @@ export default class CodexBackend extends CliAgentBackend<CodexSession> {
   protected async loadSessionTranscript(session: CodexSession) {
     const file = this.getJsonlPath(session);
     if (!file || !session.agentSessionId) throw new Error("Codex session transcript not found");
-    return readCodexTranscript(file, session.agentSessionId);
+    return { ...readCodexTranscript(file, session.agentSessionId), sources: [{ path: file, role: "session" }] };
   }
 
   private scanJsonl(session: CodexSession): {

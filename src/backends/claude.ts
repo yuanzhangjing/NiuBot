@@ -145,7 +145,7 @@ export default class ClaudeBackend extends CliAgentBackend<ClaudeSession> {
   protected async loadSessionTranscript(session: ClaudeSession) {
     const file = this.getJsonlPath(session);
     if (!file || !session.agentSessionId) throw new Error("Claude session transcript not found");
-    return readClaudeTranscript(file, session.agentSessionId);
+    return { ...readClaudeTranscript(file, session.agentSessionId), sources: [{ path: file, role: "session" }] };
   }
 
   /**

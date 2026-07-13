@@ -210,8 +210,8 @@ describe("COMPACT_RECOVERY_REMINDER", () => {
     expect(COMPACT_RECOVERY_REMINDER).toContain("nbt system-rules");
     expect(COMPACT_RECOVERY_REMINDER).toContain("nbt whoami");
     expect(COMPACT_RECOVERY_REMINDER).toContain("nbt messages list");
-    expect(COMPACT_RECOVERY_REMINDER).toContain("rg");
-    expect(COMPACT_RECOVERY_REMINDER).toContain("session 归档目录");
+    expect(COMPACT_RECOVERY_REMINDER).toContain("nbt sessions search/get");
+    expect(COMPACT_RECOVERY_REMINDER).toContain("原生 session 记录");
     expect(COMPACT_RECOVERY_REMINDER).toContain("nbt task list");
     expect(COMPACT_RECOVERY_REMINDER).toContain("AGENTS.md");
   });

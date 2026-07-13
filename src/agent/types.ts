@@ -23,6 +23,8 @@ export interface SessionConfig {
   dbPath?: string;
   /** Bot ID（传递给 agent 环境变量） */
   botId?: string;
+  /** Bot 配置名（用于定位按 bot 隔离的 session 归档） */
+  botName?: string;
   /** IM 平台标识（传递给 agent 环境变量） */
   platform?: string;
   /** 是否为管理员（传递给 agent 环境变量） */
@@ -58,6 +60,22 @@ export interface SessionTranscript {
   backend: string;
   agentSessionId: string;
   events: Iterable<TranscriptEvent> | AsyncIterable<TranscriptEvent>;
+  /** backend 原生记录文件；存在时归档只创建软链接，不复制或预渲染内容 */
+  sources?: NativeTranscriptSource[];
+  /** 没有独立原生文件的 backend 可提供未经解析的逐行快照，如 OpenCode DB rows */
+  snapshots?: NativeTranscriptSnapshot[];
+}
+
+export interface NativeTranscriptSource {
+  path: string;
+  /** 同一 session 有多个文件时用于解析器区分用途，如 history / events */
+  role?: string;
+}
+
+export interface NativeTranscriptSnapshot {
+  role: string;
+  format: "opencode-rows-jsonl";
+  records: Iterable<unknown> | AsyncIterable<unknown>;
 }
 
 export interface AgentResponse {

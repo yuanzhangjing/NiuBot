@@ -197,7 +197,7 @@ export default class PiBackend extends CliAgentBackend<PiSession> {
   protected async loadSessionTranscript(session: PiSession) {
     const file = this.getJsonlPath(session);
     if (!file || !session.agentSessionId) throw new Error("Pi session transcript not found");
-    return readPiTranscript(file, session.agentSessionId);
+    return { ...readPiTranscript(file, session.agentSessionId), sources: [{ path: file, role: "session" }] };
   }
 
   protected refreshActivity(sessionId: string, activity: AgentSessionActivity): void {

@@ -59,7 +59,7 @@ export function readCodexTranscript(file: string, agentSessionId: string, backen
         timestamp,
         type: "tool_result",
         callId: string(payload["call_id"]),
-        content: pretty(payload["output"]),
+        content: toolResultText(payload["output"]),
       }];
     }
     return [];
@@ -181,10 +181,11 @@ async function* readGrokToolTurns(file: string): AsyncGenerator<TranscriptEvent[
 
 export function transcriptFromOpencodeRows(
   agentSessionId: string,
-  rows: Iterable<{ message_data: string; part_data: string; time_created: number | null }>,
+  rows: Iterable<{ message_data: string; part_data: string; time_created: number | null }>
+    | AsyncIterable<{ message_data: string; part_data: string; time_created: number | null }>,
 ): SessionTranscript {
-  function* events(): Generator<TranscriptEvent> {
-    for (const row of rows) {
+  async function* events(): AsyncGenerator<TranscriptEvent> {
+    for await (const row of rows) {
     const message = parseObject(row.message_data);
     const part = parseObject(row.part_data);
     const role = string(message?.["role"]);
@@ -370,6 +371,19 @@ function contentText(value: unknown): string {
     const block = object(part);
     return string(block?.["text"]) ?? pretty(part);
   }).filter(Boolean).join("\n");
+}
+
+function toolResultText(value: unknown): string {
+  if (!Array.isArray(value)) return pretty(value);
+  const texts: string[] = [];
+  for (const part of value) {
+    const block = object(part);
+    const type = string(block?.["type"]);
+    const text = string(block?.["text"]);
+    if (!text || (type !== "text" && type !== "input_text" && type !== "output_text")) return pretty(value);
+    texts.push(text);
+  }
+  return texts.join("");
 }
 
 function pretty(value: unknown): string {

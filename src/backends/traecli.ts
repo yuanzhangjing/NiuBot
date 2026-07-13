@@ -150,7 +150,7 @@ export default class TraeCliBackend extends CliAgentBackend<TraeCliSession> {
   protected async loadSessionTranscript(session: TraeCliSession) {
     const file = this.getJsonlPath(session);
     if (!file || !session.agentSessionId) throw new Error("Trae CLI session transcript not found");
-    return readCodexTranscript(file, session.agentSessionId, "traecli");
+    return { ...readCodexTranscript(file, session.agentSessionId, "traecli"), sources: [{ path: file, role: "session" }] };
   }
 
   private scanJsonl(session: TraeCliSession): {

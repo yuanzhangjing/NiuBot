@@ -183,7 +183,14 @@ export default class GrokBackend extends CliAgentBackend<GrokSession> {
       if (session.isNewSession) throw new AgentSessionNotStartedError(session.agentSessionId ?? "grok-pending");
       throw new Error("Grok session transcript not found");
     }
-    return readGrokTranscript(file, session.agentSessionId, this.getSessionFile(session, "events.jsonl") ?? undefined);
+    const eventsFile = this.getSessionFile(session, "events.jsonl") ?? undefined;
+    return {
+      ...readGrokTranscript(file, session.agentSessionId, eventsFile),
+      sources: [
+        { path: file, role: "history" },
+        ...(eventsFile ? [{ path: eventsFile, role: "events" }] : []),
+      ],
+    };
   }
 
   protected getExecHooks(session: GrokSession): ExecHooks {

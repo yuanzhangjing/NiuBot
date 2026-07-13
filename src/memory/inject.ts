@@ -18,7 +18,7 @@ const LEGACY_DEFAULT_BOT_PROFILE = `# Bot Profile
 /** 新 session 首条消息：引导 agent 按需检索历史上下文 */
 export const NEW_SESSION_SEARCH_REMINDER =
 `<system-reminder>
-这是一个全新的对话 session。如果用户提到历史决策、旧任务或你不确定的背景，先搜索当前聊天的 session 归档目录并读取对应 Markdown，不要凭记忆猜测。
+这是一个全新的对话 session。如果用户提到历史决策、旧任务或你不确定的背景，先使用 nbt sessions search/get 检索当前聊天的原生 session 记录，不要凭记忆猜测。
 </system-reminder>`;
 
 /** compact 后下一条消息：提醒 agent 恢复可能被压缩掉的规则和状态 */
@@ -28,7 +28,7 @@ export const COMPACT_RECOVERY_REMINDER =
 如果 NiuBot 系统规则丢失，先运行 nbt system-rules。
 如果当前身份、会话或用户记忆丢失，运行 nbt whoami。
 如果最近对话丢失，运行 nbt messages list。
-如果历史对话细节丢失，使用 rg 搜索当前聊天的 session 归档目录并读取对应 Markdown。
+如果历史对话细节丢失，使用 nbt sessions search/get 检索当前聊天的原生 session 记录。
 如果任务状态丢失，运行 nbt task list，并读取对应 task README。
 如果问题涉及项目规则原文，重新读取 workspace 的 AGENTS.md。
 不要把 compact 摘要当成原文。
@@ -267,7 +267,7 @@ export function buildNormalContext(
 }
 
 export function buildSessionArchiveContext(sessionArchiveDirectory: string): string {
-  return `<session-archives path=${JSON.stringify(sessionArchiveDirectory)}>\n这里保存当前聊天已归档 session 的完整记录。需要恢复更早的事实、决策或执行过程时，使用 rg 搜索并读取对应 Markdown。\n</session-archives>`;
+  return `<session-archives path=${JSON.stringify(sessionArchiveDirectory)}>\n这里保存当前聊天已归档 session 的原生记录链接和元数据。需要恢复更早的事实、决策或执行过程时，使用 nbt sessions list/search/get 检索和解析。\n</session-archives>`;
 }
 
 export function buildActiveTaskContext(

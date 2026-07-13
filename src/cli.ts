@@ -36,6 +36,7 @@ import { handleContacts } from "./cli/contacts.js";
 import { handleSend } from "./cli/send.js";
 import { handleCron } from "./cli/cron.js";
 import { handleTask } from "./cli/task.js";
+import { handleSessions } from "./cli/session.js";
 import { formatLocalDateTimeWithTZ } from "./tz.js";
 
 // ─── Context ───────────────────────────────────────────────
@@ -46,6 +47,7 @@ const requestedCommand = cliArgs[0];
 const sessionCommands = new Set([
   "user-memory",
   "messages",
+  "sessions",
   "contacts",
   "send",
   "cron",
@@ -89,6 +91,8 @@ const PLATFORM = process.env["NIUBOT_PLATFORM"];
 const BOT_ID = process.env["NIUBOT_BOT_ID"];
 const IS_ADMIN = process.env["NIUBOT_IS_ADMIN"] === "true";
 const BOT_PROFILE_PATH = process.env["NIUBOT_BOT_PROFILE_PATH"];
+const BOT_NAME = process.env["NIUBOT_BOT_NAME"]
+  ?? (BOT_PROFILE_PATH ? path.basename(path.dirname(BOT_PROFILE_PATH)) : undefined);
 
 /** 提取全局 flags 并从 argv 中移除 */
 function extractGlobalFlags(args: string[]): Record<string, string> {
@@ -162,6 +166,9 @@ async function main(): Promise<void> {
       break;
     case "messages":
       handleMessages(openDb(), args.slice(1), CHAT_ID, CHAT_TYPE, parseArgs);
+      break;
+    case "sessions":
+      await handleSessions(openDb(), args.slice(1), CHAT_ID, CHAT_TYPE, NIUBOT_HOME!, BOT_NAME, parseArgs);
       break;
     case "contacts":
       handleContacts(openDb(), args.slice(1), CHAT_ID, CHAT_TYPE, parseArgs);
@@ -439,6 +446,7 @@ Usage: nbt <command> <subcommand> [options]
 Commands:
   user-memory   add|list|get|update|del     Manage user memories
   messages      list|search|get             Query message history
+  sessions      list|search|get             Query archived backend transcripts
   contacts      list-users|list-chats|get-user|get-chat|set-name
                Manage users and chats directory
   send          <text>                      Send text, card, or file

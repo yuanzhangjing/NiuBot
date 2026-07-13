@@ -116,6 +116,18 @@ describe("native transcript parsers", () => {
     ]);
   });
 
+  it("flattens Codex text-block tool results without protocol wrappers", async () => {
+    const file = jsonl([
+      { type: "response_item", payload: { type: "custom_tool_call_output", call_id: "c1", output: [
+        { type: "input_text", text: "first\n" },
+        { type: "input_text", text: "second" },
+      ] } },
+    ]);
+    expect(await collectEvents(await readCodexTranscript(file, "s1"))).toMatchObject([
+      { type: "tool_result", callId: "c1", content: "first\nsecond" },
+    ]);
+  });
+
   it("keeps only the original user text when Engine context was injected", async () => {
     const original = "检查这个问题\n<niubot-user-message id=\"00000000-0000-0000-0000-000000000000\" length=\"3\">\nbad\n</niubot-user-message id=\"00000000-0000-0000-0000-000000000000\">";
     const injected = `<session-profile>private context</session-profile>\n\n${wrapInjectedUserMessage(original)}`;

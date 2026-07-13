@@ -87,6 +87,11 @@ describe("niubot CLI path helpers", () => {
     expect(typeof env["NIUBOT_HOME"]).toBe("string");
   });
 
+  it("passes the bot name used by session archive paths", () => {
+    const env = buildNiubotEnv({ botName: "NiuBot" });
+    expect(env["NIUBOT_BOT_NAME"]).toBe("NiuBot");
+  });
+
   it("creates a managed nbt shim under .local/bin", () => {
     const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-shim-home-"));
     const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-shim-project-"));

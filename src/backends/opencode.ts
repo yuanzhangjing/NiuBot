@@ -159,15 +159,23 @@ export default class OpencodeBackend extends CliAgentBackend<OpencodeSession> {
     if (!session.agentSessionId) throw new Error("OpenCode backend session ID is unavailable");
     const db = this.getOpencodeDb();
     if (!db) throw new Error("OpenCode session database not found");
-    const rows = db.prepare(`
+    const query = db.prepare(`
       SELECT m.data AS message_data, p.data AS part_data,
              COALESCE(p.time_created, m.time_created) AS time_created
       FROM message m
       JOIN part p ON p.message_id = m.id
       WHERE m.session_id = ?
       ORDER BY COALESCE(p.time_created, m.time_created), p.id
-    `).iterate(session.agentSessionId) as IterableIterator<{ message_data: string; part_data: string; time_created: number | null }>;
-    return transcriptFromOpencodeRows(session.agentSessionId, rows);
+    `);
+    const rows = () => query.iterate(session.agentSessionId) as IterableIterator<{
+      message_data: string;
+      part_data: string;
+      time_created: number | null;
+    }>;
+    return {
+      ...transcriptFromOpencodeRows(session.agentSessionId, rows()),
+      snapshots: [{ role: "rows", format: "opencode-rows-jsonl" as const, records: rows() }],
+    };
   }
 
   /** 从 opencode DB 的 message 表查最新 assistant 消息的 modelID */

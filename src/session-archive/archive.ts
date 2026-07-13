@@ -1,10 +1,31 @@
 import { randomUUID } from "node:crypto";
-import { chmodSync, createWriteStream, existsSync, mkdirSync, renameSync, rmSync } from "node:fs";
+import { chmodSync, createWriteStream, existsSync, mkdirSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { once } from "node:events";
-import { join } from "node:path";
+import { extname, join, resolve } from "node:path";
 import { finished } from "node:stream/promises";
-import type { AgentBackend, AgentSession, SessionTranscript, TranscriptEvent } from "../agent/types.js";
+import type { AgentBackend, AgentSession, SessionTranscript } from "../agent/types.js";
 import { TZ } from "../tz.js";
+
+export const SESSION_ARCHIVE_MANIFEST = "manifest.json";
+
+export interface SessionArchiveSource {
+  name: string;
+  role: string;
+  format: "native-jsonl" | "normalized-jsonl" | "opencode-rows-jsonl";
+}
+
+export interface SessionArchiveManifest {
+  schema_version: 1;
+  session_id: string;
+  chat_id: string;
+  source: string;
+  backend: string;
+  agent_session_id: string;
+  started_at: string;
+  archived_at: string;
+  timezone: string;
+  sources: SessionArchiveSource[];
+}
 
 export interface SessionArchiveMetadata {
   botId: string;
@@ -26,40 +47,86 @@ export async function archiveAgentSession(
   const directory = getSessionArchiveDirectory(niubotHome, metadata.botId, metadata.chatId);
   mkdirSync(directory, { recursive: true, mode: 0o700 });
   chmodSync(directory, 0o700);
-  const file = join(directory, buildArchiveFileName(metadata));
-  if (existsSync(file)) return file;
+  const archiveDirectory = join(directory, buildArchiveDirectoryName(metadata));
+  const manifestFile = join(archiveDirectory, SESSION_ARCHIVE_MANIFEST);
+  if (existsSync(manifestFile)) return manifestFile;
+  if (existsSync(archiveDirectory)) throw new Error(`session archive directory is incomplete: ${archiveDirectory}`);
   const transcript = await backend.exportSessionTranscript(agentSession);
 
-  const temporary = `${file}.${randomUUID()}.tmp`;
+  const temporary = join(directory, `.${buildArchiveDirectoryName(metadata)}.${randomUUID()}.tmp`);
   try {
-    const eventCount = await writeSessionArchive(temporary, metadata, transcript);
-    if (eventCount === 0) throw new Error("backend transcript contains no recoverable events");
-    renameSync(temporary, file);
+    mkdirSync(temporary, { mode: 0o700 });
+    const sources: SessionArchiveSource[] = [];
+    if (transcript.sources?.length) {
+      const usedNames = new Set<string>();
+      for (const [index, source] of transcript.sources.entries()) {
+        const target = resolve(source.path);
+        if (!statSync(target).isFile()) throw new Error(`backend transcript source is not a file: ${target}`);
+        const role = safeSourceRole(source.role ?? `source-${index + 1}`);
+        const extension = extname(target) || ".jsonl";
+        let name = `${role}${extension}`;
+        if (usedNames.has(name)) name = `${role}-${index + 1}${extension}`;
+        usedNames.add(name);
+        symlinkSync(target, join(temporary, name));
+        sources.push({ name, role, format: "native-jsonl" });
+      }
+    } else if (transcript.snapshots?.length) {
+      const usedNames = new Set<string>();
+      for (const [index, snapshot] of transcript.snapshots.entries()) {
+        const role = safeSourceRole(snapshot.role || `snapshot-${index + 1}`);
+        let name = `${role}.jsonl`;
+        if (usedNames.has(name)) name = `${role}-${index + 1}.jsonl`;
+        usedNames.add(name);
+        const recordCount = await writeJsonlRecords(join(temporary, name), snapshot.records);
+        if (recordCount === 0) throw new Error(`backend transcript snapshot is empty: ${role}`);
+        sources.push({ name, role, format: snapshot.format });
+      }
+    } else {
+      const name = "events.jsonl";
+      const eventCount = await writeNormalizedTranscript(join(temporary, name), transcript);
+      if (eventCount === 0) throw new Error("backend transcript contains no recoverable events");
+      sources.push({ name, role: "normalized", format: "normalized-jsonl" });
+    }
+
+    const manifest: SessionArchiveManifest = {
+      schema_version: 1,
+      session_id: metadata.sessionId,
+      chat_id: metadata.chatId,
+      source: metadata.source,
+      backend: metadata.backend,
+      agent_session_id: transcript.agentSessionId,
+      started_at: localIso(metadata.startedAt),
+      archived_at: localIso(metadata.archivedAt),
+      timezone: TZ,
+      sources,
+    };
+    const temporaryManifest = join(temporary, SESSION_ARCHIVE_MANIFEST);
+    writeFileSync(temporaryManifest, `${JSON.stringify(manifest, null, 2)}\n`, { encoding: "utf-8", flag: "wx", mode: 0o600 });
+    chmodSync(temporaryManifest, 0o600);
+    renameSync(temporary, archiveDirectory);
   } catch (err) {
-    rmSync(temporary, { force: true });
+    rmSync(temporary, { recursive: true, force: true });
     throw err;
   }
-  return file;
+  return manifestFile;
 }
 
 export function getSessionArchiveDirectory(niubotHome: string, botId: string, chatId: string): string {
   return join(niubotHome, safeSegment(botId, "botId"), "session-archives", safeSegment(chatId, "chatId"));
 }
 
-export function buildArchiveFileName(metadata: Pick<SessionArchiveMetadata, "startedAt" | "archivedAt" | "sessionId">): string {
-  return `${fileTime(metadata.startedAt)}--${fileTime(metadata.archivedAt)}_${safeSegment(metadata.sessionId, "sessionId")}.md`;
+export function buildArchiveDirectoryName(metadata: Pick<SessionArchiveMetadata, "startedAt" | "archivedAt" | "sessionId">): string {
+  return `${fileTime(metadata.startedAt)}--${fileTime(metadata.archivedAt)}_${safeSegment(metadata.sessionId, "sessionId")}`;
 }
 
-export function formatSessionArchive(
-  metadata: SessionArchiveMetadata,
-  transcript: SessionTranscript & { events: Iterable<TranscriptEvent> },
-): string {
-  const lines = archiveHeader(metadata, transcript);
-  for (const event of transcript.events) lines.push(...formatEvent(event));
-  return `${lines.join("\n").trimEnd()}\n`;
+async function writeNormalizedTranscript(file: string, transcript: SessionTranscript): Promise<number> {
+  return writeJsonlRecords(file, transcript.events);
 }
 
-async function writeSessionArchive(file: string, metadata: SessionArchiveMetadata, transcript: SessionTranscript): Promise<number> {
+async function writeJsonlRecords(
+  file: string,
+  records: Iterable<unknown> | AsyncIterable<unknown>,
+): Promise<number> {
   const output = createWriteStream(file, { encoding: "utf-8", flags: "wx", mode: 0o600 });
   const completion = finished(output);
   void completion.catch(() => {});
@@ -67,10 +134,9 @@ async function writeSessionArchive(file: string, metadata: SessionArchiveMetadat
     if (!output.write(content)) await once(output, "drain");
   };
   try {
-    await write(`${archiveHeader(metadata, transcript).join("\n")}\n`);
     let eventCount = 0;
-    for await (const event of transcript.events) {
-      await write(`${formatEvent(event).join("\n")}\n`);
+    for await (const record of records) {
+      await write(`${JSON.stringify(record)}\n`);
       eventCount++;
     }
     output.end();
@@ -83,40 +149,9 @@ async function writeSessionArchive(file: string, metadata: SessionArchiveMetadat
   }
 }
 
-function archiveHeader(metadata: SessionArchiveMetadata, transcript: SessionTranscript): string[] {
-  return [
-    "---",
-    "schema_version: 1",
-    `session_id: ${yamlString(metadata.sessionId)}`,
-    `chat_id: ${yamlString(metadata.chatId)}`,
-    `source: ${yamlString(metadata.source)}`,
-    `backend: ${yamlString(metadata.backend)}`,
-    `agent_session_id: ${yamlString(transcript.agentSessionId)}`,
-    `started_at: ${yamlString(localIso(metadata.startedAt))}`,
-    `archived_at: ${yamlString(localIso(metadata.archivedAt))}`,
-    `timezone: ${yamlString(TZ)}`,
-    "---",
-    "",
-    `# Session ${metadata.sessionId}`,
-    "",
-  ];
-}
-
-function formatEvent(event: TranscriptEvent): string[] {
-  const lines: string[] = [];
-  const time = event.timestamp ? formatEventTime(event.timestamp) : "time unavailable";
-  const label = event.type.replace("_", " ");
-  const tool = event.name ? ` · ${event.name}` : "";
-  lines.push(`## ${time} · ${label}${tool}`, "");
-  if (event.callId) lines.push(`<!-- call_id: ${escapeComment(event.callId)} -->`, "");
-  if (event.type === "tool_call" || event.type === "tool_result") {
-    const fence = codeFence(event.content);
-    const language = event.type === "tool_call" && isJson(event.content) ? "json" : "text";
-    lines.push(`${fence}${language}`, event.content, fence, "");
-  } else {
-    lines.push(event.content, "");
-  }
-  return lines;
+function safeSourceRole(value: string): string {
+  const normalized = value.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
+  return normalized || "source";
 }
 
 function safeSegment(value: string, label: string): string {
@@ -144,24 +179,9 @@ function localIso(utc: string): string {
   return `${get("year")}-${get("month")}-${get("day")}T${get("hour")}:${get("minute")}:${get("second")}${sign}${two(Math.floor(absolute / 60))}:${two(absolute % 60)}`;
 }
 
-function formatEventTime(value: string): string {
-  const date = new Date(value);
-  if (!Number.isFinite(date.getTime())) return value;
-  return localIso(date.toISOString()).replace("T", " ");
-}
-
 function parseUtc(value: string): Date {
   const normalized = value.replace(" ", "T");
   return new Date(/[zZ]|[+-]\d\d:\d\d$/.test(normalized) ? normalized : `${normalized}Z`);
 }
 
-function yamlString(value: string): string { return JSON.stringify(value); }
 function two(value: number): string { return String(value).padStart(2, "0"); }
-function escapeComment(value: string): string { return value.replace(/--/g, "—"); }
-function codeFence(content: string): string {
-  const longest = Math.max(0, ...Array.from(content.matchAll(/`+/g), (match) => match[0].length));
-  return "`".repeat(Math.max(3, longest + 1));
-}
-function isJson(content: string): boolean {
-  try { JSON.parse(content); return true; } catch { return false; }
-}

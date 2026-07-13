@@ -194,7 +194,7 @@ export default class CursorAgentBackend extends CliAgentBackend<CursorAgentSessi
   protected async loadSessionTranscript(session: CursorAgentSession) {
     const file = this.getJsonlPath(session);
     if (!file || !session.agentSessionId) throw new Error("Cursor session transcript not found");
-    return readCursorTranscript(file, session.agentSessionId);
+    return { ...readCursorTranscript(file, session.agentSessionId), sources: [{ path: file, role: "session" }] };
   }
 
   protected getExecHooks(session: CursorAgentSession): ExecHooks {
