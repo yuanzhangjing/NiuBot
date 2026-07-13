@@ -1,18 +1,26 @@
 import { randomUUID } from "node:crypto";
-import { chmodSync, createWriteStream, existsSync, mkdirSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, createWriteStream, existsSync, mkdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { once } from "node:events";
-import { extname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { finished } from "node:stream/promises";
 import type { AgentBackend, AgentSession, SessionTranscript } from "../agent/types.js";
 import { TZ } from "../tz.js";
 
 export const SESSION_ARCHIVE_MANIFEST = "manifest.json";
 
-export interface SessionArchiveSource {
+export type SessionArchiveSource = {
+  path: string;
+  role: string;
+  format: "native-jsonl";
+} | {
+  path: string;
+  role: string;
+  format: "opencode-db";
+} | {
   name: string;
   role: string;
-  format: "native-jsonl" | "normalized-jsonl" | "opencode-rows-jsonl";
-}
+  format: "normalized-jsonl";
+};
 
 export interface SessionArchiveManifest {
   schema_version: 1;
@@ -58,28 +66,11 @@ export async function archiveAgentSession(
     mkdirSync(temporary, { mode: 0o700 });
     const sources: SessionArchiveSource[] = [];
     if (transcript.sources?.length) {
-      const usedNames = new Set<string>();
       for (const [index, source] of transcript.sources.entries()) {
         const target = resolve(source.path);
         if (!statSync(target).isFile()) throw new Error(`backend transcript source is not a file: ${target}`);
         const role = safeSourceRole(source.role ?? `source-${index + 1}`);
-        const extension = extname(target) || ".jsonl";
-        let name = `${role}${extension}`;
-        if (usedNames.has(name)) name = `${role}-${index + 1}${extension}`;
-        usedNames.add(name);
-        symlinkSync(target, join(temporary, name));
-        sources.push({ name, role, format: "native-jsonl" });
-      }
-    } else if (transcript.snapshots?.length) {
-      const usedNames = new Set<string>();
-      for (const [index, snapshot] of transcript.snapshots.entries()) {
-        const role = safeSourceRole(snapshot.role || `snapshot-${index + 1}`);
-        let name = `${role}.jsonl`;
-        if (usedNames.has(name)) name = `${role}-${index + 1}.jsonl`;
-        usedNames.add(name);
-        const recordCount = await writeJsonlRecords(join(temporary, name), snapshot.records);
-        if (recordCount === 0) throw new Error(`backend transcript snapshot is empty: ${role}`);
-        sources.push({ name, role, format: snapshot.format });
+        sources.push({ path: target, role, format: source.format ?? "native-jsonl" });
       }
     } else {
       const name = "events.jsonl";

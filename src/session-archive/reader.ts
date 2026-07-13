@@ -1,6 +1,7 @@
 import { createReadStream, existsSync, readFileSync, readdirSync } from "node:fs";
 import { createInterface } from "node:readline";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
+import Database from "better-sqlite3";
 import type { SessionTranscript, TranscriptEvent, TranscriptEventType } from "../agent/types.js";
 import {
   readClaudeTranscript,
@@ -36,11 +37,19 @@ export function readSessionArchiveManifest(file: string): SessionArchiveManifest
     throw new Error(`invalid session archive manifest: ${file}`);
   }
   for (const source of value.sources) {
-    if (!source || typeof source.name !== "string" || typeof source.role !== "string" || !source.role
-      || source.name === "." || source.name === ".."
-      || source.name.includes("/") || source.name.includes("\\") || source.name.includes("\0")
-      || (source.format !== "native-jsonl" && source.format !== "normalized-jsonl"
-        && source.format !== "opencode-rows-jsonl")) {
+    if (!source || typeof source.role !== "string" || !source.role) {
+      throw new Error(`invalid session archive source in ${file}`);
+    }
+    if (source.format === "normalized-jsonl") {
+      if (typeof source.name !== "string" || source.name === "." || source.name === ".."
+        || source.name.includes("/") || source.name.includes("\\") || source.name.includes("\0")) {
+        throw new Error(`invalid session archive source in ${file}`);
+      }
+    } else if (source.format === "native-jsonl" || source.format === "opencode-db") {
+      if (typeof source.path !== "string" || !isAbsolute(source.path) || source.path.includes("\0")) {
+        throw new Error(`invalid session archive source in ${file}`);
+      }
+    } else {
       throw new Error(`invalid session archive source in ${file}`);
     }
   }
@@ -64,13 +73,13 @@ export function loadArchivedTranscript(manifestFile: string): {
       },
     };
   }
-  const opencodeRows = manifest.sources.find((source) => source.format === "opencode-rows-jsonl");
-  if (opencodeRows) {
+  const opencodeDb = manifest.sources.find((source) => source.format === "opencode-db");
+  if (opencodeDb) {
     return {
       manifest,
       transcript: transcriptFromOpencodeRows(
         manifest.agent_session_id,
-        readOpencodeRows(join(directory, opencodeRows.name)),
+        readOpencodeDatabaseRows(opencodeDb.path, manifest.agent_session_id),
       ),
     };
   }
@@ -78,8 +87,8 @@ export function loadArchivedTranscript(manifestFile: string): {
   const source = (role: string) => {
     const item = manifest.sources.find((candidate) => candidate.role === role)
       ?? (manifest.sources.length === 1 ? manifest.sources[0] : undefined);
-    if (!item) throw new Error(`session archive source not found: ${role}`);
-    return join(directory, item.name);
+    if (!item || item.format !== "native-jsonl") throw new Error(`session archive source not found: ${role}`);
+    return item.path;
   };
 
   let transcript: SessionTranscript;
@@ -104,7 +113,7 @@ export function loadArchivedTranscript(manifestFile: string): {
       transcript = readGrokTranscript(
         source("history"),
         manifest.agent_session_id,
-        events ? join(directory, events.name) : undefined,
+        events?.format === "native-jsonl" ? events.path : undefined,
       );
       break;
     }
@@ -122,37 +131,34 @@ async function* readNormalizedEvents(file: string): AsyncGenerator<TranscriptEve
     try {
       const value = JSON.parse(line) as Partial<TranscriptEvent>;
       if (isEventType(value.type) && typeof value.content === "string") yield value as TranscriptEvent;
-    } catch { /* skip malformed snapshot lines */ }
+    } catch { /* skip malformed normalized event lines */ }
   }
 }
 
-async function* readOpencodeRows(file: string): AsyncGenerator<{
+export async function* readOpencodeDatabaseRows(file: string, sessionId: string): AsyncGenerator<{
   message_data: string;
   part_data: string;
   time_created: number | null;
 }> {
-  for await (const value of readJsonlObjects(file)) {
-    if (typeof value.message_data === "string" && typeof value.part_data === "string") {
-      yield {
-        message_data: value.message_data,
-        part_data: value.part_data,
-        time_created: typeof value.time_created === "number" ? value.time_created : null,
-      };
+  const db = new Database(file, { readonly: true, fileMustExist: true });
+  try {
+    const rows = db.prepare(`
+      SELECT m.data AS message_data, p.data AS part_data,
+             COALESCE(p.time_created, m.time_created) AS time_created
+      FROM message m
+      JOIN part p ON p.message_id = m.id
+      WHERE m.session_id = ?
+      ORDER BY COALESCE(p.time_created, m.time_created), p.id
+    `).iterate(sessionId) as IterableIterator<{
+      message_data: string;
+      part_data: string;
+      time_created: number | null;
+    }>;
+    for (const row of rows) {
+      yield row;
     }
-  }
-}
-
-async function* readJsonlObjects(file: string): AsyncGenerator<Record<string, unknown>> {
-  const input = createReadStream(file, { encoding: "utf-8" });
-  const lines = createInterface({ input, crlfDelay: Infinity });
-  for await (const line of lines) {
-    if (!line.trim()) continue;
-    try {
-      const value = JSON.parse(line) as unknown;
-      if (value !== null && typeof value === "object" && !Array.isArray(value)) {
-        yield value as Record<string, unknown>;
-      }
-    } catch { /* skip malformed snapshot lines */ }
+  } finally {
+    db.close();
   }
 }
 

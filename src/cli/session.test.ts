@@ -67,7 +67,7 @@ describe("nbt sessions", () => {
     const lines: string[] = [];
     vi.spyOn(console, "log").mockImplementation((...values) => lines.push(values.join(" ")));
     await handleSessions(db, ["list"], "c1", "p2p", home, "NiuBot", parseArgs);
-    expect(lines.join("\n")).toContain("archive=linked-jsonl");
+    expect(lines.join("\n")).toContain("archive=source-reference");
 
     lines.length = 0;
     await handleSessions(db, ["search", "NEEDLE_FULL_TEXT"], "c1", "p2p", home, "NiuBot", parseArgs);

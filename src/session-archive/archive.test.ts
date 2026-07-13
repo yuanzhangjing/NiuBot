@@ -1,6 +1,7 @@
-import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AgentBackend, AgentSession, SessionTranscript } from "../agent/types.js";
 import { archiveAgentSession, buildArchiveDirectoryName, getSessionArchiveDirectory } from "./archive.js";
@@ -34,7 +35,7 @@ const transcript: SessionTranscript = {
 };
 
 describe("session archive", () => {
-  it("creates a manifest and native JSONL symlink atomically and idempotently", async () => {
+  it("creates a manifest with a native JSONL path atomically and idempotently", async () => {
     const home = mkdtempSync(join(tmpdir(), "niubot-archive-"));
     tempDirs.push(home);
     const native = join(home, "native.jsonl");
@@ -53,9 +54,8 @@ describe("session archive", () => {
     expect(exportCount).toBe(1);
     const manifest = JSON.parse(readFileSync(first, "utf-8"));
     expect(manifest).toMatchObject({ session_id: "f876dcde", backend: "codex" });
-    const linked = join(dirname(first), manifest.sources[0].name);
-    expect(lstatSync(linked).isSymbolicLink()).toBe(true);
-    expect(readlinkSync(linked)).toBe(native);
+    expect(manifest.sources).toEqual([{ path: native, role: "session", format: "native-jsonl" }]);
+    expect(readdirSync(dirname(first))).toEqual(["manifest.json"]);
     expect(statSync(first).mode & 0o777).toBe(0o600);
     expect(statSync(dirname(first)).mode & 0o777).toBe(0o700);
     expect(statSync(join(home, "NiuBot", "session-archives", "c1")).mode & 0o777).toBe(0o700);
@@ -88,23 +88,26 @@ describe("session archive", () => {
     expect(snapshot).toContain('"content":"second"');
   });
 
-  it("stores and reparses raw OpenCode rows without pre-rendering Markdown", async () => {
+  it("queries OpenCode rows directly from its database", async () => {
     const home = mkdtempSync(join(tmpdir(), "niubot-archive-opencode-"));
     tempDirs.push(home);
+    const databaseFile = join(home, "opencode.db");
+    const db = new Database(databaseFile);
+    db.exec(`
+      CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, data TEXT, time_created INTEGER);
+      CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, data TEXT, time_created INTEGER);
+    `);
+    db.prepare("INSERT INTO message VALUES (?, ?, ?, ?)")
+      .run("message-1", "open-1", '{"role":"user"}', 1_700_000_000_000);
+    db.prepare("INSERT INTO part VALUES (?, ?, ?, ?)")
+      .run("part-1", "message-1", '{"type":"text","text":"raw row text"}', 1_700_000_000_000);
+    db.close();
     const backend = {
       exportSessionTranscript: async () => ({
         backend: "opencode",
         agentSessionId: "open-1",
         events: [],
-        snapshots: [{
-          role: "rows",
-          format: "opencode-rows-jsonl" as const,
-          records: [{
-            message_data: '{"role":"user"}',
-            part_data: '{"type":"text","text":"raw row text"}',
-            time_created: 1_700_000_000_000,
-          }],
-        }],
+        sources: [{ path: databaseFile, role: "database", format: "opencode-db" as const }],
       }),
     } as AgentBackend;
     const manifestFile = await archiveAgentSession(home, backend, { id: "open-internal" }, {
@@ -113,7 +116,8 @@ describe("session archive", () => {
     const loaded = loadArchivedTranscript(manifestFile);
     const events = [];
     for await (const event of loaded.transcript.events) events.push(event);
-    expect(loaded.manifest.sources[0]?.format).toBe("opencode-rows-jsonl");
+    expect(loaded.manifest.sources).toEqual([{ path: databaseFile, role: "database", format: "opencode-db" }]);
+    expect(readdirSync(dirname(manifestFile))).toEqual(["manifest.json"]);
     expect(events).toMatchObject([{ type: "user", content: "raw row text" }]);
   });
 

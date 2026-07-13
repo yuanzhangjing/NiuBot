@@ -7,6 +7,7 @@ import { getSessionArchiveDirectory } from "../session-archive/archive.js";
 import {
   findSessionArchive,
   loadArchivedTranscript,
+  readOpencodeDatabaseRows,
   readSessionArchiveManifest,
   type LocatedSessionArchive,
 } from "../session-archive/reader.js";
@@ -64,7 +65,7 @@ function sessionList(
   }
   for (const row of rows) {
     const archive = locate(niubotHome, botName, row);
-    const archiveLabel = archive ? "linked-jsonl" : "missing";
+    const archiveLabel = archive ? "source-reference" : "missing";
     console.log(formatSessionRow(row, archiveLabel));
   }
 }
@@ -139,7 +140,7 @@ async function sessionGet(
   if (!archive) throw new Error(`Session archive not found: ${sessionId}`);
 
   if (flags["raw"] === "true") {
-    printRawArchive(archive);
+    await printRawArchive(archive);
     return;
   }
   const transcript = transcriptFor(row, archive);
@@ -181,11 +182,21 @@ async function* inferToolResultNames(
   }
 }
 
-function printRawArchive(archive: LocatedSessionArchive): void {
+async function printRawArchive(archive: LocatedSessionArchive): Promise<void> {
   const manifest = readSessionArchiveManifest(archive.path);
   for (const source of manifest.sources) {
-    console.log(`--- ${source.role}: ${source.name} ---`);
-    process.stdout.write(readFileSync(join(dirname(archive.path), source.name), "utf-8"));
+    const location = source.format === "normalized-jsonl" ? source.name : source.path;
+    console.log(`--- ${source.role}: ${location} ---`);
+    if (source.format === "opencode-db") {
+      for await (const row of readOpencodeDatabaseRows(source.path, manifest.agent_session_id)) {
+        console.log(JSON.stringify(row));
+      }
+    } else {
+      const file = source.format === "normalized-jsonl"
+        ? join(dirname(archive.path), source.name)
+        : source.path;
+      process.stdout.write(readFileSync(file, "utf-8"));
+    }
     console.log("");
   }
 }

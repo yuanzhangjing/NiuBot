@@ -60,22 +60,16 @@ export interface SessionTranscript {
   backend: string;
   agentSessionId: string;
   events: Iterable<TranscriptEvent> | AsyncIterable<TranscriptEvent>;
-  /** backend 原生记录文件；存在时归档只创建软链接，不复制或预渲染内容 */
+  /** backend 原生数据源；归档只记录路径，不复制或预渲染内容 */
   sources?: NativeTranscriptSource[];
-  /** 没有独立原生文件的 backend 可提供未经解析的逐行快照，如 OpenCode DB rows */
-  snapshots?: NativeTranscriptSnapshot[];
 }
 
 export interface NativeTranscriptSource {
   path: string;
   /** 同一 session 有多个文件时用于解析器区分用途，如 history / events */
   role?: string;
-}
-
-export interface NativeTranscriptSnapshot {
-  role: string;
-  format: "opencode-rows-jsonl";
-  records: Iterable<unknown> | AsyncIterable<unknown>;
+  /** 默认是逐行 JSON；OpenCode 使用共享 SQLite 数据库 */
+  format?: "native-jsonl" | "opencode-db";
 }
 
 export interface AgentResponse {

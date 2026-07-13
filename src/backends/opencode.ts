@@ -174,7 +174,7 @@ export default class OpencodeBackend extends CliAgentBackend<OpencodeSession> {
     }>;
     return {
       ...transcriptFromOpencodeRows(session.agentSessionId, rows()),
-      snapshots: [{ role: "rows", format: "opencode-rows-jsonl" as const, records: rows() }],
+      sources: [{ path: db.name, role: "database", format: "opencode-db" as const }],
     };
   }
 
