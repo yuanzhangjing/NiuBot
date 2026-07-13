@@ -7,7 +7,6 @@ import { getSessionArchiveDirectory } from "../session-archive/archive.js";
 import {
   findSessionArchive,
   loadArchivedTranscript,
-  readLegacyMarkdownTranscript,
   readSessionArchiveManifest,
   type LocatedSessionArchive,
 } from "../session-archive/reader.js";
@@ -65,8 +64,7 @@ function sessionList(
   }
   for (const row of rows) {
     const archive = locate(niubotHome, botName, row);
-    const archiveLabel = archive?.kind === "manifest" ? "linked-jsonl"
-      : archive?.kind === "legacy-markdown" ? "legacy-markdown" : "missing";
+    const archiveLabel = archive ? "linked-jsonl" : "missing";
     console.log(formatSessionRow(row, archiveLabel));
   }
 }
@@ -144,11 +142,6 @@ async function sessionGet(
     printRawArchive(archive);
     return;
   }
-  if (archive.kind === "legacy-markdown" && !requestedEventId && flags["format"] !== "jsonl") {
-    process.stdout.write(readFileSync(archive.path, "utf-8"));
-    return;
-  }
-
   const transcript = transcriptFor(row, archive);
   const seen = new Map<string, number>();
   if (!requestedEventId && flags["format"] !== "jsonl") printSessionHeader(row, transcript.agentSessionId);
@@ -170,9 +163,7 @@ function locate(niubotHome: string, botName: string, row: SessionRow): LocatedSe
 }
 
 function transcriptFor(row: SessionRow, archive: LocatedSessionArchive): SessionTranscript {
-  const transcript = archive.kind === "manifest"
-    ? loadArchivedTranscript(archive.path).transcript
-    : readLegacyMarkdownTranscript(archive.path, row.backend_type ?? "unknown", row.agent_session_id ?? row.id);
+  const transcript = loadArchivedTranscript(archive.path).transcript;
   return { ...transcript, events: inferToolResultNames(transcript.events) };
 }
 
@@ -191,10 +182,6 @@ async function* inferToolResultNames(
 }
 
 function printRawArchive(archive: LocatedSessionArchive): void {
-  if (archive.kind === "legacy-markdown") {
-    process.stdout.write(readFileSync(archive.path, "utf-8"));
-    return;
-  }
   const manifest = readSessionArchiveManifest(archive.path);
   for (const source of manifest.sources) {
     console.log(`--- ${source.role}: ${source.name} ---`);

@@ -12,9 +12,10 @@ import {
 } from "./native-transcript.js";
 import { SESSION_ARCHIVE_MANIFEST, type SessionArchiveManifest } from "./archive.js";
 
-export type LocatedSessionArchive =
-  | { kind: "manifest"; path: string }
-  | { kind: "legacy-markdown"; path: string };
+export interface LocatedSessionArchive {
+  kind: "manifest";
+  path: string;
+}
 
 export function findSessionArchive(directory: string, sessionId: string): LocatedSessionArchive | undefined {
   if (!existsSync(directory)) return undefined;
@@ -25,10 +26,7 @@ export function findSessionArchive(directory: string, sessionId: string): Locate
       if (existsSync(manifest)) return { kind: "manifest", path: manifest };
     }
   }
-  const legacySuffix = `${suffix}.md`;
-  const legacy = readdirSync(directory, { withFileTypes: true })
-    .find((entry) => entry.isFile() && entry.name.endsWith(legacySuffix));
-  return legacy ? { kind: "legacy-markdown", path: join(directory, legacy.name) } : undefined;
+  return undefined;
 }
 
 export function readSessionArchiveManifest(file: string): SessionArchiveManifest {
@@ -114,36 +112,6 @@ export function loadArchivedTranscript(manifestFile: string): {
       throw new Error(`unsupported archived transcript backend: ${manifest.backend}`);
   }
   return { manifest, transcript };
-}
-
-export function readLegacyMarkdownTranscript(file: string, backend: string, agentSessionId: string): SessionTranscript {
-  const text = readFileSync(file, "utf-8");
-  const header = /^## ([^\n]+?) · (user|assistant|tool call|tool result)(?: · ([^\n]+))?$/gm;
-  const matches = [...text.matchAll(header)];
-  const events: TranscriptEvent[] = [];
-  for (let index = 0; index < matches.length; index++) {
-    const match = matches[index]!;
-    const bodyStart = (match.index ?? 0) + match[0].length;
-    const bodyEnd = index + 1 < matches.length ? matches[index + 1]!.index ?? text.length : text.length;
-    const label = match[2]!;
-    const body = text.slice(bodyStart, bodyEnd).trim();
-    const callId = /<!-- call_id: (.*?) -->/.exec(body)?.[1];
-    const content = cleanLegacyBody(body);
-    events.push({
-      timestamp: match[1] === "time unavailable" ? undefined : match[1],
-      type: label.replace(" ", "_") as TranscriptEventType,
-      name: match[3],
-      callId,
-      content,
-    });
-  }
-  return { backend, agentSessionId, events };
-}
-
-function cleanLegacyBody(body: string): string {
-  const withoutComment = body.replace(/<!-- call_id: .*? -->\s*/s, "");
-  const fenced = /^(`{3,})[^\n]*\n([\s\S]*)\n\1$/.exec(withoutComment);
-  return fenced ? fenced[2]! : withoutComment;
 }
 
 async function* readNormalizedEvents(file: string): AsyncGenerator<TranscriptEvent> {

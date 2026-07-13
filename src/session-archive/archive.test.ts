@@ -1,10 +1,10 @@
-import { lstatSync, mkdtempSync, readFileSync, readlinkSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AgentBackend, AgentSession, SessionTranscript } from "../agent/types.js";
 import { archiveAgentSession, buildArchiveDirectoryName, getSessionArchiveDirectory } from "./archive.js";
-import { loadArchivedTranscript } from "./reader.js";
+import { findSessionArchive, loadArchivedTranscript } from "./reader.js";
 
 const tempDirs: string[] = [];
 
@@ -119,6 +119,15 @@ describe("session archive", () => {
 
   it("rejects path traversal segments", () => {
     expect(() => getSessionArchiveDirectory("/tmp", "NiuBot", "../private")).toThrow("invalid chatId");
+  });
+
+  it("ignores old Markdown archives", () => {
+    const home = mkdtempSync(join(tmpdir(), "niubot-archive-legacy-"));
+    tempDirs.push(home);
+    const directory = getSessionArchiveDirectory(home, "NiuBot", "c1");
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(join(directory, "2026-07-13_10-00-00--2026-07-13_11-00-00_f876dcde.md"), "# old archive\n");
+    expect(findSessionArchive(directory, "f876dcde")).toBeUndefined();
   });
 
   it("includes local start/end times and session id in directory name", () => {
