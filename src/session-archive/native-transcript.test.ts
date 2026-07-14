@@ -104,18 +104,53 @@ describe("native transcript parsers", () => {
     ]);
   });
 
-  it("extracts Grok chat history messages", async () => {
+  it("extracts Grok chat history messages and ignores lifecycle-only events.jsonl", async () => {
     const history = jsonl([
       { type: "user", content: [{ type: "input_text", text: "hello" }] },
       { type: "assistant", content: "done" },
     ]);
+    // events.jsonl only has tool lifecycle metadata (no args/output); do not invent empty shells.
     const events = jsonl([
       { type: "turn_started", ts: "2026-01-01T00:00:00Z" },
       { type: "tool_started", ts: "2026-01-01T00:00:01Z", tool_name: "search" },
       { type: "tool_completed", ts: "2026-01-01T00:00:02Z", tool_name: "search", outcome: "success", duration_ms: 1000 },
     ]);
     expect((await collectEvents(await readGrokTranscript(history, "s1", events))).map((event) => event.type))
-      .toEqual(["user", "tool_call", "tool_result", "assistant"]);
+      .toEqual(["user", "assistant"]);
+  });
+
+  it("extracts Grok assistant tool_calls, tool_result, and backend_tool_call from chat history", async () => {
+    const history = jsonl([
+      { type: "user", content: [{ type: "text", text: "hi" }] },
+      {
+        type: "assistant",
+        content: "checking",
+        tool_calls: [{
+          id: "call-1",
+          name: "read_file",
+          arguments: JSON.stringify({ target_file: "/tmp/a.md", limit: 80 }),
+        }],
+      },
+      {
+        type: "tool_result",
+        tool_call_id: "call-1",
+        content: "file body",
+      },
+      { type: "assistant", content: "done" },
+      {
+        type: "backend_tool_call",
+        kind: { tool_type: "web_search", action: { type: "search", query: "niubot" } },
+      },
+    ]);
+    const events = await collectEvents(await readGrokTranscript(history, "s1"));
+    expect(events.map((event) => event.type)).toEqual([
+      "user", "assistant", "tool_call", "tool_result", "assistant", "tool_call",
+    ]);
+    expect(events[2]).toMatchObject({ type: "tool_call", name: "read_file", callId: "call-1" });
+    expect(events[2]?.content).toContain("target_file");
+    expect(events[3]).toMatchObject({ type: "tool_result", callId: "call-1", content: "file body" });
+    expect(events[5]).toMatchObject({ type: "tool_call", name: "web_search" });
+    expect(events[5]?.content).toContain("niubot");
   });
 
   it("extracts Codex custom tool calls", async () => {

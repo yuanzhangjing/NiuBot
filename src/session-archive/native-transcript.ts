@@ -99,84 +99,68 @@ export function readPiTranscript(file: string, agentSessionId: string): SessionT
   return { backend: "pi", agentSessionId, events };
 }
 
-export function readGrokTranscript(file: string, agentSessionId: string, eventsFile?: string): SessionTranscript {
-  const events = grokEvents(file, eventsFile);
-  return { backend: "grok", agentSessionId, events };
+/**
+ * Grok 的完整 tool 参数/输出在 chat_history.jsonl：
+ * - assistant.tool_calls[]: { id, name, arguments }
+ * - tool_result: { tool_call_id, content }
+ * - backend_tool_call: { kind: { tool_type, action } }
+ *
+ * events.jsonl 只有 tool_started/tool_completed 生命周期，不含参数与输出，
+ * 因此不再用它拼空壳 tool 事件。参数保留以兼容既有调用方。
+ */
+export function readGrokTranscript(file: string, agentSessionId: string, _eventsFile?: string): SessionTranscript {
+  return { backend: "grok", agentSessionId, events: grokEvents(file) };
 }
 
-async function* grokEvents(file: string, eventsFile?: string): AsyncGenerator<TranscriptEvent> {
-  const toolTurns = eventsFile ? readGrokToolTurns(eventsFile)[Symbol.asyncIterator]() : undefined;
+async function* grokEvents(file: string): AsyncGenerator<TranscriptEvent> {
   for await (const entry of readJsonl(file)) {
     const type = string(entry["type"]);
     const eventTimestamp = string(entry["timestamp"] ?? entry["ts"]);
     if (type === "user") {
       yield* messageContentEvents(type, entry["content"], eventTimestamp);
     } else if (type === "assistant") {
-      if (toolTurns) {
-        const turn = await toolTurns.next();
-        if (!turn.done) yield* turn.value;
-      }
       yield* messageContentEvents(type, entry["content"], eventTimestamp);
+      yield* grokAssistantToolCalls(entry["tool_calls"], eventTimestamp);
     } else if (type === "function_call" || type === "tool_call") {
       yield {
-        timestamp: eventTimestamp, type: "tool_call",
+        timestamp: eventTimestamp,
+        type: "tool_call",
         name: string(entry["name"] ?? entry["tool_name"]),
-        callId: string(entry["call_id"] ?? entry["id"]),
+        callId: string(entry["call_id"] ?? entry["id"] ?? entry["tool_call_id"]),
         content: pretty(entry["arguments"] ?? entry["input"]),
       };
     } else if (type === "function_call_output" || type === "tool_result") {
       yield {
-        timestamp: eventTimestamp, type: "tool_result",
+        timestamp: eventTimestamp,
+        type: "tool_result",
         name: string(entry["name"] ?? entry["tool_name"]),
-        callId: string(entry["call_id"] ?? entry["id"]),
-        content: pretty(entry["output"] ?? entry["content"]),
+        callId: string(entry["tool_call_id"] ?? entry["call_id"] ?? entry["id"]),
+        content: toolResultText(entry["output"] ?? entry["content"]),
+      };
+    } else if (type === "backend_tool_call") {
+      const kind = object(entry["kind"]);
+      yield {
+        timestamp: eventTimestamp,
+        type: "tool_call",
+        name: string(kind?.["tool_type"]) ?? "backend_tool",
+        callId: string(entry["id"] ?? entry["call_id"] ?? entry["tool_call_id"]),
+        content: pretty(kind?.["action"] ?? kind ?? entry),
       };
     }
   }
-  if (toolTurns) {
-    for (let turn = await toolTurns.next(); !turn.done; turn = await toolTurns.next()) yield* turn.value;
-  }
 }
 
-async function* readGrokToolTurns(file: string): AsyncGenerator<TranscriptEvent[]> {
-  const active = new Map<string, string[]>();
-  let current: TranscriptEvent[] | undefined;
-  let sequence = 0;
-  for await (const entry of readJsonl(file)) {
-    const type = string(entry["type"]);
-    if (type === "turn_started") {
-      if (current) yield current;
-      current = [];
-      active.clear();
-    }
-    if (!current) continue;
-    const name = string(entry["tool_name"]);
-    const eventTimestamp = string(entry["ts"]);
-    if (type === "tool_started") {
-      const callId = `grok-tool-${++sequence}`;
-      const ids = active.get(name ?? "unknown") ?? [];
-      ids.push(callId);
-      active.set(name ?? "unknown", ids);
-      current.push({
-        timestamp: eventTimestamp,
-        type: "tool_call",
-        name,
-        callId,
-        content: "（Grok 原生记录未提供工具参数）",
-      });
-    } else if (type === "tool_completed") {
-      const ids = active.get(name ?? "unknown") ?? [];
-      const callId = ids.shift() ?? `grok-tool-${++sequence}`;
-      current.push({
-        timestamp: eventTimestamp,
-        type: "tool_result",
-        name,
-        callId,
-        content: pretty({ outcome: entry["outcome"], duration_ms: entry["duration_ms"], detail: "Grok 原生记录未提供工具输出" }),
-      });
-    }
+function* grokAssistantToolCalls(value: unknown, timestamp?: string): Generator<TranscriptEvent> {
+  if (!Array.isArray(value)) return;
+  for (const raw of value) {
+    const call = object(raw);
+    if (!call) continue;
+    const name = string(call["name"] ?? call["tool_name"]);
+    const callId = string(call["id"] ?? call["call_id"] ?? call["tool_call_id"]);
+    const content = pretty(call["arguments"] ?? call["input"]);
+    if (!name && !callId && !content) continue;
+    yield { timestamp, type: "tool_call", name, callId, content };
   }
-  if (current) yield current;
 }
 
 export function transcriptFromOpencodeRows(
