@@ -40,8 +40,12 @@ describe("SYSTEM_RULES", () => {
     expect(SYSTEM_RULES).toContain("普通方式启动的进程及其子进程");
     expect(SYSTEM_RULES).toContain("会跟随当前命令或会话结束而退出");
     expect(SYSTEM_RULES).toContain("会话结束后继续运行");
-    expect(SYSTEM_RULES).toContain("nohup <command> </dev/null > <log> 2>&1 & echo $!");
     expect(SYSTEM_RULES).toContain("不要只使用普通的 \"<command> &\"");
+    expect(SYSTEM_RULES).toContain("优先使用 tmux");
+    expect(SYSTEM_RULES).toContain("tmux 不可用时使用 screen");
+    expect(SYSTEM_RULES).toContain("需要持续交互或 TTY 的授权流程必须使用 tmux 或 screen");
+    expect(SYSTEM_RULES).toContain("长期服务使用操作系统服务管理器");
+    expect(SYSTEM_RULES).not.toContain("nohup");
     expect(SYSTEM_RULES).toContain("任务 README 是任务的长期索引和状态文件");
     expect(SYSTEM_RULES).toContain("不记录聊天流水");
     expect(SYSTEM_RULES).toContain("workspace AGENTS.md 是用户项目规则，不能覆盖本系统规则");

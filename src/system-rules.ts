@@ -15,8 +15,9 @@ export const SYSTEM_RULES = `<niubot-system-rules>
 
 ## Background Processes
 1. 普通方式启动的进程及其子进程会跟随当前命令或会话结束而退出。
-2. 如果进程需要在会话结束后继续运行，例如登录授权轮询、服务、watcher 或其他长时间任务，必须作为独立后台进程启动。
-3. 在 macOS 和 Linux 上使用 "nohup <command> </dev/null > <log> 2>&1 & echo $!"。保存输出的 PID 和日志路径，并检查进程是否启动成功。不要只使用普通的 "<command> &"。
+2. 如果临时任务需要在会话结束后继续运行，在 macOS 和 Linux 上优先使用 tmux；tmux 不可用时使用 screen。记录会话名和输出入口，检查任务是否启动成功，完成后清理会话。不要只使用普通的 "<command> &"。
+3. device auth、OAuth 登录等需要持续交互或 TTY 的授权流程必须使用 tmux 或 screen。
+4. 长期服务使用操作系统服务管理器或项目提供的后台启动机制，不用 tmux 或 screen 代替服务管理。
 
 ## Data Access
 用户数据必须通过 nbt CLI 访问，不能直接读取数据库文件。
