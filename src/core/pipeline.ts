@@ -53,6 +53,7 @@ const PROCESSING_EMOJI = "Get";
 const MERGED_EMOJI = "Pin";
 const EMPTY_RESPONSE_FALLBACK = "（处理完成，但未生成回复。如果没收到预期结果，请重试）";
 const UPDATE_CONFIRM_COMMAND = "/update 1";
+const UPDATE_PACKAGE_NAME = "@yuanzhangjing/niubot";
 export const SHELL_COMMAND_TIMEOUT_MS = 300_000;
 export const UPDATE_INSTALL_TIMEOUT_MS = 600_000;
 
@@ -2258,8 +2259,7 @@ export class Pipeline {
   }
 
   private async fetchLatestVersion(): Promise<string | null> {
-    const PKG = "@yuanzhangjing/niubot";
-    const { stdout } = await this.runUpdateCommand(`npm view ${PKG}@latest version`, 15_000);
+    const { stdout } = await this.runUpdateCommand(`npm view ${UPDATE_PACKAGE_NAME}@latest version`, 15_000);
     const latest = stdout.trim();
     if (!this.isValidVersion(latest)) {
       throw new Error(`版本号格式异常：${latest.slice(0, 50)}`);
@@ -2268,7 +2268,6 @@ export class Pipeline {
   }
 
   private async handleUpdate(chatId: string, platformChatId: string, msgId?: string, confirmed = false): Promise<void> {
-    const PKG = "@yuanzhangjing/niubot";
     const currentVersion = this.version;
 
     try {
@@ -2289,9 +2288,23 @@ export class Pipeline {
 
       this.replyText(chatId, platformChatId, undefined, `发现新版本：${currentVersion} → ${latest}，正在安装...`);
 
-      await this.runUpdateCommand(`npm install -g ${PKG}@${latest}`, UPDATE_INSTALL_TIMEOUT_MS);
-      this.replyText(chatId, platformChatId, undefined, `${latest} 安装完成，正在重启...`);
-      this.triggerRestart({ platformChatId });
+      let installError: unknown;
+      try {
+        await this.runUpdateCommand(`npm install -g ${UPDATE_PACKAGE_NAME}@${latest}`, UPDATE_INSTALL_TIMEOUT_MS);
+      } catch (err) {
+        installError = err;
+      }
+
+      if (installError) {
+        this.log.warn("npm global install failed; continuing with isolated release update", {
+          version: latest,
+          error: String(installError),
+        });
+        this.replyText(chatId, platformChatId, undefined, "全局安装命令报错，将继续准备独立 release；旧服务会保留到新版本预检通过。");
+      }
+
+      this.replyText(chatId, platformChatId, undefined, `正在准备 ${latest} 的独立 release 并重启...`);
+      this.triggerRestart({ platformChatId, updateVersion: latest });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       this.replyText(chatId, platformChatId, undefined, `更新失败：${msg.slice(0, 500)}`);
@@ -2372,12 +2385,15 @@ export class Pipeline {
    * restart.sh 负责：sleep → build → preflight → kill old → start new → health check → notify。
    * 可通过 platformChatId 或 chatId 指定通知目标，都不传则不发通知。
    */
-  triggerRestart(opts?: { platformChatId?: string; chatId?: string; sourceEnvPath?: string }): void {
+  triggerRestart(opts?: { platformChatId?: string; chatId?: string; sourceEnvPath?: string; updateVersion?: string }): void {
     const runtimeRoot = path.resolve(
       path.dirname(fileURLToPath(import.meta.url)),
       "../..",
     );
-    const projectRoot = this.restartConfig?.sourceDirectory ?? runtimeRoot;
+    const useNpmRelease = process.env["NIUBOT_RUNTIME_MODE"] === "npm-release";
+    const projectRoot = opts?.updateVersion || useNpmRelease
+      ? runtimeRoot
+      : (this.restartConfig?.sourceDirectory ?? runtimeRoot);
     const restartScript = path.join(projectRoot, "restart.sh");
 
     // 解析 chatId 和 platformChatId（互相反查）
@@ -2408,6 +2424,10 @@ export class Pipeline {
         NIUBOT_SOURCE_DIR: projectRoot,
         NIUBOT_RESTART_NOTIFY_CHAT_ID: chatId ?? "",
         NIUBOT_API_SOCKET: socketPath,
+        ...(opts?.updateVersion ? {
+          NIUBOT_RESTART_MODE: "npm-update",
+          NIUBOT_UPDATE_VERSION: opts.updateVersion,
+        } : {}),
         ...(opts?.sourceEnvPath ? { NIUBOT_RESTART_SOURCE_ENV: opts.sourceEnvPath } : {}),
       },
     });

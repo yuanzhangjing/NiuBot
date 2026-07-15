@@ -1168,8 +1168,8 @@ describe("Pipeline.recover", () => {
       if (cmd.startsWith("npm view ")) return { stdout: "9.9.9\n", stderr: "" };
       return { stdout: "", stderr: "" };
     };
-    let restarted = false;
-    (pipeline as any).triggerRestart = () => { restarted = true; };
+    let restartOptions: any;
+    (pipeline as any).triggerRestart = (opts: any) => { restartOptions = opts; };
 
     await (pipeline as any).handleUpdate("c1", "chat-open-id", undefined, true);
 
@@ -1177,9 +1177,12 @@ describe("Pipeline.recover", () => {
       "npm view @yuanzhangjing/niubot@latest version",
       "npm install -g @yuanzhangjing/niubot@9.9.9",
     ]);
-    expect(restarted).toBe(true);
+    expect(restartOptions).toEqual({
+      platformChatId: "chat-open-id",
+      updateVersion: "9.9.9",
+    });
     expect(sentTexts.at(-2)).toContain("正在安装");
-    expect(sentTexts.at(-1)).toContain("正在重启");
+    expect(sentTexts.at(-1)).toContain("独立 release");
   });
 
   test("/update install command uses a ten minute timeout", async () => {
@@ -1210,6 +1213,36 @@ describe("Pipeline.recover", () => {
 
     expect(timeouts).toEqual([15_000, UPDATE_INSTALL_TIMEOUT_MS]);
     expect(UPDATE_INSTALL_TIMEOUT_MS).toBe(600_000);
+  });
+
+  test("/update continues with an isolated release when global npm install fails", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const { im, sentTexts } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db,
+      im,
+      new RecordingAgent(),
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+    (pipeline as any).runUpdateCommand = async (cmd: string) => {
+      if (cmd.startsWith("npm view ")) return { stdout: "9.9.9\n", stderr: "" };
+      throw new Error("npm exited with code 1");
+    };
+    let restarted = false;
+    (pipeline as any).triggerRestart = () => { restarted = true; };
+
+    await (pipeline as any).handleUpdate("c1", "chat-open-id", undefined, true);
+
+    expect(restarted).toBe(true);
+    expect(sentTexts.at(-2)).toContain("独立 release");
+    expect(sentTexts.at(-1)).toContain("独立 release");
   });
 
   test("shell command timeout is five minutes and shown in output", () => {

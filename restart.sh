@@ -70,8 +70,14 @@ process.stdout.write(path.resolve(expanded));
 NODE
 }
 
+RESTART_MODE="${NIUBOT_RESTART_MODE:-}"
+UPDATE_TARGET_VERSION="${NIUBOT_UPDATE_VERSION:-}"
+PREVIOUS_RUNTIME_MODE="${NIUBOT_RUNTIME_MODE:-}"
 CONFIG_SOURCE_DIR="$(resolve_config_source_dir)"
-if [ -n "$CONFIG_SOURCE_DIR" ] && [ -d "$CONFIG_SOURCE_DIR" ]; then
+if [ "$RESTART_MODE" = "npm-update" ] || [ "$PREVIOUS_RUNTIME_MODE" = "npm-release" ]; then
+    # npm-managed releases must stay independent from a development checkout.
+    SOURCE_DIR="${NIUBOT_SOURCE_DIR:-$SCRIPT_DIR}"
+elif [ -n "$CONFIG_SOURCE_DIR" ] && [ -d "$CONFIG_SOURCE_DIR" ]; then
     # restart.sourceDirectory takes precedence over an inherited NIUBOT_SOURCE_DIR
     # because long-running services may carry an old release path in the env.
     SOURCE_DIR="$CONFIG_SOURCE_DIR"
@@ -79,6 +85,8 @@ else
     SOURCE_DIR="${NIUBOT_SOURCE_DIR:-$SCRIPT_DIR}"
 fi
 SOURCE_DIR_REAL="$(cd "$SOURCE_DIR" && pwd -P)"
+# Do not leak one-shot update inputs into the restarted service.
+unset NIUBOT_RESTART_MODE NIUBOT_UPDATE_VERSION
 BOT_NAME="${NIUBOT_BOT_NAME:-NiuBot}"
 CHAT_ID="${NIUBOT_RESTART_NOTIFY_CHAT_ID:-}"
 SOCKET_PATH="${NIUBOT_API_SOCKET:-$NIUBOT_HOME/$BOT_NAME/api.sock}"
@@ -107,12 +115,23 @@ DIST_DIR="$SOURCE_DIR_REAL/dist"
 HEALTH_TIMEOUT=15
 HEALTH_INTERVAL=1
 PREFLIGHT_TIMEOUT=20
-DEPENDENCY_INSTALL_TIMEOUT="${NIUBOT_RESTART_INSTALL_TIMEOUT:-120}"
+DEFAULT_DEPENDENCY_INSTALL_TIMEOUT=120
+if [ "$RESTART_MODE" = "npm-update" ]; then
+    DEFAULT_DEPENDENCY_INSTALL_TIMEOUT=600
+fi
+DEPENDENCY_INSTALL_TIMEOUT="${NIUBOT_RESTART_INSTALL_TIMEOUT:-$DEFAULT_DEPENDENCY_INSTALL_TIMEOUT}"
 case "$DEPENDENCY_INSTALL_TIMEOUT" in
-    ""|*[!0-9]*) DEPENDENCY_INSTALL_TIMEOUT=120 ;;
+    ""|*[!0-9]*) DEPENDENCY_INSTALL_TIMEOUT="$DEFAULT_DEPENDENCY_INSTALL_TIMEOUT" ;;
 esac
 if [ "$DEPENDENCY_INSTALL_TIMEOUT" -le 0 ]; then
-    DEPENDENCY_INSTALL_TIMEOUT=120
+    DEPENDENCY_INSTALL_TIMEOUT="$DEFAULT_DEPENDENCY_INSTALL_TIMEOUT"
+fi
+NPM_PACK_TIMEOUT="${NIUBOT_RESTART_PACK_TIMEOUT:-120}"
+case "$NPM_PACK_TIMEOUT" in
+    ""|*[!0-9]*) NPM_PACK_TIMEOUT=120 ;;
+esac
+if [ "$NPM_PACK_TIMEOUT" -le 0 ]; then
+    NPM_PACK_TIMEOUT=120
 fi
 PROXY_CHECK_TIMEOUT="${NIUBOT_RESTART_PROXY_CHECK_TIMEOUT:-3}"
 case "$PROXY_CHECK_TIMEOUT" in
@@ -303,9 +322,10 @@ stop_service() {
 
 start_service() {
     local package_dir="${1:-$SCRIPT_DIR_REAL}"
+    local runtime_mode="${2:-${NIUBOT_RUNTIME_MODE:-}}"
     debug "starting new process from $package_dir..."
     cd "$package_dir"
-    NIUBOT_SOURCE_DIR="$SOURCE_DIR_REAL" NIUBOT_LOG_LEVEL="${NIUBOT_LOG_LEVEL:-info}" nohup "${SHELL:-/bin/zsh}" -l -c 'exec node dist/index.js' >> "$LOG_FILE" 2>&1 &
+    NIUBOT_SOURCE_DIR="$SOURCE_DIR_REAL" NIUBOT_RUNTIME_MODE="$runtime_mode" NIUBOT_LOG_LEVEL="${NIUBOT_LOG_LEVEL:-info}" nohup "${SHELL:-/bin/zsh}" -l -c 'exec node dist/index.js' >> "$LOG_FILE" 2>&1 &
     echo "$!" > "$CANDIDATE_PID_FILE"
     STATE_CANDIDATE_PID="$!"
     debug "new process launched, PID=$!"
@@ -578,6 +598,51 @@ install_candidate_dependencies() {
     return 1
 }
 
+pack_npm_update() {
+    local version="$1"
+    local output_file="$RESTART_DIR/npm-pack-$RESTART_ID.out"
+    rm -f "$output_file"
+
+    preflight_npm_proxy_environment || return 1
+    (
+        cd "$SOURCE_DIR_REAL"
+        exec perl -e 'use POSIX "setsid"; setsid(); exec @ARGV' \
+            npm pack "@yuanzhangjing/niubot@$version" --pack-destination "$PACKAGES_DIR" \
+            > "$output_file" 2>> "$DEBUG_LOG"
+    ) &
+    local pack_pid=$!
+
+    local elapsed=0
+    while [ "$elapsed" -lt "$NPM_PACK_TIMEOUT" ]; do
+        if ! kill -0 "$pack_pid" 2>/dev/null; then
+            local status=0
+            wait "$pack_pid" 2>/dev/null || status=$?
+            if [ "$status" -ne 0 ]; then
+                rm -f "$output_file"
+                return "$status"
+            fi
+            tail -n 1 "$output_file"
+            rm -f "$output_file"
+            return 0
+        fi
+        sleep "$HEALTH_INTERVAL"
+        elapsed=$((elapsed + HEALTH_INTERVAL))
+        if [ $((elapsed % 10)) -eq 0 ]; then
+            debug "  npm candidate pack: waiting... ($elapsed/${NPM_PACK_TIMEOUT})"
+        fi
+    done
+
+    debug "npm candidate pack timed out after ${NPM_PACK_TIMEOUT}s, killing PID $pack_pid"
+    kill_process_tree "$pack_pid" TERM
+    sleep 5
+    if kill -0 "$pack_pid" 2>/dev/null; then
+        kill_process_tree "$pack_pid" KILL
+    fi
+    wait "$pack_pid" 2>/dev/null || true
+    rm -f "$output_file"
+    return 1
+}
+
 bootstrap_last_known_good() {
     if [ -n "$(resolve_release_link "$LKG_LINK")" ]; then
         return 0
@@ -619,9 +684,6 @@ build_candidate_release() {
     fi
     debug "pack check done"
 
-    npm link --silent >> "$DEBUG_LOG" 2>&1 || debug "npm link skipped"
-    debug "npm link done"
-
     local version
     local sha
     local release_id
@@ -650,6 +712,52 @@ build_candidate_release() {
         return 1
     fi
     debug "candidate release ready package_dir=$package_dir"
+
+    echo "$release_dir"
+}
+
+build_npm_candidate_release() {
+    local version="$1"
+    case "$version" in
+        ""|*[!0-9A-Za-z._-]*)
+            debug "invalid npm update version: $version"
+            return 1
+            ;;
+    esac
+
+    local release_id
+    local release_dir
+    local package_dir
+    release_id="$(date '+%Y%m%d-%H%M%S')-${version}-npm"
+    release_dir="$RELEASES_DIR/$release_id"
+    package_dir="$(release_package_dir "$release_dir")"
+    mkdir -p "$package_dir"
+
+    debug "packing npm candidate version=$version release=$release_id"
+    local pack_file
+    pack_file="$(pack_npm_update "$version")"
+    local pack_path="$PACKAGES_DIR/$pack_file"
+    if [ ! -f "$pack_path" ]; then
+        debug "npm candidate pack FAILED: package not found path=$pack_path"
+        return 1
+    fi
+    tar -xzf "$pack_path" -C "$package_dir" --strip-components=1
+
+    local actual_name
+    local actual_version
+    actual_name="$(cd "$package_dir" && node -p "require('./package.json').name" 2>/dev/null || true)"
+    actual_version="$(cd "$package_dir" && node -p "require('./package.json').version" 2>/dev/null || true)"
+    if [ "$actual_name" != "@yuanzhangjing/niubot" ] || [ "$actual_version" != "$version" ]; then
+        debug "npm candidate metadata mismatch name=$actual_name version=$actual_version expected=$version"
+        return 1
+    fi
+
+    debug "installing production dependencies for npm candidate..."
+    if ! install_candidate_dependencies "$package_dir"; then
+        debug "npm candidate dependency install FAILED"
+        return 1
+    fi
+    debug "npm candidate release ready package_dir=$package_dir"
 
     echo "$release_dir"
 }
@@ -698,7 +806,84 @@ if [ -d "$SOURCE_DIR_REAL/src" ]; then
     DEV_MODE=true
 fi
 
-if $DEV_MODE; then
+if [ "$RESTART_MODE" = "npm-update" ]; then
+    # ── npm update: registry package → immutable release → preflight → switch / rollback ──
+
+    write_state "bootstrap_last_known_good" || true
+    bootstrap_last_known_good
+
+    write_state "build_npm_candidate" || true
+    if ! candidate_release="$(build_npm_candidate_release "$UPDATE_TARGET_VERSION")"; then
+        write_state "build_package_failed" "npm package download, unpack, or dependency install failed" || true
+        notify "更新失败：下载安装包或依赖错误，当前服务不受影响。"
+        debug "=== restart.sh done (npm candidate failed) ==="
+        exit 1
+    fi
+    STATE_CANDIDATE_RELEASE="$candidate_release"
+    candidate_package_dir="$(release_package_dir "$candidate_release")"
+
+    write_state "preflight_candidate" || true
+    if ! run_preflight "$candidate_package_dir"; then
+        debug "npm candidate preflight FAILED, old process unaffected"
+        write_state "preflight_failed" "npm candidate preflight failed" || true
+        notify "更新失败：新版本预检不通过，当前服务不受影响。"
+        debug "=== restart.sh done (preflight failed) ==="
+        exit 1
+    fi
+
+    previous_release="$(resolve_release_link "$LKG_LINK")"
+    if [ -n "$previous_release" ]; then
+        STATE_PREVIOUS_RELEASE="$previous_release"
+        set_release_link "$PREVIOUS_LINK" "$previous_release"
+    fi
+
+    write_state "stop_old_service" || true
+    stop_service
+    set_release_link "$CURRENT_LINK" "$candidate_release"
+    debug "current release switched npm_candidate=$candidate_release previous=${previous_release:-none}"
+    write_state "start_candidate" || true
+    start_service "$candidate_package_dir" "npm-release"
+
+    write_state "health_check_candidate" || true
+    if check_health; then
+        debug "npm candidate health check passed"
+        sleep 1
+        set_release_link "$LKG_LINK" "$candidate_release"
+        debug "last-known-good updated npm_release=$candidate_release"
+        cleanup_old_releases
+        rm -f "$CANDIDATE_PID_FILE"
+        write_state "success" || true
+        notify "更新并重启成功。"
+        debug "=== restart.sh done (npm update success) ==="
+        exit 0
+    fi
+
+    debug "npm candidate health check failed, rolling back..."
+    write_state "rollback_stop_candidate" "npm candidate health check failed" || true
+    stop_candidate_service
+
+    rollback_release="$(resolve_release_link "$LKG_LINK")"
+    if [ -n "$rollback_release" ]; then
+        rollback_package_dir="$(release_package_dir "$rollback_release")"
+        set_release_link "$CURRENT_LINK" "$rollback_release"
+        write_state "rollback_start_lkg" "npm candidate health check failed" || true
+        start_service "$rollback_package_dir" "$PREVIOUS_RUNTIME_MODE"
+        write_state "health_check_rollback" "npm candidate health check failed" || true
+        if check_health; then
+            sleep 1
+            rm -f "$CANDIDATE_PID_FILE"
+            write_state "rollback_success" "npm candidate health check failed" || true
+            notify "新版本启动失败，已回滚到上一版本。"
+            debug "=== restart.sh done (npm rollback success) ==="
+            exit 0
+        fi
+    fi
+
+    write_state "rollback_failed" "npm update and rollback health checks failed" || true
+    notify "更新失败（回滚也失败），请检查日志: $LOG_FILE"
+    debug "=== restart.sh done (npm rollback failed) ==="
+    exit 1
+elif $DEV_MODE; then
     # ── Dev mode: build package → release → preflight → switch → commit LKG / rollback ──
 
     write_state "bootstrap_last_known_good" || true

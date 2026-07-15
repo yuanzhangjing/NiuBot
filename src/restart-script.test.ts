@@ -69,6 +69,37 @@ describe("restart.sh", () => {
     expect(sourceIndex).toBeGreaterThan(configIndex);
   });
 
+  test("builds npm updates as immutable releases without leaking update inputs", () => {
+    const script = readScript();
+    const modeIndex = script.indexOf('RESTART_MODE" = "npm-update"');
+    const configIndex = script.indexOf('elif [ -n "$CONFIG_SOURCE_DIR" ]');
+    const unsetIndex = script.indexOf("unset NIUBOT_RESTART_MODE NIUBOT_UPDATE_VERSION");
+    const startIndex = script.indexOf("start_service() {");
+
+    expect(modeIndex).toBeGreaterThan(-1);
+    expect(configIndex).toBeGreaterThan(modeIndex);
+    expect(unsetIndex).toBeGreaterThan(configIndex);
+    expect(unsetIndex).toBeLessThan(startIndex);
+    expect(script).toContain("build_npm_candidate_release");
+    expect(script).toContain("pack_npm_update");
+    expect(script).toContain("NPM_PACK_TIMEOUT=");
+    expect(script).toContain("npm candidate pack timed out after ${NPM_PACK_TIMEOUT}s");
+    expect(script).toContain('if [ "$RESTART_MODE" = "npm-update" ]; then');
+    expect(script).toContain("DEFAULT_DEPENDENCY_INSTALL_TIMEOUT=600");
+    expect(script).toContain('start_service "$candidate_package_dir" "npm-release"');
+    expect(script).toContain('start_service "$rollback_package_dir" "$PREVIOUS_RUNTIME_MODE"');
+    expect(script).toContain("npm candidate health check failed, rolling back");
+    expect(script).toContain('PREVIOUS_RUNTIME_MODE="${NIUBOT_RUNTIME_MODE:-}"');
+    expect(script).not.toContain("npm link");
+
+    const startScript = readFileSync(path.resolve(__dirname, "../start.sh"), "utf-8");
+    expect(startScript).not.toContain("npm link");
+
+    const pipeline = readFileSync(path.resolve(__dirname, "core/pipeline.ts"), "utf-8");
+    expect(pipeline).toContain('process.env["NIUBOT_RUNTIME_MODE"] === "npm-release"');
+    expect(pipeline).toContain("opts?.updateVersion || useNpmRelease");
+  });
+
   test("passes the current bot name to the detached restart script", () => {
     const pipeline = readFileSync(path.resolve(__dirname, "core/pipeline.ts"), "utf-8");
 

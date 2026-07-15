@@ -53,8 +53,6 @@ if $DO_BUILD; then
     fi
     echo "Build done."
 
-    # Ensure global CLI symlink matches current build
-    npm link --silent 2>/dev/null || true
 fi
 
 # ── Start ──
