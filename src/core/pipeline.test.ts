@@ -2017,7 +2017,7 @@ describe("Pipeline.recover", () => {
     expect((pipeline as any).lastCompactCounts.has("c1")).toBe(false);
   });
 
-  test("keeps the current session active when /new cannot write its transcript", async () => {
+  test("starts a new session and marks the old one archive_failed when transcript export fails", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
     const db = initDatabase(path.join(dir, "niubot.db"));
@@ -2037,10 +2037,12 @@ describe("Pipeline.recover", () => {
     await (pipeline as any).sessionTransitionLocks.get("c1");
 
     const row = db.prepare("SELECT status, ended_at FROM sessions WHERE id = 's1'").get() as { status: string; ended_at: string | null };
-    expect(row).toEqual({ status: "active", ended_at: null });
-    expect((pipeline as any).chatSessions.has("c1")).toBe(true);
-    expect(agent.closeSessionCalls).toHaveLength(0);
-    expect(sentTexts.some((text) => text.includes("新建会话失败"))).toBe(true);
+    expect(row.status).toBe("archive_failed");
+    expect(row.ended_at).not.toBeNull();
+    expect((pipeline as any).chatSessions.has("c1")).toBe(false);
+    expect(agent.closeSessionCalls).toEqual(["agent_1"]);
+    expect(sentTexts).toContain("已开始新会话，当前上下文已清空；旧会话记录归档失败。");
+    expect(sentTexts.some((text) => text.includes("新建会话失败"))).toBe(false);
   });
 
   test("does not claim an orphaned active session was archived without a file", async () => {

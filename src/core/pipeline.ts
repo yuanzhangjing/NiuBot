@@ -131,6 +131,8 @@ interface PendingTransitionMessage {
   msg: NormalizedMessage;
 }
 
+type SessionEndStatus = "archived" | "archive_failed" | "discarded";
+
 export class Pipeline {
   private db: Database.Database;
   private im: PlatformAdapter;
@@ -1678,10 +1680,12 @@ export class Pipeline {
     await this.stopActiveRunForSessionTransition(chatId);
     await this.waitForSessionCreation(chatId);
     await this.archiveSession(chatId)
-      .then((archived) => {
-        const text = archived
-          ? "已开始新会话，当前上下文已清空。"
-          : "当前没有进行中的会话；下一条消息会新建会话。";
+      .then((status) => {
+        const text = status === false
+          ? "当前没有进行中的会话；下一条消息会新建会话。"
+          : status === "archive_failed"
+            ? "已开始新会话，当前上下文已清空；旧会话记录归档失败。"
+            : "已开始新会话，当前上下文已清空。";
         this.replyText(chatId, platformChatId, msgId, text);
       })
       .catch((err) => {
@@ -2932,7 +2936,7 @@ export class Pipeline {
     this.pendingCompactRecovery.add(chatId);
   }
 
-  private async archiveSession(chatId: string): Promise<boolean> {
+  private async archiveSession(chatId: string): Promise<SessionEndStatus | false> {
     const session = this.chatSessions.get(chatId);
     if (!session) {
       const result = this.db.prepare(`
@@ -2949,18 +2953,26 @@ export class Pipeline {
       `).run(chatId);
 
       this.clearChatRuntimeState(chatId);
-      return result.changes > 0;
+      return result.changes > 0 ? "archive_failed" : false;
     }
 
     const { agentSession, sessionId } = session;
     const archivedAt = utcDateTimeForSql(new Date());
-    let archiveStatus = "archived";
+    let archiveStatus: SessionEndStatus = "archived";
     try {
       await this.archiveTranscript(chatId, sessionId, agentSession, this.agent, archivedAt);
     } catch (err) {
-      if (!(err instanceof AgentSessionNotStartedError)) throw err;
-      archiveStatus = "discarded";
-      this.log.info("discarding session that never started in backend", { chatId, sessionId });
+      if (err instanceof AgentSessionNotStartedError) {
+        archiveStatus = "discarded";
+        this.log.info("discarding session that never started in backend", { chatId, sessionId });
+      } else {
+        archiveStatus = "archive_failed";
+        this.log.error("session transcript archive failed; ending session anyway", {
+          chatId,
+          sessionId,
+          error: String(err),
+        });
+      }
     }
 
     this.db.prepare(`
@@ -2975,8 +2987,8 @@ export class Pipeline {
       this.log.warn("failed to close backend session during archive", { chatId, sessionId, error: String(err) });
     });
 
-    this.log.info("session archived", { chatId, sessionId });
-    return true;
+    this.log.info("session ended", { chatId, sessionId, status: archiveStatus });
+    return archiveStatus;
   }
 
   private async archiveTranscript(
