@@ -40,7 +40,7 @@ export function resolveExecutable(
   }
 
   const pathValue = readEnv(env, "PATH") ?? "";
-  const delimiter = platform === "win32" ? ";" : path.delimiter;
+  const delimiter = platform === "win32" ? path.win32.delimiter : path.posix.delimiter;
   for (const directory of pathValue.split(delimiter)) {
     if (!directory) continue;
     const base = pathApi.join(trimWrappingQuotes(directory), command);
