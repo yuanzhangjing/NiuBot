@@ -1,13 +1,19 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentSessionNotStartedError } from "../agent/types.js";
 import GrokBackend from "./grok.js";
 
 const originalHome = process.env["HOME"];
 
+function setTestHome(home: string): void {
+  vi.stubEnv("HOME", home);
+  vi.stubEnv("USERPROFILE", home);
+}
+
 afterEach(() => {
+  vi.unstubAllEnvs();
   if (originalHome === undefined) {
     delete process.env["HOME"];
   } else {
@@ -22,7 +28,7 @@ function grokSessionDir(home: string, workingDirectory: string, sessionId: strin
 describe("GrokBackend", () => {
   it("reports a preallocated session as not started before history exists", async () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "grok-home-"));
-    process.env["HOME"] = home;
+    setTestHome(home);
     const backend = new GrokBackend();
     const session = backend.buildSession({ workingDirectory: path.join(home, "workspace") });
 
@@ -96,7 +102,7 @@ describe("GrokBackend", () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "grok-home-"));
     const workingDirectory = path.join(home, "workspace");
     const sessionId = "88888888-8888-4888-8888-888888888888";
-    process.env["HOME"] = home;
+    setTestHome(home);
 
     const backend = new GrokBackend();
     const session = backend.buildSession({ workingDirectory });
@@ -115,7 +121,7 @@ describe("GrokBackend", () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "grok-home-"));
     const workingDirectory = path.join(home, "workspace");
     const sessionId = "33333333-3333-4333-8333-333333333333";
-    process.env["HOME"] = home;
+    setTestHome(home);
 
     const dir = grokSessionDir(home, workingDirectory, sessionId);
     fs.mkdirSync(dir, { recursive: true });
@@ -153,7 +159,7 @@ describe("GrokBackend", () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "grok-home-"));
     const workingDirectory = path.join(home, "workspace");
     const sessionId = "66666666-6666-4666-8666-666666666666";
-    process.env["HOME"] = home;
+    setTestHome(home);
 
     const dir = grokSessionDir(home, workingDirectory, sessionId);
     fs.mkdirSync(dir, { recursive: true });
@@ -179,7 +185,7 @@ describe("GrokBackend", () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "grok-home-"));
     const workingDirectory = path.join(home, "workspace");
     const sessionId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-    process.env["HOME"] = home;
+    setTestHome(home);
 
     const dir = grokSessionDir(home, workingDirectory, sessionId);
     fs.mkdirSync(dir, { recursive: true });
@@ -208,7 +214,7 @@ describe("GrokBackend", () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "grok-home-"));
     const workingDirectory = path.join(home, "workspace");
     const sessionId = "77777777-7777-4777-8777-777777777777";
-    process.env["HOME"] = home;
+    setTestHome(home);
 
     const dir = grokSessionDir(home, workingDirectory, sessionId);
     fs.mkdirSync(dir, { recursive: true });
@@ -248,7 +254,7 @@ describe("GrokBackend", () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "grok-home-"));
     const workingDirectory = path.join(home, "workspace");
     const sessionId = "55555555-5555-4555-8555-555555555555";
-    process.env["HOME"] = home;
+    setTestHome(home);
 
     const dir = grokSessionDir(home, workingDirectory, sessionId);
     fs.mkdirSync(dir, { recursive: true });
@@ -290,7 +296,7 @@ describe("GrokBackend", () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "grok-home-"));
     const workingDirectory = path.join(home, "workspace");
     const sessionId = "99999999-9999-4999-8999-999999999999";
-    process.env["HOME"] = home;
+    setTestHome(home);
 
     const dir = grokSessionDir(home, workingDirectory, sessionId);
     fs.mkdirSync(dir, { recursive: true });

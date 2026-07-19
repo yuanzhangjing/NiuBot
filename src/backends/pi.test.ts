@@ -1,13 +1,19 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import PiBackend, { encodePiSessionDir } from "./pi.js";
 
 const originalHome = process.env["HOME"];
 
+function setTestHome(home: string): void {
+  vi.stubEnv("HOME", home);
+  vi.stubEnv("USERPROFILE", home);
+}
+
 describe("PiBackend", () => {
   afterEach(() => {
+    vi.unstubAllEnvs();
     if (originalHome === undefined) {
       delete process.env["HOME"];
     } else {
@@ -94,7 +100,7 @@ describe("PiBackend", () => {
     const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "pi-home-"));
     const workingDirectory = path.join(tempHome, "workspace");
     fs.mkdirSync(workingDirectory, { recursive: true });
-    process.env["HOME"] = tempHome;
+    setTestHome(tempHome);
 
     const sessionsRoot = path.join(
       tempHome,
@@ -155,6 +161,8 @@ describe("PiBackend", () => {
   });
 
   it("encodes cwd into pi session directory slug", () => {
-    expect(encodePiSessionDir("/private/tmp")).toBe("--private-tmp--");
+    const encoded = encodePiSessionDir(path.resolve(os.tmpdir(), "pi-session"));
+    expect(encoded).toMatch(/^--.+--$/);
+    expect(encoded).not.toMatch(/[\\/:]/);
   });
 });

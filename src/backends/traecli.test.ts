@@ -1,13 +1,19 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import TraeCliBackend from "./traecli.js";
 
 const originalHome = process.env["HOME"];
 
+function setTestHome(home: string): void {
+  vi.stubEnv("HOME", home);
+  vi.stubEnv("USERPROFILE", home);
+}
+
 describe("TraeCliBackend", () => {
   afterEach(() => {
+    vi.unstubAllEnvs();
     if (originalHome === undefined) {
       delete process.env["HOME"];
     } else {
@@ -18,7 +24,7 @@ describe("TraeCliBackend", () => {
   it("hydrates model and current context usage from the session log", () => {
     const threadId = "019f02c8-43c8-7da1-b78c-d7c2c81e544b";
     const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "trae-home-"));
-    process.env["HOME"] = tempHome;
+    setTestHome(tempHome);
 
     const logDir = path.join(tempHome, ".trae", "cli", "sessions", "2026", "06", "26");
     fs.mkdirSync(logDir, { recursive: true });
@@ -75,7 +81,7 @@ describe("TraeCliBackend", () => {
   it("counts context_compacted events from the session log", () => {
     const threadId = "019f02c8-1111-7da1-b78c-d7c2c81e544b";
     const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "trae-home-"));
-    process.env["HOME"] = tempHome;
+    setTestHome(tempHome);
 
     const logDir = path.join(tempHome, ".trae", "cli", "sessions", "2026", "06", "26");
     fs.mkdirSync(logDir, { recursive: true });
@@ -103,7 +109,7 @@ describe("TraeCliBackend", () => {
   it("resumes scanning incrementally across turns", () => {
     const threadId = "019f02c8-2222-7da1-b78c-d7c2c81e544b";
     const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "trae-home-"));
-    process.env["HOME"] = tempHome;
+    setTestHome(tempHome);
 
     const logDir = path.join(tempHome, ".trae", "cli", "sessions", "2026", "06", "26");
     fs.mkdirSync(logDir, { recursive: true });
@@ -305,7 +311,7 @@ describe("TraeCliBackend", () => {
   it("skips non-directory entries while locating session logs", () => {
     const threadId = "019f02c8-3333-7da1-b78c-d7c2c81e544b";
     const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "trae-home-"));
-    process.env["HOME"] = tempHome;
+    setTestHome(tempHome);
 
     const sessionsRoot = path.join(tempHome, ".trae", "cli", "sessions");
     const logDir = path.join(sessionsRoot, "2026", "06", "26");
@@ -336,7 +342,7 @@ describe("TraeCliBackend", () => {
 
   it("returns null from mtime probe when sessions root contains only files", () => {
     const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "trae-home-"));
-    process.env["HOME"] = tempHome;
+    setTestHome(tempHome);
 
     const sessionsRoot = path.join(tempHome, ".trae", "cli", "sessions");
     fs.mkdirSync(sessionsRoot, { recursive: true });
