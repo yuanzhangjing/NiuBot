@@ -73,10 +73,15 @@ export function forceTerminateProcessTree(
   platform: NodeJS.Platform = process.platform,
 ): void {
   if (platform === "win32") {
-    execFileSync("taskkill.exe", ["/PID", String(pid), "/T", "/F"], {
-      timeout: 10_000,
-      stdio: "ignore",
-    });
+    try {
+      execFileSync("taskkill.exe", ["/PID", String(pid), "/T", "/F"], {
+        timeout: 10_000,
+        stdio: "ignore",
+      });
+    } catch {
+      // The process may have exited between identity verification and taskkill.
+      // Callers verify that it is gone and report a failure if it is still alive.
+    }
     return;
   }
   try {

@@ -35,8 +35,15 @@ describe("local IPC endpoints", () => {
     expect(first).toEqual(second);
     expect(first.kind).toBe("named-pipe");
     expect(first.address.startsWith("\\\\.\\pipe\\niubot-")).toBe(true);
-    expect(first.address.slice("\\\\.\\pipe\\niubot-".length)).toMatch(/^[a-f0-9]{16}-bot-niu-bot$/);
+    expect(first.address.slice("\\\\.\\pipe\\niubot-".length)).toMatch(/^[a-f0-9]{16}-bot-niu-bot-[a-f0-9]{8}$/);
     expect(first.address).not.toContain("Users");
+  });
+
+  it("does not collide when different bot IDs have the same readable slug", () => {
+    const first = resolveBotEndpoint("C:\\Users\\Zen\\.niubot", "Niu Bot", "win32");
+    const second = resolveBotEndpoint("C:\\Users\\Zen\\.niubot", "Niu-Bot", "win32");
+
+    expect(first.address).not.toBe(second.address);
   });
 
   it("only creates and removes filesystem entries for Unix sockets", () => {

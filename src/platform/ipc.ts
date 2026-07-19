@@ -82,6 +82,6 @@ function namedPipeEndpoint(niubotHome: string, role: string): LocalIpcEndpoint {
 
 function stableSegment(value: string): string {
   const readable = value.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 24);
-  if (readable) return readable;
-  return createHash("sha256").update(value).digest("hex").slice(0, 12);
+  const hash = createHash("sha256").update(value).digest("hex").slice(0, 8);
+  return `${readable || "id"}-${hash}`;
 }
