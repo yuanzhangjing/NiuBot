@@ -2,9 +2,9 @@
  * CLI: send — send messages and files via IPC to the running daemon.
  */
 
-import http from "node:http";
 import path from "node:path";
-import os from "node:os";
+import { localApiRequest } from "../local-api/client.js";
+import { endpointFromAddress, resolveBotEndpoint, type LocalIpcEndpoint } from "../platform/ipc.js";
 
 function requireEnv(name: string): string {
   const v = process.env[name];
@@ -13,43 +13,31 @@ function requireEnv(name: string): string {
 }
 const DB_PATH = process.env["NIUBOT_DB_PATH"];
 
-function getSocketPath(): string {
+function getEndpoint(): LocalIpcEndpoint {
   const niubotHome = requireEnv("NIUBOT_HOME");
-  return process.env["NIUBOT_API_SOCKET"]
-    ?? (DB_PATH
-      ? path.join(path.dirname(DB_PATH), "api.sock")
-      : path.join(niubotHome, "run", "api.sock"));
+  const configured = process.env["NIUBOT_API_SOCKET"];
+  if (configured) return endpointFromAddress(configured);
+  const botName = process.env["NIUBOT_BOT_NAME"];
+  if (botName) return resolveBotEndpoint(niubotHome, botName);
+  if (DB_PATH) {
+    const directory = path.dirname(DB_PATH);
+    return resolveBotEndpoint(niubotHome, path.basename(directory), process.platform, directory);
+  }
+  return endpointFromAddress(path.join(niubotHome, "run", "api.sock"));
 }
 
-function ipcRequest(socketPath: string, urlPath: string, body: unknown): Promise<string> {
-  const data = JSON.stringify(body);
-  return new Promise((resolve, reject) => {
-    const req = http.request(
-      {
-        socketPath,
-        path: urlPath,
-        method: "POST",
-        headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(data) },
-      },
-      (res) => {
-        const chunks: Buffer[] = [];
-        res.on("data", (chunk) => chunks.push(chunk));
-        res.on("end", () => {
-          const body = Buffer.concat(chunks).toString();
-          if (res.statusCode && res.statusCode >= 400) {
-            reject(new Error(`API error (${res.statusCode}): ${body}`));
-          } else {
-            resolve(body);
-          }
-        });
-      },
-    );
-    req.on("error", (err) => {
-      reject(new Error(`Cannot connect to NiuBot daemon: ${err.message}. Is NiuBot running?`));
-    });
-    req.write(data);
-    req.end();
-  });
+async function ipcRequest(endpoint: LocalIpcEndpoint, urlPath: string, body: unknown): Promise<string> {
+  let response;
+  try {
+    response = await localApiRequest(endpoint, urlPath, { method: "POST", body });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(`Cannot connect to NiuBot daemon: ${message}. Is NiuBot running?`);
+  }
+  if (response.statusCode >= 400) {
+    throw new Error(`API error (${response.statusCode}): ${response.body}`);
+  }
+  return response.body;
 }
 
 export function resolveSendFilePaths(
@@ -102,11 +90,11 @@ export function handleSend(
       console.error("Usage: nbt send --file <path> [--file <path> ...]");
       process.exit(1);
     }
-    const socketPath = getSocketPath();
+    const endpoint = getEndpoint();
     (async () => {
       for (const filePath of filePaths) {
         const absPath = path.resolve(filePath);
-        await ipcRequest(socketPath, "/send-file", { chat_id: targetChatId, file_path: absPath });
+        await ipcRequest(endpoint, "/send-file", { chat_id: targetChatId, file_path: absPath });
       }
       console.log(filePaths.length === 1 ? "File sent." : `${filePaths.length} files sent.`);
     })()
@@ -125,8 +113,8 @@ export function handleSend(
       console.error("Usage: nbt send --card <header> <content>");
       process.exit(1);
     }
-    const socketPath = getSocketPath();
-    ipcRequest(socketPath, "/send", { chat_id: targetChatId, text: content, card_header: cardHeader })
+    const endpoint = getEndpoint();
+    ipcRequest(endpoint, "/send", { chat_id: targetChatId, text: content, card_header: cardHeader })
       .then(() => console.log("Card sent."))
       .catch((err) => {
         console.error(`Error: ${err.message}`);
@@ -141,8 +129,8 @@ export function handleSend(
     console.error("Usage: nbt send <text>");
     process.exit(1);
   }
-  const socketPath = getSocketPath();
-  ipcRequest(socketPath, "/send", { chat_id: targetChatId, text })
+  const endpoint = getEndpoint();
+  ipcRequest(endpoint, "/send", { chat_id: targetChatId, text })
     .then(() => console.log("Message sent."))
     .catch((err) => {
       console.error(`Error: ${err.message}`);

@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { BUILTIN_BACKEND_LIST, loadConfig, NIUBOT_HOME, normalizeBackend } from "./config.js";
+import { BUILTIN_BACKEND_LIST, loadConfig, normalizeBackend } from "./config.js";
 
 const tempDirs: string[] = [];
 
@@ -62,7 +62,8 @@ bots:
 
     const config = loadConfig(configPath);
 
-    expect(config.bots[0]?.botProfilePath).toBe(path.join(NIUBOT_HOME, "NiuBot", "bot_profile.md"));
+    expect(config.bots[0]?.botProfilePath).toBe(path.join(dir, "NiuBot", "bot_profile.md"));
+    expect(config.bots[0]?.dbPath).toBe(path.join(dir, "NiuBot", "niubot.db"));
     expect(config.bots[0]?.personaPath).toBeUndefined();
     expect(config.bots[0]?.instructionsPath).toBeUndefined();
     expect(config.bots[0]?.projectContextPath).toBeUndefined();

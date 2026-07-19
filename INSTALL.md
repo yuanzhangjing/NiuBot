@@ -11,6 +11,17 @@ Human users: run `niubot init` and follow the prompts. You don't need to read th
 - Node.js >= 18
 - A Feishu (Lark) enterprise account with permission to create apps
 
+### Windows
+
+NiuBot itself runs natively in PowerShell or Windows Terminal. It does not require WSL or Git Bash for installation or service management.
+
+- Codex, OpenCode, and Grok are treated as native Windows backends when their CLI version probe succeeds.
+- Claude Code supports Windows but requires Git for Windows. Portable Git installations may need `CLAUDE_CODE_GIT_BASH_PATH`.
+- Cursor Agent is marked WSL-only on Windows.
+- Pi and TraeCLI remain unavailable on native Windows until their upstream behavior is verified.
+
+NiuBot probes the selected backend at startup. An unavailable backend does not prevent other installed backends from running.
+
 ## Step 1: Install NiuBot
 
 ```bash
@@ -161,7 +172,7 @@ restart:
   sourceDirectory: /path/to/niubot/source
 ```
 
-When this is set, `/restart` runs that source tree's `restart.sh` and passes it as `NIUBOT_SOURCE_DIR`. If the directory contains `src/`, the restart script uses dev mode: build, package, preflight, switch release, then health check. Without this setting, `/restart` keeps using the currently running package directory.
+When this is set, `/restart` asks the Node restart worker to build that source tree, package it as an immutable release, run preflight, switch releases, and check health. Without this setting, `/restart` keeps using the currently running package directory.
 
 Create default bot profile:
 
@@ -237,6 +248,8 @@ NiuBot is running.
   API: ~/.niubot/NiuBot/api.sock
 ```
 
+On Windows the API line is a local Named Pipe such as `\\.\pipe\niubot-<home-hash>-bot-niubot`; it is not a TCP port.
+
 If pre-start checks fail, fix the reported issues and retry.
 
 ## Step 5: Configure Permissions (requires user action)
@@ -290,7 +303,17 @@ Admin commands (in chat):
 niubot status           # Check if running
 niubot stop             # Stop the service
 niubot start            # Start the service
-niubot start --restart  # Restart (stop + start)
+niubot restart          # Preflight and safely restart
+niubot update           # Install, switch, health-check, and roll back on failure
+niubot status --all     # Show registered NIUBOT_HOME instances
+```
+
+Every lifecycle command accepts `--home <path>`. This is the simplest way to run independent instances without repeatedly changing environment variables:
+
+```text
+niubot start  --home D:\NiuBot\work
+niubot status --home D:\NiuBot\work
+niubot stop   --home D:\NiuBot\work
 ```
 
 ## Troubleshooting

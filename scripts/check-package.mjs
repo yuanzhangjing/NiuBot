@@ -1,6 +1,8 @@
 import { execFileSync } from "node:child_process";
 
-const raw = execFileSync("npm", ["pack", "--json", "--dry-run"], {
+const npmEntry = process.env.npm_execpath;
+if (!npmEntry) throw new Error("npm_execpath is not set; run this check through npm run pack:check");
+const raw = execFileSync(process.execPath, [npmEntry, "pack", "--json", "--dry-run"], {
   encoding: "utf8",
 });
 

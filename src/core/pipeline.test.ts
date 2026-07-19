@@ -20,7 +20,6 @@ import {
   formatShellExecError,
   Pipeline,
   SHELL_COMMAND_TIMEOUT_MS,
-  UPDATE_INSTALL_TIMEOUT_MS,
   type BotIdentity,
 } from "./pipeline.js";
 import { ResponseSender } from "./response-sender.js";
@@ -1097,9 +1096,9 @@ describe("Pipeline.recover", () => {
       0,
       "codex",
     );
-    const updateCommands: string[] = [];
-    (pipeline as any).runUpdateCommand = async (cmd: string) => {
-      updateCommands.push(cmd);
+    const updateCommands: string[][] = [];
+    (pipeline as any).runNpmCommand = async (args: string[]) => {
+      updateCommands.push(args);
       return { stdout: "9.9.9\n", stderr: "" };
     };
     let restarted = false;
@@ -1107,7 +1106,7 @@ describe("Pipeline.recover", () => {
 
     await (pipeline as any).handleUpdate("c1", "chat-open-id", undefined, false);
 
-    expect(updateCommands).toEqual(["npm view @yuanzhangjing/niubot@latest version"]);
+    expect(updateCommands).toEqual([["view", "@yuanzhangjing/niubot@latest", "version"]]);
     expect(restarted).toBe(false);
     expect(sentTexts).toHaveLength(0);
     expect(sentCards).toHaveLength(1);
@@ -1145,7 +1144,7 @@ describe("Pipeline.recover", () => {
     expect(calls).toEqual([true]);
   });
 
-  test("/update confirm installs the newer version and restarts", async () => {
+  test("/update confirm prepares an isolated release without a global install", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
@@ -1162,30 +1161,25 @@ describe("Pipeline.recover", () => {
       0,
       "codex",
     );
-    const updateCommands: string[] = [];
-    (pipeline as any).runUpdateCommand = async (cmd: string) => {
-      updateCommands.push(cmd);
-      if (cmd.startsWith("npm view ")) return { stdout: "9.9.9\n", stderr: "" };
-      return { stdout: "", stderr: "" };
+    const updateCommands: string[][] = [];
+    (pipeline as any).runNpmCommand = async (args: string[]) => {
+      updateCommands.push(args);
+      return { stdout: "9.9.9\n", stderr: "" };
     };
     let restartOptions: any;
     (pipeline as any).triggerRestart = (opts: any) => { restartOptions = opts; };
 
     await (pipeline as any).handleUpdate("c1", "chat-open-id", undefined, true);
 
-    expect(updateCommands).toEqual([
-      "npm view @yuanzhangjing/niubot@latest version",
-      "npm install -g @yuanzhangjing/niubot@9.9.9",
-    ]);
+    expect(updateCommands).toEqual([["view", "@yuanzhangjing/niubot@latest", "version"]]);
     expect(restartOptions).toEqual({
       platformChatId: "chat-open-id",
       updateVersion: "9.9.9",
     });
-    expect(sentTexts.at(-2)).toContain("正在安装");
     expect(sentTexts.at(-1)).toContain("独立 release");
   });
 
-  test("/update install command uses a ten minute timeout", async () => {
+  test("/update registry check uses a bounded timeout", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
@@ -1202,20 +1196,18 @@ describe("Pipeline.recover", () => {
       "codex",
     );
     const timeouts: number[] = [];
-    (pipeline as any).runUpdateCommand = async (cmd: string, timeout: number) => {
+    (pipeline as any).runNpmCommand = async (_args: string[], timeout: number) => {
       timeouts.push(timeout);
-      if (cmd.startsWith("npm view ")) return { stdout: "9.9.9\n", stderr: "" };
-      return { stdout: "", stderr: "" };
+      return { stdout: "9.9.9\n", stderr: "" };
     };
     (pipeline as any).triggerRestart = () => {};
 
     await (pipeline as any).handleUpdate("c1", "chat-open-id", undefined, true);
 
-    expect(timeouts).toEqual([15_000, UPDATE_INSTALL_TIMEOUT_MS]);
-    expect(UPDATE_INSTALL_TIMEOUT_MS).toBe(600_000);
+    expect(timeouts).toEqual([15_000]);
   });
 
-  test("/update continues with an isolated release when global npm install fails", async () => {
+  test("/update reports registry errors without starting a restart", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
@@ -1231,18 +1223,14 @@ describe("Pipeline.recover", () => {
       0,
       "codex",
     );
-    (pipeline as any).runUpdateCommand = async (cmd: string) => {
-      if (cmd.startsWith("npm view ")) return { stdout: "9.9.9\n", stderr: "" };
-      throw new Error("npm exited with code 1");
-    };
+    (pipeline as any).runNpmCommand = async () => { throw new Error("npm exited with code 1"); };
     let restarted = false;
     (pipeline as any).triggerRestart = () => { restarted = true; };
 
     await (pipeline as any).handleUpdate("c1", "chat-open-id", undefined, true);
 
-    expect(restarted).toBe(true);
-    expect(sentTexts.at(-2)).toContain("独立 release");
-    expect(sentTexts.at(-1)).toContain("独立 release");
+    expect(restarted).toBe(false);
+    expect(sentTexts.at(-1)).toContain("更新失败");
   });
 
   test("shell command timeout is five minutes and shown in output", () => {
@@ -1324,7 +1312,7 @@ describe("Pipeline.recover", () => {
       0,
       "codex",
     );
-    (pipeline as any).runUpdateCommand = async () => ({ stdout: "9.9.9\n", stderr: "" });
+    (pipeline as any).runNpmCommand = async () => ({ stdout: "9.9.9\n", stderr: "" });
     await pipeline.start();
 
     await (pipeline as any).checkForUpdatesAndNotifyAdmins();
@@ -1841,6 +1829,39 @@ describe("Pipeline.recover", () => {
       model: "claude-model",
     });
     expect(sentCards[0]?.content).toContain("重启后仍保持当前选择");
+  });
+
+  test("keeps the current session when target backend validation fails", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare(`
+      INSERT INTO sessions (id, chat_id, user_id, status, backend_type, started_at, last_active_at)
+      VALUES ('active-session', 'c1', 'u2', 'active', 'codex', datetime('now'), datetime('now'))
+    `).run();
+    const identity = createBotIdentity();
+    const { im, sentCards } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db, im, new RecordingAgent(), identity, dir, path.join(dir, "niubot.db"), 0, "codex",
+      async () => { throw new Error("claude CLI not found"); },
+      () => ["codex", "claude"],
+    );
+    (pipeline as any).chatSessions.set("c1", {
+      agentSession: { id: "agent-session" },
+      sessionId: "active-session",
+      platformChatId: "chat-open-id",
+      userId: "u2",
+      hasReplied: true,
+    });
+
+    (pipeline as any).handleAgentCommand(["claude"], "c1", "chat-open-id");
+    await (pipeline as any).globalSessionTransition;
+
+    expect((pipeline as any).backendType).toBe("codex");
+    expect((pipeline as any).chatSessions.has("c1")).toBe(true);
+    expect((db.prepare("SELECT status FROM sessions WHERE id = 'active-session'").get() as { status: string }).status)
+      .toBe("active");
+    expect(sentCards.at(-1)?.content).toContain("claude CLI not found");
   });
 
   test("defers a new chat that first appears while the backend is switching", async () => {

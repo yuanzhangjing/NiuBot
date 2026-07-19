@@ -4,9 +4,14 @@
  */
 
 import http from "node:http";
-import fs from "node:fs";
 import path from "node:path";
 import { createLogger } from "../logger.js";
+import {
+  cleanupLocalIpcEndpoint,
+  endpointFromAddress,
+  prepareLocalIpcEndpoint,
+  type LocalIpcEndpoint,
+} from "../platform/ipc.js";
 
 const log = createLogger("api");
 
@@ -25,20 +30,16 @@ export interface ApiHandler {
 
 export class ApiServer {
   private server: http.Server | null = null;
-  private socketPath: string;
+  private endpoint: LocalIpcEndpoint;
   private handler: ApiHandler;
 
-  constructor(socketPath: string, handler: ApiHandler) {
-    this.socketPath = socketPath;
+  constructor(endpoint: LocalIpcEndpoint | string, handler: ApiHandler) {
+    this.endpoint = typeof endpoint === "string" ? endpointFromAddress(endpoint) : endpoint;
     this.handler = handler;
   }
 
   async start(): Promise<void> {
-    // Ensure parent directory exists
-    fs.mkdirSync(path.dirname(this.socketPath), { recursive: true });
-
-    // Remove stale socket file
-    try { fs.unlinkSync(this.socketPath); } catch { /* not exists */ }
+    prepareLocalIpcEndpoint(this.endpoint);
 
     this.server = http.createServer((req, res) => {
       this.handleRequest(req, res).catch((err) => {
@@ -49,8 +50,8 @@ export class ApiServer {
     });
 
     return new Promise((resolve, reject) => {
-      this.server!.listen(this.socketPath, () => {
-        log.info("api server started", { socketPath: this.socketPath });
+      this.server!.listen(this.endpoint.address, () => {
+        log.info("api server started", { endpoint: this.endpoint.address, kind: this.endpoint.kind });
         resolve();
       });
       this.server!.on("error", reject);
@@ -60,7 +61,7 @@ export class ApiServer {
   stop(): void {
     if (this.server) {
       this.server.close();
-      try { fs.unlinkSync(this.socketPath); } catch { /* ignore */ }
+      try { cleanupLocalIpcEndpoint(this.endpoint); } catch { /* ignore */ }
       this.server = null;
       log.info("api server stopped");
     }

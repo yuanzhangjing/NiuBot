@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { AgentBackend } from "./agent/types.js";
-import type { BotConfig, AgentBackendType, RestartConfig } from "./config.js";
+import { NIUBOT_HOME, type BotConfig, type AgentBackendType, type RestartConfig } from "./config.js";
 import {
   initDatabase,
   ensureUser,
@@ -18,6 +18,7 @@ import { ensureStaticContextFiles, ensureWorkspaceAgentFiles } from "./static-co
 import { createLogger } from "./logger.js";
 import type { ResolvedBotRuntimeConfig } from "./runtime-config.js";
 import type Database from "better-sqlite3";
+import { resolveBotEndpoint } from "./platform/ipc.js";
 
 export interface BotInstance {
   id: string;
@@ -115,7 +116,7 @@ export async function createBotInstance(
   );
 
   // 6. 创建 API Server
-  const socketPath = path.join(path.dirname(botConfig.dbPath), "api.sock");
+  const endpoint = resolveBotEndpoint(NIUBOT_HOME, botConfig.id, process.platform, path.dirname(botConfig.dbPath));
   const apiHandler: ApiHandler = {
     sendMessage: (chatId, text) => pipeline.sendToChat(chatId, text),
     sendCard: (chatId, header, content) => pipeline.sendCardToChat(chatId, header, content),
@@ -133,7 +134,7 @@ export async function createBotInstance(
     },
     getDefaultPlatformChatId: () => undefined,
   };
-  const apiServer = new ApiServer(socketPath, apiHandler);
+  const apiServer = new ApiServer(endpoint, apiHandler);
 
   // 7. 创建 Cron Scheduler（独立 session，不走用户消息队列）
   const cronScheduler = new CronScheduler(db, async (chatId, userId, prompt, description) => {
@@ -143,7 +144,7 @@ export async function createBotInstance(
   log.info("bot instance created", {
     workDir: botConfig.workingDirectory,
     botProfile: botConfig.botProfilePath,
-    socketPath,
+    endpoint: endpoint.address,
   });
 
   return {

@@ -13,7 +13,6 @@
  *   niubot version  — 显示版本号
  */
 
-import { execFileSync, spawn } from "node:child_process";
 import fs from "node:fs";
 import { createRequire } from "node:module";
 import os from "node:os";
@@ -25,6 +24,16 @@ import { DEFAULT_BOT_PROFILE } from "./bot-profile.js";
 import { AGENT_REGISTRY, expandHome, loadConfig, normalizeBackend, resolveHomePath, type NiuBotConfig } from "./config.js";
 import { INSTALL_GUIDE_COMMAND } from "./install-guide.js";
 import { localToday } from "./tz.js";
+import { waitForLocalApiHealth } from "./local-api/client.js";
+import { resolveBotEndpoint } from "./platform/ipc.js";
+import { probeAllBackendCapabilities, probeBackendCapability } from "./agent/backend-capability.js";
+import { waitForEngineIdentity } from "./local-api/engine-client.js";
+import { inspectRunningEngine, launchDetachedEngine, stopEngine } from "./process-manager.js";
+import { launchRestartWorker } from "./restart-launcher.js";
+import { runCommandSync } from "./platform/command.js";
+import { resolveNpmExecutableForNode } from "./platform/executable.js";
+import { clearProcessState, readProcessState } from "./process-state.js";
+import { isProcessAlive } from "./platform/process.js";
 
 // ── Paths ──────────────────────────────────────────────────
 
@@ -94,37 +103,6 @@ function isRegularFile(filePath: string | undefined): filePath is string {
     return fs.statSync(filePath).isFile();
   } catch {
     return false;
-  }
-}
-
-function parseLsofName(output: string): string | undefined {
-  return output
-    .split(/\r?\n/)
-    .find((line) => line.startsWith("n") && line.length > 1)
-    ?.slice(1);
-}
-
-function getProcessCwd(pid: number): string | undefined {
-  try {
-    const out = execFileSync("lsof", ["-a", "-p", String(pid), "-d", "cwd", "-Fn"], {
-      encoding: "utf-8",
-      timeout: 3000,
-    });
-    return parseLsofName(out);
-  } catch {
-    return undefined;
-  }
-}
-
-function getProcessFdPath(pid: number, fd: number): string | undefined {
-  try {
-    const out = execFileSync("lsof", ["-a", "-p", String(pid), "-d", String(fd), "-Fn"], {
-      encoding: "utf-8",
-      timeout: 3000,
-    });
-    return parseLsofName(out);
-  } catch {
-    return undefined;
   }
 }
 
@@ -199,23 +177,22 @@ export function isPackageRootInsideNpmRoot(packageRoot: string, npmRoot: string)
   return relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative);
 }
 
-export function resolveNpmExecutableForNode(
-  nodePath: string,
-  platform: NodeJS.Platform = process.platform,
-  exists: (filePath: string) => boolean = fs.existsSync,
-): string | undefined {
-  const npmName = platform === "win32" ? "npm.cmd" : "npm";
-  const pathApi = platform === "win32" ? path.win32 : path;
-  const candidate = pathApi.join(pathApi.dirname(nodePath), npmName);
-  return exists(candidate) ? candidate : undefined;
-}
+export { resolveNpmExecutableForNode } from "./platform/executable.js";
 
 function resolveNpmCommandForCurrentNode(): string {
   return resolveNpmExecutableForNode(process.execPath) ?? "npm";
 }
 
-export function resolveNiubotHome(flagHome: string | undefined, envHome: string | undefined, cwd: string = process.cwd()): string {
-  return resolveHomePath(flagHome ?? envHome ?? path.join(os.homedir(), ".niubot"), cwd);
+function safeCurrentWorkingDirectory(): string {
+  try {
+    return process.cwd();
+  } catch {
+    return os.homedir();
+  }
+}
+
+export function resolveNiubotHome(flagHome: string | undefined, envHome: string | undefined, cwd?: string): string {
+  return resolveHomePath(flagHome ?? envHome ?? path.join(os.homedir(), ".niubot"), cwd ?? safeCurrentWorkingDirectory());
 }
 
 function getDefaultNiubotHome(): string {
@@ -269,11 +246,10 @@ export function registerHomePath(registryPath: string, home: string): void {
 
 function readNpmRoot(npmCommand: string): string | undefined {
   try {
-    return execFileSync(npmCommand, ["root", "-g"], {
-      encoding: "utf-8",
-      timeout: 8000,
-      stdio: ["ignore", "pipe", "ignore"],
-    }).trim();
+    return runCommandSync(npmCommand, ["root", "-g"], {
+      timeoutMs: 8_000,
+      cwd: safeCurrentWorkingDirectory(),
+    }).stdout.trim();
   } catch {
     return undefined;
   }
@@ -341,44 +317,30 @@ interface BackendScanResult {
 }
 
 function scanBackend(name: string): BackendScanResult {
-  const commands: Record<string, { cmd: string; args: string[] }> = {
-    claude: { cmd: "claude", args: ["--version"] },
-    codex: { cmd: "codex", args: ["--version"] },
-    traecli: { cmd: "traecli", args: ["--version"] },
-    opencode: { cmd: "opencode", args: ["--version"] },
-    cursor: { cmd: "cursor-agent", args: ["--version"] },
-    pi: { cmd: "pi", args: ["--version"] },
-    grok: { cmd: "grok", args: ["--version"] },
+  const capability = probeBackendCapability(name);
+  if (!capability) return { name, available: false, error: "unknown backend" };
+  return {
+    name: capability.backend,
+    available: capability.selectable,
+    version: capability.version,
+    error: capability.reason,
   };
-
-  const entry = commands[name];
-  if (!entry) {
-    return { name, available: false, error: "unknown backend" };
-  }
-
-  try {
-    const out = execFileSync(entry.cmd, entry.args, {
-      timeout: 5000,
-      encoding: "utf-8",
-      stdio: ["ignore", "pipe", "pipe"],
-    }).trim();
-    // Extract version from output (first line, or the version-looking part)
-    const versionMatch = out.match(/[\d]+\.[\d]+[\d.a-z-]*/);
-    return { name, available: true, version: versionMatch?.[0] ?? out.split("\n")[0] };
-  } catch {
-    return { name, available: false, error: "not found" };
-  }
 }
 
 function scanAllBackends(): { results: BackendScanResult[]; firstAvailable?: string } {
   const results: BackendScanResult[] = [];
   let firstAvailable: string | undefined;
 
-  for (const name of Object.keys(AGENT_REGISTRY)) {
-    const result = scanBackend(name);
+  for (const capability of probeAllBackendCapabilities()) {
+    const result: BackendScanResult = {
+      name: capability.backend,
+      available: capability.selectable,
+      version: capability.version,
+      error: capability.reason,
+    };
     results.push(result);
     if (result.available && !firstAvailable) {
-      firstAvailable = name;
+      firstAvailable = result.name;
     }
   }
 
@@ -604,7 +566,7 @@ async function cmdInit(niubotHome: string, flags: CliFlags): Promise<void> {
     const startNow = await prompt("  Start NiuBot now? (Y/n): ");
     if (!startNow || startNow.toLowerCase() === "y" || startNow.toLowerCase() === "yes") {
       console.log();
-      cmdStart(niubotHome, {});
+      await cmdStart(niubotHome, {});
     } else {
       console.log();
       console.log("  Run 'niubot start' when ready.");
@@ -780,8 +742,8 @@ async function cmdAddBot(niubotHome: string): Promise<void> {
       const restart = await prompt("  NiuBot is running. Restart to load the new bot? (Y/n): ");
       if (!restart || restart.toLowerCase() === "y" || restart.toLowerCase() === "yes") {
         console.log();
-        stopProcess(niubotHome);
-        cmdStart(niubotHome, {});
+        await stopProcess(niubotHome);
+        await cmdStart(niubotHome, {});
       } else {
         hint("Run 'niubot start --restart' when ready");
       }
@@ -839,7 +801,7 @@ export function generateBotProfileTemplate(): string {
 
 // ── Start ──────────────────────────────────────────────────
 
-function cmdStart(niubotHome: string, flags: CliFlags): void {
+async function cmdStart(niubotHome: string, flags: CliFlags): Promise<void> {
   console.log();
 
   // Pre-start checks
@@ -878,15 +840,50 @@ function cmdStart(niubotHome: string, flags: CliFlags): void {
     if (backendScan.available) {
       ok(`${be} CLI available${backendScan.version ? ` (v${backendScan.version})` : ""}`);
     } else {
-      fail(`${be} CLI not found`);
-      hint(`Install ${be} CLI, or change backend in config.yaml`);
+      fail(`${be} backend unavailable`);
+      hint(backendScan.error ?? `Install ${be} CLI, or change backend in config.yaml`);
       issues.push("backend");
     }
   }
 
   // Check for existing process
   const pidFile = path.join(niubotHome, "niubot.pid");
-  if (fs.existsSync(pidFile)) {
+  const recordedState = readProcessState(niubotHome);
+  const runningEngine = await inspectRunningEngine(niubotHome);
+  if (runningEngine) {
+    if (flags.restart) {
+      if (process.env["NIUBOT_AGENT_SESSION"]) {
+        fail("Cannot restart from within a bot session. Use /restart in Feishu or run directly in your terminal.");
+        process.exit(1);
+      }
+      info("Existing process found, stopping first...");
+      await stopProcess(niubotHome);
+    } else {
+      fail(`Already running (PID ${runningEngine.state.pid})`);
+      hint("Use 'niubot stop' first, or 'niubot start --restart'");
+      issues.push("process");
+    }
+  } else if (recordedState) {
+    const state = recordedState.processes.engine;
+    if (isProcessAlive(state.pid)) {
+      if (flags.restart) {
+        if (process.env["NIUBOT_AGENT_SESSION"]) {
+          fail("Cannot restart from within a bot session. Use /restart in Feishu or run directly in your terminal.");
+          process.exit(1);
+        }
+        info("Existing process is not responding; verifying its creation marker before stopping...");
+        await stopProcess(niubotHome);
+      } else {
+        fail(`Process ${state.pid} exists, but Engine identity cannot be verified`);
+        hint("Use 'niubot restart' to attempt a verified recovery, or inspect the service log.");
+        issues.push("process");
+      }
+    } else {
+      clearProcessState(niubotHome, state.instanceId);
+      try { fs.unlinkSync(pidFile); } catch { /* already absent */ }
+      ok("Removed stale process state");
+    }
+  } else if (fs.existsSync(pidFile)) {
     const pid = parseInt(fs.readFileSync(pidFile, "utf-8").trim(), 10);
     if (isProcessRunning(pid)) {
       if (flags.restart) {
@@ -897,7 +894,7 @@ function cmdStart(niubotHome: string, flags: CliFlags): void {
           process.exit(1);
         }
         info("Existing process found, stopping first...");
-        stopProcess(niubotHome);
+        await stopProcess(niubotHome);
       } else {
         fail(`Already running (PID ${pid})`);
         hint("Use 'niubot stop' first, or 'niubot start --restart'");
@@ -933,25 +930,17 @@ function cmdStart(niubotHome: string, flags: CliFlags): void {
   fs.mkdirSync(logDir, { recursive: true });
   const logFile = getTodayLogFilePath(niubotHome);
 
-  const logFd = fs.openSync(logFile, "a");
-
-  const child = spawn(process.execPath, [path.join(PROJECT_ROOT, "dist", "index.js")], {
-    cwd: PROJECT_ROOT,
-    detached: true,
-    stdio: ["ignore", logFd, logFd],
+  const launched = launchDetachedEngine({
+    niubotHome,
+    engineEntry: path.join(PROJECT_ROOT, "dist", "index.js"),
+    runtimePath: PROJECT_ROOT,
+    logFile,
+    version: getPkgVersion(),
     env: {
-      ...process.env,
-      NIUBOT_HOME: niubotHome,
       NIUBOT_LOG_LEVEL: process.env["NIUBOT_LOG_LEVEL"] ?? "info",
       NIUBOT_DEBUG_AGENT_STDOUT: process.env["NIUBOT_DEBUG_AGENT_STDOUT"] ?? "",
     },
   });
-
-  child.unref();
-  fs.closeSync(logFd);
-
-  // Write PID (engine also writes it, but we write early for immediate status checks)
-  fs.writeFileSync(pidFile, String(child.pid));
   // Snapshot the version at startup so status shows the actual running version
   fs.writeFileSync(path.join(niubotHome, "niubot.version"), getPkgVersion());
   fs.writeFileSync(path.join(niubotHome, "niubot.node"), getNodeRuntimeLabel());
@@ -960,14 +949,26 @@ function cmdStart(niubotHome: string, flags: CliFlags): void {
   } catch (err) {
     hint(`Could not update home registry: ${err instanceof Error ? err.message : String(err)}`);
   }
-  ok(`Process started (PID ${child.pid})`);
+  ok(`Process started (PID ${launched.state.pid})`);
   info(`Log: ${logFile}`);
+
+  const engineIdentity = await waitForEngineIdentity(
+    launched.endpoint,
+    launched.state.instanceId,
+    15_000,
+    250,
+  );
+  if (engineIdentity) {
+    ok("Engine identity check passed");
+  } else {
+    fail("Engine identity check failed");
+  }
 
   // Health check — all bots must respond
   const failedBots: string[] = [];
   for (const bot of config.bots) {
-    const socketPath = path.join(niubotHome, bot.id, "api.sock");
-    if (waitForHealth(socketPath, 15)) {
+    const endpoint = resolveBotEndpoint(niubotHome, bot.id, process.platform, path.dirname(bot.dbPath));
+    if (await waitForLocalApiHealth(endpoint, 15_000, 1_000)) {
       ok(`${bot.id} health check passed`);
     } else {
       fail(`${bot.id} health check failed`);
@@ -976,11 +977,11 @@ function cmdStart(niubotHome: string, flags: CliFlags): void {
   }
 
   console.log();
-  if (failedBots.length === 0) {
+  if (failedBots.length === 0 && engineIdentity) {
     console.log("NiuBot is running.");
     console.log(`  Log: ${logFile}`);
     for (const bot of config.bots) {
-      console.log(`  API: ${path.join(niubotHome, bot.id, "api.sock")}`);
+      console.log(`  API: ${resolveBotEndpoint(niubotHome, bot.id, process.platform, path.dirname(bot.dbPath)).address}`);
     }
   } else {
     hint(`Check log: ${logFile}`);
@@ -999,48 +1000,77 @@ function cmdStart(niubotHome: string, flags: CliFlags): void {
 
 // ── Stop ───────────────────────────────────────────────────
 
-function cmdStop(niubotHome: string): void {
-  const stopped = stopProcess(niubotHome);
+async function cmdStop(niubotHome: string): Promise<void> {
+  const stopped = await stopProcess(niubotHome);
   if (!stopped) {
     console.log("NiuBot is not running.");
   }
 }
 
-function stopProcess(niubotHome: string): boolean {
-  const pidFile = path.join(niubotHome, "niubot.pid");
-  if (!fs.existsSync(pidFile)) return false;
-
-  const pid = parseInt(fs.readFileSync(pidFile, "utf-8").trim(), 10);
-  if (!isProcessRunning(pid)) {
-    fs.unlinkSync(pidFile);
-    return false;
+async function cmdRestart(niubotHome: string): Promise<void> {
+  if (process.env["NIUBOT_AGENT_SESSION"]) {
+    fail("Cannot restart from within a bot session. Use /restart in Feishu or run directly in your terminal.");
+    process.exitCode = 1;
+    return;
   }
-
-  // Send SIGTERM
-  process.kill(pid, "SIGTERM");
-
-  // Wait up to 5 seconds for graceful shutdown
-  const deadline = Date.now() + 5000;
-  while (Date.now() < deadline && isProcessRunning(pid)) {
-    execFileSync("sleep", ["0.5"]);
+  const running = await inspectRunningEngine(niubotHome);
+  if (!running) {
+    fail("NiuBot is not running or its process identity cannot be verified.");
+    hint("Use 'niubot status --home <path>' to confirm the instance.");
+    process.exitCode = 1;
+    return;
   }
+  const config = loadConfig(path.join(niubotHome, "config.yaml"));
+  const worker = launchRestartWorker({
+    niubotHome,
+    botName: config.bots[0]?.id ?? "NiuBot",
+    runtimeRoot: PROJECT_ROOT,
+    sourceDirectory: running.identity.runtimePath,
+    runtimeMode: running.state.runtimeMode ?? "",
+  });
+  console.log(`Restart started (worker PID ${worker.pid})`);
+  console.log(`  Log: ${worker.logFile}`);
+}
 
-  // Force kill if still alive
-  if (isProcessRunning(pid)) {
-    try { process.kill(pid, "SIGKILL"); } catch { /* already dead */ }
-    execFileSync("sleep", ["0.5"]);
-  }
-
-  // Clean up PID file
-  try { fs.unlinkSync(pidFile); } catch { /* ignore */ }
-
-  console.log(`NiuBot stopped (PID ${pid})`);
-  return true;
+async function stopProcess(niubotHome: string): Promise<boolean> {
+  const result = await stopEngine(niubotHome);
+  if (result.stopped) console.log(`NiuBot stopped (PID ${result.pid})`);
+  return result.stopped;
 }
 
 // ── Status ─────────────────────────────────────────────────
 
-function printStatusForHome(niubotHome: string): void {
+async function printStatusForHome(niubotHome: string): Promise<void> {
+  const running = await inspectRunningEngine(niubotHome);
+  if (running) {
+    const logFile = getTodayLogFilePath(niubotHome);
+    const uptime = formatDuration(Date.now() - Date.parse(running.state.startedAt));
+    console.log(`NiuBot is running (PID ${running.state.pid})`);
+    console.log(`  Version: ${running.identity.version}`);
+    console.log(`  Path: ${running.identity.runtimePath}`);
+    console.log(`  Node: ${running.state.nodePath}`);
+    if (uptime) console.log(`  Uptime: ${uptime}`);
+    console.log(`  Log: ${logFile}`);
+    console.log(`  Config: ${path.join(niubotHome, "config.yaml")}`);
+    console.log(`  API: ${running.state.endpoint}`);
+    return;
+  }
+
+  const recordedState = readProcessState(niubotHome);
+  if (recordedState) {
+    const state = recordedState.processes.engine;
+    if (isProcessAlive(state.pid)) {
+      console.log(`NiuBot process exists (PID ${state.pid}), but Engine identity cannot be verified.`);
+      console.log(`  State: ${path.join(niubotHome, "run", "process-state.json")}`);
+      console.log(`  Log: ${getTodayLogFilePath(niubotHome)}`);
+      return;
+    }
+    clearProcessState(niubotHome, state.instanceId);
+    try { fs.unlinkSync(path.join(niubotHome, "niubot.pid")); } catch { /* already absent */ }
+    console.log("NiuBot is not running (stale process state removed).");
+    return;
+  }
+
   const pidFile = path.join(niubotHome, "niubot.pid");
   if (!fs.existsSync(pidFile)) {
     console.log("NiuBot is not running.");
@@ -1054,45 +1084,32 @@ function printStatusForHome(niubotHome: string): void {
     return;
   }
 
-  // Get process uptime from /proc or ps
-  let uptime = "";
-  try {
-    const psOut = execFileSync("ps", ["-o", "etime=", "-p", String(pid)], {
-      encoding: "utf-8",
-      timeout: 3000,
-    }).trim();
-    uptime = psOut;
-  } catch { /* ignore */ }
-
   const logFile = getTodayLogFilePath(niubotHome);
   const configPath = path.join(niubotHome, "config.yaml");
   const details = resolveRunningStatusDetails({
     niubotHome,
     cliPath: __dirname,
     todayLogFile: logFile,
-    processCwd: getProcessCwd(pid),
-    processStdoutPath: getProcessFdPath(pid, 1),
   });
 
   console.log(`NiuBot is running (PID ${pid})`);
   console.log(`  Version: ${details.version}`);
   console.log(`  Path: ${details.path}`);
   if (details.node) console.log(`  Node: ${details.node}`);
-  if (uptime) console.log(`  Uptime: ${uptime}`);
   console.log(`  Log: ${details.logFile}`);
   console.log(`  Config: ${configPath}`);
 }
 
-function cmdStatus(niubotHome: string, flags: CliFlags, hasExplicitHome: boolean): void {
+async function cmdStatus(niubotHome: string, flags: CliFlags, hasExplicitHome: boolean): Promise<void> {
   const listAll = flags.all || !hasExplicitHome;
   if (!listAll) {
-    printStatusForHome(niubotHome);
+    await printStatusForHome(niubotHome);
     return;
   }
 
   const homes = collectStatusHomes(niubotHome, readRegisteredHomes(getHomeRegistryPath()));
   if (homes.length <= 1) {
-    printStatusForHome(niubotHome);
+    await printStatusForHome(niubotHome);
     return;
   }
 
@@ -1100,7 +1117,7 @@ function cmdStatus(niubotHome: string, flags: CliFlags, hasExplicitHome: boolean
   for (const home of homes) {
     console.log();
     console.log(`Home: ${home}`);
-    printStatusForHome(home);
+    await printStatusForHome(home);
   }
 }
 
@@ -1132,11 +1149,10 @@ export function parseNiubotVersionOutput(output: string): string | undefined {
 
 function readActiveCliVersion(): string | undefined {
   try {
-    const output = execFileSync("niubot", ["version"], {
-      encoding: "utf-8",
-      timeout: 8000,
-      stdio: ["ignore", "pipe", "ignore"],
-    });
+    const output = runCommandSync("niubot", ["version"], {
+      timeoutMs: 8_000,
+      cwd: safeCurrentWorkingDirectory(),
+    }).stdout;
     return parseNiubotVersionOutput(output);
   } catch {
     return undefined;
@@ -1148,17 +1164,16 @@ function checkForUpdate(): string | null {
   const local = getPkgVersion();
   const npmCommand = resolveNpmCommandForCurrentNode();
   try {
-    const latest = execFileSync(npmCommand, ["view", `${PKG_NAME}@latest`, "version"], {
-      encoding: "utf-8",
-      timeout: 8000,
-      stdio: ["ignore", "pipe", "ignore"],
-    }).trim();
+    const latest = runCommandSync(npmCommand, ["view", `${PKG_NAME}@latest`, "version"], {
+      timeoutMs: 8_000,
+      cwd: safeCurrentWorkingDirectory(),
+    }).stdout.trim();
     if (latest && latest !== local) return latest;
   } catch { /* network error, not published, etc. */ }
   return null;
 }
 
-function cmdUpdate(niubotHome: string): void {
+async function cmdUpdate(niubotHome: string): Promise<void> {
   const current = getPkgVersion();
   const npmCommand = resolveNpmCommandForCurrentNode();
   console.log();
@@ -1176,6 +1191,28 @@ function cmdUpdate(niubotHome: string): void {
   console.log(`  New version available: ${latest}`);
   console.log();
 
+  const running = await inspectRunningEngine(niubotHome);
+  if (running) {
+    if (process.env["NIUBOT_AGENT_SESSION"]) {
+      fail("Cannot update from within a bot session. Use /update in Feishu or run directly in your terminal.");
+      process.exitCode = 1;
+      return;
+    }
+    const config = loadConfig(path.join(niubotHome, "config.yaml"));
+    const worker = launchRestartWorker({
+      niubotHome,
+      botName: config.bots[0]?.id ?? "NiuBot",
+      runtimeRoot: PROJECT_ROOT,
+      sourceDirectory: running.identity.runtimePath,
+      runtimeMode: running.state.runtimeMode ?? "",
+      updateVersion: latest,
+    });
+    info(`Update started (worker PID ${worker.pid})`);
+    info(`Log: ${worker.logFile}`);
+    console.log();
+    return;
+  }
+
   const npmRoot = readNpmRoot(npmCommand);
   if (npmRoot && !isPackageRootInsideNpmRoot(PROJECT_ROOT, npmRoot)) {
     fail("Refusing to update because npm global root does not match the active niubot installation.");
@@ -1191,10 +1228,9 @@ function cmdUpdate(niubotHome: string): void {
   // Install
   info(`Installing ${PKG_NAME}@${latest} ...`);
   try {
-    execFileSync(npmCommand, ["install", "-g", `${PKG_NAME}@${latest}`], {
-      encoding: "utf-8",
-      timeout: 60000,
-      stdio: ["ignore", "pipe", "pipe"],
+    runCommandSync(npmCommand, ["install", "-g", `${PKG_NAME}@${latest}`], {
+      timeoutMs: 60_000,
+      cwd: safeCurrentWorkingDirectory(),
     });
   } catch (err) {
     fail(`Install failed: ${err instanceof Error ? err.message : err}`);
@@ -1214,75 +1250,26 @@ function cmdUpdate(niubotHome: string): void {
   }
   ok(`Updated to ${latest}`);
 
-  // Restart if running
-  const pidFile = path.join(niubotHome, "niubot.pid");
-  if (!fs.existsSync(pidFile)) {
-    console.log();
-    hint(`No running service found (looked in ${niubotHome}).`);
-    hint("Start it with: niubot start");
-    console.log();
-    return;
-  }
-
-  const pid = parseInt(fs.readFileSync(pidFile, "utf-8").trim(), 10);
-  if (!isProcessRunning(pid)) {
-    fs.unlinkSync(pidFile);
-    console.log();
-    hint("Service is not running (stale PID file removed). Start it with: niubot start");
-    console.log();
-    return;
-  }
-
-  console.log();
-  info("Restarting service...");
-  stopProcess(niubotHome);
-
-  // Re-exec start with the NEW binary (the just-installed version)
-  try {
-    execFileSync(process.execPath, [path.join(PROJECT_ROOT, "dist", "user-cli.js"), "start"], {
-      encoding: "utf-8",
-      timeout: 30000,
-      stdio: "inherit",
-      env: { ...process.env, NIUBOT_HOME: niubotHome },
-    });
-  } catch {
-    hint("Auto-restart failed. Run 'niubot start' manually.");
-  }
-
+  hint(`No running service found in ${niubotHome}. Start it with: niubot start`);
   console.log();
 }
 
 // ── Utilities ──────────────────────────────────────────────
 
-function isProcessRunning(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
+function formatDuration(milliseconds: number): string {
+  if (!Number.isFinite(milliseconds) || milliseconds < 0) return "";
+  const totalSeconds = Math.floor(milliseconds / 1_000);
+  const days = Math.floor(totalSeconds / 86_400);
+  const hours = Math.floor((totalSeconds % 86_400) / 3_600);
+  const minutes = Math.floor((totalSeconds % 3_600) / 60);
+  const seconds = totalSeconds % 60;
+  return [days ? `${days}d` : "", hours || days ? `${hours}h` : "", minutes || hours || days ? `${minutes}m` : "", `${seconds}s`]
+    .filter(Boolean)
+    .join(" ");
 }
 
-function waitForHealth(socketPath: string, timeoutSec: number): boolean {
-  const deadline = Date.now() + timeoutSec * 1000;
-
-  while (Date.now() < deadline) {
-    if (fs.existsSync(socketPath)) {
-      try {
-        // 用 curl 通过 unix socket 发 GET /ping，和 restart.sh 一致
-        execFileSync("curl", [
-          "-s", "--max-time", "2",
-          "--unix-socket", socketPath,
-          "http://localhost/ping",
-        ], { timeout: 5000, encoding: "utf-8" });
-        return true;
-      } catch { /* not ready yet */ }
-    }
-
-    execFileSync("sleep", ["1"]);
-  }
-
-  return false;
+function isProcessRunning(pid: number): boolean {
+  return isProcessAlive(pid);
 }
 
 // ── Usage ──────────────────────────────────────────────────
@@ -1296,6 +1283,7 @@ Commands:
   init       Initialize NiuBot (environment check + config templates)
   add-bot    Add a new bot to an existing installation
   start      Start the NiuBot service
+  restart    Safely rebuild or restart the running service
   stop       Stop the NiuBot service
   status     Show service status
   update     Check for updates and install latest version
@@ -1335,16 +1323,19 @@ async function main(): Promise<void> {
       await cmdAddBot(niubotHome);
       break;
     case "start":
-      cmdStart(niubotHome, flags);
+      await cmdStart(niubotHome, flags);
+      break;
+    case "restart":
+      await cmdRestart(niubotHome);
       break;
     case "stop":
-      cmdStop(niubotHome);
+      await cmdStop(niubotHome);
       break;
     case "status":
-      cmdStatus(niubotHome, flags, hasExplicitHome);
+      await cmdStatus(niubotHome, flags, hasExplicitHome);
       break;
     case "update":
-      cmdUpdate(niubotHome);
+      await cmdUpdate(niubotHome);
       break;
     case "version":
     case "--version":
@@ -1361,5 +1352,8 @@ const entryPath = process.argv[1] ? fs.realpathSync(path.resolve(process.argv[1]
 const modulePath = fileURLToPath(import.meta.url);
 
 if (entryPath === modulePath) {
-  void main();
+  void main().catch((err) => {
+    console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+    process.exitCode = 1;
+  });
 }

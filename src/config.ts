@@ -27,24 +27,45 @@ export { NIUBOT_HOME };
 export const AGENT_REGISTRY = {
   claude: {
     aliases: ["claude", "claude-code"],
+    command: "claude",
+    versionArgs: ["--version"],
+    windowsSupport: "dependency-required",
   },
   codex: {
     aliases: ["codex"],
+    command: "codex",
+    versionArgs: ["--version"],
+    windowsSupport: "native",
   },
   traecli: {
     aliases: ["traecli", "trae-cli"],
+    command: "traecli",
+    versionArgs: ["--version"],
+    windowsSupport: "unknown",
   },
   opencode: {
     aliases: ["opencode"],
+    command: "opencode",
+    versionArgs: ["--version"],
+    windowsSupport: "native",
   },
   cursor: {
     aliases: ["cursor", "cursor-agent"],
+    command: "cursor-agent",
+    versionArgs: ["--version"],
+    windowsSupport: "wsl-only",
   },
   pi: {
     aliases: ["pi", "pi-agent", "pi-coding-agent"],
+    command: "pi",
+    versionArgs: ["--version"],
+    windowsSupport: "unknown",
   },
   grok: {
     aliases: ["grok", "grok-build"],
+    command: "grok",
+    versionArgs: ["--version"],
+    windowsSupport: "native",
   },
 } as const;
 
@@ -128,6 +149,7 @@ export function loadConfig(configPath?: string): NiuBotConfig {
   // 1. 尝试从配置文件加载
   let fileConfig: Record<string, unknown> = {};
   const filePath = configPath ?? findConfigFile();
+  const configHome = filePath ? path.dirname(path.resolve(filePath)) : NIUBOT_HOME;
   if (filePath && fs.existsSync(filePath)) {
     const raw = fs.readFileSync(filePath, "utf-8");
     fileConfig = filePath.endsWith(".json") ? JSON.parse(raw) : yaml.parse(raw);
@@ -156,7 +178,7 @@ export function loadConfig(configPath?: string): NiuBotConfig {
     if (rawBots.length === 0) {
       throw new Error("Config error: bots array is empty");
     }
-    bots = rawBots.map((b) => parseBotConfig(b, legacyDefaultBackend));
+    bots = rawBots.map((b) => parseBotConfig(b, legacyDefaultBackend, configHome));
 
     const ids = new Set<string>();
     for (const bot of bots) {
@@ -187,7 +209,7 @@ export function loadConfig(configPath?: string): NiuBotConfig {
 
     const legacyDbPath = process.env["NIUBOT_DB_PATH"]
       ?? ((fileConfig["database"] as Record<string, string>)?.["path"])
-      ?? path.join(NIUBOT_HOME, "niubot.db");
+      ?? path.join(configHome, "niubot.db");
 
     const legacyWorkingDirectory = path.resolve(expandHome(legacyWorkDir));
     bots = [{
@@ -197,9 +219,9 @@ export function loadConfig(configPath?: string): NiuBotConfig {
       backend: legacyDefaultBackend,
       workingDirectory: legacyWorkingDirectory,
       dbPath: path.resolve(expandHome(legacyDbPath)),
-      botProfilePath: path.join(NIUBOT_HOME, "NiuBot", "bot_profile.md"),
-      personaPath: path.join(NIUBOT_HOME, "NiuBot", "persona.md"),
-      instructionsPath: path.join(NIUBOT_HOME, "NiuBot", "instructions.md"),
+      botProfilePath: path.join(configHome, "NiuBot", "bot_profile.md"),
+      personaPath: path.join(configHome, "NiuBot", "persona.md"),
+      instructionsPath: path.join(configHome, "NiuBot", "instructions.md"),
     }];
     assertBuiltinBackend(bots[0]!.backend, bots[0]!.id);
   }
@@ -226,7 +248,7 @@ function parseRestartConfig(raw: unknown): RestartConfig | undefined {
 }
 
 /** 解析单个 bot 配置，填充默认路径 */
-function parseBotConfig(raw: Record<string, string>, legacyDefaultBackend?: string): BotConfig {
+function parseBotConfig(raw: Record<string, string>, legacyDefaultBackend: string | undefined, configHome: string): BotConfig {
   // 兼容旧配置：优先读 id，fallback 到 name
   const id = raw["id"] ?? raw["name"];
   if (!id) throw new Error("Config error: bot entry missing 'id'");
@@ -237,7 +259,7 @@ function parseBotConfig(raw: Record<string, string>, legacyDefaultBackend?: stri
     throw new Error(`Config error: bot '${id}' missing appId or appSecret`);
   }
 
-  const botDir = path.join(NIUBOT_HOME, id);
+  const botDir = path.join(configHome, id);
 
   const backend = normalizeBackend(raw["backend"]) ?? legacyDefaultBackend;
   assertBuiltinBackend(backend, id);

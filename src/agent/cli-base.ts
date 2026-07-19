@@ -11,6 +11,8 @@ import { createLogger } from "../logger.js";
 import { prependNiubotBinToPath } from "../niubot-cli.js";
 import { createInterface } from "node:readline";
 import { dumpAgentStdout, type AgentStdoutDumpReason } from "./agent-stdout-log.js";
+import { buildExecutableInvocation, resolveExecutable } from "../platform/executable.js";
+import { shouldDetachChildProcessForTree, terminateSpawnedProcessTree } from "../platform/process.js";
 
 /** 子类 session 的基础字段 */
 export interface BaseCliSession {
@@ -296,8 +298,8 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
     const child = this.activeProcesses.get(session.id);
     if (child) {
       this.cancelledSessions.add(session.id);
-      child.kill("SIGTERM");
-      this.log.info("cancel: sent SIGTERM to child process", { sessionId: session.id, pid: child.pid });
+      if (child.pid) terminateSpawnedProcessTree(child.pid, false);
+      this.log.info("cancel: terminated child process tree", { sessionId: session.id, pid: child.pid });
     } else {
       this.log.info("cancel: no active process to kill", { sessionId: session.id });
     }
@@ -321,7 +323,8 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
     if (!internal.agentSessionId) throw new AgentSessionNotStartedError(session.id);
     let exited = await this.waitForSessionProcessExit(session.id, 10_000);
     if (!exited) {
-      this.activeProcesses.get(session.id)?.kill("SIGTERM");
+      const child = this.activeProcesses.get(session.id);
+      if (child?.pid) terminateSpawnedProcessTree(child.pid, false);
       exited = await this.waitForSessionProcessExit(session.id, 2_000);
     }
     if (!exited) throw new Error(`Backend process is still running: ${session.id}`);
@@ -441,10 +444,20 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
         stdinPreview,
       });
 
-      const child = spawn(cmd, args, {
+      const childEnv = { ...process.env, ...opts?.env };
+      const executable = resolveExecutable(cmd, { env: childEnv, cwd: opts?.cwd });
+      if (!executable) {
+        reject(new Error(`Backend CLI not found: ${cmd}`));
+        return;
+      }
+      const invocation = buildExecutableInvocation(executable, args, { env: childEnv });
+      const child = spawn(invocation.command, invocation.args, {
         cwd: opts?.cwd,
-        env: { ...process.env, ...opts?.env },
+        env: childEnv,
+        detached: shouldDetachChildProcessForTree(),
+        windowsHide: true,
         stdio: ["pipe", "pipe", "pipe"],
+        windowsVerbatimArguments: invocation.windowsVerbatimArguments,
       });
 
       // 抓住当前 activity 引用，回调里直接用，避免旧进程 rl 通过 Map 污染新 activity

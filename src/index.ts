@@ -1,5 +1,7 @@
-import { writeFileSync, unlinkSync, mkdirSync } from "node:fs";
+import { randomBytes, randomUUID } from "node:crypto";
+import { readFileSync, writeFileSync, unlinkSync, mkdirSync } from "node:fs";
 import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   loadConfig,
   NIUBOT_HOME,
@@ -15,6 +17,12 @@ import { ensureRuntimeNbtShim, prependNiubotBinToPath } from "./niubot-cli.js";
 import { summarizeProxyEnvironment } from "./proxy-env.js";
 import { resolveBotRuntimeConfig } from "./runtime-config.js";
 import { startBotRuntime } from "./bot-startup.js";
+import { resolveEngineEndpoint, resolvePreflightEndpoint } from "./platform/ipc.js";
+import { probeAllBackendCapabilities, probeBackendCapability } from "./agent/backend-capability.js";
+import { normalizeBackend } from "./config.js";
+import { EngineControlServer, type EngineIdentity } from "./local-api/engine-server.js";
+import { clearProcessState, writeProcessState } from "./process-state.js";
+import { queryProcessStartMarker } from "./platform/process.js";
 
 const log = createLogger("main");
 
@@ -107,6 +115,10 @@ async function main(): Promise<void> {
   }
 
   async function getOrCreateBackend(type: string): Promise<AgentBackend> {
+    const capability = probeBackendCapability(type);
+    if (!capability?.selectable) {
+      throw new Error(`Backend '${type}' is unavailable: ${capability?.reason ?? "unknown backend"}`);
+    }
     let backend = backends.get(type);
     if (!backend) {
       backend = await createBackend(type);
@@ -117,14 +129,34 @@ async function main(): Promise<void> {
     return backend;
   }
 
-  const getAvailableBackends = () => [...BUILTIN_BACKEND_LIST];
+  const getAvailableBackends = () => probeAllBackendCapabilities()
+    .filter((capability) => capability.selectable)
+    .map((capability) => capability.backend);
+
+  const startupCapabilities = probeAllBackendCapabilities();
+  log.info("backend capabilities", {
+    backends: startupCapabilities.map((capability) => ({
+      backend: capability.backend,
+      selectable: capability.selectable,
+      version: capability.version ?? null,
+      reason: capability.reason ?? null,
+    })),
+  });
 
   const bots: BotInstance[] = [];
   for (const botConfig of config.bots) {
     try {
       const autoUpdateNotificationsEnabled = bots.length === 0;
       const runtimeState = loadPersistedBotRuntimeState(botConfig.dbPath, botConfig.id);
-      const runtimeConfig = resolveBotRuntimeConfig(botConfig.backend, runtimeState, getAvailableBackends());
+      const availableBackends = getAvailableBackends();
+      const runtimeBackend = normalizeBackend(runtimeState?.backendType);
+      const configBackend = normalizeBackend(botConfig.backend);
+      const runtimeSelectable = runtimeBackend ? availableBackends.some((backend) => backend === runtimeBackend) : false;
+      if (!runtimeSelectable && configBackend && !availableBackends.some((backend) => backend === configBackend)) {
+        const capability = startupCapabilities.find((candidate) => candidate.backend === configBackend);
+        throw new Error(`Configured backend '${configBackend}' is unavailable: ${capability?.reason ?? "not installed"}`);
+      }
+      const runtimeConfig = resolveBotRuntimeConfig(botConfig.backend, runtimeState, availableBackends);
       const backendType = runtimeConfig.backendType;
       const agent = await getOrCreateBackend(backendType);
       const instance = await createBotInstance(
@@ -158,9 +190,9 @@ async function main(): Promise<void> {
   }
 
   if (preflight) {
-    const tempSocket = resolve(NIUBOT_HOME, bots[0].config.id ?? "NiuBot", "api.sock.preflight");
+    const tempEndpoint = resolvePreflightEndpoint(NIUBOT_HOME, bots[0].config.id ?? "NiuBot");
     const { ApiServer } = await import("./core/api.js");
-    const tempApi = new ApiServer(tempSocket, {
+    const tempApi = new ApiServer(tempEndpoint, {
       sendMessage: async () => {},
       sendCard: async () => {},
       sendFile: async () => {},
@@ -176,26 +208,24 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
-  for (const bot of bots) {
-    try {
-      await startBotRuntime(bot, { log });
-    } catch (err) {
-      log.error("failed to start bot", { name: bot.id, error: String(err) });
-    }
-  }
-
-  log.info("NiuBot is running", { activeBots: bots.length });
-
-  const pidFile = resolve(NIUBOT_HOME, "niubot.pid");
-  try {
-    mkdirSync(NIUBOT_HOME, { recursive: true });
-    writeFileSync(pidFile, String(process.pid));
-    log.info("PID file written", { pidFile, pid: process.pid });
-  } catch (e) {
-    log.warn("failed to write PID file", { pidFile, error: String(e) });
-  }
-
+  const runtimePath = resolve(fileURLToPath(new URL(".", import.meta.url)), "..");
+  const version = readRuntimeVersion(runtimePath);
+  const instanceId = process.env["NIUBOT_INSTANCE_ID"] || randomUUID();
+  const controlToken = process.env["NIUBOT_CONTROL_TOKEN"] || randomBytes(32).toString("hex");
+  const startedAt = process.env["NIUBOT_STARTED_AT"] || new Date().toISOString();
+  const engineEndpoint = resolveEngineEndpoint(NIUBOT_HOME);
+  const identity: EngineIdentity = {
+    pid: process.pid,
+    instanceId,
+    home: NIUBOT_HOME,
+    version,
+    runtimePath,
+    startedAt,
+  };
+  let engineControlServer: EngineControlServer | undefined;
   let shuttingDown = false;
+  const pidFile = resolve(NIUBOT_HOME, "niubot.pid");
+
   const shutdown = async () => {
     if (shuttingDown) return;
     shuttingDown = true;
@@ -213,9 +243,7 @@ async function main(): Promise<void> {
       await bot.pipeline.shutdown();
     }
     const busyCount = bots.reduce((n, b) => n + (b.pipeline.hasBusyChats() ? 1 : 0), 0);
-    if (busyCount > 0) {
-      log.info("waiting for in-flight tasks", { busyBots: busyCount });
-    }
+    if (busyCount > 0) log.info("waiting for in-flight tasks", { busyBots: busyCount });
     const deadline = Date.now() + 15_000;
     while (bots.some((b) => b.pipeline.hasBusyChats()) && Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, 500));
@@ -237,6 +265,10 @@ async function main(): Promise<void> {
       try { bot.db.close(); } catch (e) { log.error("db.close failed", { bot: bot.id, error: String(e) }); }
     }
 
+    engineControlServer?.stop();
+    try { clearProcessState(NIUBOT_HOME, instanceId); } catch (e) {
+      log.warn("failed to clear process state", { error: String(e) });
+    }
     try {
       unlinkSync(pidFile);
       log.info("PID file removed");
@@ -245,6 +277,42 @@ async function main(): Promise<void> {
     log.info("bye");
     process.exit(0);
   };
+
+  for (const bot of bots) {
+    try {
+      await startBotRuntime(bot, { log });
+    } catch (err) {
+      log.error("failed to start bot", { name: bot.id, error: String(err) });
+    }
+  }
+
+  engineControlServer = new EngineControlServer(engineEndpoint, identity, controlToken, shutdown);
+  await engineControlServer.start();
+  writeProcessState(NIUBOT_HOME, {
+    pid: process.pid,
+    instanceId,
+    startedAt,
+    platformStartMarker: queryProcessStartMarker(process.pid),
+    endpoint: engineEndpoint.address,
+    endpointKind: engineEndpoint.kind,
+    controlToken,
+    version,
+    runtimeMode: process.env["NIUBOT_RUNTIME_MODE"] || "",
+    runtimePath,
+    nodePath: process.execPath,
+  });
+  log.info("process state written", { instanceId, endpoint: engineEndpoint.address });
+
+  log.info("NiuBot is running", { activeBots: bots.length });
+
+  // Legacy compatibility for one migration cycle.
+  try {
+    mkdirSync(NIUBOT_HOME, { recursive: true });
+    writeFileSync(pidFile, String(process.pid));
+    log.info("PID file written", { pidFile, pid: process.pid });
+  } catch (e) {
+    log.warn("failed to write PID file", { pidFile, error: String(e) });
+  }
 
   for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
     process.on(sig, () => {
@@ -261,6 +329,15 @@ async function main(): Promise<void> {
   process.on("unhandledRejection", (reason) => {
     log.error("unhandled rejection", { reason: String(reason) });
   });
+}
+
+function readRuntimeVersion(runtimePath: string): string {
+  try {
+    const pkg = JSON.parse(readFileSync(resolve(runtimePath, "package.json"), "utf-8")) as { version?: string };
+    return pkg.version ?? "unknown";
+  } catch {
+    return "unknown";
+  }
 }
 
 main().catch((err) => {
