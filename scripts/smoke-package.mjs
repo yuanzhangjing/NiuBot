@@ -48,6 +48,15 @@ try {
     throw new Error(`Installed command returned ${JSON.stringify(output.trim())}; expected ${JSON.stringify(expected)}`);
   }
 
+  const guideOutput = execFileSync(cliPath, ["install-guide"], {
+    encoding: "utf8",
+    shell: process.platform === "win32",
+    windowsHide: true,
+  });
+  if (!guideOutput.startsWith("# NiuBot Installation Guide")) {
+    throw new Error("Installed command could not read the packaged installation guide");
+  }
+
   console.log(`Package smoke passed: ${expected}`);
 } finally {
   fs.rmSync(temporaryRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });

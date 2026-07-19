@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { waitForEngineIdentity } from "./local-api/engine-client.js";
 import { inspectRunningEngine, launchDetachedEngine, stopEngine } from "./process-manager.js";
+import { waitForProcessExit } from "./platform/process.js";
 
 const homes: string[] = [];
 const runtimes: string[] = [];
@@ -52,9 +53,30 @@ describe("process manager integration", () => {
     expect((await inspectRunningEngine(secondHome))?.state.pid).toBe(second.state.pid);
     await stopEngine(secondHome);
   }, 60_000);
+
+  it("does not orphan an engine that closes IPC before its process exits", async () => {
+    const runtime = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-engine-fixture-"));
+    runtimes.push(runtime);
+    const entry = path.join(runtime, "engine.mjs");
+    fs.writeFileSync(entry, fixtureEngineSource(true));
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-home-orphan-"));
+    homes.push(home);
+
+    const launched = launchDetachedEngine({
+      niubotHome: home,
+      engineEntry: entry,
+      runtimePath: runtime,
+      logFile: path.join(home, "logs", "engine.log"),
+      version: "1.0.0",
+    });
+    expect(await waitForEngineIdentity(launched.endpoint, launched.state.instanceId, 10_000, 100)).toBeTruthy();
+
+    await expect(stopEngine(home)).resolves.toEqual({ stopped: true, pid: launched.state.pid });
+    expect(await waitForProcessExit(launched.state.pid, 1_000)).toBe(true);
+  }, 60_000);
 });
 
-function fixtureEngineSource(): string {
+function fixtureEngineSource(stayAliveAfterShutdown = false): string {
   return `import crypto from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
@@ -71,7 +93,7 @@ if (process.platform !== "win32") {
 let server;
 const finish = () => {
   server.close();
-  setTimeout(() => process.exit(0), 20);
+  ${stayAliveAfterShutdown ? "setInterval(() => {}, 1000);" : "setTimeout(() => process.exit(0), 20);"}
 };
 server = http.createServer((req, res) => {
   if (req.method === "GET" && req.url === "/identity") {

@@ -76,4 +76,14 @@ describe("release store", () => {
     const store = createStore();
     expect(() => store.releaseDirectory("../outside")).toThrow(/Invalid release id/);
   });
+
+  it("only derives release ids from runtime paths inside this store", () => {
+    const store = createStore();
+    createRelease(store, "release-a");
+    expect(store.releaseIdForRuntimePath(store.packageDirectory("release-a"))).toBe("release-a");
+    expect(store.releaseIdForRuntimePath(path.join(path.dirname(store.botDirectory), "outside", "package"))).toBeUndefined();
+    if (process.platform === "win32") {
+      expect(store.releaseIdForRuntimePath("Z:\\unrelated\\releases\\release-a\\package")).toBeUndefined();
+    }
+  });
 });

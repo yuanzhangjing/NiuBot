@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { exec, execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
@@ -40,8 +41,9 @@ import { labelLocalDateTime, labelLocalTime, utcDateTimeForSql } from "../tz.js"
 import { listCronJobs, deleteCronJob, getCronJob } from "./cron.js";
 import { createLogger } from "../logger.js";
 import { launchRestartWorker } from "../restart-launcher.js";
-import { resolveExecutable } from "../platform/executable.js";
+import { resolveExecutable, resolveNpmExecutableForNode } from "../platform/executable.js";
 import { runCommand } from "../platform/command.js";
+import type { BackendCapability } from "../agent/backend-capability.js";
 import { buildResponseFooter } from "./footer.js";
 import { ResponseSender } from "./response-sender.js";
 import { TimeoutError, withTimeout } from "./timeout.js";
@@ -58,6 +60,17 @@ const EMPTY_RESPONSE_FALLBACK = "（处理完成，但未生成回复。如果�
 const UPDATE_CONFIRM_COMMAND = "/update 1";
 const UPDATE_PACKAGE_NAME = "@yuanzhangjing/niubot";
 export const SHELL_COMMAND_TIMEOUT_MS = 300_000;
+
+export function resolveUpdateCommandCwd(niubotHome: string, fallbackHome = os.homedir()): string {
+  const candidates = [niubotHome, fallbackHome];
+  try { candidates.push(process.cwd()); } catch { /* current directory may have been deleted */ }
+  for (const candidate of candidates) {
+    try {
+      if (existsSync(candidate) && statSync(candidate).isDirectory()) return candidate;
+    } catch { /* try the next stable directory */ }
+  }
+  throw new Error("No existing directory is available for the npm update check");
+}
 
 /** 过期消息阈值（ms）：超过 2 分钟的消息丢弃 */
 const STALE_MESSAGE_THRESHOLD_MS = 2 * 60 * 1000;
@@ -142,6 +155,7 @@ export class Pipeline {
   private backendType: AgentBackendType;
   private backendResolver?: (type: AgentBackendType) => Promise<AgentBackend>;
   private getAvailableBackends: () => string[];
+  private getBackendCapabilities: () => BackendCapability[];
   private queue: ChatManager;
   private responseSender: ResponseSender;
   private runtimeState: RuntimeStateStore;
@@ -254,6 +268,7 @@ export class Pipeline {
     restartConfig?: RestartConfig,
     autoUpdateNotificationsEnabled = true,
     archiveHome?: string,
+    getBackendCapabilities?: () => BackendCapability[],
   ) {
     this.db = db;
     this.im = im;
@@ -261,6 +276,13 @@ export class Pipeline {
     this.backendType = backendType;
     this.backendResolver = backendResolver;
     this.getAvailableBackends = getAvailableBackends ?? (() => [...BUILTIN_BACKEND_LIST]);
+    this.getBackendCapabilities = getBackendCapabilities ?? (() => this.getAvailableBackends().map((backend) => ({
+      backend: backend as BackendCapability["backend"],
+      platform: process.platform,
+      support: "native",
+      installed: true,
+      selectable: true,
+    })));
     this.botIdentity = botIdentity;
     this.workingDirectory = workingDirectory;
     this.dbPath = dbPath;
@@ -1837,36 +1859,46 @@ export class Pipeline {
    * - /agent <type> → 切换到指定 backend，归档当前 session
    */
   private handleAgentCommand(args: string[], chatId: string, platformChatId: string, msgId?: string): void {
+    const capabilities = this.getBackendCapabilities();
     if (args.length === 0) {
       // 显示当前 agent（卡片）
-      const backends = this.getAvailableBackends();
       const currentModel = this.botIdentity.model ?? "default";
       const lines: string[] = [
         `**Agent:** ${this.backendType}`,
         `**Model:** ${currentModel}`,
         "",
       ];
-      lines.push("**可选 Agent:**");
-      for (let i = 0; i < backends.length; i++) {
-        const b = backends[i]!;
-        const tag = b === this.backendType ? "  ✓" : "";
-        lines.push(`  ${i + 1}. ${b}${tag}`);
+      lines.push("**Agent 状态:**");
+      for (let i = 0; i < capabilities.length; i++) {
+        const capability = capabilities[i]!;
+        const current = capability.backend === this.backendType ? "  ✓ 当前" : "";
+        const status = capability.selectable
+          ? `可用${capability.version ? ` · ${capability.version}` : ""}`
+          : `不可用 · ${capability.reason ?? "当前平台或安装状态不支持"}`;
+        lines.push(`  ${i + 1}. ${capability.backend} — ${status}${current}`);
       }
       lines.push("", "`/agent <名字或编号>` 切换");
       this.sendAgentCard(chatId, platformChatId, msgId, "Agent", lines.join("\n"));
       return;
     }
 
-    const available = this.getAvailableBackends();
+    const available: string[] = capabilities.filter((item) => item.selectable).map((item) => item.backend);
+    const availableLabels = capabilities
+      .map((item, itemIndex) => item.selectable ? `${itemIndex + 1}. ${item.backend}` : undefined)
+      .filter((item): item is string => item !== undefined)
+      .join(", ");
 
     // 支持编号选择：数字当编号，否则当名字走别名解析
     const index = Number(args[0]);
-    const target = Number.isInteger(index) && index >= 1 && index <= available.length
-      ? available[index - 1]!
+    const target = Number.isInteger(index) && index >= 1 && index <= capabilities.length
+      ? capabilities[index - 1]!.backend
       : normalizeBackend(args[0]);
 
     if (!target || !available.includes(target)) {
-      const content = `无效的 backend: \`${args[0]}\`\n\n可选: ${available.map((b, i) => `${i + 1}. ${b}`).join(", ")}`;
+      const capability = capabilities.find((item) => item.backend === target);
+      const content = capability
+        ? `backend **${capability.backend}** 当前不可用：${capability.reason ?? "当前平台或安装状态不支持"}\n\n可选: ${availableLabels}`
+        : `无效的 backend: \`${args[0]}\`\n\n可选: ${availableLabels}`;
       this.sendAgentCard(chatId, platformChatId, msgId, "Agent", content);
       return;
     }
@@ -2254,7 +2286,8 @@ export class Pipeline {
   }
 
   private async runNpmCommand(args: string[], timeout: number): Promise<{ stdout: string; stderr: string }> {
-    return runCommand("npm", args, { timeoutMs: timeout, cwd: this.workingDirectory });
+    const npmCommand = resolveNpmExecutableForNode(process.execPath) ?? "npm";
+    return runCommand(npmCommand, args, { timeoutMs: timeout, cwd: resolveUpdateCommandCwd(NIUBOT_HOME) });
   }
 
   private isValidVersion(version: string): boolean {

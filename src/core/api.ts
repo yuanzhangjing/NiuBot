@@ -39,7 +39,7 @@ export class ApiServer {
   }
 
   async start(): Promise<void> {
-    prepareLocalIpcEndpoint(this.endpoint);
+    await prepareLocalIpcEndpoint(this.endpoint);
 
     this.server = http.createServer((req, res) => {
       this.handleRequest(req, res).catch((err) => {

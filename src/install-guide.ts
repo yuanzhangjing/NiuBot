@@ -1,1 +1,1 @@
-export const INSTALL_GUIDE_COMMAND = "npm explore -g @yuanzhangjing/niubot -- cat INSTALL.md";
+export const INSTALL_GUIDE_COMMAND = "niubot install-guide";

@@ -17,6 +17,14 @@ describe("backend capability", () => {
     });
   });
 
+  it("treats current Claude Code as native on Windows", () => {
+    expect(probeBackendCapability("claude", {
+      platform: "win32",
+      resolveCommand: () => "C:\\bin\\claude.exe",
+      runVersion: () => "2.1.0",
+    })).toMatchObject({ support: "native", installed: true, selectable: true });
+  });
+
   it("does not expose WSL-only or unverified backends as native Windows choices", () => {
     const resolveCommand = vi.fn((command: string) => `C:\\bin\\${command}.cmd`);
     expect(probeBackendCapability("cursor", { platform: "win32", resolveCommand })?.selectable).toBe(false);

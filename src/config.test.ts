@@ -1,15 +1,31 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
-import { BUILTIN_BACKEND_LIST, loadConfig, normalizeBackend } from "./config.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { BUILTIN_BACKEND_LIST, loadConfig, normalizeBackend, resolveHomePath } from "./config.js";
 
 const tempDirs: string[] = [];
 
 afterEach(() => {
+  vi.restoreAllMocks();
   for (const dir of tempDirs.splice(0)) {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+describe("resolveHomePath", () => {
+  it("does not read a deleted current directory for absolute paths", () => {
+    const absolute = path.join(os.tmpdir(), "niubot-absolute-home");
+    vi.spyOn(process, "cwd").mockImplementation(() => { throw new Error("uv_cwd"); });
+
+    expect(resolveHomePath(absolute)).toBe(path.normalize(absolute));
+  });
+
+  it("falls back to the user home for relative paths when cwd is unavailable", () => {
+    vi.spyOn(process, "cwd").mockImplementation(() => { throw new Error("uv_cwd"); });
+
+    expect(resolveHomePath("relative-home")).toBe(path.join(os.homedir(), "relative-home"));
+  });
 });
 
 describe("loadConfig", () => {

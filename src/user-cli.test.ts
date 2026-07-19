@@ -180,7 +180,7 @@ describe("user-cli init model configuration", () => {
   });
 
   it("points agents to INSTALL.md in the top-level help", () => {
-    const expectedCommand = "npm explore -g @yuanzhangjing/niubot -- cat INSTALL.md";
+    const expectedCommand = "niubot install-guide";
     expect(INSTALL_GUIDE_COMMAND).toBe(expectedCommand);
 
     const srcDir = path.dirname(fileURLToPath(import.meta.url));
@@ -192,5 +192,18 @@ describe("user-cli init model configuration", () => {
     );
 
     expect(output).toContain(`Agent install guide: run \`${expectedCommand}\` and follow it.`);
+  });
+
+  it("prints the packaged installation guide without relying on cat", () => {
+    const srcDir = path.dirname(fileURLToPath(import.meta.url));
+    const tsxCliPath = path.join(srcDir, "..", "node_modules", "tsx", "dist", "cli.mjs");
+    const output = execFileSync(
+      process.execPath,
+      [tsxCliPath, path.join(srcDir, "user-cli.ts"), "install-guide"],
+      { encoding: "utf8" },
+    );
+
+    expect(output).toContain("# NiuBot Installation Guide");
+    expect(output).toContain("### Windows");
   });
 });

@@ -19,6 +19,7 @@ import { createLogger } from "./logger.js";
 import type { ResolvedBotRuntimeConfig } from "./runtime-config.js";
 import type Database from "better-sqlite3";
 import { resolveBotEndpoint } from "./platform/ipc.js";
+import type { BackendCapability } from "./agent/backend-capability.js";
 
 export interface BotInstance {
   id: string;
@@ -43,6 +44,7 @@ export async function createBotInstance(
   runtimeConfig?: ResolvedBotRuntimeConfig,
   restartConfig?: RestartConfig,
   autoUpdateNotificationsEnabled = true,
+  getBackendCapabilities?: () => BackendCapability[],
 ): Promise<BotInstance> {
   const log = createLogger("bot-instance", botConfig.id);
 
@@ -113,6 +115,8 @@ export async function createBotInstance(
     },
     restartConfig,
     autoUpdateNotificationsEnabled,
+    undefined,
+    getBackendCapabilities,
   );
 
   // 6. 创建 API Server

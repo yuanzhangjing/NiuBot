@@ -16,7 +16,7 @@ Human users: run `niubot init` and follow the prompts. You don't need to read th
 NiuBot itself runs natively in PowerShell or Windows Terminal. It does not require WSL or Git Bash for installation or service management.
 
 - Codex, OpenCode, and Grok are treated as native Windows backends when their CLI version probe succeeds.
-- Claude Code supports Windows but requires Git for Windows. Portable Git installations may need `CLAUDE_CODE_GIT_BASH_PATH`.
+- Claude Code supports native Windows and falls back to PowerShell when Git Bash is absent. Git for Windows is still useful for Bash-based tools; portable installations may need `CLAUDE_CODE_GIT_BASH_PATH`.
 - Cursor Agent is marked WSL-only on Windows.
 - Pi and TraeCLI remain unavailable on native Windows until their upstream behavior is verified.
 
@@ -130,6 +130,14 @@ pi --version
 ```
 
 ### Step 2.1: Generate Config
+
+The preferred cross-platform path is:
+
+```text
+niubot init
+```
+
+It creates the config and bot profile without requiring shell-specific file commands. On native Windows, use this command in PowerShell and then edit `%USERPROFILE%\.niubot\config.yaml` when the Feishu credentials are available. The manual commands below are POSIX examples for agents that write the files directly; do not run `mkdir -p`, `cat`, or `tail` in PowerShell.
 
 Create the config directory and files:
 
@@ -282,6 +290,12 @@ If no response, check the log:
 tail -50 ~/.niubot/logs/niubot-$(date +%Y-%m-%d).log
 ```
 
+PowerShell:
+
+```powershell
+Get-Content "$HOME\.niubot\logs\niubot-$(Get-Date -Format yyyy-MM-dd).log" -Tail 50
+```
+
 ## Admin System
 
 Admin is auto-detected — no manual configuration needed:
@@ -332,6 +346,12 @@ Check the log for errors:
 ```bash
 tail -100 ~/.niubot/logs/niubot-$(date +%Y-%m-%d).log
 ```
+
+PowerShell:
+
+```powershell
+Get-Content "$HOME\.niubot\logs\niubot-$(Get-Date -Format yyyy-MM-dd).log" -Tail 100
+```
 Common causes: invalid Feishu credentials, missing permissions, agent CLI not working.
 
 ---
@@ -355,6 +375,8 @@ The CLI will walk through: backend selection → Bot ID → model config → Fei
 After the CLI finishes, continue to [Post-Setup: Feishu Permissions](#post-setup-feishu-permissions) below.
 
 ### Manual: Step-by-Step
+
+On Windows, prefer `niubot add-bot`; it performs the same file operations without POSIX commands. The manual snippets below are POSIX examples.
 
 #### 1. Choose a Bot ID
 

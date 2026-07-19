@@ -129,7 +129,8 @@ async function main(): Promise<void> {
     return backend;
   }
 
-  const getAvailableBackends = () => probeAllBackendCapabilities()
+  const getBackendCapabilities = () => probeAllBackendCapabilities();
+  const getAvailableBackends = () => getBackendCapabilities()
     .filter((capability) => capability.selectable)
     .map((capability) => capability.backend);
 
@@ -169,6 +170,7 @@ async function main(): Promise<void> {
         runtimeConfig,
         config.restart,
         autoUpdateNotificationsEnabled,
+        getBackendCapabilities,
       );
       bots.push(instance);
       log.info("bot backend assigned", {

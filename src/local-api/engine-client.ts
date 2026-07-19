@@ -1,6 +1,14 @@
 import { localApiRequest } from "./client.js";
 import type { LocalIpcEndpoint } from "../platform/ipc.js";
+import { samePlatformPath } from "../platform/files.js";
 import type { EngineIdentity } from "./engine-server.js";
+
+export interface ExpectedEngineIdentity {
+  instanceId: string;
+  pid?: number;
+  home?: string;
+  runtimePath?: string;
+}
 
 export async function readEngineIdentity(
   endpoint: LocalIpcEndpoint,
@@ -27,17 +35,28 @@ export async function requestEngineShutdown(
 
 export async function waitForEngineIdentity(
   endpoint: LocalIpcEndpoint,
-  expectedInstanceId: string,
+  expected: string | ExpectedEngineIdentity,
   timeoutMs: number,
   intervalMs = 250,
 ): Promise<EngineIdentity | undefined> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const identity = await readEngineIdentity(endpoint, Math.min(2_000, timeoutMs));
-    if (identity?.instanceId === expectedInstanceId) return identity;
+    if (identity && engineIdentityMatches(identity, expected)) return identity;
     await new Promise((resolve) => setTimeout(resolve, Math.min(intervalMs, Math.max(0, deadline - Date.now()))));
   }
   return undefined;
+}
+
+export function engineIdentityMatches(
+  identity: EngineIdentity,
+  expected: string | ExpectedEngineIdentity,
+): boolean {
+  if (typeof expected === "string") return identity.instanceId === expected;
+  return identity.instanceId === expected.instanceId
+    && (expected.pid === undefined || identity.pid === expected.pid)
+    && (expected.home === undefined || samePlatformPath(identity.home, expected.home))
+    && (expected.runtimePath === undefined || samePlatformPath(identity.runtimePath, expected.runtimePath));
 }
 
 async function localApiRequestWithToken(

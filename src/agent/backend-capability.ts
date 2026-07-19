@@ -80,7 +80,7 @@ export function probeBackendCapability(
       installed: true,
       selectable: true,
       executable,
-      reason: support === "dependency-required" ? "requires the upstream Windows runtime dependency" : undefined,
+      reason: supportReason(support),
     };
   }
 
@@ -99,7 +99,7 @@ export function probeBackendCapability(
       selectable: true,
       executable,
       version: parseVersion(output),
-      reason: support === "dependency-required" ? "requires the upstream Windows runtime dependency" : undefined,
+      reason: supportReason(support),
     };
   } catch (err) {
     return {
@@ -112,6 +112,12 @@ export function probeBackendCapability(
       reason: versionProbeError(err),
     };
   }
+}
+
+function supportReason(support: BackendPlatformSupport): string | undefined {
+  return support === "dependency-required"
+    ? "requires the upstream Windows runtime dependency"
+    : undefined;
 }
 
 export function probeAllBackendCapabilities(options: ProbeBackendOptions = {}): BackendCapability[] {

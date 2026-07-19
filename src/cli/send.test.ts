@@ -63,7 +63,7 @@ describe("handleSend", () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-send-"));
     tempDirs.push(tempDir);
     const endpoint = resolveBotEndpoint(tempDir, "TestBot");
-    prepareLocalIpcEndpoint(endpoint);
+    await prepareLocalIpcEndpoint(endpoint);
     const bodies: Array<{ chat_id: string; file_path: string }> = [];
     const server = http.createServer((req, res) => {
       const chunks: Buffer[] = [];

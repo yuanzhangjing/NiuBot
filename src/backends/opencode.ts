@@ -5,14 +5,39 @@
 
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { resolve } from "node:path";
+import path from "node:path";
 import Database from "better-sqlite3";
 import { CliAgentBackend, buildNiubotEnv, type BaseCliSession, type ParsedOutput } from "../agent/cli-base.js";
 import { ERROR_DISPLAY_MAX_LEN } from "../agent/types.js";
 import type { SessionConfig, ExecHooks } from "../agent/types.js";
 import { transcriptFromOpencodeRows } from "../session-archive/native-transcript.js";
+import { runCommandSync } from "../platform/command.js";
 
 interface OpencodeSession extends BaseCliSession {}
+
+export function resolveOpencodeDatabasePath(options: {
+  platform?: NodeJS.Platform;
+  env?: NodeJS.ProcessEnv;
+  home?: string;
+  queryPath?: () => string;
+} = {}): string {
+  const platform = options.platform ?? process.platform;
+  const env = options.env ?? process.env;
+  const home = options.home ?? homedir();
+  const pathApi = platform === "win32" ? path.win32 : path.posix;
+  try {
+    const queried = (options.queryPath ?? (() => runCommandSync("opencode", ["db", "path"], {
+      timeoutMs: 5_000,
+      cwd: home,
+    }).stdout))().trim();
+    if (queried) return pathApi.isAbsolute(queried) ? pathApi.normalize(queried) : pathApi.resolve(home, queried);
+  } catch { /* older OpenCode releases do not expose `db path` */ }
+
+  const dataHome = env["XDG_DATA_HOME"]
+    || (platform === "win32" ? env["LOCALAPPDATA"] : undefined)
+    || pathApi.join(home, ".local", "share");
+  return pathApi.join(dataHome, "opencode", "opencode.db");
+}
 
 export default class OpencodeBackend extends CliAgentBackend<OpencodeSession> {
   constructor() {
@@ -84,7 +109,7 @@ export default class OpencodeBackend extends CliAgentBackend<OpencodeSession> {
   private opencodeDb: Database.Database | null | undefined; // undefined = 未初始化
   private getOpencodeDb(): Database.Database | null {
     if (this.opencodeDb !== undefined) return this.opencodeDb;
-    const dbPath = resolve(homedir(), ".local", "share", "opencode", "opencode.db");
+    const dbPath = resolveOpencodeDatabasePath();
     if (!existsSync(dbPath)) {
       this.opencodeDb = null;
       return null;

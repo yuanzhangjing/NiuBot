@@ -410,6 +410,7 @@ async function cmdInit(niubotHome: string, flags: CliFlags): Promise<void> {
       console.log(`Result: all checks passed`);
     } else {
       console.log(`Result: ${issues.length} issue${issues.length > 1 ? "s" : ""} to fix before 'niubot start'`);
+      process.exitCode = 1;
     }
     console.log();
     return;
@@ -963,7 +964,12 @@ async function cmdStart(niubotHome: string, flags: CliFlags): Promise<void> {
 
   const engineIdentity = await waitForEngineIdentity(
     launched.endpoint,
-    launched.state.instanceId,
+    {
+      instanceId: launched.state.instanceId,
+      pid: launched.state.pid,
+      home: niubotHome,
+      runtimePath: launched.state.runtimePath,
+    },
     15_000,
     250,
   );
@@ -994,7 +1000,10 @@ async function cmdStart(niubotHome: string, flags: CliFlags): Promise<void> {
     }
   } else {
     hint(`Check log: ${logFile}`);
-    console.log("Some bots failed health check. The service may still be initializing.");
+    console.log("NiuBot started, but did not become healthy before the startup deadline.");
+    process.exitCode = 1;
+    console.log();
+    return;
   }
 
   // Check for updates (non-blocking, best-effort)
@@ -1168,15 +1177,23 @@ function readActiveCliVersion(): string | undefined {
   }
 }
 
-/** Check npm registry for a newer version. Returns latest version or null. */
+function fetchLatestVersion(): string {
+  const npmCommand = resolveNpmCommandForCurrentNode();
+  const latest = runCommandSync(npmCommand, ["view", `${PKG_NAME}@latest`, "version"], {
+    timeoutMs: 8_000,
+    cwd: safeCurrentWorkingDirectory(),
+  }).stdout.trim();
+  if (!latest || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(latest)) {
+    throw new Error(`npm returned an invalid latest version: ${latest || "(empty)"}`);
+  }
+  return latest;
+}
+
+/** Best-effort startup check. Registry errors are intentionally silent here. */
 function checkForUpdate(): string | null {
   const local = getPkgVersion();
-  const npmCommand = resolveNpmCommandForCurrentNode();
   try {
-    const latest = runCommandSync(npmCommand, ["view", `${PKG_NAME}@latest`, "version"], {
-      timeoutMs: 8_000,
-      cwd: safeCurrentWorkingDirectory(),
-    }).stdout.trim();
+    const latest = fetchLatestVersion();
     if (latest && latest !== local) return latest;
   } catch { /* network error, not published, etc. */ }
   return null;
@@ -1190,8 +1207,16 @@ async function cmdUpdate(niubotHome: string): Promise<void> {
 
   // Check for latest
   info("Checking npm registry...");
-  const latest = checkForUpdate();
-  if (!latest) {
+  let latest: string;
+  try {
+    latest = fetchLatestVersion();
+  } catch (err) {
+    fail(`Update check failed: ${err instanceof Error ? err.message : String(err)}`);
+    console.log();
+    process.exitCode = 1;
+    return;
+  }
+  if (latest === current) {
     ok("Already up to date.");
     console.log();
     return;
@@ -1238,7 +1263,7 @@ async function cmdUpdate(niubotHome: string): Promise<void> {
   info(`Installing ${PKG_NAME}@${latest} ...`);
   try {
     runCommandSync(npmCommand, ["install", "-g", `${PKG_NAME}@${latest}`], {
-      timeoutMs: 60_000,
+      timeoutMs: 600_000,
       cwd: safeCurrentWorkingDirectory(),
     });
   } catch (err) {
@@ -1252,7 +1277,7 @@ async function cmdUpdate(niubotHome: string): Promise<void> {
   if (activeVersion && activeVersion !== latest) {
     fail(`Installed ${latest}, but the active niubot command is still ${activeVersion}.`);
     hint("You probably have multiple global npm installs or PATH is resolving an older binary first.");
-    hint("Check with: which -a niubot");
+    hint(process.platform === "win32" ? "Check with: Get-Command niubot -All" : "Check with: which -a niubot");
     hint("Check npm prefix with: npm root -g");
     console.log();
     process.exit(1);
@@ -1281,6 +1306,10 @@ function isProcessRunning(pid: number): boolean {
   return isProcessAlive(pid);
 }
 
+function cmdInstallGuide(): void {
+  process.stdout.write(fs.readFileSync(path.join(PROJECT_ROOT, "INSTALL.md"), "utf-8"));
+}
+
 // ── Usage ──────────────────────────────────────────────────
 
 function getUsageText(): string {
@@ -1297,6 +1326,7 @@ Commands:
   status     Show service status
   update     Check for updates and install latest version
   version    Show version
+  install-guide  Print the agent installation guide
 
 Init options:
   --check    Only run preflight checks, don't create files
@@ -1350,6 +1380,9 @@ async function main(): Promise<void> {
     case "--version":
     case "-v":
       cmdVersion(flags);
+      break;
+    case "install-guide":
+      cmdInstallGuide();
       break;
     default:
       printUsage();

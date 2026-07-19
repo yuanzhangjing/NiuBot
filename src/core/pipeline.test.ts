@@ -20,6 +20,7 @@ import { SYSTEM_RULES } from "../system-rules.js";
 import {
   formatShellExecError,
   Pipeline,
+  resolveUpdateCommandCwd,
   SHELL_COMMAND_TIMEOUT_MS,
   type BotIdentity,
 } from "./pipeline.js";
@@ -1219,6 +1220,16 @@ describe("Pipeline.recover", () => {
     expect(timeouts).toEqual([15_000]);
   });
 
+  test("/update chooses an existing stable directory instead of the bot workspace", () => {
+    const home = mkdtempSync(path.join(os.tmpdir(), "niubot-update-home-"));
+    const fallback = mkdtempSync(path.join(os.tmpdir(), "niubot-update-fallback-"));
+    tempDirs.push(home, fallback);
+
+    expect(resolveUpdateCommandCwd(home, fallback)).toBe(home);
+    rmSync(home, { recursive: true, force: true });
+    expect(resolveUpdateCommandCwd(home, fallback)).toBe(fallback);
+  });
+
   test("/update reports registry errors without starting a restart", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
@@ -1841,6 +1852,28 @@ describe("Pipeline.recover", () => {
       model: "claude-model",
     });
     expect(sentCards[0]?.content).toContain("重启后仍保持当前选择");
+  });
+
+  test("/agent shows selectable and unavailable backend states", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+    const { im, sentCards } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      initDatabase(path.join(dir, "niubot.db")), im, new RecordingAgent(),
+      createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex",
+    );
+    (pipeline as any).getBackendCapabilities = () => [
+      { backend: "codex", platform: "win32", support: "native", installed: true, selectable: true, version: "1.2.3" },
+      { backend: "cursor", platform: "win32", support: "wsl-only", installed: true, selectable: false, reason: "requires WSL" },
+    ];
+
+    (pipeline as any).handleAgentCommand([], "c1", "chat-open-id");
+
+    expect(sentCards[0]?.content).toContain("codex — 可用 · 1.2.3");
+    expect(sentCards[0]?.content).toContain("cursor — 不可用 · requires WSL");
+
+    (pipeline as any).handleAgentCommand(["2"], "c1", "chat-open-id");
+    expect(sentCards[1]?.content).toContain("cursor** 当前不可用：requires WSL");
   });
 
   test("keeps the current session when target backend validation fails", async () => {

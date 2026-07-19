@@ -120,23 +120,16 @@ export async function stopEngine(niubotHome: string): Promise<{ stopped: boolean
         if (!identity || identity.instanceId !== running.state.instanceId) break;
         await delay(250);
       }
-      if (running.state.pid !== process.pid) {
-        const exited = await waitForProcessExit(running.state.pid, 5_000);
-        if (!exited) {
-          forceTerminateProcessTree(running.state.pid);
-          if (!await waitForProcessExit(running.state.pid, 5_000)) {
-            throw new Error(`Engine process ${running.state.pid} did not exit after forced termination`);
-          }
-        }
-      }
     }
 
     const remaining = await readEngineIdentity(endpoint, 500);
     if (remaining?.instanceId === running.state.instanceId) {
-      forceTerminateProcessTree(running.state.pid);
-      if (!await waitForProcessExit(running.state.pid, 5_000)) {
-        throw new Error(`Engine process ${running.state.pid} did not exit after forced termination`);
-      }
+      await forceStopVerifiedProcess(running.state);
+    } else if (running.state.pid !== process.pid && isProcessAlive(running.state.pid)) {
+      // The endpoint may disappear before the process actually exits. Do not
+      // clear its state and leave an orphan behind; verify the OS creation
+      // marker before using the precise process-tree fallback.
+      await forceStopVerifiedProcess(running.state);
     }
     clearProcessState(niubotHome, running.state.instanceId);
     removeLegacyPidFile(niubotHome);
@@ -150,23 +143,28 @@ export async function stopEngine(niubotHome: string): Promise<{ stopped: boolean
       removeLegacyPidFile(niubotHome);
       return { stopped: false, pid: state.pid };
     }
-    const currentMarker = queryProcessStartMarker(state.pid);
-    if (!state.platformStartMarker || !currentMarker || currentMarker !== state.platformStartMarker) {
-      throw new Error("Engine process state exists, but its identity could not be verified");
-    }
     if (state.pid === process.pid) {
       throw new Error("Refusing to force-stop the current process without Engine IPC confirmation");
     }
-    forceTerminateProcessTree(state.pid);
-    if (!await waitForProcessExit(state.pid, 5_000)) {
-      throw new Error(`Engine process ${state.pid} did not exit after forced termination`);
-    }
+    await forceStopVerifiedProcess(state);
     clearProcessState(niubotHome, state.instanceId);
     removeLegacyPidFile(niubotHome);
     return { stopped: true, pid: state.pid };
   }
 
   return stopLegacyEngine(niubotHome);
+}
+
+async function forceStopVerifiedProcess(state: EngineProcessState): Promise<void> {
+  if (!isProcessAlive(state.pid)) return;
+  const currentMarker = queryProcessStartMarker(state.pid);
+  if (!state.platformStartMarker || !currentMarker || currentMarker !== state.platformStartMarker) {
+    throw new Error("Engine process state exists, but its identity could not be verified");
+  }
+  forceTerminateProcessTree(state.pid);
+  if (!await waitForProcessExit(state.pid, 5_000)) {
+    throw new Error(`Engine process ${state.pid} did not exit after forced termination`);
+  }
 }
 
 function asyncLegacyStop(pid: number): Promise<void> {

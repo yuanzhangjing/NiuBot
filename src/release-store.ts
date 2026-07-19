@@ -115,7 +115,7 @@ export class ReleaseStore {
     const state = this.readState();
     const protectedIds = new Set([state.current, state.previous, state.lastKnownGood].filter(Boolean));
     for (const runtimePath of options.protectedRuntimePaths ?? []) {
-      const id = this.releaseIdFromRuntimePath(runtimePath);
+      const id = this.releaseIdForRuntimePath(runtimePath);
       if (id) protectedIds.add(id);
     }
 
@@ -163,11 +163,12 @@ export class ReleaseStore {
     }
   }
 
-  private releaseIdFromRuntimePath(runtimePath: string): string | undefined {
+  releaseIdForRuntimePath(runtimePath: string): string | undefined {
     const releasesDirectory = canonicalPath(this.releasesDirectory);
     const relative = path.relative(releasesDirectory, canonicalPath(runtimePath));
+    if (!relative || path.isAbsolute(relative) || relative.startsWith(`..${path.sep}`) || relative === "..") return undefined;
     const parts = relative.split(path.sep);
-    if (parts.length >= 2 && parts[1] === "package" && parts[0] && !parts[0].startsWith("..")) {
+    if (parts.length >= 2 && parts[1] === "package" && parts[0]) {
       return parts[0];
     }
     return undefined;

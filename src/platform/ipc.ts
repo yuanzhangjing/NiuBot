@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import fs from "node:fs";
+import net from "node:net";
 import path from "node:path";
 import { removeFileSync } from "./files.js";
 
@@ -58,9 +59,13 @@ export function endpointFromAddress(
   };
 }
 
-export function prepareLocalIpcEndpoint(endpoint: LocalIpcEndpoint): void {
+export async function prepareLocalIpcEndpoint(endpoint: LocalIpcEndpoint): Promise<void> {
   if (endpoint.kind !== "unix-socket") return;
   fs.mkdirSync(path.dirname(endpoint.address), { recursive: true });
+  if (!fs.existsSync(endpoint.address)) return;
+  if (await canConnectToUnixSocket(endpoint.address)) {
+    throw new Error(`Local IPC endpoint is already active: ${endpoint.address}`);
+  }
   removeFileSync(endpoint.address);
 }
 
@@ -84,4 +89,20 @@ function stableSegment(value: string): string {
   const readable = value.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 24);
   const hash = createHash("sha256").update(value).digest("hex").slice(0, 8);
   return `${readable || "id"}-${hash}`;
+}
+
+function canConnectToUnixSocket(address: string, timeoutMs = 300): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = net.createConnection(address);
+    let settled = false;
+    const finish = (reachable: boolean) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolve(reachable);
+    };
+    socket.setTimeout(timeoutMs, () => finish(false));
+    socket.once("connect", () => finish(true));
+    socket.once("error", () => finish(false));
+  });
 }

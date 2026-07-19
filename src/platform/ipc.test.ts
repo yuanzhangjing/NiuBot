@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -46,20 +47,40 @@ describe("local IPC endpoints", () => {
     expect(first.address).not.toBe(second.address);
   });
 
-  it("only creates and removes filesystem entries for Unix sockets", () => {
+  it("only creates and removes filesystem entries for Unix sockets", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-ipc-"));
     tempDirs.push(dir);
     const endpoint = resolveBotEndpoint(dir, "NiuBot", "darwin");
     fs.mkdirSync(path.dirname(endpoint.address), { recursive: true });
     fs.writeFileSync(endpoint.address, "stale");
 
-    prepareLocalIpcEndpoint(endpoint);
+    await prepareLocalIpcEndpoint(endpoint);
     expect(fs.existsSync(endpoint.address)).toBe(false);
     fs.writeFileSync(endpoint.address, "socket-placeholder");
     cleanupLocalIpcEndpoint(endpoint);
     expect(fs.existsSync(endpoint.address)).toBe(false);
 
-    expect(() => prepareLocalIpcEndpoint(endpointFromAddress("\\\\.\\pipe\\niubot-test", "win32")))
-      .not.toThrow();
+    await expect(prepareLocalIpcEndpoint(endpointFromAddress("\\\\.\\pipe\\niubot-test", "win32")))
+      .resolves.toBeUndefined();
+  });
+
+  it("refuses to unlink an active Unix socket", async () => {
+    if (process.platform === "win32") return;
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-ipc-active-"));
+    tempDirs.push(dir);
+    const endpoint = resolveEngineEndpoint(dir);
+    fs.mkdirSync(path.dirname(endpoint.address), { recursive: true });
+    const server = net.createServer();
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(endpoint.address, resolve);
+    });
+
+    try {
+      await expect(prepareLocalIpcEndpoint(endpoint)).rejects.toThrow("already active");
+      expect(fs.existsSync(endpoint.address)).toBe(true);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 });

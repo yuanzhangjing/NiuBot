@@ -28,7 +28,7 @@ export class EngineControlServer {
   ) {}
 
   async start(): Promise<void> {
-    prepareLocalIpcEndpoint(this.endpoint);
+    await prepareLocalIpcEndpoint(this.endpoint);
     this.server = http.createServer((req, res) => {
       this.handle(req, res).catch((err) => {
         log.error("engine control request failed", { error: String(err) });

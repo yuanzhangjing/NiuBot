@@ -11,6 +11,7 @@ import { localApiRequest, waitForLocalApiHealth } from "./local-api/client.js";
 import { waitForEngineIdentity } from "./local-api/engine-client.js";
 import { resolveBotEndpoint } from "./platform/ipc.js";
 import { runCommand } from "./platform/command.js";
+import { resolveNpmExecutableForNode } from "./platform/executable.js";
 import { isProcessAlive } from "./platform/process.js";
 import { inspectRunningEngine, launchDetachedEngine, stopEngine } from "./process-manager.js";
 import { readProcessState } from "./process-state.js";
@@ -111,8 +112,9 @@ export async function runRestartWorker(env: NodeJS.ProcessEnv = process.env): Pr
 async function runSourceRestart(context: RestartContext): Promise<void> {
   await ensureBootstrapRelease(context);
   context.state.write("build_candidate");
-  await runLogged(context, "npm", ["run", "build"], context.sourceDirectory, 180_000);
-  await runLogged(context, "npm", ["run", "pack:check"], context.sourceDirectory, 180_000);
+  const npmCommand = resolveNpmCommandForCurrentNode();
+  await runLogged(context, npmCommand, ["run", "build"], context.sourceDirectory, 180_000);
+  await runLogged(context, npmCommand, ["run", "pack:check"], context.sourceDirectory, 180_000);
   const pkg = readPackage(path.join(context.sourceDirectory, "package.json"));
   const sha = await readGitSha(context);
   const releaseId = `${compactTimestamp(new Date())}-${pkg.version}-${sha}`;
@@ -236,7 +238,7 @@ async function ensureBootstrapRelease(context: RestartContext): Promise<void> {
   if (state.lastKnownGood) return;
 
   const running = await inspectRunningEngine(context.niubotHome);
-  const existingId = running ? releaseIdForRuntime(context.store, running.state.runtimePath) : undefined;
+  const existingId = running ? context.store.releaseIdForRuntimePath(running.state.runtimePath) : undefined;
   if (existingId) {
     const next: ReleaseState = { schemaVersion: 1, current: existingId, lastKnownGood: existingId };
     context.store.writeState(next);
@@ -274,10 +276,11 @@ async function packRelease(context: RestartContext, options: PackReleaseOptions)
   if (fs.existsSync(releaseDirectory)) throw new Error(`release already exists: ${options.releaseId}`);
   fs.mkdirSync(packageDirectory, { recursive: true });
   try {
+    const npmCommand = resolveNpmCommandForCurrentNode();
     const args = ["pack"];
     if (options.packageSpec) args.push(options.packageSpec);
     args.push("--json", "--pack-destination", context.store.packagesDirectory);
-    const packed = await runLogged(context, "npm", args, options.cwd, readPositiveMs("NIUBOT_RESTART_PACK_TIMEOUT", 120_000));
+    const packed = await runLogged(context, npmCommand, args, options.cwd, readPositiveMs("NIUBOT_RESTART_PACK_TIMEOUT", 120_000));
     const filename = parseNpmPackFilename(packed.stdout);
     const archive = path.join(context.store.packagesDirectory, filename);
     if (!fs.existsSync(archive)) throw new Error(`npm pack output not found: ${archive}`);
@@ -290,7 +293,7 @@ async function packRelease(context: RestartContext, options: PackReleaseOptions)
     await assertLocalProxyEnvironment();
     await runLogged(
       context,
-      "npm",
+      npmCommand,
       ["install", "--omit=dev", "--no-audit", "--no-fund"],
       packageDirectory,
       options.installTimeoutMs,
@@ -318,7 +321,12 @@ async function checkRuntimeHealth(
   launched: ReturnType<typeof launchDetachedEngine>,
 ): Promise<boolean> {
   const healthTimeout = readPositiveMs("NIUBOT_RESTART_HEALTH_TIMEOUT", 15_000);
-  const identity = await waitForEngineIdentity(launched.endpoint, launched.state.instanceId, healthTimeout, 250);
+  const identity = await waitForEngineIdentity(launched.endpoint, {
+    instanceId: launched.state.instanceId,
+    pid: launched.state.pid,
+    home: context.niubotHome,
+    runtimePath: launched.state.runtimePath,
+  }, healthTimeout, 250);
   if (!identity) return false;
   let config;
   try {
@@ -453,11 +461,8 @@ function readPackage(file: string): { name: string; version: string } {
   return { name: pkg.name, version: pkg.version };
 }
 
-function releaseIdForRuntime(store: ReleaseStore, runtimePath: string): string | undefined {
-  const relative = path.relative(canonicalPath(store.releasesDirectory), canonicalPath(runtimePath));
-  const parts = relative.split(path.sep);
-  if (parts.length === 2 && parts[1] === "package" && parts[0] && !parts[0].startsWith("..")) return parts[0];
-  return undefined;
+function resolveNpmCommandForCurrentNode(): string {
+  return resolveNpmExecutableForNode(process.execPath) ?? "npm";
 }
 
 function acquireRestartLock(context: RestartContext): () => void {
@@ -490,10 +495,6 @@ function readLockPid(lockFile: string): number | undefined {
   } catch {
     return undefined;
   }
-}
-
-function canonicalPath(value: string): string {
-  try { return fs.realpathSync.native(value); } catch { return path.resolve(value); }
 }
 
 function installTimeout(context: RestartContext, update: boolean): number {

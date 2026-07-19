@@ -11,9 +11,14 @@ export function expandHome(p: string): string {
   return p;
 }
 
-export function resolveHomePath(homePath: string, cwd: string = process.cwd()): string {
+export function resolveHomePath(homePath: string, cwd?: string): string {
   const expanded = expandHome(homePath);
-  return path.isAbsolute(expanded) ? path.normalize(expanded) : path.resolve(cwd, expanded);
+  if (path.isAbsolute(expanded)) return path.normalize(expanded);
+  return path.resolve(cwd ?? safeCurrentWorkingDirectory(), expanded);
+}
+
+function safeCurrentWorkingDirectory(): string {
+  try { return process.cwd(); } catch { return os.homedir(); }
 }
 
 /** NIUBOT_HOME 默认 ~/.niubot */
@@ -29,7 +34,7 @@ export const AGENT_REGISTRY = {
     aliases: ["claude", "claude-code"],
     command: "claude",
     versionArgs: ["--version"],
-    windowsSupport: "dependency-required",
+    windowsSupport: "native",
   },
   codex: {
     aliases: ["codex"],
