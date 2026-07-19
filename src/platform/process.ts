@@ -104,6 +104,51 @@ export function queryProcessCommandLine(
   return undefined;
 }
 
+/** Read another process's working directory where the host OS exposes it. */
+export function queryProcessWorkingDirectory(
+  pid: number,
+  platform: NodeJS.Platform = process.platform,
+): string | undefined {
+  if (!Number.isInteger(pid) || pid <= 0) return undefined;
+  try {
+    if (platform === "linux") return fs.readlinkSync(`/proc/${pid}/cwd`);
+    if (platform === "darwin") return queryProcessPathWithLsof(pid, "cwd");
+  } catch {
+    return undefined;
+  }
+  // Windows does not expose another process's current directory through a
+  // stable supported API. New Engine state records runtimePath directly.
+  return undefined;
+}
+
+/** Read the file backing an inherited process descriptor, used for legacy logs. */
+export function queryProcessFileDescriptorPath(
+  pid: number,
+  descriptor: number,
+  platform: NodeJS.Platform = process.platform,
+): string | undefined {
+  if (!Number.isInteger(pid) || pid <= 0 || !Number.isInteger(descriptor) || descriptor < 0) return undefined;
+  try {
+    if (platform === "linux") return fs.readlinkSync(`/proc/${pid}/fd/${descriptor}`);
+    if (platform === "darwin") return queryProcessPathWithLsof(pid, String(descriptor));
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
+function queryProcessPathWithLsof(pid: number, descriptor: string): string | undefined {
+  const output = execFileSync("lsof", ["-a", "-p", String(pid), "-d", descriptor, "-Fn"], {
+    timeout: 5_000,
+    encoding: "utf-8",
+    stdio: ["ignore", "pipe", "ignore"],
+  });
+  return output
+    .split(/\r?\n/)
+    .find((line) => line.startsWith("n") && line.length > 1)
+    ?.slice(1);
+}
+
 /** Read one environment value from an existing process when the OS exposes it. */
 export function queryProcessEnvironmentValue(
   pid: number,

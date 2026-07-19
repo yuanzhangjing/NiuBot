@@ -38,7 +38,11 @@ import {
   resolveNpmExecutableForNode,
 } from "./platform/executable.js";
 import { clearProcessState, readProcessState } from "./process-state.js";
-import { isProcessAlive } from "./platform/process.js";
+import {
+  isProcessAlive,
+  queryProcessFileDescriptorPath,
+  queryProcessWorkingDirectory,
+} from "./platform/process.js";
 import { isNewerPackageVersion } from "./version.js";
 
 // ── Paths ──────────────────────────────────────────────────
@@ -1085,6 +1089,8 @@ async function printStatusForHome(niubotHome: string): Promise<void> {
     niubotHome,
     cliPath: __dirname,
     todayLogFile: logFile,
+    processCwd: queryProcessWorkingDirectory(pid),
+    processStdoutPath: queryProcessFileDescriptorPath(pid, 1),
   });
 
   console.log(`NiuBot is running (PID ${pid})`);
