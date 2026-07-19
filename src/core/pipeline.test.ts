@@ -18,6 +18,7 @@ import {
 import type { NormalizedMessage, PlatformAdapter } from "../im/types.js";
 import { COMPACT_RECOVERY_REMINDER } from "../memory/inject.js";
 import { SYSTEM_RULES } from "../system-rules.js";
+import { addCronJob } from "./cron.js";
 import {
   formatShellExecError,
   Pipeline,
@@ -3892,5 +3893,163 @@ describe("Pipeline.recover", () => {
       LIMIT 1
     `).get("230028") as { rowid: number } | undefined;
     expect(ftsRow).toBeTruthy();
+  });
+
+  test("only lets a group member delete cron jobs they created", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const otherJob = addCronJob(db, {
+      chatId: "c1",
+      creatorUserId: "u3",
+      cronExpr: "* * * * *",
+      prompt: "other job",
+    });
+    const ownJob = addCronJob(db, {
+      chatId: "c1",
+      creatorUserId: "u2",
+      cronExpr: "* * * * *",
+      prompt: "own job",
+    });
+    const { im, sentTexts } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db, im, new RecordingAgent(), createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex",
+    );
+
+    expect((pipeline as any).handleBuiltinCommand(
+      `/cron del ${otherJob}`, "u2", "c1", "chat-open-id", "group", "m1",
+    )).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(sentTexts).toContain("只能删除自己创建的定时任务。");
+    expect(db.prepare("SELECT id FROM cron_jobs WHERE id = ?").get(otherJob)).toBeTruthy();
+
+    expect((pipeline as any).handleBuiltinCommand(
+      `/cron del ${ownJob}`, "u2", "c1", "chat-open-id", "group", "m2",
+    )).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(sentTexts).toContain(`已删除定时任务 #${ownJob}`);
+    expect(db.prepare("SELECT id FROM cron_jobs WHERE id = ?").get(ownJob)).toBeUndefined();
+  });
+
+  test("routes /task stop through the command entrypoint and scopes it to the current chat", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const backend = new RecordingAgent();
+    const { im, sentTexts } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db, im, new RecordingAgent(), createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex",
+    );
+    (pipeline as any).adminRoles.set("u2", "owner");
+    (pipeline as any).runningTasks.set("task-current", {
+      agentSession: { id: "task-current" }, backend, backendType: "codex", chatId: "c1",
+      description: "current", startedAt: Date.now(),
+    });
+    (pipeline as any).runningTasks.set("task-other", {
+      agentSession: { id: "task-other" }, backend, backendType: "codex", chatId: "c2",
+      description: "other", startedAt: Date.now(),
+    });
+
+    const handled = (pipeline as any).handleBuiltinCommand(
+      "/task stop", "u2", "c1", "chat-open-id", "p2p", "m1",
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(handled).toBe(true);
+    expect(backend.cancelSessionCalls).toEqual(["task-current"]);
+    expect(sentTexts).toContain("正在停止 1 个 task。");
+  });
+
+  test("adds and removes an admin through the owner command path", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare(`
+      INSERT INTO users (id, name, platform, platform_id, is_admin)
+      VALUES ('u2', 'Owner', 'feishu', 'owner-open-id', 'owner'),
+             ('u3', 'Member', 'feishu', 'member-open-id', 'none')
+    `).run();
+    const { im, sentTexts } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db, im, new RecordingAgent(), createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex",
+    );
+    (pipeline as any).adminRoles.set("u2", "owner");
+
+    expect((pipeline as any).handleBuiltinCommand(
+      "/admin add @u3", "u2", "c1", "chat-open-id", "p2p", "m1",
+    )).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect((pipeline as any).adminRoles.get("u3")).toBe("admin");
+    expect((db.prepare("SELECT is_admin FROM users WHERE id = 'u3'").get() as { is_admin: string }).is_admin).toBe("admin");
+
+    expect((pipeline as any).handleBuiltinCommand(
+      "/admin remove @u3", "u2", "c1", "chat-open-id", "p2p", "m2",
+    )).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect((pipeline as any).adminRoles.has("u3")).toBe(false);
+    expect(sentTexts.some((text) => text.includes("已添加") && text.includes("管理员"))).toBe(true);
+    expect(sentTexts.some((text) => text.includes("已移除") && text.includes("管理员权限"))).toBe(true);
+  });
+
+  test("executes an admin shell command and exposes it through /history", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const { im, sentCards } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db, im, new RecordingAgent(), createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex",
+    );
+    (pipeline as any).adminRoles.set("u2", "owner");
+
+    expect((pipeline as any).handleBuiltinCommand(
+      "/pwd", "u2", "c1", "chat-open-id", "p2p", "m1",
+    )).toBe(true);
+    await vi.waitFor(() => {
+      expect(sentCards.some((card) => card.header === "Shell" && card.content.includes(dir))).toBe(true);
+    });
+
+    expect((pipeline as any).handleBuiltinCommand(
+      "/history", "u2", "c1", "chat-open-id", "p2p", "m2",
+    )).toBe(true);
+    await vi.waitFor(() => {
+      expect(sentCards.some((card) => card.header === "Shell History" && card.content.includes("pwd"))).toBe(true);
+    });
+  });
+
+  test("stores silent group messages but only runs the agent when the bot is mentioned", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const agent = new ReplyAgent();
+    const { im, dispatchMessage } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex",
+    );
+    await pipeline.start();
+
+    dispatchMessage(createMessage({
+      chatPlatformId: "group-open-id",
+      chatType: "group",
+      contentText: "silent message",
+      platformMsgId: "g1",
+      botMentioned: false,
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(agent.sendMessageCalls).toHaveLength(0);
+
+    dispatchMessage(createMessage({
+      chatPlatformId: "group-open-id",
+      chatType: "group",
+      contentText: "@NiuBot ping",
+      platformMsgId: "g2",
+      botMentioned: true,
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(agent.sendMessageCalls).toHaveLength(1);
+    expect((db.prepare("SELECT COUNT(*) AS count FROM messages WHERE chat_id = 'c1'").get() as { count: number }).count).toBeGreaterThanOrEqual(2);
   });
 });

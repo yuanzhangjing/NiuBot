@@ -39,7 +39,7 @@ import {
   type StableSystemContextOptions,
 } from "../memory/inject.js";
 import { labelLocalDateTime, labelLocalTime, utcDateTimeForSql } from "../tz.js";
-import { listCronJobs, deleteCronJob, getCronJob } from "./cron.js";
+import { listCronJobs, deleteCronJobForAccess } from "./cron.js";
 import { createLogger } from "../logger.js";
 import { launchRestartWorker } from "../restart-launcher.js";
 import { resolveExecutable, resolveNpmExecutableForNode } from "../platform/executable.js";
@@ -1076,7 +1076,7 @@ export class Pipeline {
         return true;
       }
       case "/cron": {
-        this.handleCronCommand(parts.slice(1), chatId, platformChatId, msgId);
+        this.handleCronCommand(parts.slice(1), userId, chatId, chatType, platformChatId, msgId);
         return true;
       }
       case "/agent": {
@@ -1422,7 +1422,14 @@ export class Pipeline {
 
   // ── /cron command ─────────────────────────────────────────────
 
-  private handleCronCommand(args: string[], chatId: string, platformChatId: string, msgId?: string): void {
+  private handleCronCommand(
+    args: string[],
+    userId: string,
+    chatId: string,
+    chatType: string,
+    platformChatId: string,
+    msgId?: string,
+  ): void {
     const sub = (args[0] ?? "list").toLowerCase();
 
     switch (sub) {
@@ -1443,12 +1450,24 @@ export class Pipeline {
           this.replyText(chatId, platformChatId, msgId, `无效 ID: ${idStr}`);
           return;
         }
-        const job = getCronJob(this.db, id);
-        if (!job || job.chatId !== chatId) {
+        try {
+          const job = deleteCronJobForAccess(this.db, id, {
+            currentChatId: chatId,
+            chatType: chatType === "group" ? "group" : "p2p",
+            userId,
+          });
+          if (!job) {
+            this.replyText(chatId, platformChatId, msgId, `未找到定时任务 #${id}`);
+            return;
+          }
+        } catch (err) {
+          if (err instanceof Error && err.message === "can only delete your own cron jobs") {
+            this.replyText(chatId, platformChatId, msgId, "只能删除自己创建的定时任务。");
+            return;
+          }
           this.replyText(chatId, platformChatId, msgId, `未找到定时任务 #${id}`);
           return;
         }
-        deleteCronJob(this.db, id);
         this.replyText(chatId, platformChatId, msgId, `已删除定时任务 #${id}`);
         break;
       }
