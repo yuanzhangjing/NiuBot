@@ -28,13 +28,15 @@ describe("resolveExecutable", () => {
   });
 
   it("routes cmd shims through the configured command interpreter", () => {
-    const invocation = buildExecutableInvocation("C:\\Tools\\agent.cmd", ["--version"], {
+    const invocation = buildExecutableInvocation("C:\\Program Files\\Tools\\agent.cmd", ["hello world", "a&b"], {
       platform: "win32",
       env: { ComSpec: "C:\\Windows\\System32\\cmd.exe" },
     });
     expect(invocation.command).toBe("C:\\Windows\\System32\\cmd.exe");
     expect(invocation.args.slice(0, 3)).toEqual(["/d", "/s", "/c"]);
     expect(invocation.args[3]).toContain("agent.cmd");
+    expect(invocation.args[3]).toMatch(/^".*"$/);
+    expect(invocation.args[3]).toContain("^&");
     expect(invocation.windowsVerbatimArguments).toBe(true);
   });
 

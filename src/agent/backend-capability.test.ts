@@ -1,7 +1,29 @@
 import { describe, expect, it, vi } from "vitest";
-import { probeAllBackendCapabilities, probeBackendCapability } from "./backend-capability.js";
+import {
+  probeAllBackendCapabilities,
+  probeAllBackendCapabilitiesAsync,
+  probeBackendCapability,
+} from "./backend-capability.js";
 
 describe("backend capability", () => {
+  it("probes installed backends concurrently", async () => {
+    let active = 0;
+    let peak = 0;
+    const capabilities = await probeAllBackendCapabilitiesAsync({
+      platform: "linux",
+      resolveCommand: (command) => `/bin/${command}`,
+      runVersionAsync: async () => {
+        active++;
+        peak = Math.max(peak, active);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        active--;
+        return "1.2.3";
+      },
+    });
+
+    expect(capabilities.every((capability) => capability.selectable)).toBe(true);
+    expect(peak).toBeGreaterThan(1);
+  });
   it("marks an installed native backend selectable", () => {
     const capability = probeBackendCapability("codex", {
       platform: "win32",

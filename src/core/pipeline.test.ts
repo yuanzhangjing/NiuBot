@@ -5,6 +5,7 @@ import Database from "better-sqlite3";
 import yaml from "yaml";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { CliAgentBackend, type BaseCliSession, type ParsedOutput } from "../agent/cli-base.js";
+import type { BackendCapability } from "../agent/backend-capability.js";
 import { AgentSessionNotStartedError, type AgentBackend, type AgentResponse, type AgentSession, type SessionConfig } from "../agent/types.js";
 import {
   getBotBackendModelState,
@@ -1843,8 +1844,8 @@ describe("Pipeline.recover", () => {
       model: "claude-model",
     });
 
-    (pipeline as any).handleAgentCommand(["claude"], "c1", "chat-open-id");
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await (pipeline as any).handleAgentCommand(["claude"], "c1", "chat-open-id");
+    await (pipeline as any).globalSessionTransition;
 
     expect(identity.model).toBe("claude-model");
     expect(getBotRuntimeState(db, "NiuBot")).toEqual({
@@ -1854,7 +1855,7 @@ describe("Pipeline.recover", () => {
     expect(sentCards[0]?.content).toContain("重启后仍保持当前选择");
   });
 
-  test("/agent shows selectable and unavailable backend states", () => {
+  test("/agent shows selectable and unavailable backend states", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
     const { im, sentCards } = createRecordingImStub();
@@ -1867,13 +1868,46 @@ describe("Pipeline.recover", () => {
       { backend: "cursor", platform: "win32", support: "wsl-only", installed: true, selectable: false, reason: "requires WSL" },
     ];
 
-    (pipeline as any).handleAgentCommand([], "c1", "chat-open-id");
+    await (pipeline as any).handleAgentCommand([], "c1", "chat-open-id");
 
     expect(sentCards[0]?.content).toContain("codex — 可用 · 1.2.3");
     expect(sentCards[0]?.content).toContain("cursor — 不可用 · requires WSL");
 
-    (pipeline as any).handleAgentCommand(["2"], "c1", "chat-open-id");
+    await (pipeline as any).handleAgentCommand(["2"], "c1", "chat-open-id");
     expect(sentCards[1]?.content).toContain("cursor** 当前不可用：requires WSL");
+  });
+
+  test("/agent refreshes backend installation state on every invocation", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+    const { im, sentCards } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      initDatabase(path.join(dir, "niubot.db")), im, new RecordingAgent(),
+      createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex",
+    );
+    let claudeInstalled = false;
+    const getCapabilities = vi.fn(async () => [
+      { backend: "codex", platform: "darwin", support: "native", installed: true, selectable: true },
+      {
+        backend: "claude",
+        platform: "darwin",
+        support: "native",
+        installed: claudeInstalled,
+        selectable: claudeInstalled,
+        version: claudeInstalled ? "2.1.0" : undefined,
+        reason: claudeInstalled ? undefined : "claude CLI not found",
+      },
+    ] satisfies BackendCapability[]);
+    (pipeline as any).getBackendCapabilities = getCapabilities;
+
+    await (pipeline as any).handleAgentCommand([], "c1", "chat-open-id");
+    expect(sentCards[0]?.content).toContain("claude — 不可用 · claude CLI not found");
+
+    claudeInstalled = true;
+    await (pipeline as any).handleAgentCommand([], "c1", "chat-open-id");
+
+    expect(getCapabilities).toHaveBeenCalledTimes(2);
+    expect(sentCards[1]?.content).toContain("claude — 可用 · 2.1.0");
   });
 
   test("keeps the current session when target backend validation fails", async () => {
@@ -1899,7 +1933,7 @@ describe("Pipeline.recover", () => {
       hasReplied: true,
     });
 
-    (pipeline as any).handleAgentCommand(["claude"], "c1", "chat-open-id");
+    await (pipeline as any).handleAgentCommand(["claude"], "c1", "chat-open-id");
     await (pipeline as any).globalSessionTransition;
 
     expect((pipeline as any).backendType).toBe("codex");
@@ -1921,7 +1955,7 @@ describe("Pipeline.recover", () => {
       () => ["codex", "claude"],
     );
 
-    (pipeline as any).handleAgentCommand(["claude"], "trigger-chat", "trigger-platform-chat");
+    await (pipeline as any).handleAgentCommand(["claude"], "trigger-chat", "trigger-platform-chat");
     (pipeline as any).handleMessage(createMessage({
       chatPlatformId: "brand-new-platform-chat",
       platformMsgId: "new-chat-message",
@@ -2022,8 +2056,8 @@ describe("Pipeline.recover", () => {
       () => ["codex", "claude"],
     );
 
-    (pipeline as any).handleAgentCommand(["claude"], "c1", "chat-open-id");
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await (pipeline as any).handleAgentCommand(["claude"], "c1", "chat-open-id");
+    await (pipeline as any).globalSessionTransition;
 
     expect(identity.model).toBe("claude-opus-4-6");
     expect(getBotRuntimeState(db, "NiuBot")).toEqual({

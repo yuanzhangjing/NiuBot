@@ -5,8 +5,8 @@ import { spawn } from "node:child_process";
 import { afterEach, describe, expect, it } from "vitest";
 import { EngineControlServer, type EngineIdentity } from "./local-api/engine-server.js";
 import { resolveEngineEndpoint } from "./platform/ipc.js";
-import { queryProcessStartMarker, waitForProcessExit } from "./platform/process.js";
-import { inspectRunningEngine, stopEngine } from "./process-manager.js";
+import { queryProcessStartMarker, terminateSpawnedProcessTree, waitForProcessExit } from "./platform/process.js";
+import { inspectRunningEngine, launchDetachedEngine, stopEngine } from "./process-manager.js";
 import { readProcessState, writeProcessState, type EngineProcessState } from "./process-state.js";
 
 const tempDirs: string[] = [];
@@ -18,6 +18,27 @@ afterEach(() => {
 });
 
 describe("process manager", () => {
+  it("serializes starts and rejects a second Engine for the same home", async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-process-manager-"));
+    tempDirs.push(home);
+    const runtime = path.join(home, "runtime");
+    const entry = path.join(runtime, "dist", "index.js");
+    const logFile = path.join(home, "logs", "engine.log");
+    fs.mkdirSync(path.dirname(entry), { recursive: true });
+    fs.writeFileSync(entry, "setInterval(() => {}, 1000);\n");
+    const options = {
+      niubotHome: home,
+      engineEntry: entry,
+      runtimePath: runtime,
+      logFile,
+      version: "1.0.0",
+    };
+
+    const launched = launchDetachedEngine(options);
+    expect(() => launchDetachedEngine(options)).toThrow(/already running or starting/);
+    await expect(stopEngine(home)).resolves.toEqual({ stopped: true, pid: launched.state.pid });
+  });
+
   it("identifies and stops an engine through its control endpoint", async () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-process-manager-"));
     tempDirs.push(home);
@@ -104,5 +125,45 @@ describe("process manager", () => {
 
     await expect(stopEngine(home)).resolves.toEqual({ stopped: true, pid: child.pid });
     expect(await waitForProcessExit(child.pid, 1_000)).toBe(true);
+  });
+
+  it.skipIf(process.platform === "win32")("verifies the home and command before stopping a legacy PID", async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "niubot legacy home "));
+    tempDirs.push(home);
+    const runtime = path.join(home, "legacy-runtime");
+    const entry = path.join(runtime, "dist", "index.js");
+    fs.mkdirSync(path.dirname(entry), { recursive: true });
+    fs.writeFileSync(entry, "setInterval(() => {}, 1000);\n");
+    const child = spawn(process.execPath, [entry], {
+      cwd: runtime,
+      detached: true,
+      windowsHide: true,
+      stdio: "ignore",
+      env: { ...process.env, NIUBOT_HOME: home },
+    });
+    if (!child.pid) throw new Error("test child did not start");
+    child.unref();
+    fs.writeFileSync(path.join(home, "niubot.pid"), String(child.pid));
+
+    await expect(stopEngine(home)).resolves.toEqual({ stopped: true, pid: child.pid });
+    expect(await waitForProcessExit(child.pid, 1_000)).toBe(true);
+  });
+
+  it("refuses to stop an unrelated process referenced by a legacy PID file", async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-process-manager-"));
+    tempDirs.push(home);
+    const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+      detached: true,
+      windowsHide: true,
+      stdio: "ignore",
+    });
+    if (!child.pid) throw new Error("test child did not start");
+    child.unref();
+    fs.writeFileSync(path.join(home, "niubot.pid"), String(child.pid));
+
+    await expect(stopEngine(home)).rejects.toThrow(/cannot be verified/);
+    expect(queryProcessStartMarker(child.pid)).toBeTruthy();
+    terminateSpawnedProcessTree(child.pid, true);
+    await waitForProcessExit(child.pid, 1_000);
   });
 });

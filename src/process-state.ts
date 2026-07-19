@@ -17,6 +17,7 @@ export interface EngineProcessState {
   runtimeMode?: string;
   runtimePath: string;
   nodePath: string;
+  logFile?: string;
 }
 
 export interface NiuBotProcessState {
@@ -97,5 +98,6 @@ function isProcessState(value: unknown): value is NiuBotProcessState {
     && typeof item["version"] === "string"
     && (item["runtimeMode"] === undefined || typeof item["runtimeMode"] === "string")
     && typeof item["runtimePath"] === "string"
-    && typeof item["nodePath"] === "string";
+    && typeof item["nodePath"] === "string"
+    && (item["logFile"] === undefined || typeof item["logFile"] === "string");
 }

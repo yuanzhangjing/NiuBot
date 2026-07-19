@@ -39,6 +39,7 @@ import {
 } from "./platform/executable.js";
 import { clearProcessState, readProcessState } from "./process-state.js";
 import { isProcessAlive } from "./platform/process.js";
+import { isNewerPackageVersion } from "./version.js";
 
 // ── Paths ──────────────────────────────────────────────────
 
@@ -1037,7 +1038,7 @@ async function stopProcess(niubotHome: string): Promise<boolean> {
 async function printStatusForHome(niubotHome: string): Promise<void> {
   const running = await inspectRunningEngine(niubotHome);
   if (running) {
-    const logFile = getTodayLogFilePath(niubotHome);
+    const logFile = running.state.logFile ?? getTodayLogFilePath(niubotHome);
     const uptime = formatDuration(Date.now() - Date.parse(running.state.startedAt));
     console.log(`NiuBot is running (PID ${running.state.pid})`);
     console.log(`  Version: ${running.identity.version}`);
@@ -1056,7 +1057,7 @@ async function printStatusForHome(niubotHome: string): Promise<void> {
     if (isProcessAlive(state.pid)) {
       console.log(`NiuBot process exists (PID ${state.pid}), but Engine identity cannot be verified.`);
       console.log(`  State: ${path.join(niubotHome, "run", "process-state.json")}`);
-      console.log(`  Log: ${getTodayLogFilePath(niubotHome)}`);
+      console.log(`  Log: ${state.logFile ?? getTodayLogFilePath(niubotHome)}`);
       return;
     }
     clearProcessState(niubotHome, state.instanceId);
@@ -1170,13 +1171,22 @@ function checkForUpdate(): string | null {
   const local = getPkgVersion();
   try {
     const latest = fetchLatestVersion();
-    if (latest && latest !== local) return latest;
+    if (latest && isNewerPackageVersion(latest, local)) return latest;
   } catch { /* network error, not published, etc. */ }
   return null;
 }
 
 async function cmdUpdate(niubotHome: string): Promise<void> {
-  const current = getPkgVersion();
+  const running = await inspectRunningEngine(niubotHome);
+  const recordedState = readProcessState(niubotHome);
+  if (!running && recordedState && isProcessAlive(recordedState.processes.engine.pid)) {
+    fail(`Process ${recordedState.processes.engine.pid} exists, but Engine identity cannot be verified.`);
+    hint("Refusing to modify the installation while a possibly running Engine is unverified.");
+    process.exitCode = 1;
+    return;
+  }
+
+  const current = running?.identity.version ?? getPkgVersion();
   const npmCommand = resolveNpmCommandForCurrentNode();
   console.log();
   console.log(`Current version: ${current}`);
@@ -1192,7 +1202,7 @@ async function cmdUpdate(niubotHome: string): Promise<void> {
     process.exitCode = 1;
     return;
   }
-  if (latest === current) {
+  if (!isNewerPackageVersion(latest, current)) {
     ok("Already up to date.");
     console.log();
     return;
@@ -1201,7 +1211,6 @@ async function cmdUpdate(niubotHome: string): Promise<void> {
   console.log(`  New version available: ${latest}`);
   console.log();
 
-  const running = await inspectRunningEngine(niubotHome);
   if (running) {
     if (process.env["NIUBOT_AGENT_SESSION"]) {
       fail("Cannot update from within a bot session. Use /update in Feishu or run directly in your terminal.");

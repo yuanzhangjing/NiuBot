@@ -24,6 +24,7 @@ import {
   markUnfinishedRuntimeRunsFailedByRestart,
   recordRuntimeEvent,
 } from "../database/schema.js";
+import { isNewerPackageVersion } from "../version.js";
 import {
   buildActiveTaskContext,
   buildImportantContext,
@@ -155,7 +156,7 @@ export class Pipeline {
   private backendType: AgentBackendType;
   private backendResolver?: (type: AgentBackendType) => Promise<AgentBackend>;
   private getAvailableBackends: () => string[];
-  private getBackendCapabilities: () => BackendCapability[];
+  private getBackendCapabilities: () => BackendCapability[] | Promise<BackendCapability[]>;
   private queue: ChatManager;
   private responseSender: ResponseSender;
   private runtimeState: RuntimeStateStore;
@@ -268,7 +269,7 @@ export class Pipeline {
     restartConfig?: RestartConfig,
     autoUpdateNotificationsEnabled = true,
     archiveHome?: string,
-    getBackendCapabilities?: () => BackendCapability[],
+    getBackendCapabilities?: () => BackendCapability[] | Promise<BackendCapability[]>,
   ) {
     this.db = db;
     this.im = im;
@@ -1083,7 +1084,10 @@ export class Pipeline {
           this.replyText(chatId, platformChatId, msgId, "/agent 仅管理员可用。");
           return true;
         }
-        this.handleAgentCommand(parts.slice(1), chatId, platformChatId, msgId);
+        void this.handleAgentCommand(parts.slice(1), chatId, platformChatId, msgId).catch((err) => {
+          this.log.error("agent command failed", { error: String(err) });
+          this.sendAgentCard(chatId, platformChatId, msgId, "Agent", `处理 /agent 失败: ${String(err)}`);
+        });
         return true;
       }
       case "/model": {
@@ -1858,8 +1862,15 @@ export class Pipeline {
    * - /agent        → 显示当前 backend
    * - /agent <type> → 切换到指定 backend，归档当前 session
    */
-  private handleAgentCommand(args: string[], chatId: string, platformChatId: string, msgId?: string): void {
-    const capabilities = this.getBackendCapabilities();
+  private async handleAgentCommand(args: string[], chatId: string, platformChatId: string, msgId?: string): Promise<void> {
+    let capabilities: BackendCapability[];
+    try {
+      capabilities = await this.getBackendCapabilities();
+    } catch (err) {
+      this.log.error("failed to refresh backend capabilities", { error: String(err) });
+      this.sendAgentCard(chatId, platformChatId, msgId, "Agent", `读取 backend 状态失败: ${String(err)}`);
+      return;
+    }
     if (args.length === 0) {
       // 显示当前 agent（卡片）
       const currentModel = this.botIdentity.model ?? "default";
@@ -2308,7 +2319,7 @@ export class Pipeline {
 
     try {
       const latest = await this.fetchLatestVersion();
-      if (!latest || latest === currentVersion) {
+      if (!latest || !isNewerPackageVersion(latest, currentVersion)) {
         const text = `已是最新版本 (${currentVersion})。`;
         const send = this.im.sendCard(platformChatId, "Update", text, undefined, msgId);
         send.then((pmid) => { this.storeBotResponse(chatId, text, pmid); }).catch((err) => this.log.warn("update card send failed", { error: String(err) }));

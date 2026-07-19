@@ -10,6 +10,7 @@ import {
   getBundledNiubotBinDir,
   prependNiubotBinToPath,
 } from "./platform/cli-runtime.js";
+import { resolveBotEndpoint } from "./platform/ipc.js";
 
 describe("niubot CLI path helpers", () => {
   it("publishes nbt as a stable package binary", () => {
@@ -119,8 +120,13 @@ describe("niubot CLI path helpers", () => {
   });
 
   it("passes the bot name used by session archive paths", () => {
-    const env = buildNiubotEnv({ botName: "NiuBot" });
+    const env = buildNiubotEnv({ botName: "NiuBot", dbPath: "/data/custom/bot.db" });
     expect(env["NIUBOT_BOT_NAME"]).toBe("NiuBot");
+    expect(env["NIUBOT_API_SOCKET"]).toBe(
+      process.platform === "win32"
+        ? resolveBotEndpoint(env["NIUBOT_HOME"]!, "NiuBot").address
+        : "/data/custom/api.sock",
+    );
   });
 
   it.skipIf(process.platform === "win32")("creates a managed nbt shim under .local/bin", () => {

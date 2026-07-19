@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { AGENT_REGISTRY, BUILTIN_BACKENDS, normalizeBackend, type BuiltinBackendType } from "../config.js";
 import { buildExecutableInvocation, resolveExecutable } from "../platform/executable.js";
+import { runCommand } from "../platform/command.js";
 
 export type BackendPlatformSupport = "native" | "dependency-required" | "wsl-only" | "unknown";
 
@@ -21,6 +22,10 @@ export interface ProbeBackendOptions {
   resolveCommand?: typeof resolveExecutable;
   runVersion?: (command: string, args: string[], windowsVerbatimArguments?: boolean) => string;
   verifyVersion?: boolean;
+}
+
+export interface ProbeBackendAsyncOptions extends Omit<ProbeBackendOptions, "runVersion"> {
+  runVersionAsync?: (command: string, args: string[]) => Promise<string>;
 }
 
 export function probeBackendCapability(
@@ -124,6 +129,38 @@ export function probeAllBackendCapabilities(options: ProbeBackendOptions = {}): 
   return (Object.keys(AGENT_REGISTRY) as BuiltinBackendType[])
     .map((backend) => probeBackendCapability(backend, options)!)
     .filter(Boolean);
+}
+
+export async function probeBackendCapabilityAsync(
+  rawBackend: string,
+  options: ProbeBackendAsyncOptions = {},
+): Promise<BackendCapability | undefined> {
+  const base = probeBackendCapability(rawBackend, { ...options, verifyVersion: false });
+  if (!base || !base.selectable || options.verifyVersion === false) return base;
+
+  const definition = AGENT_REGISTRY[base.backend];
+  try {
+    const output = await (options.runVersionAsync ?? defaultRunVersionAsync)(
+      base.executable!,
+      [...definition.versionArgs],
+    );
+    return { ...base, version: parseVersion(output.trim()) };
+  } catch (err) {
+    return { ...base, selectable: false, reason: versionProbeError(err) };
+  }
+}
+
+export async function probeAllBackendCapabilitiesAsync(
+  options: ProbeBackendAsyncOptions = {},
+): Promise<BackendCapability[]> {
+  return (await Promise.all(
+    (Object.keys(AGENT_REGISTRY) as BuiltinBackendType[])
+      .map((backend) => probeBackendCapabilityAsync(backend, options)),
+  )).filter((capability): capability is BackendCapability => Boolean(capability));
+}
+
+async function defaultRunVersionAsync(command: string, args: string[]): Promise<string> {
+  return (await runCommand(command, args, { timeoutMs: 5_000, maxOutputBytes: 1024 * 1024 })).stdout;
 }
 
 function defaultRunVersion(command: string, args: string[], windowsVerbatimArguments = false): string {

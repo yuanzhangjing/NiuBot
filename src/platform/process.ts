@@ -68,6 +68,78 @@ export function queryProcessStartMarker(
   return undefined;
 }
 
+export function queryProcessCommandLine(
+  pid: number,
+  platform: NodeJS.Platform = process.platform,
+): string | undefined {
+  if (!Number.isInteger(pid) || pid <= 0) return undefined;
+  try {
+    if (platform === "linux") {
+      return fs.readFileSync(`/proc/${pid}/cmdline`).toString("utf-8").split("\0").filter(Boolean).join(" ") || undefined;
+    }
+    if (platform === "darwin") {
+      return execFileSync("ps", ["-ww", "-p", String(pid), "-o", "command="], {
+        timeout: 5_000,
+        encoding: "utf-8",
+        stdio: ["ignore", "pipe", "ignore"],
+      }).trim() || undefined;
+    }
+    if (platform === "win32") {
+      const script = [
+        `$p = Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}'`,
+        "if ($null -ne $p) { $p.CommandLine }",
+      ].join("; ");
+      return execFileSync("powershell.exe", [
+        "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script,
+      ], {
+        timeout: 10_000,
+        encoding: "utf-8",
+        stdio: ["ignore", "pipe", "ignore"],
+        windowsHide: true,
+      }).trim() || undefined;
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
+/** Read one environment value from an existing process when the OS exposes it. */
+export function queryProcessEnvironmentValue(
+  pid: number,
+  name: string,
+  platform: NodeJS.Platform = process.platform,
+): string | undefined {
+  if (!Number.isInteger(pid) || pid <= 0 || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) return undefined;
+  try {
+    if (platform === "linux") {
+      const prefix = `${name}=`;
+      const entry = fs.readFileSync(`/proc/${pid}/environ`)
+        .toString("utf-8")
+        .split("\0")
+        .find((item) => item.startsWith(prefix));
+      return entry?.slice(prefix.length);
+    }
+    if (platform === "darwin") {
+      const output = execFileSync("ps", ["eww", "-p", String(pid), "-o", "command="], {
+        timeout: 5_000,
+        encoding: "utf-8",
+        stdio: ["ignore", "pipe", "ignore"],
+        maxBuffer: 4 * 1024 * 1024,
+      });
+      const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const match = output.match(new RegExp(`(?:^|\\s)${escapedName}=(.*?)(?=\\s[A-Za-z_][A-Za-z0-9_]*=|\\s*$)`));
+      return match?.[1];
+    }
+  } catch {
+    return undefined;
+  }
+  // Windows does not expose another process's environment through a stable,
+  // supported API. Legacy PID-only state is therefore intentionally not
+  // eligible for automatic termination there.
+  return undefined;
+}
+
 export function waitForProcessStartMarker(
   pid: number,
   platform: NodeJS.Platform = process.platform,

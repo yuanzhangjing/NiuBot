@@ -4,32 +4,30 @@
 
 import path from "node:path";
 import { localApiRequest } from "../local-api/client.js";
-import { endpointFromAddress, resolveBotEndpoint, type LocalIpcEndpoint } from "../platform/ipc.js";
+import { resolveSessionBotEndpoint, type LocalIpcEndpoint } from "../platform/ipc.js";
 
-function requireEnv(name: string): string {
-  const v = process.env[name];
-  if (!v) { console.error(`${name} is not set. nbt must run inside a NiuBot session.`); process.exit(1); }
-  return v;
-}
-const DB_PATH = process.env["NIUBOT_DB_PATH"];
-
-function getEndpoint(): LocalIpcEndpoint {
-  const niubotHome = requireEnv("NIUBOT_HOME");
-  const configured = process.env["NIUBOT_API_SOCKET"];
-  if (configured) return endpointFromAddress(configured);
-  const botName = process.env["NIUBOT_BOT_NAME"];
-  if (botName) return resolveBotEndpoint(niubotHome, botName);
-  if (DB_PATH) {
-    const directory = path.dirname(DB_PATH);
-    return resolveBotEndpoint(niubotHome, path.basename(directory), { unixSocketDirectory: directory });
-  }
-  return endpointFromAddress(path.join(niubotHome, "run", "api.sock"));
+export function resolveSendEndpoint(
+  env: NodeJS.ProcessEnv = process.env,
+): LocalIpcEndpoint {
+  const niubotHome = env["NIUBOT_HOME"];
+  if (!niubotHome) throw new Error("NIUBOT_HOME is not set. nbt must run inside a NiuBot session.");
+  return resolveSessionBotEndpoint({
+    niubotHome,
+    botId: env["NIUBOT_BOT_NAME"],
+    dbPath: env["NIUBOT_DB_PATH"],
+    configuredAddress: env["NIUBOT_API_SOCKET"],
+  });
 }
 
-async function ipcRequest(endpoint: LocalIpcEndpoint, urlPath: string, body: unknown): Promise<string> {
+async function ipcRequest(
+  endpoint: LocalIpcEndpoint,
+  urlPath: string,
+  body: unknown,
+  timeoutMs: number,
+): Promise<string> {
   let response;
   try {
-    response = await localApiRequest(endpoint, urlPath, { method: "POST", body });
+    response = await localApiRequest(endpoint, urlPath, { method: "POST", body, timeoutMs });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     throw new Error(`Cannot connect to NiuBot daemon: ${message}. Is NiuBot running?`);
@@ -90,11 +88,11 @@ export function handleSend(
       console.error("Usage: nbt send --file <path> [--file <path> ...]");
       process.exit(1);
     }
-    const endpoint = getEndpoint();
+    const endpoint = resolveSendEndpoint();
     (async () => {
       for (const filePath of filePaths) {
         const absPath = path.resolve(filePath);
-        await ipcRequest(endpoint, "/send-file", { chat_id: targetChatId, file_path: absPath });
+        await ipcRequest(endpoint, "/send-file", { chat_id: targetChatId, file_path: absPath }, 120_000);
       }
       console.log(filePaths.length === 1 ? "File sent." : `${filePaths.length} files sent.`);
     })()
@@ -113,8 +111,8 @@ export function handleSend(
       console.error("Usage: nbt send --card <header> <content>");
       process.exit(1);
     }
-    const endpoint = getEndpoint();
-    ipcRequest(endpoint, "/send", { chat_id: targetChatId, text: content, card_header: cardHeader })
+    const endpoint = resolveSendEndpoint();
+    ipcRequest(endpoint, "/send", { chat_id: targetChatId, text: content, card_header: cardHeader }, 30_000)
       .then(() => console.log("Card sent."))
       .catch((err) => {
         console.error(`Error: ${err.message}`);
@@ -129,8 +127,8 @@ export function handleSend(
     console.error("Usage: nbt send <text>");
     process.exit(1);
   }
-  const endpoint = getEndpoint();
-  ipcRequest(endpoint, "/send", { chat_id: targetChatId, text })
+  const endpoint = resolveSendEndpoint();
+  ipcRequest(endpoint, "/send", { chat_id: targetChatId, text }, 30_000)
     .then(() => console.log("Message sent."))
     .catch((err) => {
       console.error(`Error: ${err.message}`);

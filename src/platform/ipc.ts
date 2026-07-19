@@ -16,6 +16,14 @@ export interface ResolveBotEndpointOptions {
   unixSocketDirectory?: string;
 }
 
+export interface ResolveSessionEndpointOptions {
+  niubotHome: string;
+  botId?: string;
+  dbPath?: string;
+  configuredAddress?: string;
+  platform?: NodeJS.Platform;
+}
+
 export function resolveBotEndpoint(
   niubotHome: string,
   botId: string,
@@ -29,6 +37,24 @@ export function resolveBotEndpoint(
     kind: "unix-socket",
     address: path.posix.join(options.unixSocketDirectory ?? path.posix.join(niubotHome, botId), "api.sock"),
   };
+}
+
+/** Resolve the Bot API used by an agent-side CLI session. */
+export function resolveSessionBotEndpoint(options: ResolveSessionEndpointOptions): LocalIpcEndpoint {
+  const platform = options.platform ?? process.platform;
+  if (options.configuredAddress) return endpointFromAddress(options.configuredAddress, platform);
+  if (platform !== "win32" && options.dbPath) {
+    const directory = path.dirname(options.dbPath);
+    return resolveBotEndpoint(options.niubotHome, options.botId ?? path.basename(directory), {
+      platform,
+      unixSocketDirectory: directory,
+    });
+  }
+  if (options.botId || platform === "win32") {
+    return resolveBotEndpoint(options.niubotHome, options.botId ?? "NiuBot", { platform });
+  }
+  // Compatibility with sessions created before bot identity was injected.
+  return endpointFromAddress(path.join(options.niubotHome, "run", "api.sock"), platform);
 }
 
 export function resolveEngineEndpoint(

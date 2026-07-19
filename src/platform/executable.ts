@@ -96,10 +96,16 @@ export function buildExecutableInvocation(
 
   const env = options.env ?? process.env;
   const commandInterpreter = readEnv(env, "COMSPEC") || "cmd.exe";
-  const commandLine = [escapeCmdArgument(executable), ...args.map(escapeCmdArgument)].join(" ");
+  const doubleEscapeMetaCharacters = /node_modules[\\/]\.bin[\\/][^\\/]+\.cmd$/i.test(executable);
+  const commandLine = [
+    escapeCmdCommand(executable),
+    ...args.map((argument) => escapeCmdArgument(argument, doubleEscapeMetaCharacters)),
+  ].join(" ");
   return {
     command: commandInterpreter,
-    args: ["/d", "/s", "/c", commandLine],
+    // cmd /s strips the first and last quote. The outer pair is therefore part
+    // of the protocol and is required when the shim path contains spaces.
+    args: ["/d", "/s", "/c", `"${commandLine}"`],
     windowsVerbatimArguments: true,
   };
 }
@@ -151,10 +157,19 @@ function trimWrappingQuotes(value: string): string {
 }
 
 // Equivalent to the escaping used by mature Node spawn wrappers for cmd.exe.
-function escapeCmdArgument(value: string): string {
+const CMD_META_CHARACTERS = /([()\][%!^"`<>&|;, *?])/g;
+
+function escapeCmdCommand(value: string): string {
+  return String(value).replace(CMD_META_CHARACTERS, "^$1");
+}
+
+function escapeCmdArgument(value: string, doubleEscapeMetaCharacters: boolean): string {
   let escaped = String(value);
-  escaped = escaped.replace(/(\\*)"/g, "$1$1\\\"");
-  escaped = escaped.replace(/(\\*)$/, "$1$1");
+  escaped = escaped.replace(/(?=(\\+?)?)\1"/g, "$1$1\\\"");
+  escaped = escaped.replace(/(?=(\\+?)?)\1$/, "$1$1");
   escaped = `"${escaped}"`;
-  return escaped.replace(/[()%!^"<>&|]/g, "^$&");
+  escaped = escaped.replace(CMD_META_CHARACTERS, "^$1");
+  return doubleEscapeMetaCharacters
+    ? escaped.replace(CMD_META_CHARACTERS, "^$1")
+    : escaped;
 }

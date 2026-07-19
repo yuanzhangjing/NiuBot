@@ -6,6 +6,7 @@ export interface RunCommandOptions {
   cwd?: string;
   env?: NodeJS.ProcessEnv;
   timeoutMs?: number;
+  maxOutputBytes?: number;
   onOutput?: (stream: "stdout" | "stderr", text: string) => void;
 }
 
@@ -39,6 +40,8 @@ export async function runCommand(
     let stdout = "";
     let stderr = "";
     let timedOut = false;
+    let outputLimitExceeded = false;
+    let forceTimer: NodeJS.Timeout | undefined;
     const timer = options.timeoutMs
         ? setTimeout(() => {
           timedOut = true;
@@ -47,9 +50,12 @@ export async function runCommand(
           // taskkill /F immediately instead of waiting for a grace period that
           // the child cannot observe.
           if (child.pid) terminateSpawnedProcessTree(child.pid, process.platform === "win32");
-          setTimeout(() => {
-            if (child.exitCode === null && child.pid) terminateSpawnedProcessTree(child.pid, true);
-          }, 5_000).unref();
+          forceTimer = setTimeout(() => {
+            if (child.exitCode === null && child.signalCode === null && child.pid) {
+              terminateSpawnedProcessTree(child.pid, true);
+            }
+          }, 5_000);
+          forceTimer.unref();
         }, options.timeoutMs)
       : undefined;
     timer?.unref();
@@ -58,22 +64,34 @@ export async function runCommand(
       const text = chunk.toString();
       stdout += text;
       options.onOutput?.("stdout", text);
+      enforceOutputLimit();
     });
     child.stderr.on("data", (chunk: Buffer) => {
       const text = chunk.toString();
       stderr += text;
       options.onOutput?.("stderr", text);
+      enforceOutputLimit();
     });
+    const enforceOutputLimit = () => {
+      if (!options.maxOutputBytes || outputLimitExceeded) return;
+      if (Buffer.byteLength(stdout) + Buffer.byteLength(stderr) <= options.maxOutputBytes) return;
+      outputLimitExceeded = true;
+      if (child.pid) terminateSpawnedProcessTree(child.pid, true);
+    };
     child.once("error", (err) => {
       if (timer) clearTimeout(timer);
+      if (forceTimer) clearTimeout(forceTimer);
       reject(err);
     });
     child.once("exit", (code, signal) => {
       if (timer) clearTimeout(timer);
+      if (forceTimer) clearTimeout(forceTimer);
       const exitCode = code ?? (signal ? 1 : 0);
       const result: CommandResult = { command: executable, args, stdout, stderr, exitCode };
       if (timedOut) {
         reject(commandError(`Command timed out after ${options.timeoutMs}ms`, result));
+      } else if (outputLimitExceeded) {
+        reject(commandError(`Command output exceeded ${options.maxOutputBytes} bytes`, result));
       } else if (exitCode !== 0) {
         reject(commandError(`Command exited with code ${exitCode}`, result));
       } else {

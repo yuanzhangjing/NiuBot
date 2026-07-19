@@ -10,6 +10,7 @@ import {
   resolveBotEndpoint,
   resolveEngineEndpoint,
   resolvePreflightEndpoint,
+  resolveSessionBotEndpoint,
 } from "./ipc.js";
 
 const tempDirs: string[] = [];
@@ -45,6 +46,21 @@ describe("local IPC endpoints", () => {
     const second = resolveBotEndpoint("C:\\Users\\Zen\\.niubot", "Niu-Bot", { platform: "win32" });
 
     expect(first.address).not.toBe(second.address);
+  });
+
+  it("keeps session endpoint platform rules inside the IPC adapter", () => {
+    expect(resolveSessionBotEndpoint({
+      niubotHome: "/home/niubot",
+      botId: "TestBot",
+      dbPath: "/data/custom/bot.db",
+      platform: "linux",
+    }).address).toBe("/data/custom/api.sock");
+    expect(resolveSessionBotEndpoint({
+      niubotHome: "C:\\Users\\Zen\\.niubot",
+      botId: "TestBot",
+      dbPath: "D:\\data\\bot.db",
+      platform: "win32",
+    }).kind).toBe("named-pipe");
   });
 
   it("only creates and removes filesystem entries for Unix sockets", async () => {

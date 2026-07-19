@@ -3,7 +3,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { handleSend, resolveSendFilePaths } from "./send.js";
+import { handleSend, resolveSendEndpoint, resolveSendFilePaths } from "./send.js";
 import { prepareLocalIpcEndpoint, resolveBotEndpoint } from "../platform/ipc.js";
 
 function parseArgs(args: string[]): { positional: string[]; flags: Record<string, string> } {
@@ -55,6 +55,24 @@ describe("resolveSendFilePaths", () => {
     const { positional, flags } = parseArgs(args);
 
     expect(resolveSendFilePaths(args, positional, flags)).toEqual(["eval-cases.yaml"]);
+  });
+});
+
+describe("resolveSendEndpoint", () => {
+  it("uses the configured endpoint first", () => {
+    expect(resolveSendEndpoint({
+      NIUBOT_HOME: "/home/niubot",
+      NIUBOT_API_SOCKET: "/custom/api.sock",
+      NIUBOT_BOT_NAME: "TestBot",
+    }).address).toBe("/custom/api.sock");
+  });
+
+  it("derives a Unix socket from the database directory before the bot default", () => {
+    expect(resolveSendEndpoint({
+      NIUBOT_HOME: "/home/niubot",
+      NIUBOT_DB_PATH: "/data/custom/bot.db",
+      NIUBOT_BOT_NAME: "TestBot",
+    }).address).toBe("/data/custom/api.sock");
   });
 });
 

@@ -18,11 +18,13 @@ import { summarizeProxyEnvironment } from "./proxy-env.js";
 import { resolveBotRuntimeConfig } from "./runtime-config.js";
 import { startBotRuntime } from "./bot-startup.js";
 import { resolveEngineEndpoint, resolvePreflightEndpoint } from "./platform/ipc.js";
-import { probeAllBackendCapabilities, probeBackendCapability } from "./agent/backend-capability.js";
+import { probeAllBackendCapabilitiesAsync, probeBackendCapabilityAsync } from "./agent/backend-capability.js";
+import { BackendCapabilityCache } from "./agent/backend-capability-cache.js";
 import { normalizeBackend } from "./config.js";
 import { EngineControlServer, type EngineIdentity } from "./local-api/engine-server.js";
-import { clearProcessState, writeProcessState } from "./process-state.js";
-import { queryProcessStartMarker } from "./platform/process.js";
+import { clearProcessState, readProcessState, writeProcessState } from "./process-state.js";
+import { waitForProcessStartMarker } from "./platform/process.js";
+import { samePlatformPath } from "./platform/files.js";
 
 const log = createLogger("main");
 
@@ -107,6 +109,21 @@ async function main(): Promise<void> {
     bots: config.bots.map((b) => `${b.id}(${b.backend})`).join(", "),
   });
 
+  const initialCapabilities = await probeAllBackendCapabilitiesAsync();
+  const capabilityCache = new BackendCapabilityCache(
+    initialCapabilities,
+    () => probeAllBackendCapabilitiesAsync(),
+    (backend) => probeBackendCapabilityAsync(backend),
+  );
+  log.info("backend capabilities", {
+    backends: initialCapabilities.map((capability) => ({
+      backend: capability.backend,
+      selectable: capability.selectable,
+      version: capability.version ?? null,
+      reason: capability.reason ?? null,
+    })),
+  });
+
   const backends = new Map<string, AgentBackend>();
 
   async function createBackend(type: string): Promise<AgentBackend> {
@@ -115,7 +132,10 @@ async function main(): Promise<void> {
   }
 
   async function getOrCreateBackend(type: string): Promise<AgentBackend> {
-    const capability = probeBackendCapability(type);
+    let capability = capabilityCache.get(type);
+    if (!capability?.selectable) {
+      capability = await capabilityCache.recheck(type);
+    }
     if (!capability?.selectable) {
       throw new Error(`Backend '${type}' is unavailable: ${capability?.reason ?? "unknown backend"}`);
     }
@@ -129,20 +149,19 @@ async function main(): Promise<void> {
     return backend;
   }
 
-  const getBackendCapabilities = () => probeAllBackendCapabilities();
-  const getAvailableBackends = () => getBackendCapabilities()
-    .filter((capability) => capability.selectable)
-    .map((capability) => capability.backend);
-
-  const startupCapabilities = probeAllBackendCapabilities();
-  log.info("backend capabilities", {
-    backends: startupCapabilities.map((capability) => ({
-      backend: capability.backend,
-      selectable: capability.selectable,
-      version: capability.version ?? null,
-      reason: capability.reason ?? null,
-    })),
-  });
+  const getBackendCapabilities = async () => {
+    const capabilities = await capabilityCache.refresh();
+    log.info("backend capabilities refreshed", {
+      backends: capabilities.map((capability) => ({
+        backend: capability.backend,
+        selectable: capability.selectable,
+        version: capability.version ?? null,
+        reason: capability.reason ?? null,
+      })),
+    });
+    return capabilities;
+  };
+  const getAvailableBackends = () => capabilityCache.availableBackends();
 
   const bots: BotInstance[] = [];
   for (const botConfig of config.bots) {
@@ -154,7 +173,7 @@ async function main(): Promise<void> {
       const configBackend = normalizeBackend(botConfig.backend);
       const runtimeSelectable = runtimeBackend ? availableBackends.some((backend) => backend === runtimeBackend) : false;
       if (!runtimeSelectable && configBackend && !availableBackends.some((backend) => backend === configBackend)) {
-        const capability = startupCapabilities.find((candidate) => candidate.backend === configBackend);
+        const capability = capabilityCache.get(configBackend);
         throw new Error(`Configured backend '${configBackend}' is unavailable: ${capability?.reason ?? "not installed"}`);
       }
       const runtimeConfig = resolveBotRuntimeConfig(botConfig.backend, runtimeState, availableBackends);
@@ -272,8 +291,10 @@ async function main(): Promise<void> {
       log.warn("failed to clear process state", { error: String(e) });
     }
     try {
-      unlinkSync(pidFile);
-      log.info("PID file removed");
+      if (readFileSync(pidFile, "utf-8").trim() === String(process.pid)) {
+        unlinkSync(pidFile);
+        log.info("PID file removed");
+      }
     } catch { /* ignore */ }
 
     log.info("bye");
@@ -290,20 +311,36 @@ async function main(): Promise<void> {
 
   engineControlServer = new EngineControlServer(engineEndpoint, identity, controlToken, shutdown);
   await engineControlServer.start();
-  writeProcessState(NIUBOT_HOME, {
-    pid: process.pid,
-    instanceId,
-    startedAt,
-    platformStartMarker: queryProcessStartMarker(process.pid),
-    endpoint: engineEndpoint.address,
-    endpointKind: engineEndpoint.kind,
-    controlToken,
-    version,
-    runtimeMode: process.env["NIUBOT_RUNTIME_MODE"] || "",
-    runtimePath,
-    nodePath: process.execPath,
-  });
-  log.info("process state written", { instanceId, endpoint: engineEndpoint.address });
+  const launcherState = readProcessState(NIUBOT_HOME)?.processes.engine;
+  const launcherManagesState = launcherState?.instanceId === instanceId
+    && launcherState.pid === process.pid
+    && launcherState.controlToken === controlToken
+    && launcherState.startedAt === startedAt
+    && launcherState.endpoint === engineEndpoint.address
+    && samePlatformPath(launcherState.runtimePath, runtimePath);
+  if (launcherManagesState) {
+    log.info("launcher-managed process state retained", { instanceId, endpoint: engineEndpoint.address });
+  } else {
+    const platformStartMarker = waitForProcessStartMarker(process.pid);
+    if (!platformStartMarker) {
+      throw new Error(`Engine process ${process.pid} identity marker is unavailable`);
+    }
+    writeProcessState(NIUBOT_HOME, {
+      pid: process.pid,
+      instanceId,
+      startedAt,
+      platformStartMarker,
+      endpoint: engineEndpoint.address,
+      endpointKind: engineEndpoint.kind,
+      controlToken,
+      version,
+      runtimeMode: process.env["NIUBOT_RUNTIME_MODE"] || "",
+      runtimePath,
+      nodePath: process.execPath,
+      logFile: process.env["NIUBOT_LOG_FILE"],
+    });
+    log.info("process state written", { instanceId, endpoint: engineEndpoint.address });
+  }
 
   log.info("NiuBot is running", { activeBots: bots.length });
 

@@ -13,6 +13,8 @@ import { createInterface } from "node:readline";
 import { dumpAgentStdout, type AgentStdoutDumpReason } from "./agent-stdout-log.js";
 import { buildExecutableInvocation, resolveExecutable } from "../platform/executable.js";
 import { shouldDetachChildProcessForTree, terminateSpawnedProcessTree } from "../platform/process.js";
+import { resolveSessionBotEndpoint } from "../platform/ipc.js";
+import { runCommand } from "../platform/command.js";
 
 /** 子类 session 的基础字段 */
 export interface BaseCliSession {
@@ -158,7 +160,7 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
   /** 检查 CLI 工具是否可用（start 时调用）。默认执行 command() --version */
   async checkAvailable(): Promise<void> {
     try {
-      await this.exec(this.command(), ["--version"]);
+      await runCommand(this.command(), ["--version"], { timeoutMs: 5_000 });
       this.log.info(`${this.command()} CLI found`);
     } catch {
       throw new Error(`${this.command()} CLI not found in PATH`);
@@ -763,6 +765,13 @@ export function buildNiubotEnv(config: SessionConfig): Record<string, string> {
   if (config.dbPath) env["NIUBOT_DB_PATH"] = config.dbPath;
   if (config.botId) env["NIUBOT_BOT_ID"] = config.botId;
   if (config.botName) env["NIUBOT_BOT_NAME"] = config.botName;
+  if (config.botName) {
+    env["NIUBOT_API_SOCKET"] = resolveSessionBotEndpoint({
+      niubotHome: NIUBOT_HOME,
+      botId: config.botName,
+      dbPath: config.dbPath,
+    }).address;
+  }
   if (config.platform) env["NIUBOT_PLATFORM"] = config.platform;
   if (config.isAdmin) env["NIUBOT_IS_ADMIN"] = "true";
   if (config.isAdmin && config.botProfilePath) env["NIUBOT_BOT_PROFILE_PATH"] = config.botProfilePath;

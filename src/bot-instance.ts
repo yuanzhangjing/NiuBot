@@ -44,7 +44,7 @@ export async function createBotInstance(
   runtimeConfig?: ResolvedBotRuntimeConfig,
   restartConfig?: RestartConfig,
   autoUpdateNotificationsEnabled = true,
-  getBackendCapabilities?: () => BackendCapability[],
+  getBackendCapabilities?: () => BackendCapability[] | Promise<BackendCapability[]>,
 ): Promise<BotInstance> {
   const log = createLogger("bot-instance", botConfig.id);
 

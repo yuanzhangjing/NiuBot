@@ -12,9 +12,9 @@ import { waitForEngineIdentity } from "./local-api/engine-client.js";
 import { resolveBotEndpoint } from "./platform/ipc.js";
 import { runCommand } from "./platform/command.js";
 import { resolveNpmExecutableForNode } from "./platform/executable.js";
-import { isProcessAlive } from "./platform/process.js";
 import { inspectRunningEngine, launchDetachedEngine, stopEngine } from "./process-manager.js";
 import { readProcessState } from "./process-state.js";
+import { acquireProcessLock } from "./process-lock.js";
 import { ReleaseStore, type ReleaseState } from "./release-store.js";
 import { RestartStateWriter } from "./restart-state.js";
 
@@ -39,6 +39,12 @@ interface RestartContext {
   debugLog: string;
   store: ReleaseStore;
   state: RestartStateWriter;
+}
+
+interface RuntimeTarget {
+  runtimePath: string;
+  version: string;
+  runtimeMode: string;
 }
 
 export async function runRestartWorker(env: NodeJS.ProcessEnv = process.env): Promise<void> {
@@ -76,7 +82,10 @@ export async function runRestartWorker(env: NodeJS.ProcessEnv = process.env): Pr
     store: new ReleaseStore(botDirectory),
     state: new RestartStateWriter(botDirectory, id, startedAt),
   };
-  const releaseLock = acquireRestartLock(context);
+  const releaseLock = acquireProcessLock(
+    path.join(context.niubotHome, "run", "restart.lock"),
+    "Restart",
+  );
   try {
     fs.writeFileSync(context.debugLog, "");
     log(context, `restart worker started pid=${process.pid} bot=${botName} source=${sourceDirectory}`);
@@ -143,25 +152,33 @@ async function runNpmUpdate(context: RestartContext): Promise<void> {
 }
 
 async function runProductionRestart(context: RestartContext): Promise<void> {
+  const runtimePath = context.sourceDirectory;
   context.state.write("production_preflight");
-  await runPreflight(context, context.workerRuntimePath);
+  await runPreflight(context, runtimePath);
   context.state.write("production_stop_service");
   const old = await inspectRunningEngine(context.niubotHome);
+  const recoveryTarget = old ? runtimeTargetFromRunning(old) : undefined;
   await stopEngine(context.niubotHome);
   context.state.write("production_start_service", { oldPid: old?.state.pid });
   sanitizeOneShotEnvironment();
-  const launched = launchDetachedEngine({
-    niubotHome: context.niubotHome,
-    engineEntry: path.join(context.workerRuntimePath, "dist", "index.js"),
-    runtimePath: context.workerRuntimePath,
-    logFile: context.logFile,
-    version: readPackage(path.join(context.workerRuntimePath, "package.json")).version,
-    env: runtimeEnvironment(context, context.previousRuntimeMode),
-  });
-  context.state.write("production_health_check", { candidatePid: launched.state.pid });
-  if (!await checkRuntimeHealth(context, launched)) throw new Error("health check failed");
-  context.state.write("production_success");
-  await notify(context, "重启成功。");
+  try {
+    const launched = launchRuntime(context, {
+      runtimePath,
+      version: readPackage(path.join(runtimePath, "package.json")).version,
+      runtimeMode: context.previousRuntimeMode,
+    });
+    context.state.write("production_health_check", { candidatePid: launched.state.pid });
+    if (!await checkRuntimeHealth(context, launched)) throw new Error("health check failed");
+    context.state.write("production_success");
+    await notify(context, "重启成功。");
+  } catch (err) {
+    const reason = `production restart failed: ${errorMessage(err)}`;
+    if (!recoveryTarget) {
+      context.state.write("rollback_unavailable", { error: reason });
+      throw new Error(`${reason}; previous runtime is unavailable`, { cause: err });
+    }
+    await recoverRuntime(context, recoveryTarget, reason, "重启失败，已恢复原版本。");
+  }
 }
 
 async function switchToCandidate(
@@ -182,54 +199,94 @@ async function switchToCandidate(
     previousRelease: previous,
   });
   await stopEngine(context.niubotHome);
-  context.store.activate(releaseId);
+  try {
+    context.store.activate(releaseId);
+    sanitizeOneShotEnvironment();
+    context.state.write("start_candidate");
+    const launched = launchRuntime(context, {
+      runtimePath: packageDirectory,
+      version: readPackage(path.join(packageDirectory, "package.json")).version,
+      runtimeMode,
+    });
+    context.state.write("health_check_candidate", { candidatePid: launched.state.pid });
+    if (!await checkRuntimeHealth(context, launched)) throw new Error("candidate health check failed");
 
-  sanitizeOneShotEnvironment();
-  context.state.write("start_candidate");
-  const launched = launchDetachedEngine({
-    niubotHome: context.niubotHome,
-    engineEntry: path.join(packageDirectory, "dist", "index.js"),
-    runtimePath: packageDirectory,
-    logFile: context.logFile,
-    version: readPackage(path.join(packageDirectory, "package.json")).version,
-    env: runtimeEnvironment(context, runtimeMode),
-  });
-  context.state.write("health_check_candidate", { candidatePid: launched.state.pid });
-  if (await checkRuntimeHealth(context, launched)) {
     context.store.markLastKnownGood(releaseId);
     const active = readProcessState(context.niubotHome)?.processes.engine.runtimePath;
     context.store.cleanup({ protectedRuntimePaths: active ? [active] : [] });
     context.state.write("success");
     await notify(context, successMessage);
-    return;
+  } catch (err) {
+    const reason = errorMessage(err);
+    const rollbackTarget = resolveRollbackTarget(context, old);
+    if (!rollbackTarget) {
+      context.state.write("rollback_unavailable", { error: reason });
+      throw new Error(`${reason}; no recoverable previous runtime`, { cause: err });
+    }
+    await recoverRuntime(context, rollbackTarget, reason, "新版本启动失败，已回滚到上一版本。");
   }
+}
 
-  const reason = "candidate health check failed";
-  context.state.write("rollback_stop_candidate", { error: reason });
-  await stopEngine(context.niubotHome);
-  const rollbackId = context.store.restoreLastKnownGood();
-  if (!rollbackId) {
-    context.state.write("rollback_unavailable", { error: reason });
-    throw new Error(`${reason}; no last-known-good release`);
-  }
-
-  const rollbackDirectory = context.store.packageDirectory(rollbackId);
-  context.state.write("rollback_start_lkg", { error: reason });
-  const rollback = launchDetachedEngine({
+function launchRuntime(context: RestartContext, target: RuntimeTarget) {
+  return launchDetachedEngine({
     niubotHome: context.niubotHome,
-    engineEntry: path.join(rollbackDirectory, "dist", "index.js"),
-    runtimePath: rollbackDirectory,
+    engineEntry: path.join(target.runtimePath, "dist", "index.js"),
+    runtimePath: target.runtimePath,
     logFile: context.logFile,
-    version: readPackage(path.join(rollbackDirectory, "package.json")).version,
-    env: runtimeEnvironment(context, context.previousRuntimeMode),
+    version: target.version,
+    runtimeMode: target.runtimeMode,
+    env: runtimeEnvironment(context, target.runtimeMode),
   });
-  context.state.write("health_check_rollback", { candidatePid: rollback.state.pid, error: reason });
-  if (!await checkRuntimeHealth(context, rollback)) {
-    context.state.write("rollback_failed", { error: `${reason}; rollback health check failed` });
-    throw new Error(`${reason}; rollback health check failed`);
+}
+
+function runtimeTargetFromRunning(running: NonNullable<Awaited<ReturnType<typeof inspectRunningEngine>>>): RuntimeTarget {
+  return {
+    runtimePath: running.state.runtimePath,
+    version: running.identity.version,
+    runtimeMode: running.state.runtimeMode ?? "",
+  };
+}
+
+function resolveRollbackTarget(
+  context: RestartContext,
+  old: Awaited<ReturnType<typeof inspectRunningEngine>>,
+): RuntimeTarget | undefined {
+  try {
+    const rollbackId = context.store.restoreLastKnownGood();
+    if (rollbackId) {
+      const runtimePath = context.store.packageDirectory(rollbackId);
+      return {
+        runtimePath,
+        version: readPackage(path.join(runtimePath, "package.json")).version,
+        runtimeMode: old?.state.runtimeMode ?? context.previousRuntimeMode,
+      };
+    }
+  } catch (err) {
+    log(context, `last-known-good runtime is unusable: ${errorMessage(err)}`);
   }
-  context.state.write("rollback_success", { error: reason });
-  await notify(context, "新版本启动失败，已回滚到上一版本。");
+  return old ? runtimeTargetFromRunning(old) : undefined;
+}
+
+async function recoverRuntime(
+  context: RestartContext,
+  target: RuntimeTarget,
+  reason: string,
+  notification: string,
+): Promise<void> {
+  try {
+    context.state.write("rollback_stop_candidate", { error: reason });
+    await stopEngine(context.niubotHome);
+    context.state.write("rollback_start_lkg", { error: reason });
+    const rollback = launchRuntime(context, target);
+    context.state.write("health_check_rollback", { candidatePid: rollback.state.pid, error: reason });
+    if (!await checkRuntimeHealth(context, rollback)) throw new Error("rollback health check failed");
+    context.state.write("rollback_success", { error: reason });
+    await notify(context, notification);
+  } catch (recoveryError) {
+    const message = `${reason}; recovery failed: ${errorMessage(recoveryError)}`;
+    context.state.write("rollback_failed", { error: message });
+    throw new Error(message, { cause: recoveryError });
+  }
 }
 
 async function ensureBootstrapRelease(context: RestartContext): Promise<void> {
@@ -463,38 +520,6 @@ function readPackage(file: string): { name: string; version: string } {
 
 function resolveNpmCommandForCurrentNode(): string {
   return resolveNpmExecutableForNode(process.execPath) ?? "npm";
-}
-
-function acquireRestartLock(context: RestartContext): () => void {
-  const directory = path.join(context.niubotHome, "run");
-  const lockFile = path.join(directory, "restart.lock");
-  fs.mkdirSync(directory, { recursive: true });
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      const fd = fs.openSync(lockFile, "wx", 0o600);
-      try { fs.writeFileSync(fd, `${process.pid}\n`, "utf-8"); } finally { fs.closeSync(fd); }
-      return () => {
-        try {
-          if (Number.parseInt(fs.readFileSync(lockFile, "utf-8"), 10) === process.pid) fs.unlinkSync(lockFile);
-        } catch { /* already removed */ }
-      };
-    } catch (err) {
-      if (!(err instanceof Error && "code" in err && (err as NodeJS.ErrnoException).code === "EEXIST")) throw err;
-      const owner = readLockPid(lockFile);
-      if (owner && isProcessAlive(owner)) throw new Error(`Another restart is already running (PID ${owner})`);
-      try { fs.unlinkSync(lockFile); } catch { /* retry once */ }
-    }
-  }
-  throw new Error("Could not acquire restart lock");
-}
-
-function readLockPid(lockFile: string): number | undefined {
-  try {
-    const pid = Number.parseInt(fs.readFileSync(lockFile, "utf-8").trim(), 10);
-    return Number.isInteger(pid) && pid > 0 ? pid : undefined;
-  } catch {
-    return undefined;
-  }
 }
 
 function installTimeout(context: RestartContext, update: boolean): number {

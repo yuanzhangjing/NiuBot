@@ -24,9 +24,9 @@ describe("restart worker helpers", () => {
     fs.writeFileSync(path.join(home, "config.yaml"), "restart:\n  sourceDirectory: /dev/source\n");
     expect(resolveRestartSourceDirectory({
       niubotHome: home,
-      workerRuntimePath: "/release/package",
-      env: { NIUBOT_RUNTIME_MODE: "npm-release", NIUBOT_SOURCE_DIR: "/release/package" },
-    })).toBe(path.resolve("/release/package"));
+      workerRuntimePath: "/cli/package",
+      env: { NIUBOT_RUNTIME_MODE: "npm-release", NIUBOT_SOURCE_DIR: "/active/package" },
+    })).toBe(path.resolve("/active/package"));
   });
 
   it("uses configured sourceDirectory in source mode", () => {

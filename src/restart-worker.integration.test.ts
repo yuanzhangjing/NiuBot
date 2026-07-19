@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { inspectRunningEngine, stopEngine } from "./process-manager.js";
+import { inspectRunningEngine, launchDetachedEngine, stopEngine } from "./process-manager.js";
 import { ReleaseStore } from "./release-store.js";
 import { runRestartWorker } from "./restart-worker.js";
 import { readProcessState } from "./process-state.js";
@@ -20,6 +20,62 @@ afterEach(async () => {
 });
 
 describe("restart worker integration", () => {
+  it("uses the active runtime as the production restart target, not the worker package", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-production-restart-"));
+    tempDirs.push(root);
+    const home = path.join(root, "home");
+    const runtime = path.join(root, "active-runtime");
+    fs.mkdirSync(path.join(runtime, "dist"), { recursive: true });
+    fs.mkdirSync(home, { recursive: true });
+    fs.writeFileSync(path.join(runtime, "package.json"), `${JSON.stringify({
+      name: "@yuanzhangjing/niubot",
+      version: "9.8.7",
+      type: "module",
+    })}\n`);
+    fs.writeFileSync(path.join(runtime, "dist", "index.js"), fakeEngineSource(true, "9.8.7"));
+    fs.writeFileSync(path.join(home, "config.yaml"), [
+      "bots:",
+      "  - id: TestBot",
+      "    backend: codex",
+      "    appId: test-app",
+      "    appSecret: test-secret",
+      "",
+    ].join("\n"));
+    for (const name of ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"]) {
+      vi.stubEnv(name, "");
+    }
+    const initial = launchDetachedEngine({
+      niubotHome: home,
+      engineEntry: path.join(runtime, "dist", "index.js"),
+      runtimePath: runtime,
+      logFile: path.join(home, "logs", "initial.log"),
+      version: "9.8.7",
+      runtimeMode: "npm-release",
+      env: { NIUBOT_RUNTIME_MODE: "npm-release" },
+    });
+    expect(initial.state.runtimePath).toBe(runtime);
+
+    await runRestartWorker({
+      ...process.env,
+      NIUBOT_HOME: home,
+      NIUBOT_BOT_NAME: "TestBot",
+      NIUBOT_SOURCE_DIR: runtime,
+      NIUBOT_RUNTIME_MODE: "npm-release",
+      NIUBOT_AGENT_SESSION: undefined,
+    });
+
+    const running = await inspectRunningEngine(home);
+    expect(running?.identity.version).toBe("9.8.7");
+    expect(running?.state.version).toBe("9.8.7");
+    expect(running?.state.runtimePath).toBe(runtime);
+    const restartState = JSON.parse(fs.readFileSync(
+      path.join(home, "TestBot", "restart", "state.json"),
+      "utf-8",
+    )) as { phase: string };
+    expect(restartState.phase).toBe("production_success");
+    await expect(stopEngine(home)).resolves.toMatchObject({ stopped: true });
+  }, 30_000);
+
   it("builds, switches, checks health, and commits LKG through the Node implementation", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-restart-integration-"));
     tempDirs.push(root);
@@ -140,7 +196,7 @@ describe("restart worker integration", () => {
   }, 120_000);
 });
 
-function fakeEngineSource(healthy = true): string {
+function fakeEngineSource(healthy = true, version = "1.0.0"): string {
   return `import crypto from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
@@ -179,7 +235,7 @@ engine = http.createServer((req, res) => {
       pid: process.pid,
       instanceId: process.env.NIUBOT_INSTANCE_ID,
       home,
-      version: "1.0.0",
+      version: "${version}",
       runtimePath,
       startedAt: process.env.NIUBOT_STARTED_AT,
     }));

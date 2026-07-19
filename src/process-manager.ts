@@ -9,9 +9,14 @@ import { samePlatformPath } from "./platform/files.js";
 import {
   forceTerminateProcessTree,
   isProcessAlive,
+  queryProcessCommandLine,
+  queryProcessEnvironmentValue,
+  queryProcessStartMarker,
+  terminateSpawnedProcessTree,
   waitForProcessStartMarker,
   waitForProcessExit,
 } from "./platform/process.js";
+import { acquireProcessLock } from "./process-lock.js";
 import {
   clearProcessState,
   readProcessState,
@@ -46,11 +51,25 @@ export async function inspectRunningEngine(niubotHome: string): Promise<RunningE
   const identity = await readEngineIdentity(endpointFromAddress(state.endpoint), 750);
   if (!identity) return undefined;
   if (identity.instanceId !== state.instanceId || identity.pid !== state.pid) return undefined;
+  if (identity.startedAt !== state.startedAt || identity.version !== state.version) return undefined;
   if (!samePlatformPath(identity.home, niubotHome) || !samePlatformPath(identity.runtimePath, state.runtimePath)) return undefined;
   return { state, identity };
 }
 
 export function launchDetachedEngine(options: LaunchEngineOptions): LaunchedEngine {
+  const releaseLaunchLock = acquireProcessLock(
+    path.join(options.niubotHome, "run", "engine-start.lock"),
+    "Engine start",
+  );
+  try {
+    rejectConcurrentEngineStart(options.niubotHome);
+    return launchDetachedEngineLocked(options);
+  } finally {
+    releaseLaunchLock();
+  }
+}
+
+function launchDetachedEngineLocked(options: LaunchEngineOptions): LaunchedEngine {
   const endpoint = resolveEngineEndpoint(options.niubotHome);
   const instanceId = randomUUID();
   const controlToken = randomBytes(32).toString("hex");
@@ -71,6 +90,7 @@ export function launchDetachedEngine(options: LaunchEngineOptions): LaunchedEngi
         NIUBOT_INSTANCE_ID: instanceId,
         NIUBOT_CONTROL_TOKEN: controlToken,
         NIUBOT_STARTED_AT: startedAt,
+        NIUBOT_LOG_FILE: options.logFile,
       },
     });
   } finally {
@@ -80,12 +100,11 @@ export function launchDetachedEngine(options: LaunchEngineOptions): LaunchedEngi
     try { fs.appendFileSync(options.logFile, `[${new Date().toISOString()}] Engine spawn failed: ${err.message}\n`); } catch { /* ignore */ }
   });
   if (!child.pid) throw new Error("Engine process did not provide a PID");
-  child.unref();
   const platformStartMarker = waitForProcessStartMarker(child.pid);
   if (!platformStartMarker) {
     // Use the ChildProcess handle here: no verified OS marker exists yet, so
     // a PID-based tree kill could target a reused PID if the child exited.
-    try { child.kill(); } catch { /* already stopped */ }
+    try { terminateSpawnedProcessTree(child.pid, true); } catch { /* already stopped */ }
     throw new Error(`Engine process ${child.pid} started, but its identity marker could not be read`);
   }
 
@@ -98,14 +117,40 @@ export function launchDetachedEngine(options: LaunchEngineOptions): LaunchedEngi
     endpointKind: endpoint.kind,
     controlToken,
     version: options.version,
-    runtimeMode: options.runtimeMode,
+    runtimeMode: options.runtimeMode ?? options.env?.["NIUBOT_RUNTIME_MODE"],
     runtimePath: options.runtimePath,
     nodePath: process.execPath,
+    logFile: options.logFile,
   };
-  writeProcessState(options.niubotHome, state);
-  // Legacy compatibility for releases that only understand niubot.pid.
-  fs.writeFileSync(path.join(options.niubotHome, "niubot.pid"), String(child.pid));
-  return { state, endpoint };
+  try {
+    writeProcessState(options.niubotHome, state);
+    // Legacy compatibility for releases that only understand niubot.pid.
+    fs.writeFileSync(path.join(options.niubotHome, "niubot.pid"), String(child.pid));
+    child.unref();
+    return { state, endpoint };
+  } catch (err) {
+    try { terminateSpawnedProcessTree(child.pid, true); } catch { /* already stopped */ }
+    clearProcessState(options.niubotHome, instanceId);
+    removeLegacyPidFileIfMatches(options.niubotHome, child.pid);
+    throw err;
+  }
+}
+
+function rejectConcurrentEngineStart(niubotHome: string): void {
+  const existing = readProcessState(niubotHome);
+  if (existing) {
+    const state = existing.processes.engine;
+    if (isProcessAlive(state.pid)) {
+      throw new Error(`Engine is already running or starting (PID ${state.pid})`);
+    }
+    clearProcessState(niubotHome, state.instanceId);
+  }
+
+  const legacyPid = readLegacyPid(path.join(niubotHome, "niubot.pid"));
+  if (legacyPid && isProcessAlive(legacyPid)) {
+    throw new Error(`Legacy Engine process is already running (PID ${legacyPid})`);
+  }
+  removeLegacyPidFile(niubotHome);
 }
 
 export async function stopEngine(niubotHome: string): Promise<{ stopped: boolean; pid?: number }> {
@@ -175,10 +220,16 @@ async function forceStopVerifiedProcess(state: EngineProcessState): Promise<void
   }
 }
 
-function asyncLegacyStop(pid: number): Promise<void> {
+function asyncLegacyStop(pid: number, expectedMarker: string): Promise<void> {
+  if (queryProcessStartMarker(pid) !== expectedMarker) {
+    return Promise.reject(new Error("Legacy Engine PID was reused before termination"));
+  }
   try { process.kill(pid, "SIGTERM"); } catch { return Promise.resolve(); }
   return waitForProcessExit(pid, 5_000).then((exited) => {
     if (!exited) {
+      if (queryProcessStartMarker(pid) !== expectedMarker) {
+        throw new Error("Legacy Engine PID was reused before forced termination");
+      }
       forceTerminateProcessTree(pid);
       return waitForProcessExit(pid, 5_000).then((forcedExit) => {
         if (!forcedExit) throw new Error(`Legacy Engine process ${pid} did not exit after forced termination`);
@@ -194,9 +245,33 @@ async function stopLegacyEngine(niubotHome: string): Promise<{ stopped: boolean;
     removeLegacyPidFile(niubotHome);
     return { stopped: false };
   }
-  await asyncLegacyStop(pid);
+  const marker = verifyLegacyEngineProcess(pid, niubotHome);
+  await asyncLegacyStop(pid, marker);
   removeLegacyPidFile(niubotHome);
   return { stopped: true, pid };
+}
+
+export function verifyLegacyEngineProcess(pid: number, niubotHome: string): string {
+  if (pid === process.pid) {
+    throw new Error("Refusing to stop the current process through a legacy PID file");
+  }
+  const marker = waitForProcessStartMarker(pid);
+  const processHome = queryProcessEnvironmentValue(pid, "NIUBOT_HOME");
+  const commandLine = queryProcessCommandLine(pid);
+  const isEngineEntry = commandLine
+    ? /(?:^|[\s"']|[\\/])(?:dist|src)[\\/]index\.(?:js|ts)(?=$|[\s"'])/i.test(commandLine)
+    : false;
+  if (!marker || !processHome || !samePlatformPath(processHome, niubotHome) || !isEngineEntry) {
+    throw new Error(
+      `Legacy PID ${pid} is alive, but it cannot be verified as the NiuBot Engine for this home`,
+    );
+  }
+  // Close the lookup-to-signal race as far as the platform allows. The marker
+  // is checked again immediately before each termination attempt.
+  if (queryProcessStartMarker(pid) !== marker) {
+    throw new Error(`Legacy PID ${pid} changed while its identity was being verified`);
+  }
+  return marker;
 }
 
 function readLegacyPid(pidFile: string): number | undefined {
@@ -210,6 +285,12 @@ function readLegacyPid(pidFile: string): number | undefined {
 
 function removeLegacyPidFile(niubotHome: string): void {
   try { fs.unlinkSync(path.join(niubotHome, "niubot.pid")); } catch { /* ignore */ }
+}
+
+function removeLegacyPidFileIfMatches(niubotHome: string, expectedPid: number): void {
+  const pidFile = path.join(niubotHome, "niubot.pid");
+  if (readLegacyPid(pidFile) !== expectedPid) return;
+  try { fs.unlinkSync(pidFile); } catch { /* ignore */ }
 }
 
 function delay(ms: number): Promise<void> {

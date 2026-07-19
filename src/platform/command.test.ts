@@ -26,12 +26,26 @@ describe("runCommand", () => {
       .rejects.toThrow(/timed out/);
   });
 
+  it("bounds captured command output", async () => {
+    await expect(runCommand(
+      process.execPath,
+      ["-e", "process.stdout.write('x'.repeat(10000))"],
+      { maxOutputBytes: 100 },
+    )).rejects.toThrow(/output exceeded 100 bytes/);
+  });
+
   it.skipIf(process.platform !== "win32")("executes npm-style cmd shims on Windows", async () => {
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-command-"));
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-command-"));
+    const directory = path.join(root, "path with spaces");
+    fs.mkdirSync(directory);
     const command = path.join(directory, "fixture.cmd");
-    fs.writeFileSync(command, "@echo off\r\necho %~1\r\n");
-    const result = await runCommand(command, ["hello world"], { timeoutMs: 5_000 });
-    expect(result.stdout.trim()).toBe("hello world");
-    fs.rmSync(directory, { recursive: true, force: true });
+    fs.writeFileSync(command, "@echo off\r\nnode -e \"process.stdout.write(JSON.stringify(process.argv.slice(1)))\" -- %*\r\n");
+    try {
+      const values = ["hello world", "a&b", "(group)", "quote\\\"value"];
+      const result = await runCommand(command, values, { timeoutMs: 5_000 });
+      expect(JSON.parse(result.stdout)).toEqual(values);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 });
