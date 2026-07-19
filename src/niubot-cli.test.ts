@@ -3,7 +3,13 @@ import fs from "node:fs";
 import os from "node:os";
 import { describe, expect, it } from "vitest";
 import { buildNiubotEnv } from "./agent/cli-base.js";
-import { ensureNbtShim, ensureRuntimeNbtShim, getBundledNiubotBinDir, prependNiubotBinToPath } from "./niubot-cli.js";
+import {
+  buildWindowsNbtShimContent,
+  ensureNbtShim,
+  ensureRuntimeNbtShim,
+  getBundledNiubotBinDir,
+  prependNiubotBinToPath,
+} from "./niubot-cli.js";
 
 describe("niubot CLI path helpers", () => {
   it("publishes nbt as a stable package binary", () => {
@@ -23,15 +29,27 @@ describe("niubot CLI path helpers", () => {
   it("prepends the repo-local niubot bin directory to PATH", () => {
     const original = "/usr/bin:/bin";
 
-    expect(prependNiubotBinToPath(original, { env: {}, homeDir: "", execPath: "", platform: "linux" })).toBe(
-      `${getBundledNiubotBinDir()}:${original}`,
+    expect(prependNiubotBinToPath(original, {
+      projectRoot: "/pkg",
+      env: {},
+      homeDir: "",
+      execPath: "",
+      platform: "linux",
+    })).toBe(
+      `/pkg/bin:${original}`,
     );
   });
 
   it("does not prepend the repo-local niubot bin directory twice", () => {
-    const original = `${getBundledNiubotBinDir()}:/usr/bin:/bin`;
+    const original = "/pkg/bin:/usr/bin:/bin";
 
-    expect(prependNiubotBinToPath(original, { env: {}, homeDir: "", execPath: "", platform: "linux" })).toBe(original);
+    expect(prependNiubotBinToPath(original, {
+      projectRoot: "/pkg",
+      env: {},
+      homeDir: "",
+      execPath: "",
+      platform: "linux",
+    })).toBe(original);
   });
 
   it("adds npm global and common user bin directories before the original PATH", () => {
@@ -73,7 +91,7 @@ describe("niubot CLI path helpers", () => {
       execPath: "C:\\Node\\node.exe",
       platform: "win32",
     });
-    expect(value.split(";")).toContain(path.join("C:\\Local", "NiuBot", "bin"));
+    expect(value.split(";")).toContain(path.win32.join("C:\\Local", "NiuBot", "bin"));
     expect(value).toContain("C:\\Windows;C:\\Tools");
   });
 
@@ -105,7 +123,7 @@ describe("niubot CLI path helpers", () => {
     expect(env["NIUBOT_BOT_NAME"]).toBe("NiuBot");
   });
 
-  it("creates a managed nbt shim under .local/bin", () => {
+  it.skipIf(process.platform === "win32")("creates a managed nbt shim under .local/bin", () => {
     const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-shim-home-"));
     const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-shim-project-"));
     const targetPath = path.join(projectRoot, "bin", "nbt");
@@ -120,7 +138,7 @@ describe("niubot CLI path helpers", () => {
     expect(fs.readFileSync(shimPath, "utf-8")).toContain(`exec '${targetPath}' "$@"`);
   });
 
-  it("does not overwrite an unmanaged nbt file", () => {
+  it.skipIf(process.platform === "win32")("does not overwrite an unmanaged nbt file", () => {
     const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-shim-home-"));
     const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-shim-project-"));
     const targetPath = path.join(projectRoot, "bin", "nbt");
@@ -136,7 +154,7 @@ describe("niubot CLI path helpers", () => {
     expect(fs.readFileSync(shimPath, "utf-8")).toBe("#!/bin/sh\necho user-owned\n");
   });
 
-  it("updates a previously managed nbt shim", () => {
+  it.skipIf(process.platform === "win32")("updates a previously managed nbt shim", () => {
     const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-shim-home-"));
     const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-shim-project-"));
     const targetPath = path.join(projectRoot, "bin", "nbt");
@@ -167,7 +185,14 @@ describe("niubot CLI path helpers", () => {
     expect(fs.existsSync(shimPath)).toBe(false);
   });
 
-  it("creates a native Windows command shim without a Unix shell", () => {
+  it("builds a native Windows command shim without a Unix shell", () => {
+    const content = buildWindowsNbtShimContent("C:\\Node\\node.exe", "C:\\pkg\\dist\\cli.js");
+    expect(content).toContain("@echo off");
+    expect(content).toContain('"C:\\Node\\node.exe"');
+    expect(content).not.toContain("#!/bin/sh");
+  });
+
+  it.skipIf(process.platform !== "win32")("creates the native Windows command shim on disk", () => {
     const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-shim-home-"));
     const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-shim-project-"));
     const localAppData = path.join(homeDir, "LocalAppData");
@@ -183,7 +208,7 @@ describe("niubot CLI path helpers", () => {
     });
 
     expect(result.status).toBe("created");
-    expect(result.shimPath).toBe(path.join(localAppData, "NiuBot", "bin", "nbt.cmd"));
+    expect(result.shimPath).toBe(path.win32.join(localAppData, "NiuBot", "bin", "nbt.cmd"));
     const content = fs.readFileSync(result.shimPath, "utf-8");
     expect(content).toContain("@echo off");
     expect(content).toContain('"C:\\Node\\node.exe"');

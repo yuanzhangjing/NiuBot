@@ -26,7 +26,7 @@ describe("restart worker helpers", () => {
       niubotHome: home,
       workerRuntimePath: "/release/package",
       env: { NIUBOT_RUNTIME_MODE: "npm-release", NIUBOT_SOURCE_DIR: "/release/package" },
-    })).toBe("/release/package");
+    })).toBe(path.resolve("/release/package"));
   });
 
   it("uses configured sourceDirectory in source mode", () => {

@@ -159,22 +159,31 @@ function getNodeRuntimeLabel(): string {
   return `${process.execPath} ${process.version} ABI ${process.versions.modules}`;
 }
 
-export function deriveNpmPrefixFromPackageRoot(packageRoot: string): string | undefined {
-  const normalized = path.normalize(packageRoot);
-  const parts = normalized.split(path.sep);
+export function deriveNpmPrefixFromPackageRoot(
+  packageRoot: string,
+  platform: NodeJS.Platform = process.platform,
+): string | undefined {
+  const pathApi = platform === "win32" ? path.win32 : path.posix;
+  const normalized = pathApi.normalize(packageRoot);
+  const parts = normalized.split(pathApi.sep);
   const nodeModulesIndex = parts.lastIndexOf("node_modules");
   if (nodeModulesIndex < 1) return undefined;
 
   const prefixParts = parts[nodeModulesIndex - 1] === "lib"
     ? parts.slice(0, nodeModulesIndex - 1)
     : parts.slice(0, nodeModulesIndex);
-  const prefix = prefixParts.join(path.sep);
-  return prefix || path.sep;
+  const prefix = prefixParts.join(pathApi.sep);
+  return prefix || pathApi.sep;
 }
 
-export function isPackageRootInsideNpmRoot(packageRoot: string, npmRoot: string): boolean {
-  const relative = path.relative(path.resolve(npmRoot), path.resolve(packageRoot));
-  return relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative);
+export function isPackageRootInsideNpmRoot(
+  packageRoot: string,
+  npmRoot: string,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  const pathApi = platform === "win32" ? path.win32 : path.posix;
+  const relative = pathApi.relative(pathApi.resolve(npmRoot), pathApi.resolve(packageRoot));
+  return relative !== "" && !relative.startsWith("..") && !pathApi.isAbsolute(relative);
 }
 
 export { resolveNpmExecutableForNode } from "./platform/executable.js";

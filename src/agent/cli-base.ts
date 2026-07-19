@@ -700,6 +700,16 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
         reject(err);
       });
 
+      child.stdin.on("error", (err) => {
+        this.log.warn("stdin stream error", {
+          sessionId: sessionId ?? null,
+          cmd,
+          args: logArgs,
+          stdinLength,
+          error: String(err),
+        });
+      });
+
       if (stdinDefined) {
         child.stdin.write(opts?.stdin ?? "", (err) => {
           if (err) {

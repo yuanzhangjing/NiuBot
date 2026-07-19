@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { handleSend, resolveSendFilePaths } from "./send.js";
+import { prepareLocalIpcEndpoint, resolveBotEndpoint } from "../platform/ipc.js";
 
 function parseArgs(args: string[]): { positional: string[]; flags: Record<string, string> } {
   const positional: string[] = [];
@@ -61,7 +62,8 @@ describe("handleSend", () => {
   it("sends each repeated --file value as a separate file request", async () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-send-"));
     tempDirs.push(tempDir);
-    const socketPath = path.join(tempDir, "api.sock");
+    const endpoint = resolveBotEndpoint(tempDir, "TestBot");
+    prepareLocalIpcEndpoint(endpoint);
     const bodies: Array<{ chat_id: string; file_path: string }> = [];
     const server = http.createServer((req, res) => {
       const chunks: Buffer[] = [];
@@ -80,10 +82,13 @@ describe("handleSend", () => {
     const received = new Promise<void>((resolve) => {
       receivedResolve = resolve;
     });
-    await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(endpoint.address, resolve);
+    });
 
     vi.stubEnv("NIUBOT_HOME", tempDir);
-    vi.stubEnv("NIUBOT_API_SOCKET", socketPath);
+    vi.stubEnv("NIUBOT_API_SOCKET", endpoint.address);
     let loggedResolve!: () => void;
     const logged = new Promise<void>((resolve) => {
       loggedResolve = resolve;

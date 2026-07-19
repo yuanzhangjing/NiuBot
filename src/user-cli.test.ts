@@ -42,18 +42,18 @@ describe("user-cli init model configuration", () => {
   });
 
   it("derives npm prefix from a scoped global package root", () => {
-    expect(deriveNpmPrefixFromPackageRoot("/opt/homebrew/lib/node_modules/@yuanzhangjing/niubot")).toBe("/opt/homebrew");
-    expect(deriveNpmPrefixFromPackageRoot("/Users/me/.nvs/node/22/lib/node_modules/@yuanzhangjing/niubot")).toBe("/Users/me/.nvs/node/22");
+    expect(deriveNpmPrefixFromPackageRoot("/opt/homebrew/lib/node_modules/@yuanzhangjing/niubot", "darwin")).toBe("/opt/homebrew");
+    expect(deriveNpmPrefixFromPackageRoot("/Users/me/.nvs/node/22/lib/node_modules/@yuanzhangjing/niubot", "darwin")).toBe("/Users/me/.nvs/node/22");
   });
 
   it("checks whether the package root belongs to the active npm root", () => {
     expect(isPackageRootInsideNpmRoot(
       "/opt/homebrew/lib/node_modules/@yuanzhangjing/niubot",
-      "/opt/homebrew/lib/node_modules",
+      "/opt/homebrew/lib/node_modules", "darwin",
     )).toBe(true);
     expect(isPackageRootInsideNpmRoot(
       "/opt/homebrew/lib/node_modules/@yuanzhangjing/niubot",
-      "/Users/me/.nvs/node/22/lib/node_modules",
+      "/Users/me/.nvs/node/22/lib/node_modules", "darwin",
     )).toBe(false);
   });
 
@@ -64,9 +64,11 @@ describe("user-cli init model configuration", () => {
   });
 
   it("resolves relative NIUBOT_HOME before passing it to the engine", () => {
-    expect(resolveNiubotHome(".niubot-2", undefined, "/tmp/workspace")).toBe("/tmp/workspace/.niubot-2");
-    expect(resolveNiubotHome(undefined, ".env-home", "/tmp/workspace")).toBe("/tmp/workspace/.env-home");
-    expect(resolveNiubotHome("/abs/home", ".env-home", "/tmp/workspace")).toBe("/abs/home");
+    const cwd = path.resolve(os.tmpdir(), "workspace");
+    expect(resolveNiubotHome(".niubot-2", undefined, cwd)).toBe(path.resolve(cwd, ".niubot-2"));
+    expect(resolveNiubotHome(undefined, ".env-home", cwd)).toBe(path.resolve(cwd, ".env-home"));
+    const absolute = path.resolve(os.tmpdir(), "absolute-home");
+    expect(resolveNiubotHome(absolute, ".env-home", cwd)).toBe(absolute);
   });
 
   it("stores registered homes as a de-duplicated path list", () => {

@@ -19,7 +19,7 @@ export function resolveNpmExecutableForNode(
   platform: NodeJS.Platform = process.platform,
   exists: (filePath: string) => boolean = fs.existsSync,
 ): string | undefined {
-  const pathApi = platform === "win32" ? path.win32 : path;
+  const pathApi = platform === "win32" ? path.win32 : path.posix;
   const candidate = pathApi.join(pathApi.dirname(nodePath), platform === "win32" ? "npm.cmd" : "npm");
   return exists(candidate) ? candidate : undefined;
 }

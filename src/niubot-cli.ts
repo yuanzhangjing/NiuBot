@@ -38,22 +38,29 @@ export function getProjectRoot(): string {
   return path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 }
 
-export function getBundledNiubotBinDir(projectRoot = getProjectRoot()): string {
-  return path.join(projectRoot, "bin");
+export function getBundledNiubotBinDir(
+  projectRoot = getProjectRoot(),
+  platform: NodeJS.Platform = process.platform,
+): string {
+  return pathForPlatform(platform).join(projectRoot, "bin");
 }
 
-export function getBundledNbtPath(projectRoot = getProjectRoot()): string {
-  return path.join(getBundledNiubotBinDir(projectRoot), "nbt");
+export function getBundledNbtPath(
+  projectRoot = getProjectRoot(),
+  platform: NodeJS.Platform = process.platform,
+): string {
+  return pathForPlatform(platform).join(getBundledNiubotBinDir(projectRoot, platform), "nbt");
 }
 
 export function ensureNbtShim(options: NbtShimOptions = {}): NbtShimResult {
   const projectRoot = options.projectRoot ?? getProjectRoot();
   const homeDir = options.homeDir ?? os.homedir();
   const platform = options.platform ?? process.platform;
+  const pathApi = pathForPlatform(platform);
   const targetPath = platform === "win32"
-    ? path.join(projectRoot, "dist", "cli.js")
-    : getBundledNbtPath(projectRoot);
-  const shimPath = path.join(
+    ? pathApi.join(projectRoot, "dist", "cli.js")
+    : getBundledNbtPath(projectRoot, platform);
+  const shimPath = pathApi.join(
     getNbtShimDirectory(homeDir, platform, options.localAppData),
     platform === "win32" ? "nbt.cmd" : "nbt",
   );
@@ -68,7 +75,7 @@ export function ensureNbtShim(options: NbtShimOptions = {}): NbtShimResult {
   const desired = platform === "win32"
     ? buildWindowsNbtShimContent(options.execPath ?? process.execPath, targetPath)
     : buildNbtShimContent(targetPath);
-  fs.mkdirSync(path.dirname(shimPath), { recursive: true });
+  fs.mkdirSync(pathApi.dirname(shimPath), { recursive: true });
 
   if (fs.existsSync(shimPath)) {
     const existing = fs.readFileSync(shimPath, "utf-8");
@@ -92,8 +99,9 @@ export function ensureRuntimeNbtShim(options: RuntimeNbtShimOptions = {}): NbtSh
   const projectRoot = options.projectRoot ?? getProjectRoot();
   const homeDir = options.homeDir ?? os.homedir();
   const platform = options.platform ?? process.platform;
-  const targetPath = platform === "win32" ? path.join(projectRoot, "dist", "cli.js") : getBundledNbtPath(projectRoot);
-  const shimPath = path.join(
+  const pathApi = pathForPlatform(platform);
+  const targetPath = platform === "win32" ? pathApi.join(projectRoot, "dist", "cli.js") : getBundledNbtPath(projectRoot, platform);
+  const shimPath = pathApi.join(
     getNbtShimDirectory(homeDir, platform, options.localAppData),
     platform === "win32" ? "nbt.cmd" : "nbt",
   );
@@ -120,7 +128,7 @@ export function prependNiubotBinToPath(
     ...(platform === "win32" && homeDir
       ? [getNbtShimDirectory(homeDir, platform, env["LOCALAPPDATA"])]
       : []),
-    getBundledNiubotBinDir(projectRoot),
+    getBundledNiubotBinDir(projectRoot, platform),
     ...getNpmGlobalBinCandidates({ projectRoot, env, homeDir, execPath, platform }),
     ...currentPath.split(delimiter),
   ]).join(delimiter);
@@ -128,24 +136,25 @@ export function prependNiubotBinToPath(
 
 function getNpmGlobalBinCandidates(options: Required<PathBuildOptions>): string[] {
   const candidates: string[] = [];
-  const nodeModulesMarker = `${path.sep}node_modules${path.sep}`;
+  const pathApi = pathForPlatform(options.platform);
+  const nodeModulesMarker = `${pathApi.sep}node_modules${pathApi.sep}`;
   const nodeModulesIndex = options.projectRoot.indexOf(nodeModulesMarker);
   if (nodeModulesIndex >= 0) {
     const modulePrefix = options.projectRoot.slice(0, nodeModulesIndex);
     candidates.push(options.platform === "win32"
       ? modulePrefix
-      : path.basename(modulePrefix) === "lib"
-        ? path.join(path.dirname(modulePrefix), "bin")
-        : path.join(modulePrefix, "bin"));
+      : pathApi.basename(modulePrefix) === "lib"
+        ? pathApi.join(pathApi.dirname(modulePrefix), "bin")
+        : pathApi.join(modulePrefix, "bin"));
   }
 
   const npmPrefix = options.env["npm_config_prefix"] ?? options.env["NPM_CONFIG_PREFIX"];
-  if (npmPrefix) candidates.push(options.platform === "win32" ? npmPrefix : path.join(npmPrefix, "bin"));
+  if (npmPrefix) candidates.push(options.platform === "win32" ? npmPrefix : pathApi.join(npmPrefix, "bin"));
 
-  if (options.execPath) candidates.push(path.dirname(options.execPath));
+  if (options.execPath) candidates.push(pathApi.dirname(options.execPath));
   if (options.homeDir && options.platform !== "win32") {
-    candidates.push(path.join(options.homeDir, ".local", "bin"));
-    candidates.push(path.join(options.homeDir, ".npm-global", "bin"));
+    candidates.push(pathApi.join(options.homeDir, ".local", "bin"));
+    candidates.push(pathApi.join(options.homeDir, ".npm-global", "bin"));
   }
 
   return candidates;
@@ -171,7 +180,7 @@ function buildNbtShimContent(targetPath: string): string {
   ].join("\n");
 }
 
-function buildWindowsNbtShimContent(nodePath: string, targetPath: string): string {
+export function buildWindowsNbtShimContent(nodePath: string, targetPath: string): string {
   return [
     "@echo off",
     `REM ${NBT_SHIM_MARKER}`,
@@ -181,10 +190,15 @@ function buildWindowsNbtShimContent(nodePath: string, targetPath: string): strin
 }
 
 function getNbtShimDirectory(homeDir: string, platform: NodeJS.Platform, localAppData?: string): string {
+  const pathApi = pathForPlatform(platform);
   if (platform === "win32") {
-    return path.join(localAppData || path.join(homeDir, "AppData", "Local"), "NiuBot", "bin");
+    return pathApi.join(localAppData || pathApi.join(homeDir, "AppData", "Local"), "NiuBot", "bin");
   }
-  return path.join(homeDir, ".local", "bin");
+  return pathApi.join(homeDir, ".local", "bin");
+}
+
+function pathForPlatform(platform: NodeJS.Platform): typeof path.posix | typeof path.win32 {
+  return platform === "win32" ? path.win32 : path.posix;
 }
 
 function shellSingleQuote(value: string): string {
