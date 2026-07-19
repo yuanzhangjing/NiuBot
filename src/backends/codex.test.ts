@@ -1,13 +1,20 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import CodexBackend from "./codex.js";
 
 const originalHome = process.env["HOME"];
 
+function setCodexHome(tempHome: string): void {
+  vi.stubEnv("HOME", tempHome);
+  vi.stubEnv("USERPROFILE", tempHome);
+  vi.stubEnv("CODEX_HOME", path.join(tempHome, ".codex"));
+}
+
 describe("CodexBackend session metadata", () => {
   afterEach(() => {
+    vi.unstubAllEnvs();
     if (originalHome === undefined) {
       delete process.env["HOME"];
     } else {
@@ -18,7 +25,7 @@ describe("CodexBackend session metadata", () => {
   it("hydrates model and current context usage from the Codex session log", () => {
     const threadId = "019d688f-4db1-7871-981e-09b47ad4f84b";
     const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-home-"));
-    process.env["HOME"] = tempHome;
+    setCodexHome(tempHome);
 
     const logDir = path.join(tempHome, ".codex", "sessions", "2026", "04", "07");
     fs.mkdirSync(logDir, { recursive: true });
@@ -81,7 +88,7 @@ describe("CodexBackend session metadata", () => {
   it("counts context_compacted events from the Codex session log", () => {
     const threadId = "019d6c46-7d53-7e22-9767-0e837ba20ebf";
     const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-home-"));
-    process.env["HOME"] = tempHome;
+    setCodexHome(tempHome);
 
     const logDir = path.join(tempHome, ".codex", "sessions", "2026", "04", "08");
     fs.mkdirSync(logDir, { recursive: true });
@@ -110,7 +117,7 @@ describe("CodexBackend session metadata", () => {
   it("keeps the latest token usage even if a compacted marker appears", () => {
     const threadId = "019d6d6a-ef5b-75fe-a214-1d4d1b7f09b3";
     const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-home-"));
-    process.env["HOME"] = tempHome;
+    setCodexHome(tempHome);
 
     const logDir = path.join(tempHome, ".codex", "sessions", "2026", "04", "16");
     fs.mkdirSync(logDir, { recursive: true });
@@ -153,7 +160,7 @@ describe("CodexBackend session metadata", () => {
   it("resumes scanning with the existing thread id and counts context_compacted markers", () => {
     const threadId = "019d6da5-3a23-7024-b99d-47c39056c0d2";
     const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-home-"));
-    process.env["HOME"] = tempHome;
+    setCodexHome(tempHome);
 
     const logDir = path.join(tempHome, ".codex", "sessions", "2026", "04", "16");
     fs.mkdirSync(logDir, { recursive: true });
@@ -245,7 +252,7 @@ describe("CodexBackend session metadata", () => {
   it("skips non-directory entries while locating Codex session logs", () => {
     const threadId = "019d688f-4db1-7871-981e-09b47ad4f84b";
     const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-home-"));
-    process.env["HOME"] = tempHome;
+    setCodexHome(tempHome);
 
     const sessionsRoot = path.join(tempHome, ".codex", "sessions");
     const logDir = path.join(sessionsRoot, "2026", "04", "07");
@@ -276,7 +283,7 @@ describe("CodexBackend session metadata", () => {
 
   it("returns null from mtime probe when Codex sessions root contains only files", () => {
     const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-home-"));
-    process.env["HOME"] = tempHome;
+    setCodexHome(tempHome);
 
     const sessionsRoot = path.join(tempHome, ".codex", "sessions");
     fs.mkdirSync(sessionsRoot, { recursive: true });

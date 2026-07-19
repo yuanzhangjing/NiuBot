@@ -1,13 +1,15 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import ClaudeBackend from "./claude.js";
+import { claudeProjectKey } from "../platform/workspace-path.js";
 
 const originalHome = process.env["HOME"];
 
 describe("ClaudeBackend session metadata", () => {
   afterEach(() => {
+    vi.unstubAllEnvs();
     if (originalHome === undefined) {
       delete process.env["HOME"];
     } else {
@@ -21,10 +23,10 @@ describe("ClaudeBackend session metadata", () => {
     const workingDirectory = path.join(tempHome, "workspace");
     fs.mkdirSync(workingDirectory, { recursive: true });
     process.env["HOME"] = tempHome;
+    vi.stubEnv("CLAUDE_CONFIG_DIR", path.join(tempHome, ".claude"));
 
     // Match getJsonlPath: realpathSync + replace /\_ with -
-    const realWorkDir = fs.realpathSync(path.resolve(workingDirectory));
-    const projectKey = realWorkDir.replace(/[/\\_]/g, "-");
+    const projectKey = claudeProjectKey(workingDirectory);
     const logDir = path.join(tempHome, ".claude", "projects", projectKey);
     fs.mkdirSync(logDir, { recursive: true });
     fs.writeFileSync(

@@ -3,12 +3,13 @@
  * 通过 `claude` 命令驱动 agent，stream-json 模式。
  */
 
-import { statSync, openSync, readSync, closeSync, realpathSync } from "node:fs";
+import { statSync, openSync, readSync, closeSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { CliAgentBackend, buildNiubotEnv, type BaseCliSession, type ParsedOutput } from "../agent/cli-base.js";
 import type { SessionConfig, ExecHooks } from "../agent/types.js";
 import { readClaudeTranscript } from "../session-archive/native-transcript.js";
+import { claudeProjectKey } from "../platform/workspace-path.js";
 
 interface ClaudeSession extends BaseCliSession {
   permissionMode: string;
@@ -246,15 +247,11 @@ export default class ClaudeBackend extends CliAgentBackend<ClaudeSession> {
   /** 构造 Claude Code session JSONL 文件路径（需与 Claude Code 的 project key 算法一致） */
   private getJsonlPath(session: ClaudeSession): string | null {
     if (!session.agentSessionId) return null;
-    const home = homedir();
-    let absWorkDir: string;
-    try {
-      absWorkDir = realpathSync(resolve(session.workingDirectory));
-    } catch {
-      absWorkDir = resolve(session.workingDirectory);
-    }
-    const projectKey = absWorkDir.replace(/[/\\_]/g, "-");
-    const dir = resolve(home, ".claude", "projects", projectKey);
+    const configDir = process.env["CLAUDE_CONFIG_DIR"]?.trim()
+      ? resolve(process.env["CLAUDE_CONFIG_DIR"]!)
+      : resolve(homedir(), ".claude");
+    const projectKey = claudeProjectKey(session.workingDirectory);
+    const dir = resolve(configDir, "projects", projectKey);
     return resolve(dir, `${session.agentSessionId}.jsonl`);
   }
 

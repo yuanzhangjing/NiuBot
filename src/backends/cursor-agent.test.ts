@@ -4,6 +4,7 @@ import { dirname, join, resolve } from "node:path";
 import { describe, expect, it, afterEach, vi } from "vitest";
 import { CURSOR_ENGINE_RULE_BASENAME, CURSOR_RULES_DIR } from "./cursor-workspace-rules.js";
 import CursorAgentBackend from "./cursor-agent.js";
+import { cursorProjectKey } from "../platform/workspace-path.js";
 
 describe("CursorAgentBackend", () => {
   const tmpRoots: string[] = [];
@@ -306,11 +307,12 @@ describe("CursorAgentBackend", () => {
     mkdirSync(homeDir, { recursive: true });
     mkdirSync(workDir, { recursive: true });
     vi.stubEnv("HOME", homeDir);
+    vi.stubEnv("CURSOR_AGENT_HOME", join(homeDir, ".cursor"));
 
     const session = backend.buildSession({ workingDirectory: workDir });
     session.agentSessionId = "session-123";
 
-    const projectKey = resolve(workDir).replace(/^[/\\]+/, "").replace(/[/\\]+/g, "-");
+    const projectKey = cursorProjectKey(workDir);
     const transcriptPath = join(
       homeDir,
       ".cursor",
@@ -342,11 +344,12 @@ describe("CursorAgentBackend", () => {
     mkdirSync(homeDir, { recursive: true });
     mkdirSync(workDir, { recursive: true });
     vi.stubEnv("HOME", homeDir);
+    vi.stubEnv("CURSOR_AGENT_HOME", join(homeDir, ".cursor"));
 
     const session = backend.buildSession({ workingDirectory: workDir });
     session.agentSessionId = "session-flat";
 
-    const projectKey = resolve(workDir).replace(/^[/\\]+/, "").replace(/[/\\]+/g, "-");
+    const projectKey = cursorProjectKey(workDir);
     const transcriptPath = join(
       homeDir,
       ".cursor",
@@ -369,6 +372,7 @@ describe("CursorAgentBackend", () => {
     mkdirSync(homeDir, { recursive: true });
     mkdirSync(workDir, { recursive: true });
     vi.stubEnv("HOME", homeDir);
+    vi.stubEnv("CURSOR_AGENT_HOME", join(homeDir, ".cursor"));
 
     const session = backend.buildSession({ workingDirectory: workDir });
     session.agentSessionId = "session-scan";
@@ -396,13 +400,14 @@ describe("CursorAgentBackend", () => {
     mkdirSync(homeDir, { recursive: true });
     mkdirSync(workDir, { recursive: true });
     vi.stubEnv("HOME", homeDir);
+    vi.stubEnv("CURSOR_AGENT_HOME", join(homeDir, ".cursor"));
 
     const session = backend.buildSession({ workingDirectory: workDir });
     session.agentSessionId = "session-empty-jsonl";
     const sessionId = "niubot-session-1";
     (backend as any).sessions.set(sessionId, session);
 
-    const projectKey = resolve(workDir).replace(/^[/\\]+/, "").replace(/[/\\]+/g, "-");
+    const projectKey = cursorProjectKey(workDir);
     const transcriptPath = join(
       homeDir,
       ".cursor",

@@ -11,6 +11,7 @@ import { CliAgentBackend, buildNiubotEnv, type BaseCliSession, type ParsedOutput
 import type { AgentSession, AgentSessionActivity, ExecHooks, SessionConfig } from "../agent/types.js";
 import { syncCursorWorkspaceRules } from "./cursor-workspace-rules.js";
 import { readCursorTranscript } from "../session-archive/native-transcript.js";
+import { cursorProjectKey } from "../platform/workspace-path.js";
 
 interface CursorAgentSession extends BaseCliSession {
   sessionLogPath?: string;
@@ -317,7 +318,7 @@ export default class CursorAgentBackend extends CliAgentBackend<CursorAgentSessi
   }
 
   private getCursorProjectKey(workingDirectory: string): string {
-    return resolve(workingDirectory).replace(/^[/\\]+/, "").replace(/[/\\]+/g, "-");
+    return cursorProjectKey(workingDirectory);
   }
 
   /** 从文件尾部倒读，获取最后 N 个完整行。 */

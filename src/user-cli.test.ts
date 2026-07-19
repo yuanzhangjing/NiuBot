@@ -74,20 +74,23 @@ describe("user-cli init model configuration", () => {
   it("stores registered homes as a de-duplicated path list", () => {
     const tempDir = makeTempDir("niubot-home-registry-");
     const registryPath = path.join(tempDir, "instances.json");
+    const firstHome = path.join(tempDir, "niubot-a");
+    const secondHome = path.join(tempDir, "niubot-b");
 
-    registerHomePath(registryPath, "/tmp/niubot-a");
-    registerHomePath(registryPath, "/tmp/niubot-a");
-    registerHomePath(registryPath, "/tmp/niubot-b");
+    registerHomePath(registryPath, firstHome);
+    registerHomePath(registryPath, firstHome);
+    registerHomePath(registryPath, secondHome);
 
-    expect(readRegisteredHomes(registryPath)).toEqual(["/tmp/niubot-a", "/tmp/niubot-b"]);
+    expect(readRegisteredHomes(registryPath)).toEqual([firstHome, secondHome]);
   });
 
   it("collects status homes from the current default home and registry", () => {
-    expect(collectStatusHomes("/tmp/niubot-default", [
-      "/tmp/niubot-a",
-      "/tmp/niubot-default",
-      "/tmp/niubot-b",
-    ])).toEqual(["/tmp/niubot-default", "/tmp/niubot-a", "/tmp/niubot-b"]);
+    const root = path.resolve(os.tmpdir(), "niubot-status-homes");
+    const defaultHome = path.join(root, "default");
+    const firstHome = path.join(root, "a");
+    const secondHome = path.join(root, "b");
+    expect(collectStatusHomes(defaultHome, [firstHome, defaultHome, secondHome]))
+      .toEqual([defaultHome, firstHome, secondHome]);
   });
 
   it("writes the chosen model into config.yaml", () => {
@@ -110,7 +113,8 @@ describe("user-cli init model configuration", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date(2026, 3, 25, 0, 30, 0));
 
-    expect(getTodayLogFilePath("/tmp/niubot")).toBe("/tmp/niubot/logs/niubot-2026-04-25.log");
+    const home = path.resolve(os.tmpdir(), "niubot-log-home");
+    expect(getTodayLogFilePath(home)).toBe(path.join(home, "logs", "niubot-2026-04-25.log"));
   });
 
   it("reports the running process path, log file, and package version when available", () => {

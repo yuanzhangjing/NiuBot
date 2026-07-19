@@ -271,7 +271,10 @@ export default class CodexBackend extends CliAgentBackend<CodexSession> {
     }
     if (!session.agentSessionId) return null;
 
-    const sessionsRoot = resolve(homedir(), ".codex", "sessions");
+    const codexHome = process.env["CODEX_HOME"]?.trim()
+      ? resolve(process.env["CODEX_HOME"]!)
+      : resolve(homedir(), ".codex");
+    const sessionsRoot = join(codexHome, "sessions");
     if (!existsSync(sessionsRoot)) return null;
 
     for (const year of this.readDirectoryNames(sessionsRoot)) {
