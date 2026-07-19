@@ -1,9 +1,10 @@
+import Database from "better-sqlite3";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import yaml from "yaml";
 import { afterEach, describe, expect, it } from "vitest";
-import { ensureChat, ensureUser, initDatabase, storeMessage } from "../database/schema.js";
+import { ensureChat, ensureUser, initDatabase as openDatabase, storeMessage } from "../database/schema.js";
 import {
   buildImportantContext,
   buildNormalContext,
@@ -12,8 +13,19 @@ import {
 } from "./inject.js";
 
 const tempDirs: string[] = [];
+const openDatabases = new Set<Database.Database>();
+
+function initDatabase(filePath: string): Database.Database {
+  const db = openDatabase(filePath);
+  openDatabases.add(db);
+  return db;
+}
 
 afterEach(() => {
+  for (const db of openDatabases) {
+    if (db.open) db.close();
+  }
+  openDatabases.clear();
   for (const dir of tempDirs.splice(0)) {
     fs.rmSync(dir, { recursive: true, force: true });
   }

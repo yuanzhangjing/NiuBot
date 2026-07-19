@@ -1,9 +1,10 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import Database from "better-sqlite3";
 import { afterEach, describe, expect, test } from "vitest";
 import {
-  initDatabase,
+  initDatabase as openDatabase,
   getBotRuntimeState,
   setBotRuntimeState,
   clearBotRuntimeModels,
@@ -16,8 +17,19 @@ import {
 } from "./schema.js";
 
 const tempDirs: string[] = [];
+const openDatabases = new Set<Database.Database>();
+
+function initDatabase(filePath: string): Database.Database {
+  const db = openDatabase(filePath);
+  openDatabases.add(db);
+  return db;
+}
 
 afterEach(() => {
+  for (const db of openDatabases) {
+    if (db.open) db.close();
+  }
+  openDatabases.clear();
   for (const dir of tempDirs.splice(0)) {
     rmSync(dir, { recursive: true, force: true });
   }
