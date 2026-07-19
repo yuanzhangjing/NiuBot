@@ -153,8 +153,13 @@ const named = (role) => {
   const hash = crypto.createHash("sha256").update(path.win32.resolve(home).toLowerCase()).digest("hex").slice(0, 16);
   return "\\\\\\\\.\\\\pipe\\\\niubot-" + hash + "-" + role;
 };
+const stableSegment = (value) => {
+  const readable = value.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 24);
+  const hash = crypto.createHash("sha256").update(value).digest("hex").slice(0, 8);
+  return (readable || "id") + "-" + hash;
+};
 const engineEndpoint = process.platform === "win32" ? named("engine") : path.join(home, "run", "engine.sock");
-const botEndpoint = process.platform === "win32" ? named("bot-testbot") : path.join(home, "TestBot", "api.sock");
+const botEndpoint = process.platform === "win32" ? named("bot-" + stableSegment("TestBot")) : path.join(home, "TestBot", "api.sock");
 for (const endpoint of [engineEndpoint, botEndpoint]) {
   if (process.platform !== "win32") {
     fs.mkdirSync(path.dirname(endpoint), { recursive: true });
