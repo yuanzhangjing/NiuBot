@@ -40,9 +40,13 @@ export async function runCommand(
     let stderr = "";
     let timedOut = false;
     const timer = options.timeoutMs
-      ? setTimeout(() => {
+        ? setTimeout(() => {
           timedOut = true;
-          if (child.pid) terminateSpawnedProcessTree(child.pid, false);
+          // Windows has no dependable SIGTERM equivalent for a detached-less
+          // console process tree. Once the command deadline is exceeded, use
+          // taskkill /F immediately instead of waiting for a grace period that
+          // the child cannot observe.
+          if (child.pid) terminateSpawnedProcessTree(child.pid, process.platform === "win32");
           setTimeout(() => {
             if (child.exitCode === null && child.pid) terminateSpawnedProcessTree(child.pid, true);
           }, 5_000).unref();

@@ -30,7 +30,7 @@ export function resolveExecutable(
 ): string | undefined {
   const platform = options.platform ?? process.platform;
   const env = options.env ?? process.env;
-  const pathApi = platform === "win32" ? path.win32 : path;
+  const pathApi = platform === "win32" ? path.win32 : path.posix;
   const isExecutable = options.isExecutable ?? ((candidate: string) => defaultExecutableCheck(candidate, platform));
   const extensions = executableExtensions(command, platform, env);
 

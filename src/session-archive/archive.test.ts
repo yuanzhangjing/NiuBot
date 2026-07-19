@@ -56,9 +56,11 @@ describe("session archive", () => {
     expect(manifest).toMatchObject({ session_id: "f876dcde", backend: "codex" });
     expect(manifest.sources).toEqual([{ path: native, role: "session", format: "native-jsonl" }]);
     expect(readdirSync(dirname(first))).toEqual(["manifest.json"]);
-    expect(statSync(first).mode & 0o777).toBe(0o600);
-    expect(statSync(dirname(first)).mode & 0o777).toBe(0o700);
-    expect(statSync(join(home, "NiuBot", "session-archives", "c1")).mode & 0o777).toBe(0o700);
+    if (process.platform !== "win32") {
+      expect(statSync(first).mode & 0o777).toBe(0o600);
+      expect(statSync(dirname(first)).mode & 0o777).toBe(0o700);
+      expect(statSync(join(home, "NiuBot", "session-archives", "c1")).mode & 0o777).toBe(0o700);
+    }
   });
 
   it("rejects backends without a native data source", async () => {
