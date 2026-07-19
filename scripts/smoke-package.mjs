@@ -31,19 +31,18 @@ try {
     "--prefix",
     installPrefix,
     tarballPath,
-  ], { stdio: "pipe" });
+  ], { stdio: "inherit" });
 
   const cliPath = process.platform === "win32"
     ? path.join(installPrefix, "niubot.cmd")
     : path.join(installPrefix, "bin", "niubot");
   if (!fs.existsSync(cliPath)) throw new Error(`Installed niubot command is missing: ${cliPath}`);
 
-  const output = process.platform === "win32"
-    ? execFileSync(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", `"${cliPath}" version`], {
-        encoding: "utf8",
-        windowsHide: true,
-      })
-    : execFileSync(cliPath, ["version"], { encoding: "utf8" });
+  const output = execFileSync(cliPath, ["version"], {
+    encoding: "utf8",
+    shell: process.platform === "win32",
+    windowsHide: true,
+  });
   const expected = `niubot v${packageJson.version}`;
   if (output.trim() !== expected) {
     throw new Error(`Installed command returned ${JSON.stringify(output.trim())}; expected ${JSON.stringify(expected)}`);
