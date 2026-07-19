@@ -68,6 +68,22 @@ export function queryProcessStartMarker(
   return undefined;
 }
 
+export function waitForProcessStartMarker(
+  pid: number,
+  platform: NodeJS.Platform = process.platform,
+  timeoutMs = 5_000,
+  intervalMs = 100,
+): string | undefined {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    const marker = queryProcessStartMarker(pid, platform);
+    if (marker) return marker;
+    if (!isProcessAlive(pid)) return undefined;
+    blockingDelay(Math.min(intervalMs, Math.max(0, deadline - Date.now())));
+  } while (Date.now() < deadline);
+  return queryProcessStartMarker(pid, platform);
+}
+
 export function forceTerminateProcessTree(
   pid: number,
   platform: NodeJS.Platform = process.platform,
@@ -121,4 +137,10 @@ export async function waitForProcessExit(pid: number, timeoutMs: number, interva
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function blockingDelay(milliseconds: number): void {
+  if (milliseconds <= 0) return;
+  const buffer = new SharedArrayBuffer(4);
+  Atomics.wait(new Int32Array(buffer), 0, 0, milliseconds);
 }

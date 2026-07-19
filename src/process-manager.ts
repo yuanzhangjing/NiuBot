@@ -9,7 +9,7 @@ import { samePlatformPath } from "./platform/files.js";
 import {
   forceTerminateProcessTree,
   isProcessAlive,
-  queryProcessStartMarker,
+  waitForProcessStartMarker,
   waitForProcessExit,
 } from "./platform/process.js";
 import {
@@ -81,12 +81,19 @@ export function launchDetachedEngine(options: LaunchEngineOptions): LaunchedEngi
   });
   if (!child.pid) throw new Error("Engine process did not provide a PID");
   child.unref();
+  const platformStartMarker = waitForProcessStartMarker(child.pid);
+  if (!platformStartMarker) {
+    // Use the ChildProcess handle here: no verified OS marker exists yet, so
+    // a PID-based tree kill could target a reused PID if the child exited.
+    try { child.kill(); } catch { /* already stopped */ }
+    throw new Error(`Engine process ${child.pid} started, but its identity marker could not be read`);
+  }
 
   const state: EngineProcessState = {
     pid: child.pid,
     instanceId,
     startedAt,
-    platformStartMarker: queryProcessStartMarker(child.pid),
+    platformStartMarker,
     endpoint: endpoint.address,
     endpointKind: endpoint.kind,
     controlToken,
@@ -129,7 +136,8 @@ export async function stopEngine(niubotHome: string): Promise<{ stopped: boolean
       // The endpoint may disappear before the process actually exits. Do not
       // clear its state and leave an orphan behind; verify the OS creation
       // marker before using the precise process-tree fallback.
-      await forceStopVerifiedProcess(running.state);
+      const exited = accepted && await waitForProcessExit(running.state.pid, 2_000);
+      if (!exited) await forceStopVerifiedProcess(running.state);
     }
     clearProcessState(niubotHome, running.state.instanceId);
     removeLegacyPidFile(niubotHome);
@@ -157,7 +165,7 @@ export async function stopEngine(niubotHome: string): Promise<{ stopped: boolean
 
 async function forceStopVerifiedProcess(state: EngineProcessState): Promise<void> {
   if (!isProcessAlive(state.pid)) return;
-  const currentMarker = queryProcessStartMarker(state.pid);
+  const currentMarker = waitForProcessStartMarker(state.pid);
   if (!state.platformStartMarker || !currentMarker || currentMarker !== state.platformStartMarker) {
     throw new Error("Engine process state exists, but its identity could not be verified");
   }
