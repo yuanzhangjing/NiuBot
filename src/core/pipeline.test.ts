@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import Database from "better-sqlite3";
 import yaml from "yaml";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { CliAgentBackend, type BaseCliSession, type ParsedOutput } from "../agent/cli-base.js";
@@ -9,7 +10,7 @@ import {
   getBotBackendModelState,
   getBotRuntimeState,
   getRecentRuntimeEvents,
-  initDatabase,
+  initDatabase as openDatabase,
   recordRuntimeEvent,
   setBotBackendModelState,
 } from "../database/schema.js";
@@ -374,9 +375,20 @@ function createMessage(overrides: Partial<NormalizedMessage>): NormalizedMessage
 }
 
 const tempDirs: string[] = [];
+const openDatabases = new Set<Database.Database>();
+
+function initDatabase(filePath: string): Database.Database {
+  const db = openDatabase(filePath);
+  openDatabases.add(db);
+  return db;
+}
 
 afterEach(() => {
   vi.useRealTimers();
+  for (const db of openDatabases) {
+    if (db.open) db.close();
+  }
+  openDatabases.clear();
   while (tempDirs.length > 0) {
     rmSync(tempDirs.pop()!, { recursive: true, force: true });
   }

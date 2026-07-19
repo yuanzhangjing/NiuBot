@@ -9,8 +9,12 @@ import { TZ, utcToLocalDateTime } from "../tz.js";
 import { formatMessagesForList } from "./messages.js";
 
 const tempDirs: string[] = [];
+const openDatabases: Database.Database[] = [];
 
 afterEach(() => {
+  for (const db of openDatabases.splice(0)) {
+    if (db.open) db.close();
+  }
   for (const dir of tempDirs.splice(0)) {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -20,6 +24,7 @@ function setupDb(): Database.Database {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-message-store-"));
   tempDirs.push(dir);
   const db = initDatabase(path.join(dir, "niubot.db"));
+  openDatabases.push(db);
   db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u2', 'Zen', 'feishu', 'p2')").run();
   db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c1', 'group', 'feishu', 'pc1')").run();
   db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c2', 'p2p', 'feishu', 'pc2')").run();
