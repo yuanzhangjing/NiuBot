@@ -24,6 +24,40 @@ export function resolveNpmExecutableForNode(
   return exists(candidate) ? candidate : undefined;
 }
 
+export function deriveNpmPrefixFromPackageRoot(
+  packageRoot: string,
+  platform: NodeJS.Platform = process.platform,
+): string | undefined {
+  const pathApi = platform === "win32" ? path.win32 : path.posix;
+  const normalized = pathApi.normalize(packageRoot);
+  const parts = normalized.split(pathApi.sep);
+  const nodeModulesIndex = parts.lastIndexOf("node_modules");
+  if (nodeModulesIndex < 1) return undefined;
+
+  const prefixParts = parts[nodeModulesIndex - 1] === "lib"
+    ? parts.slice(0, nodeModulesIndex - 1)
+    : parts.slice(0, nodeModulesIndex);
+  const prefix = prefixParts.join(pathApi.sep);
+  return prefix || pathApi.sep;
+}
+
+export function isPackageRootInsideNpmRoot(
+  packageRoot: string,
+  npmRoot: string,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  const pathApi = platform === "win32" ? path.win32 : path.posix;
+  const relative = pathApi.relative(pathApi.resolve(npmRoot), pathApi.resolve(packageRoot));
+  return relative !== "" && !relative.startsWith("..") && !pathApi.isAbsolute(relative);
+}
+
+export function commandLookupHint(
+  command: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  return platform === "win32" ? `Get-Command ${command} -All` : `which -a ${command}`;
+}
+
 export function resolveExecutable(
   command: string,
   options: ResolveExecutableOptions = {},

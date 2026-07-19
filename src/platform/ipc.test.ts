@@ -20,7 +20,7 @@ afterEach(() => {
 
 describe("local IPC endpoints", () => {
   it("preserves the existing Unix socket locations", () => {
-    expect(resolveBotEndpoint("/tmp/niubot", "NiuBot", "darwin")).toEqual({
+    expect(resolveBotEndpoint("/tmp/niubot", "NiuBot", { platform: "darwin" })).toEqual({
       kind: "unix-socket",
       address: "/tmp/niubot/NiuBot/api.sock",
     });
@@ -30,8 +30,8 @@ describe("local IPC endpoints", () => {
   });
 
   it("uses stable Windows named pipes without embedding user paths", () => {
-    const first = resolveBotEndpoint("C:\\Users\\Zen\\.niubot", "Niu Bot", "win32");
-    const second = resolveBotEndpoint("C:\\Users\\Zen\\.niubot", "Niu Bot", "win32");
+    const first = resolveBotEndpoint("C:\\Users\\Zen\\.niubot", "Niu Bot", { platform: "win32" });
+    const second = resolveBotEndpoint("C:\\Users\\Zen\\.niubot", "Niu Bot", { platform: "win32" });
 
     expect(first).toEqual(second);
     expect(first.kind).toBe("named-pipe");
@@ -41,8 +41,8 @@ describe("local IPC endpoints", () => {
   });
 
   it("does not collide when different bot IDs have the same readable slug", () => {
-    const first = resolveBotEndpoint("C:\\Users\\Zen\\.niubot", "Niu Bot", "win32");
-    const second = resolveBotEndpoint("C:\\Users\\Zen\\.niubot", "Niu-Bot", "win32");
+    const first = resolveBotEndpoint("C:\\Users\\Zen\\.niubot", "Niu Bot", { platform: "win32" });
+    const second = resolveBotEndpoint("C:\\Users\\Zen\\.niubot", "Niu-Bot", { platform: "win32" });
 
     expect(first.address).not.toBe(second.address);
   });
@@ -50,7 +50,7 @@ describe("local IPC endpoints", () => {
   it("only creates and removes filesystem entries for Unix sockets", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-ipc-"));
     tempDirs.push(dir);
-    const endpoint = resolveBotEndpoint(dir, "NiuBot", "darwin");
+    const endpoint = resolveBotEndpoint(dir, "NiuBot", { platform: "darwin" });
     fs.mkdirSync(path.dirname(endpoint.address), { recursive: true });
     fs.writeFileSync(endpoint.address, "stale");
 

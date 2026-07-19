@@ -335,7 +335,7 @@ async function checkRuntimeHealth(
     return false;
   }
   const results = await Promise.all(config.bots.map((bot) => waitForLocalApiHealth(
-    resolveBotEndpoint(context.niubotHome, bot.id, process.platform, path.dirname(bot.dbPath)),
+    resolveBotEndpoint(context.niubotHome, bot.id, { unixSocketDirectory: path.dirname(bot.dbPath) }),
     healthTimeout,
     500,
   )));
@@ -348,7 +348,7 @@ async function notify(context: RestartContext, text: string): Promise<void> {
     const config = loadConfig(path.join(context.niubotHome, "config.yaml"));
     const bot = config.bots.find((candidate) => candidate.id === context.botName) ?? config.bots[0];
     if (!bot) return;
-    const endpoint = resolveBotEndpoint(context.niubotHome, bot.id, process.platform, path.dirname(bot.dbPath));
+    const endpoint = resolveBotEndpoint(context.niubotHome, bot.id, { unixSocketDirectory: path.dirname(bot.dbPath) });
     const response = await localApiRequest(endpoint, "/send", {
       method: "POST",
       body: { chat_id: context.notifyChatId, text },

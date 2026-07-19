@@ -13,7 +13,7 @@ import type { CliAgentBackend } from "./agent/cli-base.js";
 import { createBotInstance, type BotInstance } from "./bot-instance.js";
 import { loadPersistedBotRuntimeState } from "./database/schema.js";
 import { createLogger, setLogLevel } from "./logger.js";
-import { ensureRuntimeNbtShim, prependNiubotBinToPath } from "./niubot-cli.js";
+import { ensureRuntimeNbtShim, prependNiubotBinToPath } from "./platform/cli-runtime.js";
 import { summarizeProxyEnvironment } from "./proxy-env.js";
 import { resolveBotRuntimeConfig } from "./runtime-config.js";
 import { startBotRuntime } from "./bot-startup.js";

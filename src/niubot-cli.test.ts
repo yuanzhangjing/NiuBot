@@ -9,7 +9,7 @@ import {
   ensureRuntimeNbtShim,
   getBundledNiubotBinDir,
   prependNiubotBinToPath,
-} from "./niubot-cli.js";
+} from "./platform/cli-runtime.js";
 
 describe("niubot CLI path helpers", () => {
   it("publishes nbt as a stable package binary", () => {

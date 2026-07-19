@@ -8,7 +8,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { AgentSessionNotStartedError, type AgentBackend, type AgentSession, type AgentResponse, type SessionConfig, type AgentSessionActivity, type ExecHooks, type SessionTranscript } from "./types.js";
 import { NIUBOT_HOME } from "../config.js";
 import { createLogger } from "../logger.js";
-import { prependNiubotBinToPath } from "../niubot-cli.js";
+import { prependNiubotBinToPath } from "../platform/cli-runtime.js";
 import { createInterface } from "node:readline";
 import { dumpAgentStdout, type AgentStdoutDumpReason } from "./agent-stdout-log.js";
 import { buildExecutableInvocation, resolveExecutable } from "../platform/executable.js";

@@ -31,7 +31,12 @@ import { waitForEngineIdentity } from "./local-api/engine-client.js";
 import { inspectRunningEngine, launchDetachedEngine, stopEngine } from "./process-manager.js";
 import { launchRestartWorker } from "./restart-launcher.js";
 import { runCommandSync } from "./platform/command.js";
-import { resolveNpmExecutableForNode } from "./platform/executable.js";
+import {
+  commandLookupHint,
+  deriveNpmPrefixFromPackageRoot,
+  isPackageRootInsideNpmRoot,
+  resolveNpmExecutableForNode,
+} from "./platform/executable.js";
 import { clearProcessState, readProcessState } from "./process-state.js";
 import { isProcessAlive } from "./platform/process.js";
 
@@ -158,35 +163,6 @@ function readTrimmedFile(filePath: string): string | undefined {
 function getNodeRuntimeLabel(): string {
   return `${process.execPath} ${process.version} ABI ${process.versions.modules}`;
 }
-
-export function deriveNpmPrefixFromPackageRoot(
-  packageRoot: string,
-  platform: NodeJS.Platform = process.platform,
-): string | undefined {
-  const pathApi = platform === "win32" ? path.win32 : path.posix;
-  const normalized = pathApi.normalize(packageRoot);
-  const parts = normalized.split(pathApi.sep);
-  const nodeModulesIndex = parts.lastIndexOf("node_modules");
-  if (nodeModulesIndex < 1) return undefined;
-
-  const prefixParts = parts[nodeModulesIndex - 1] === "lib"
-    ? parts.slice(0, nodeModulesIndex - 1)
-    : parts.slice(0, nodeModulesIndex);
-  const prefix = prefixParts.join(pathApi.sep);
-  return prefix || pathApi.sep;
-}
-
-export function isPackageRootInsideNpmRoot(
-  packageRoot: string,
-  npmRoot: string,
-  platform: NodeJS.Platform = process.platform,
-): boolean {
-  const pathApi = platform === "win32" ? path.win32 : path.posix;
-  const relative = pathApi.relative(pathApi.resolve(npmRoot), pathApi.resolve(packageRoot));
-  return relative !== "" && !relative.startsWith("..") && !pathApi.isAbsolute(relative);
-}
-
-export { resolveNpmExecutableForNode } from "./platform/executable.js";
 
 function resolveNpmCommandForCurrentNode(): string {
   return resolveNpmExecutableForNode(process.execPath) ?? "npm";
@@ -982,7 +958,7 @@ async function cmdStart(niubotHome: string, flags: CliFlags): Promise<void> {
   // Health check — all bots must respond
   const failedBots: string[] = [];
   for (const bot of config.bots) {
-    const endpoint = resolveBotEndpoint(niubotHome, bot.id, process.platform, path.dirname(bot.dbPath));
+    const endpoint = resolveBotEndpoint(niubotHome, bot.id, { unixSocketDirectory: path.dirname(bot.dbPath) });
     if (await waitForLocalApiHealth(endpoint, 15_000, 1_000)) {
       ok(`${bot.id} health check passed`);
     } else {
@@ -996,7 +972,7 @@ async function cmdStart(niubotHome: string, flags: CliFlags): Promise<void> {
     console.log("NiuBot is running.");
     console.log(`  Log: ${logFile}`);
     for (const bot of config.bots) {
-      console.log(`  API: ${resolveBotEndpoint(niubotHome, bot.id, process.platform, path.dirname(bot.dbPath)).address}`);
+      console.log(`  API: ${resolveBotEndpoint(niubotHome, bot.id, { unixSocketDirectory: path.dirname(bot.dbPath) }).address}`);
     }
   } else {
     hint(`Check log: ${logFile}`);
@@ -1277,7 +1253,7 @@ async function cmdUpdate(niubotHome: string): Promise<void> {
   if (activeVersion && activeVersion !== latest) {
     fail(`Installed ${latest}, but the active niubot command is still ${activeVersion}.`);
     hint("You probably have multiple global npm installs or PATH is resolving an older binary first.");
-    hint(process.platform === "win32" ? "Check with: Get-Command niubot -All" : "Check with: which -a niubot");
+    hint(`Check with: ${commandLookupHint("niubot")}`);
     hint("Check npm prefix with: npm root -g");
     console.log();
     process.exit(1);

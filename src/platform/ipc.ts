@@ -11,18 +11,23 @@ export interface LocalIpcEndpoint {
   address: string;
 }
 
+export interface ResolveBotEndpointOptions {
+  platform?: NodeJS.Platform;
+  unixSocketDirectory?: string;
+}
+
 export function resolveBotEndpoint(
   niubotHome: string,
   botId: string,
-  platform: NodeJS.Platform = process.platform,
-  unixSocketDirectory?: string,
+  options: ResolveBotEndpointOptions = {},
 ): LocalIpcEndpoint {
+  const platform = options.platform ?? process.platform;
   if (platform === "win32") {
     return namedPipeEndpoint(niubotHome, `bot-${stableSegment(botId)}`);
   }
   return {
     kind: "unix-socket",
-    address: path.posix.join(unixSocketDirectory ?? path.posix.join(niubotHome, botId), "api.sock"),
+    address: path.posix.join(options.unixSocketDirectory ?? path.posix.join(niubotHome, botId), "api.sock"),
   };
 }
 

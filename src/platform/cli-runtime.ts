@@ -1,6 +1,6 @@
-import path from "node:path";
-import os from "node:os";
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 type PathBuildOptions = {
@@ -35,7 +35,7 @@ type RuntimeNbtShimOptions = NbtShimOptions & {
 const NBT_SHIM_MARKER = "# Managed by NiuBot: nbt shim";
 
 export function getProjectRoot(): string {
-  return path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  return path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 }
 
 export function getBundledNiubotBinDir(
@@ -100,7 +100,9 @@ export function ensureRuntimeNbtShim(options: RuntimeNbtShimOptions = {}): NbtSh
   const homeDir = options.homeDir ?? os.homedir();
   const platform = options.platform ?? process.platform;
   const pathApi = pathForPlatform(platform);
-  const targetPath = platform === "win32" ? pathApi.join(projectRoot, "dist", "cli.js") : getBundledNbtPath(projectRoot, platform);
+  const targetPath = platform === "win32"
+    ? pathApi.join(projectRoot, "dist", "cli.js")
+    : getBundledNbtPath(projectRoot, platform);
   const shimPath = pathApi.join(
     getNbtShimDirectory(homeDir, platform, options.localAppData),
     platform === "win32" ? "nbt.cmd" : "nbt",

@@ -21,7 +21,7 @@ function getEndpoint(): LocalIpcEndpoint {
   if (botName) return resolveBotEndpoint(niubotHome, botName);
   if (DB_PATH) {
     const directory = path.dirname(DB_PATH);
-    return resolveBotEndpoint(niubotHome, path.basename(directory), process.platform, directory);
+    return resolveBotEndpoint(niubotHome, path.basename(directory), { unixSocketDirectory: directory });
   }
   return endpointFromAddress(path.join(niubotHome, "run", "api.sock"));
 }

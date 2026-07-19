@@ -11,9 +11,6 @@ import {
   getTodayLogFilePath,
   resolveRunningStatusDetails,
   parseNiubotVersionOutput,
-  deriveNpmPrefixFromPackageRoot,
-  isPackageRootInsideNpmRoot,
-  resolveNpmExecutableForNode,
   resolveNiubotHome,
   collectStatusHomes,
   readRegisteredHomes,
@@ -39,28 +36,6 @@ describe("user-cli init model configuration", () => {
   it("parses niubot version command output", () => {
     expect(parseNiubotVersionOutput("niubot v0.1.81\n")).toBe("0.1.81");
     expect(parseNiubotVersionOutput("unexpected\n")).toBeUndefined();
-  });
-
-  it("derives npm prefix from a scoped global package root", () => {
-    expect(deriveNpmPrefixFromPackageRoot("/opt/homebrew/lib/node_modules/@yuanzhangjing/niubot", "darwin")).toBe("/opt/homebrew");
-    expect(deriveNpmPrefixFromPackageRoot("/Users/me/.nvs/node/22/lib/node_modules/@yuanzhangjing/niubot", "darwin")).toBe("/Users/me/.nvs/node/22");
-  });
-
-  it("checks whether the package root belongs to the active npm root", () => {
-    expect(isPackageRootInsideNpmRoot(
-      "/opt/homebrew/lib/node_modules/@yuanzhangjing/niubot",
-      "/opt/homebrew/lib/node_modules", "darwin",
-    )).toBe(true);
-    expect(isPackageRootInsideNpmRoot(
-      "/opt/homebrew/lib/node_modules/@yuanzhangjing/niubot",
-      "/Users/me/.nvs/node/22/lib/node_modules", "darwin",
-    )).toBe(false);
-  });
-
-  it("resolves npm next to the active node runtime", () => {
-    expect(resolveNpmExecutableForNode("/opt/homebrew/bin/node", "darwin", () => true)).toBe("/opt/homebrew/bin/npm");
-    expect(resolveNpmExecutableForNode("C:\\node\\node.exe", "win32", () => true)).toBe("C:\\node\\npm.cmd");
-    expect(resolveNpmExecutableForNode("/missing/bin/node", "darwin", () => false)).toBeUndefined();
   });
 
   it("resolves relative NIUBOT_HOME before passing it to the engine", () => {

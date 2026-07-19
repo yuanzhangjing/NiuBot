@@ -120,7 +120,7 @@ export async function createBotInstance(
   );
 
   // 6. 创建 API Server
-  const endpoint = resolveBotEndpoint(NIUBOT_HOME, botConfig.id, process.platform, path.dirname(botConfig.dbPath));
+  const endpoint = resolveBotEndpoint(NIUBOT_HOME, botConfig.id, { unixSocketDirectory: path.dirname(botConfig.dbPath) });
   const apiHandler: ApiHandler = {
     sendMessage: (chatId, text) => pipeline.sendToChat(chatId, text),
     sendCard: (chatId, header, content) => pipeline.sendCardToChat(chatId, header, content),
