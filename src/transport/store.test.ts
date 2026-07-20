@@ -127,4 +127,3 @@ describe("TransportStore outbox", () => {
     expect(store.getOutbound("req-1")).toMatchObject({ status: "sent", platformMsgId: "platform-1" });
   });
 });
-
