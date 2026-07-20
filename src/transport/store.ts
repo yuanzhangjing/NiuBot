@@ -100,7 +100,10 @@ export class TransportStore {
   markInboundHandlerError(id: number, error: unknown): void {
     this.db.prepare(`
       UPDATE transport_inbox
-      SET error = ?, updated_at = datetime('now')
+      SET status = CASE WHEN attempt_count >= 3 THEN 'failed' ELSE status END,
+          error = ?,
+          completed_at = CASE WHEN attempt_count >= 3 THEN datetime('now') ELSE completed_at END,
+          updated_at = datetime('now')
       WHERE bot_id = ? AND platform = ? AND id = ? AND status = 'pending'
     `).run(limitError(error), this.botId, this.platform, id);
   }
@@ -383,4 +386,3 @@ function emptyInboundCounts(): Record<InboundStatus, number> {
 function emptyOutboundCounts(): Record<OutboundStatus, number> {
   return { pending: 0, sending: 0, sent: 0, failed: 0, unknown: 0 };
 }
-
