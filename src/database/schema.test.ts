@@ -259,3 +259,56 @@ describe("cron timezone schema", () => {
     expect(columns.map((column) => column.name)).toContain("timezone");
   });
 });
+
+describe("transport inbox claim schema", () => {
+  test("migrates schema 17 inbox rows without losing state", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-test-"));
+    tempDirs.push(dir);
+    const dbPath = path.join(dir, "niubot.db");
+    const legacy = new Database(dbPath);
+    legacy.exec(`
+      CREATE TABLE transport_inbox (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        bot_id TEXT NOT NULL,
+        platform TEXT NOT NULL,
+        platform_msg_id TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending'
+          CHECK(status IN ('pending', 'queued', 'processing', 'completed', 'failed', 'stopped', 'discarded', 'interrupted')),
+        message_id INTEGER,
+        run_id TEXT,
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        error TEXT,
+        received_at TEXT NOT NULL DEFAULT (datetime('now')),
+        queued_at TEXT,
+        processing_at TEXT,
+        completed_at TEXT,
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE(bot_id, platform, platform_msg_id)
+      );
+      CREATE INDEX idx_transport_inbox_recovery ON transport_inbox(bot_id, status, id);
+      CREATE INDEX idx_transport_inbox_message ON transport_inbox(bot_id, message_id);
+      CREATE INDEX idx_transport_inbox_run ON transport_inbox(bot_id, run_id);
+      INSERT INTO transport_inbox (
+        bot_id, platform, platform_msg_id, payload_json, status, message_id, attempt_count
+      ) VALUES ('NiuBot', 'feishu', 'msg-1', '{}', 'queued', 42, 1);
+      PRAGMA user_version = 17;
+    `);
+    legacy.close();
+
+    const migrated = initDatabase(dbPath);
+    const row = migrated.prepare(`
+      SELECT status, message_id, attempt_count, claim_token, claimed_at
+      FROM transport_inbox WHERE platform_msg_id = 'msg-1'
+    `).get() as Record<string, unknown>;
+
+    expect(row).toMatchObject({
+      status: "queued",
+      message_id: 42,
+      attempt_count: 1,
+      claim_token: null,
+      claimed_at: null,
+    });
+    expect(migrated.pragma("user_version", { simple: true })).toBe(18);
+  });
+});

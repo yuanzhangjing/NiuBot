@@ -43,8 +43,12 @@ describe("TransportStore inbox", () => {
     const { store } = createStore();
     const inbox = store.insertInbound("msg-1", "{}").row;
 
-    expect(store.markInboundAttempt(inbox.id)).toBe(true);
-    expect(store.markInboundQueued(inbox.id, 42)).toBe(true);
+    expect(store.claimInbound(inbox.id, "claim-1")).toMatchObject({
+      status: "dispatching",
+      claimToken: "claim-1",
+      attemptCount: 1,
+    });
+    expect(store.markInboundQueued(inbox.id, "claim-1", 42)).toBe(true);
     expect(store.markInboundRunState([42], "run-1", "queued")).toBe(1);
     expect(store.markInboundRunState([42], "run-1", "agent_running")).toBe(1);
     expect(store.markInboundRunState([42], "run-1", "done")).toBe(1);
@@ -57,6 +61,44 @@ describe("TransportStore inbox", () => {
     });
   });
 
+  test("allows only one consumer to claim a pending message", () => {
+    const { db, store } = createStore();
+    const competingStore = new TransportStore(db, "NiuBot", "feishu");
+    const inbox = store.insertInbound("msg-1", "{}").row;
+
+    const first = store.claimInbound(inbox.id, "consumer-a");
+    const second = competingStore.claimInbound(inbox.id, "consumer-b");
+
+    expect(first).toMatchObject({ status: "dispatching", claimToken: "consumer-a" });
+    expect(second).toBeUndefined();
+    expect(store.markInboundQueued(inbox.id, "consumer-b", 42)).toBe(false);
+    expect(store.markInboundQueued(inbox.id, "consumer-a", 42)).toBe(true);
+  });
+
+  test("releases a failed claim for retry and fails it after the third attempt", () => {
+    const { store } = createStore();
+    const inbox = store.insertInbound("msg-1", "{}").row;
+
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      const token = `claim-${attempt}`;
+      expect(store.claimInbound(inbox.id, token)?.attemptCount).toBe(attempt);
+      const released = store.releaseInboundClaim(inbox.id, token, new Error("handler failed"));
+      expect(released?.status).toBe(attempt === 3 ? "failed" : "pending");
+    }
+    expect(store.claimInbound(inbox.id, "claim-4")).toBeUndefined();
+  });
+
+  test("releases queued work when the in-memory enqueue step fails", () => {
+    const { store } = createStore();
+    const inbox = store.insertInbound("msg-1", "{}").row;
+
+    store.claimInbound(inbox.id, "claim-1");
+    store.markInboundQueued(inbox.id, "claim-1", 42);
+    const released = store.releaseInboundClaim(inbox.id, "claim-1", new Error("queue unavailable"));
+
+    expect(released).toMatchObject({ status: "pending", messageId: 42, attemptCount: 1 });
+  });
+
   test("replays queued work but interrupts work that already entered Backend", () => {
     const { store } = createStore();
     const pending = store.insertInbound("pending", "{}").row;
@@ -64,10 +106,13 @@ describe("TransportStore inbox", () => {
     const processing = store.insertInbound("processing", "{}").row;
     const discarded = store.insertInbound("discarded", "{}").row;
 
-    store.markInboundQueued(queued.id, 1);
-    store.markInboundQueued(processing.id, 2);
+    store.claimInbound(queued.id, "queued-claim");
+    store.markInboundQueued(queued.id, "queued-claim", 1);
+    store.claimInbound(processing.id, "processing-claim");
+    store.markInboundQueued(processing.id, "processing-claim", 2);
     store.markInboundRunState([2], "run-2", "agent_running");
-    store.markInboundTerminal(discarded.id, "discarded");
+    store.claimInbound(discarded.id, "discarded-claim");
+    store.markInboundTerminal(discarded.id, "discarded-claim", "discarded");
 
     const recovery = store.prepareInboundRecovery();
 
@@ -81,7 +126,8 @@ describe("TransportStore inbox", () => {
   test("does not revive messages explicitly discarded from the memory queue", () => {
     const { store } = createStore();
     const inbox = store.insertInbound("msg-1", "{}").row;
-    store.markInboundQueued(inbox.id, 9);
+    store.claimInbound(inbox.id, "claim-1");
+    store.markInboundQueued(inbox.id, "claim-1", 9);
 
     expect(store.discardInboundMessages([9])).toBe(1);
     expect(store.prepareInboundRecovery().pending).toHaveLength(0);

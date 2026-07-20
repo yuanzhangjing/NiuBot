@@ -398,6 +398,61 @@ const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 18,
+    description: "Add atomic claim state to persistent transport inbox",
+    up: (db) => {
+      db.exec(`
+        DROP INDEX IF EXISTS idx_transport_inbox_recovery;
+        DROP INDEX IF EXISTS idx_transport_inbox_message;
+        DROP INDEX IF EXISTS idx_transport_inbox_run;
+
+        ALTER TABLE transport_inbox RENAME TO transport_inbox_v17;
+
+        CREATE TABLE transport_inbox (
+          id                INTEGER PRIMARY KEY AUTOINCREMENT,
+          bot_id            TEXT NOT NULL,
+          platform          TEXT NOT NULL,
+          platform_msg_id   TEXT NOT NULL,
+          payload_json      TEXT NOT NULL,
+          status            TEXT NOT NULL DEFAULT 'pending'
+                            CHECK(status IN ('pending', 'dispatching', 'queued', 'processing', 'completed', 'failed', 'stopped', 'discarded', 'interrupted')),
+          message_id        INTEGER,
+          run_id            TEXT,
+          claim_token       TEXT,
+          attempt_count     INTEGER NOT NULL DEFAULT 0,
+          error             TEXT,
+          received_at       TEXT NOT NULL DEFAULT (datetime('now')),
+          claimed_at        TEXT,
+          queued_at         TEXT,
+          processing_at     TEXT,
+          completed_at      TEXT,
+          updated_at        TEXT NOT NULL DEFAULT (datetime('now')),
+          UNIQUE(bot_id, platform, platform_msg_id)
+        );
+
+        INSERT INTO transport_inbox (
+          id, bot_id, platform, platform_msg_id, payload_json, status,
+          message_id, run_id, attempt_count, error, received_at,
+          queued_at, processing_at, completed_at, updated_at
+        )
+        SELECT
+          id, bot_id, platform, platform_msg_id, payload_json, status,
+          message_id, run_id, attempt_count, error, received_at,
+          queued_at, processing_at, completed_at, updated_at
+        FROM transport_inbox_v17;
+
+        DROP TABLE transport_inbox_v17;
+
+        CREATE INDEX idx_transport_inbox_recovery
+          ON transport_inbox(bot_id, status, id);
+        CREATE INDEX idx_transport_inbox_message
+          ON transport_inbox(bot_id, message_id);
+        CREATE INDEX idx_transport_inbox_run
+          ON transport_inbox(bot_id, run_id);
+      `);
+    },
+  },
 ];
 
 const LATEST_VERSION = migrations[migrations.length - 1]!.version;

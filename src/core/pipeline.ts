@@ -90,6 +90,10 @@ const INTERRUPT_WORDS = new Set([
   "等等", "等一下", "稍等",
   "stop", "cancel", "abort",
 ]);
+const BUILTIN_COMMANDS = new Set([
+  "/restart", "/update", "/service", "/new", "/cron", "/agent", "/model",
+  "/admin", "/help", "/stop", "/clear", "/flush", "/task", "/status", "/history",
+]);
 // ── Watchdog 常量 ──
 const AGENT_WATCHDOG_INTERVAL_MS = 15_000;     // 15 秒检测间隔
 const AGENT_IDLE_THRESHOLD_MS = 600_000;       // 10 分钟：第一次 idle 通知
@@ -154,6 +158,10 @@ interface RunningTask {
 interface PendingTransitionMessage {
   msg: NormalizedMessage;
   inboxId?: number;
+  claimToken?: string;
+  recoveredMessageId?: number;
+  resolve: () => void;
+  reject: (error: unknown) => void;
 }
 
 type SessionEndStatus = "archived" | "archive_failed" | "discarded";
@@ -745,22 +753,46 @@ export class Pipeline {
   }
 
   /** Standard Transport entrypoint. Platform events are persisted before reaching this method. */
-  handleInbound(delivery: InboundDelivery): void {
-    this.handleMessage(delivery.message, delivery.replayed, delivery.inboxId, delivery.messageId);
+  handleInbound(delivery: InboundDelivery): void | Promise<void> {
+    try {
+      const result = this.handleMessage(
+        delivery.message,
+        delivery.replayed,
+        delivery.inboxId,
+        delivery.claimToken,
+        delivery.messageId,
+      );
+      if (result) {
+        return result.catch((error) => {
+          if (delivery.message.platformMsgId) {
+            this.processedMsgIds.delete(delivery.message.platformMsgId);
+          }
+          throw error;
+        });
+      }
+    } catch (error) {
+      if (delivery.message.platformMsgId) {
+        this.processedMsgIds.delete(delivery.message.platformMsgId);
+      }
+      throw error;
+    }
   }
 
   private handleMessage(
     msg: NormalizedMessage,
     replayedAfterTransition = false,
     inboxId?: number,
+    claimToken?: string,
     recoveredMessageId?: number,
-  ): void {
+  ): void | Promise<void> {
     const platform = this.botIdentity.platform;
 
     // 消息去重（飞书 WebSocket 可能重复推送）
     if (msg.platformMsgId && this.processedMsgIds.has(msg.platformMsgId)) {
       this.log.debug("duplicate message, skipping", { platformMsgId: msg.platformMsgId });
-      if (inboxId != null) this.transport.markInboundTerminal?.(inboxId, "completed");
+      if (inboxId != null && claimToken) {
+        this.transport.markInboundTerminal?.(inboxId, claimToken, "completed");
+      }
       return;
     }
     if (msg.platformMsgId) {
@@ -782,7 +814,9 @@ export class Pipeline {
         if (msg.platformMsgId) {
           this.transport.addReaction(msg.chatPlatformId, msg.platformMsgId, "Alarm").catch(() => {});
         }
-        if (inboxId != null) this.transport.markInboundTerminal?.(inboxId, "discarded", "stale message");
+        if (inboxId != null && claimToken) {
+          this.transport.markInboundTerminal?.(inboxId, claimToken, "discarded", "stale message");
+        }
         return;
       }
     }
@@ -796,11 +830,13 @@ export class Pipeline {
 
       if (!isReplyToBot) {
         // 群聊中未 @ bot 也未回复 bot，只存消息不触发
-        const messageId = this.storeMessageOnly(msg, platform);
-        if (inboxId != null) {
-          this.transport.markInboundQueued?.(inboxId, messageId);
-          this.transport.markInboundTerminal?.(inboxId, "completed");
-        }
+        this.persistInboundMessage({
+          inboxId,
+          claimToken,
+          recoveredMessageId,
+          state: "completed",
+          store: () => this.storeMessageOnly(msg, platform),
+        });
         return;
       }
     }
@@ -833,8 +869,7 @@ export class Pipeline {
         msgId: msg.platformMsgId,
         type: msg.contentType,
       });
-      this.enqueuePendingTransitionMessage(chatId, msg, inboxId);
-      return;
+      return this.enqueuePendingTransitionMessage(chatId, msg, inboxId, claimToken, recoveredMessageId);
     }
 
     // Fetch group chat name if not known
@@ -859,17 +894,23 @@ export class Pipeline {
       : undefined;
 
     const sessionId = this.chatSessions.get(chatId)?.sessionId;
-    const incomingMsgId = recoveredMessageId ?? storeMessage(this.db, {
-      chatId,
-      senderId: userId,
-      sessionId,
-      role: "user",
-      contentText: msg.contentText,
-      contentType: msg.contentType,
-      platform,
-      platformMsgId: msg.platformMsgId,
-      platformTs: platformTsStr,
-      platformRaw: JSON.stringify(msg.raw),
+    const persistIncomingMessage = (state: "queued" | "processing"): number => this.persistInboundMessage({
+      inboxId,
+      claimToken,
+      recoveredMessageId,
+      state,
+      store: () => storeMessage(this.db, {
+        chatId,
+        senderId: userId,
+        sessionId,
+        role: "user",
+        contentText: msg.contentText,
+        contentType: msg.contentType,
+        platform,
+        platformMsgId: msg.platformMsgId,
+        platformTs: platformTsStr,
+        platformRaw: JSON.stringify(msg.raw),
+      }),
     });
 
     this.log.info("message received", {
@@ -911,21 +952,31 @@ export class Pipeline {
     // 短词打断检测（不清空队列，只 kill 当前进程，与 /stop 行为一致）
     const trimmedText = msg.contentText.trim().toLowerCase();
     if (INTERRUPT_WORDS.has(trimmedText) && this.chatSessions.has(chatId)) {
+      persistIncomingMessage("processing");
       this.log.info("interrupt word detected", { chatId, word: trimmedText });
       this.cancelChat(chatId).catch(() => {});
       const interruptText = "好的，已停止。";
       this.transport.sendText(msg.chatPlatformId, interruptText).then((pmid) => {
         this.storeBotResponse(chatId, interruptText, pmid);
       }).catch(() => {});
-      if (inboxId != null) this.transport.markInboundTerminal?.(inboxId, "completed");
+      if (inboxId != null && claimToken) {
+        this.transport.markInboundTerminal?.(inboxId, claimToken, "completed");
+      }
       return;
     }
 
     // 内置命令拦截：/xxx 开头的消息先匹配内置命令，命中则不传给 agent
-    if (this.handleBuiltinCommand(msg.contentText.trim(), userId, chatId, msg.chatPlatformId, msg.chatType, msg.platformMsgId)) {
-      if (inboxId != null) this.transport.markInboundTerminal?.(inboxId, "completed");
+    const commandText = msg.contentText.trim();
+    if (this.isBuiltinCommand(commandText, userId)) {
+      persistIncomingMessage("processing");
+      this.handleBuiltinCommand(commandText, userId, chatId, msg.chatPlatformId, msg.chatType, msg.platformMsgId);
+      if (inboxId != null && claimToken) {
+        this.transport.markInboundTerminal?.(inboxId, claimToken, "completed");
+      }
       return;
     }
+
+    const incomingMsgId = persistIncomingMessage("queued");
 
     // Reaction 策略：收到即二选一；pending 先 Pin，非 pending 先 Get；pending 开始处理后再补 Get
     const isPending = this.queue.push({
@@ -937,7 +988,6 @@ export class Pipeline {
       timestamp: Date.now(),
       platformMsgId: msg.platformMsgId,
     });
-    if (inboxId != null) this.transport.markInboundQueued?.(inboxId, incomingMsgId);
     this.log.info("reaction decision", {
       chatId,
       msgId: msg.platformMsgId,
@@ -996,6 +1046,30 @@ export class Pipeline {
       }
     }
     return messageId;
+  }
+
+  private persistInboundMessage(options: {
+    inboxId?: number;
+    claimToken?: string;
+    recoveredMessageId?: number;
+    state: "queued" | "processing" | "completed";
+    store: () => number;
+  }): number {
+    const persist = this.db.transaction(() => {
+      const messageId = options.recoveredMessageId ?? options.store();
+      if (options.inboxId != null && options.claimToken) {
+        if (options.state === "queued") {
+          this.transport.markInboundQueued?.(options.inboxId, options.claimToken, messageId);
+        } else if (options.state === "processing") {
+          this.transport.markInboundProcessing?.(options.inboxId, options.claimToken, messageId);
+        } else {
+          this.transport.markInboundQueued?.(options.inboxId, options.claimToken, messageId);
+          this.transport.markInboundTerminal?.(options.inboxId, options.claimToken, "completed");
+        }
+      }
+      return messageId;
+    });
+    return persist();
   }
 
   /** Check if a platform message was sent by the bot */
@@ -1088,7 +1162,7 @@ export class Pipeline {
    *   3. return false → 转发给 agent
    */
   private handleBuiltinCommand(text: string, userId: string, chatId: string, platformChatId: string, chatType: string, msgId?: string): boolean {
-    if (!text.startsWith("/") || text.startsWith("//")) return false;
+    if (!this.isBuiltinCommand(text, userId)) return false;
 
     const parts = text.split(/\s+/);
     const cmd = parts[0].toLowerCase();
@@ -1280,6 +1354,15 @@ export class Pipeline {
 
     // 3. 未识别的 / 命令，交给 agent 处理
     return false;
+  }
+
+  private isBuiltinCommand(text: string, userId: string): boolean {
+    if (!text.startsWith("/") || text.startsWith("//")) return false;
+    const firstToken = text.split(/\s+/, 1)[0]?.toLowerCase();
+    if (firstToken && BUILTIN_COMMANDS.has(firstToken)) return true;
+    if (!this.adminRoles.has(userId)) return false;
+    const executable = text.slice(1).split(/\s+/, 1)[0];
+    return !!executable && commandExistsSync(executable);
   }
 
   /** //xxx 表示强制透传给 agent，实际发送时去掉一个前缀 / */
@@ -1834,11 +1917,19 @@ export class Pipeline {
     });
   }
 
-  private enqueuePendingTransitionMessage(chatId: string, msg: NormalizedMessage, inboxId?: number): void {
-    const pending = this.pendingTransitionMessages.get(chatId) ?? [];
-    pending.push({ msg, inboxId });
-    this.pendingTransitionMessages.set(chatId, pending);
-    this.markQueuedMessage(msg.chatPlatformId, msg.platformMsgId);
+  private enqueuePendingTransitionMessage(
+    chatId: string,
+    msg: NormalizedMessage,
+    inboxId?: number,
+    claimToken?: string,
+    recoveredMessageId?: number,
+  ): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      const pending = this.pendingTransitionMessages.get(chatId) ?? [];
+      pending.push({ msg, inboxId, claimToken, recoveredMessageId, resolve, reject });
+      this.pendingTransitionMessages.set(chatId, pending);
+      this.markQueuedMessage(msg.chatPlatformId, msg.platformMsgId);
+    });
   }
 
   private drainPendingTransitionMessages(chatId: string): void {
@@ -1850,7 +1941,13 @@ export class Pipeline {
       if (entry.msg.platformMsgId) {
         this.processedMsgIds.delete(entry.msg.platformMsgId);
       }
-      this.handleMessage(entry.msg, true, entry.inboxId);
+      try {
+        Promise.resolve(
+          this.handleMessage(entry.msg, true, entry.inboxId, entry.claimToken, entry.recoveredMessageId),
+        ).then(entry.resolve, entry.reject);
+      } catch (error) {
+        entry.reject(error);
+      }
     }
   }
 
