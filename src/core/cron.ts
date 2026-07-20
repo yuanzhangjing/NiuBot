@@ -6,6 +6,12 @@
 
 import type Database from "better-sqlite3";
 import { createLogger } from "../logger.js";
+import {
+  getZonedDateTimeParts,
+  TZ,
+  userDateTimeToUtcSql,
+  utcDateTimeForSql,
+} from "../tz.js";
 import { assertChatAccess, type ChatAccessContext } from "./access.js";
 
 const log = createLogger("cron");
@@ -26,6 +32,7 @@ interface CronJob {
   runCount: number;
   status: string;
   lastRunAt: string | null;
+  timezone: string;
 }
 
 interface RawCronRow {
@@ -42,6 +49,7 @@ interface RawCronRow {
   status: string;
   last_run_at: string | null;
   created_at: string;
+  timezone: string | null;
 }
 
 function toJob(r: RawCronRow): CronJob {
@@ -58,6 +66,7 @@ function toJob(r: RawCronRow): CronJob {
     runCount: r.run_count,
     status: r.status,
     lastRunAt: r.last_run_at,
+    timezone: r.timezone ?? TZ,
   };
 }
 
@@ -72,6 +81,7 @@ export class CronScheduler {
   constructor(db: Database.Database, executor: CronExecutor) {
     this.db = db;
     this.executor = executor;
+    migrateLegacyCronTimezones(db);
   }
 
   start(): void {
@@ -98,7 +108,7 @@ export class CronScheduler {
 
   private async tick(): Promise<void> {
     const now = new Date();
-    const nowStr = formatLocalDateTime(now);
+    const nowStr = utcDateTimeForSql(now);
 
     const jobs = this.db.prepare(
       "SELECT * FROM cron_jobs WHERE status = 'active'",
@@ -130,7 +140,7 @@ export class CronScheduler {
         }
       } else if (job.cronExpr) {
         // Recurring job — check if current minute matches cron expression
-        shouldRun = matchesCron(job.cronExpr, now);
+        shouldRun = matchesCron(job.cronExpr, now, job.timezone);
         // Don't run if already ran in this minute
         if (shouldRun && job.lastRunAt) {
           const lastMinute = normalizeDatetime(job.lastRunAt).slice(0, 16);
@@ -183,28 +193,37 @@ export function addCronJob(
     description?: string;
     maxTimes?: number;
     untilTime?: string;
+    timeZone?: string;
   },
 ): number {
+  migrateLegacyCronTimezones(db);
+  const timeZone = opts.timeZone ?? TZ;
+  const runAt = opts.runAt ? userDateTimeToUtcSql(opts.runAt, timeZone) : null;
+  const untilTime = opts.untilTime ? userDateTimeToUtcSql(opts.untilTime, timeZone) : null;
+
   // Validate: runAt must be in the future.
-  if (opts.runAt) {
-    const runAtTime = new Date(opts.runAt.replace(" ", "T"));
+  if (runAt) {
+    const runAtTime = new Date(runAt.replace(" ", "T") + "Z");
     if (runAtTime.getTime() <= Date.now()) {
       throw new Error("run_at must be in the future");
     }
   }
 
   const result = db.prepare(`
-    INSERT INTO cron_jobs (chat_id, creator_user_id, cron_expr, run_at, prompt, description, max_times, until_time)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO cron_jobs (
+      chat_id, creator_user_id, cron_expr, run_at, prompt, description, max_times, until_time, timezone
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     opts.chatId,
     opts.creatorUserId,
     opts.cronExpr ?? null,
-    opts.runAt ?? null,
+    runAt,
     opts.prompt,
     opts.description ?? "",
     opts.maxTimes ?? null,
-    opts.untilTime ?? null,
+    untilTime,
+    timeZone,
   );
   return Number(result.lastInsertRowid);
 }
@@ -214,6 +233,7 @@ export function listCronJobs(
   db: Database.Database,
   chatId?: string,
 ): Array<CronJob & { createdAt: string }> {
+  migrateLegacyCronTimezones(db);
   let sql = "SELECT * FROM cron_jobs WHERE status = 'active'";
   const params: unknown[] = [];
   if (chatId) {
@@ -276,6 +296,7 @@ export function deleteCronJobForAccess(
 
 /** Get a cron job by ID */
 export function getCronJob(db: Database.Database, id: number): (CronJob & { createdAt: string }) | undefined {
+  migrateLegacyCronTimezones(db);
   const row = db.prepare("SELECT * FROM cron_jobs WHERE id = ?").get(id) as RawCronRow | undefined;
   return row ? { ...toJob(row), createdAt: row.created_at } : undefined;
 }
@@ -285,16 +306,17 @@ export function getCronJob(db: Database.Database, id: number): (CronJob & { crea
  * Supports: minute hour day month weekday
  * Each field: number, *, or comma-separated values
  */
-function matchesCron(expr: string, date: Date): boolean {
+function matchesCron(expr: string, date: Date, timeZone: string): boolean {
   const parts = expr.trim().split(/\s+/);
   if (parts.length < 5) return false;
 
+  const local = getZonedDateTimeParts(date, timeZone);
   const fields = [
-    date.getMinutes(),  // minute
-    date.getHours(),    // hour
-    date.getDate(),     // day of month
-    date.getMonth() + 1, // month (1-12)
-    date.getDay(),      // day of week (0=Sunday)
+    local.minute,
+    local.hour,
+    local.day,
+    local.month,
+    new Date(Date.UTC(local.year, local.month - 1, local.day)).getUTCDay(),
   ];
 
   for (let i = 0; i < 5; i++) {
@@ -324,13 +346,42 @@ function matchesCronField(field: string, value: number): boolean {
   return false;
 }
 
-/** Format a Date as "YYYY-MM-DD HH:MM:SS" in system local time (consistent with matchesCron) */
-function formatLocalDateTime(d: Date): string {
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
-}
-
 /** Normalize datetime string: replace 'T' separator with space for consistent comparison */
 function normalizeDatetime(s: string): string {
   return s.replace("T", " ");
+}
+
+/** Convert pre-v16 cron timestamps, which were stored as local wall-clock text, to UTC once. */
+export function migrateLegacyCronTimezones(db: Database.Database, timeZone: string = TZ): number {
+  const rows = db.prepare(`
+    SELECT id, run_at, until_time, last_run_at
+    FROM cron_jobs
+    WHERE timezone IS NULL OR timezone = ''
+  `).all() as Array<{
+    id: number;
+    run_at: string | null;
+    until_time: string | null;
+    last_run_at: string | null;
+  }>;
+  if (rows.length === 0) return 0;
+
+  const update = db.prepare(`
+    UPDATE cron_jobs
+    SET run_at = ?, until_time = ?, last_run_at = ?, timezone = ?
+    WHERE id = ?
+  `);
+  const migrate = db.transaction(() => {
+    for (const row of rows) {
+      update.run(
+        row.run_at ? userDateTimeToUtcSql(row.run_at, timeZone) : null,
+        row.until_time ? userDateTimeToUtcSql(row.until_time, timeZone) : null,
+        row.last_run_at ? userDateTimeToUtcSql(row.last_run_at, timeZone) : null,
+        timeZone,
+        row.id,
+      );
+    }
+  });
+  migrate();
+  log.info("migrated legacy cron timestamps to UTC", { count: rows.length, timezone: timeZone });
+  return rows.length;
 }

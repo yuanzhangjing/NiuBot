@@ -4,8 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { initDatabase } from "../database/schema.js";
-import { getMessageForAccess, searchMessages } from "../messages/store.js";
-import { TZ, utcToLocalDateTime } from "../tz.js";
+import { getMessageForAccess, listMessages, searchMessages } from "../messages/store.js";
+import { TZ, userTimeRangeToUtc, utcToLocalDateTime } from "../tz.js";
 import { formatMessagesForList } from "./messages.js";
 
 const tempDirs: string[] = [];
@@ -106,5 +106,20 @@ describe("message access rules", () => {
       chatType: "p2p",
       limit: 10,
     })).toThrow("targetChatId is required unless searchAll is true");
+  });
+
+  it("interprets date filters as local calendar boundaries before querying UTC", () => {
+    const db = setupDb();
+    const range = userTimeRangeToUtc({ since: "2026-07-20", before: "2026-07-21" });
+    db.prepare("UPDATE messages SET created_at = ? WHERE id = 2").run(range.since);
+
+    expect(listMessages(db, {
+      currentChatId: "c2",
+      chatType: "p2p",
+      targetChatId: "c2",
+      limit: 10,
+      since: "2026-07-20",
+      before: "2026-07-21",
+    }).map((row) => row.id)).toEqual([2]);
   });
 });

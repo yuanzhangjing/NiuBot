@@ -8,8 +8,17 @@ import {
   type LocatedSessionArchive,
 } from "../session-archive/reader.js";
 import { listSessionMessages } from "../messages/store.js";
-import { getSessionForAccess, listSessions, type SessionRow } from "../sessions/store.js";
-import { formatLocalDateTimeWithTZ } from "../tz.js";
+import {
+  getSessionForAccess,
+  listSessions,
+  listSessionsOverlappingUtcRange,
+  type SessionRow,
+} from "../sessions/store.js";
+import {
+  formatLocalDateTimeWithTZ,
+  instantIsInUtcRange,
+  userTimeRangeToUtc,
+} from "../tz.js";
 
 type ParseArgs = (args: string[]) => { positional: string[]; flags: Record<string, string> };
 
@@ -86,13 +95,14 @@ async function sessionSearch(
   if (!query) throw new Error("Usage: nbt sessions search <query>");
   const targetChatId = requireChatId(flags["chat-id"] ?? currentChatId);
   const limit = numberFlag(flags["limit"] ?? flags["n"], 10);
-  const rows = listSessions(db, {
+  const eventRange = userTimeRangeToUtc({ since: flags["since"], before: flags["before"] });
+  const rows = listSessionsOverlappingUtcRange(db, {
     currentChatId,
     chatType,
     targetChatId,
     limit: numberFlag(flags["sessions"], 500),
-    since: flags["since"],
-    before: flags["before"],
+    sinceUtc: eventRange.since,
+    beforeUtc: eventRange.before,
   });
   const needle = query.toLocaleLowerCase();
   let matches = 0;
@@ -106,6 +116,7 @@ async function sessionSearch(
       for await (const event of transcript.events) {
         const eventId = makeEventId(row.id, event, seen);
         const messageId = takeMessageId(messageIds, event);
+        if (!instantIsInUtcRange(event.timestamp, eventRange)) continue;
         const index = event.content.toLocaleLowerCase().indexOf(needle);
         if (index < 0) continue;
         console.log(`[event ${eventId}]${messageId ? ` [message #${messageId}]` : ""} [session ${row.id}] ${eventLabel(event)}`);
@@ -195,8 +206,8 @@ function printSessionHeader(row: SessionRow, agentSessionId: string): void {
   console.log(`chat_id: ${JSON.stringify(row.chat_id)}`);
   console.log(`backend: ${JSON.stringify(row.backend_type ?? "unknown")}`);
   console.log(`agent_session_id: ${JSON.stringify(agentSessionId)}`);
-  console.log(`started_at: ${JSON.stringify(row.started_at)}`);
-  console.log(`archived_at: ${JSON.stringify(row.ended_at ?? "")}`);
+  console.log(`started_at: ${JSON.stringify(formatLocalDateTimeWithTZ(row.started_at))}`);
+  console.log(`archived_at: ${JSON.stringify(row.ended_at ? formatLocalDateTimeWithTZ(row.ended_at) : "")}`);
   console.log("---\n");
   console.log(`# Session ${row.id}\n`);
 }
@@ -215,7 +226,7 @@ function printEvent(eventId: string, event: TranscriptEvent): void {
 }
 
 function eventLabel(event: TranscriptEvent): string {
-  const time = event.timestamp ?? "time unavailable";
+  const time = event.timestamp ? formatLocalDateTimeWithTZ(event.timestamp) : "time unavailable";
   const type = event.type.replace("_", " ");
   return `${time} · ${type}${event.name ? ` · ${event.name}` : ""}`;
 }
@@ -312,6 +323,7 @@ Commands:
 Options:
   --format jsonl               Output normalized events as JSONL
   --max-chars <count>          Limit get output (default: event 20000, session 100000; max 1000000)
-  --since/--before <datetime>  Filter sessions by archive time
+  --since/--before <datetime>  List: filter archive time; search: filter event time
+                               Date/local datetime uses configured timezone; ISO Z/offset is accepted
   -n, --limit <count>          Limit list or search results`);
 }

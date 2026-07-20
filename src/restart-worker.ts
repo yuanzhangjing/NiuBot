@@ -17,6 +17,7 @@ import { readProcessState } from "./process-state.js";
 import { acquireProcessLock } from "./process-lock.js";
 import { ReleaseStore, type ReleaseState } from "./release-store.js";
 import { RestartStateWriter } from "./restart-state.js";
+import { dateInTimeZone } from "./tz.js";
 
 const PACKAGE_NAME = "@yuanzhangjing/niubot";
 const DEFAULT_INSTALL_TIMEOUT_MS = 120_000;
@@ -570,12 +571,11 @@ function canConnect(host: string, port: number, timeoutMs: number): Promise<bool
 
 function compactTimestamp(date: Date): string {
   const pad = (value: number, width = 2) => String(value).padStart(width, "0");
-  return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}-${pad(date.getMilliseconds(), 3)}`;
+  return `${date.getUTCFullYear()}${pad(date.getUTCMonth() + 1)}${pad(date.getUTCDate())}-${pad(date.getUTCHours())}${pad(date.getUTCMinutes())}${pad(date.getUTCSeconds())}-${pad(date.getUTCMilliseconds(), 3)}Z`;
 }
 
 function localDate(): string {
-  const now = new Date();
-  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+  return dateInTimeZone();
 }
 
 function log(context: RestartContext, message: string): void {

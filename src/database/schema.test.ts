@@ -243,3 +243,19 @@ describe("runtime events schema", () => {
     expect(events.filter((event) => event.runId === "run-done").map((event) => event.event)).toEqual(["done"]);
   });
 });
+
+describe("cron timezone schema", () => {
+  test("adds a timezone column to legacy cron jobs", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-test-"));
+    tempDirs.push(dir);
+    const dbPath = path.join(dir, "niubot.db");
+    const db = initDatabase(dbPath);
+    db.pragma("user_version = 15");
+    db.exec("ALTER TABLE cron_jobs DROP COLUMN timezone");
+    db.close();
+
+    const migrated = initDatabase(dbPath);
+    const columns = migrated.prepare("PRAGMA table_info(cron_jobs)").all() as Array<{ name: string }>;
+    expect(columns.map((column) => column.name)).toContain("timezone");
+  });
+});

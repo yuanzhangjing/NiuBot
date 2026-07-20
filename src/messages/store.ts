@@ -1,5 +1,6 @@
 import type Database from "better-sqlite3";
 import { assertAllChatsAccess, assertChatAccess, type ChatAccessContext } from "../core/access.js";
+import { userTimeRangeToUtc } from "../tz.js";
 
 export interface MessageRow {
   id: number;
@@ -186,13 +187,14 @@ export function listSessionMessages(db: Database.Database, sessionId: string): S
 }
 
 function appendMessageFilters(sql: string, params: unknown[], filters: MessageFilter): string {
-  if (filters.since) {
+  const range = userTimeRangeToUtc({ since: filters.since, before: filters.before });
+  if (range.since) {
     sql += " AND m.created_at >= ?";
-    params.push(filters.since);
+    params.push(range.since);
   }
-  if (filters.before) {
+  if (range.before) {
     sql += " AND m.created_at < ?";
-    params.push(filters.before);
+    params.push(range.before);
   }
   if (filters.role) {
     sql += " AND m.role = ?";

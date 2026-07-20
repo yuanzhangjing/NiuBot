@@ -5,6 +5,8 @@
  * 多 bot：2026-03-31 18:08:46 [INFO] [NiuBot/pipeline] session recovered chatId=c1
  */
 
+import { dateTimeInTimeZone } from "./tz.js";
+
 type LogLevel = "debug" | "info" | "warn" | "error";
 
 const LEVEL_PRIORITY: Record<LogLevel, number> = {
@@ -28,9 +30,7 @@ export function setLogLevel(level: LogLevel): void {
 }
 
 function formatTimestamp(): string {
-  const d = new Date();
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  return dateTimeInTimeZone();
 }
 
 function formatData(data?: Record<string, unknown>): string {

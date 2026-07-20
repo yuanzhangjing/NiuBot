@@ -2,6 +2,7 @@ import { appendFileSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { resolveHomePath } from "../config.js";
+import { dateInTimeZone, dateTimeInTimeZone } from "../tz.js";
 
 function resolveNiubotHome(): string {
   return resolveHomePath(process.env["NIUBOT_HOME"] ?? join(homedir(), ".niubot"));
@@ -34,19 +35,11 @@ export function isAgentStdoutDumpEnabled(): boolean {
 }
 
 function formatTimestamp(): string {
-  const d = new Date();
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
-}
-
-function localToday(): string {
-  const d = new Date();
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  return dateTimeInTimeZone();
 }
 
 export function getAgentStdoutLogFilePath(niubotHome: string = resolveNiubotHome()): string {
-  return join(niubotHome, "logs", `agent-stdout-${localToday()}.log`);
+  return join(niubotHome, "logs", `agent-stdout-${dateInTimeZone()}.log`);
 }
 
 function summarizeForLog(text: string | undefined, maxLen: number): string {

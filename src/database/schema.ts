@@ -330,6 +330,16 @@ const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 16,
+    description: "Bind cron schedules to an IANA timezone",
+    up: (db) => {
+      const columns = db.prepare("PRAGMA table_info(cron_jobs)").all() as Array<{ name: string }>;
+      if (!columns.some((column) => column.name === "timezone")) {
+        db.exec("ALTER TABLE cron_jobs ADD COLUMN timezone TEXT");
+      }
+    },
+  },
 ];
 
 const LATEST_VERSION = migrations[migrations.length - 1]!.version;

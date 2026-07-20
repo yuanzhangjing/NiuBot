@@ -38,7 +38,14 @@ import {
   type SpeakerInfo,
   type StableSystemContextOptions,
 } from "../memory/inject.js";
-import { labelLocalDateTime, labelLocalTime, utcDateTimeForSql } from "../tz.js";
+import {
+  formatLocalDateTimeWithTZ,
+  isInLocalHourWindow,
+  labelLocalTime,
+  millisecondsUntilLocalHour,
+  TZ,
+  utcDateTimeForSql,
+} from "../tz.js";
 import { listCronJobs, deleteCronJobForAccess } from "./cron.js";
 import { createLogger } from "../logger.js";
 import { launchRestartWorker } from "../restart-launcher.js";
@@ -1494,18 +1501,18 @@ export class Pipeline {
       lines.push(`Prompt: ${job.prompt}`);
       lines.push(`ID: ${job.id}`);
       if (job.runAt) {
-        lines.push(`Schedule: ${labelLocalDateTime(job.runAt)} (一次性)`);
+        lines.push(`Schedule: ${formatLocalDateTimeWithTZ(job.runAt, job.timezone)} (一次性)`);
       } else if (job.cronExpr) {
-        lines.push(`Schedule: ${labelLocalTime(`\`${job.cronExpr}\``)}`);
+        lines.push(`Schedule: ${labelLocalTime(`\`${job.cronExpr}\``, job.timezone)}`);
       }
       if (job.maxTimes) {
         lines.push(`Progress: ${job.runCount}/${job.maxTimes}`);
       }
       if (job.untilTime) {
-        lines.push(`Until: ${labelLocalDateTime(job.untilTime)}`);
+        lines.push(`Until: ${formatLocalDateTimeWithTZ(job.untilTime, job.timezone)}`);
       }
       if (job.lastRunAt) {
-        lines.push(`Last run: ${labelLocalDateTime(job.lastRunAt)}`);
+        lines.push(`Last run: ${formatLocalDateTimeWithTZ(job.lastRunAt, job.timezone)}`);
       }
       lines.push(""); // blank separator
     }
@@ -2373,17 +2380,11 @@ export class Pipeline {
   }
 
   private isUpdateNotificationWindow(now: Date): boolean {
-    const hour = now.getHours();
-    return hour >= UPDATE_CHECK_HOUR && hour < UPDATE_NOTIFY_END_HOUR;
+    return isInLocalHourWindow(now, UPDATE_CHECK_HOUR, UPDATE_NOTIFY_END_HOUR, TZ);
   }
 
   private getNextUpdateCheckDelayMs(now: Date): number {
-    const next = new Date(now);
-    next.setHours(UPDATE_CHECK_HOUR, 0, 0, 0);
-    if (next.getTime() <= now.getTime()) {
-      next.setDate(next.getDate() + 1);
-    }
-    return next.getTime() - now.getTime();
+    return millisecondsUntilLocalHour(now, UPDATE_CHECK_HOUR, TZ);
   }
 
   private scheduleNextUpdateCheck(): void {

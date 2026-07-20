@@ -1,5 +1,6 @@
 import type Database from "better-sqlite3";
 import { assertChatAccess, type ChatAccessContext } from "../core/access.js";
+import { userTimeRangeToUtc } from "../tz.js";
 
 export interface SessionRow {
   id: string;
@@ -37,13 +38,49 @@ export function listSessions(
   });
   const conditions = ["chat_id = ?", "status = 'archived'", "ended_at IS NOT NULL"];
   const params: Array<string | number> = [options.targetChatId];
-  if (options.since) {
+  const range = userTimeRangeToUtc({ since: options.since, before: options.before });
+  if (range.since) {
     conditions.push("ended_at >= ?");
-    params.push(options.since);
+    params.push(range.since);
   }
-  if (options.before) {
+  if (range.before) {
     conditions.push("ended_at < ?");
-    params.push(options.before);
+    params.push(range.before);
+  }
+  params.push(Math.max(1, Math.abs(options.limit)));
+  return db.prepare(`
+    SELECT ${SESSION_COLUMNS}
+    FROM sessions
+    WHERE ${conditions.join(" AND ")}
+    ORDER BY ended_at DESC
+    LIMIT ?
+  `).all(...params) as SessionRow[];
+}
+
+/** List archived sessions that may contain events inside a canonical UTC range. */
+export function listSessionsOverlappingUtcRange(
+  db: Database.Database,
+  options: ChatAccessContext & {
+    targetChatId: string;
+    limit: number;
+    sinceUtc?: string;
+    beforeUtc?: string;
+  },
+): SessionRow[] {
+  assertChatAccess({
+    currentChatId: options.currentChatId,
+    chatType: options.chatType,
+    targetChatId: options.targetChatId,
+  });
+  const conditions = ["chat_id = ?", "status = 'archived'", "ended_at IS NOT NULL"];
+  const params: Array<string | number> = [options.targetChatId];
+  if (options.sinceUtc) {
+    conditions.push("ended_at >= ?");
+    params.push(options.sinceUtc);
+  }
+  if (options.beforeUtc) {
+    conditions.push("started_at < ?");
+    params.push(options.beforeUtc);
   }
   params.push(Math.max(1, Math.abs(options.limit)));
   return db.prepare(`

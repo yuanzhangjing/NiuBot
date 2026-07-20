@@ -3,12 +3,17 @@
  */
 
 import type Database from "better-sqlite3";
-import { addCronJob, deleteCronJobForAccess, listCronJobsForAccess } from "../core/cron.js";
-import { labelLocalDateTime, labelLocalTime } from "../tz.js";
+import { addCronJob, deleteCronJobForAccess, getCronJob, listCronJobsForAccess } from "../core/cron.js";
+import { formatLocalDateTimeWithTZ, labelLocalTime, TZ } from "../tz.js";
 
-export function formatCronScheduleForDisplay(job: { cronExpr: string | null; runAt: string | null }): string {
-  if (job.cronExpr) return labelLocalTime(job.cronExpr);
-  if (job.runAt) return `at ${labelLocalDateTime(job.runAt)}`;
+export function formatCronScheduleForDisplay(job: {
+  cronExpr: string | null;
+  runAt: string | null;
+  timezone?: string;
+}): string {
+  const timeZone = job.timezone ?? TZ;
+  if (job.cronExpr) return labelLocalTime(job.cronExpr, timeZone);
+  if (job.runAt) return `at ${formatLocalDateTimeWithTZ(job.runAt, timeZone)}`;
   return "unknown";
 }
 
@@ -89,13 +94,14 @@ function cronAdd(
     maxTimes,
     untilTime: untilTime ?? undefined,
   });
+  const created = getCronJob(db, id);
 
   console.log(`Created cron job #${id}`);
   if (cronExpr) console.log(`  Schedule: ${labelLocalTime(cronExpr)}`);
-  if (runAt) console.log(`  Run at: ${labelLocalDateTime(runAt)}`);
+  if (created?.runAt) console.log(`  Run at: ${formatLocalDateTimeWithTZ(created.runAt, created.timezone)}`);
   if (desc) console.log(`  Description: ${desc}`);
   if (maxTimes) console.log(`  Max runs: ${maxTimes}`);
-  if (untilTime) console.log(`  Until: ${labelLocalDateTime(untilTime)}`);
+  if (created?.untilTime) console.log(`  Until: ${formatLocalDateTimeWithTZ(created.untilTime, created.timezone)}`);
 }
 
 function cronList(
@@ -177,6 +183,7 @@ Commands:
   del   <id>  Delete a job
 
 Datetime formats: "2026-03-17T10:52:00", "2026-03-17 10:52", "2026-03-17"
+Times without Z/offset and recurring cron expressions use NIUBOT_TZ (${TZ}).
 
 Example:
   nbt cron add --cron "0 9 * * 1-5" --prompt "Send daily standup summary" --desc "standup"`);

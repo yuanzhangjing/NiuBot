@@ -50,7 +50,11 @@ function setupDb() {
 describe("cron access rules", () => {
   it("labels cron schedules as local time", () => {
     expect(formatCronScheduleForDisplay({ cronExpr: "0 10 * * *", runAt: null })).toContain("0 10 * * * (local time, ");
-    expect(formatCronScheduleForDisplay({ cronExpr: null, runAt: "2026-04-25 10:00" })).toContain("at 2026-04-25 10:00 (");
+    expect(formatCronScheduleForDisplay({
+      cronExpr: null,
+      runAt: "2026-04-25 10:00:00",
+      timezone: "UTC",
+    })).toBe("at 2026-04-25 10:00 (UTC)");
   });
 
   it("blocks group list for another chat", () => {

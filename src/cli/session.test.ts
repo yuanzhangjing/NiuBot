@@ -85,6 +85,21 @@ describe("nbt sessions", () => {
     expect(lines.join("\n")).toContain("查找唯一标记 NEEDLE_FULL_TEXT");
 
     lines.length = 0;
+    await handleSessions(db, [
+      "search", "NEEDLE_FULL_TEXT",
+      "--since", "2026-07-13T01:00:00Z",
+      "--before", "2026-07-13T01:00:01Z",
+    ], "c1", "p2p", home, "NiuBot", parseArgs);
+    expect(lines.join("\n")).toContain("NEEDLE_FULL_TEXT");
+
+    lines.length = 0;
+    await handleSessions(db, [
+      "search", "NEEDLE_FULL_TEXT",
+      "--before", "2026-07-13T01:00:00Z",
+    ], "c1", "p2p", home, "NiuBot", parseArgs);
+    expect(lines).toEqual(["(无匹配 transcript 事件)"]);
+
+    lines.length = 0;
     await handleSessions(db, ["get", eventId!], "c1", "p2p", home, "NiuBot", parseArgs);
     expect(lines.join("\n")).toContain("查找唯一标记 NEEDLE_FULL_TEXT");
     expect(lines.join("\n")).toContain(`event_id: ${eventId}`);

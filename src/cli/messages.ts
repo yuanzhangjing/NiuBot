@@ -255,5 +255,7 @@ Commands:
                    -C <count> (context lines around match) | --since/--before <datetime>
                    --role user|assistant | --user-id <id>
 
-  get     <id>     Show full content of a single message`);
+  get     <id>     Show full content of a single message
+
+Date/local datetime filters use ${TZ}; ISO datetime with Z/offset is accepted.`);
 }
