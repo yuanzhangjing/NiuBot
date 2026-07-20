@@ -22,6 +22,8 @@ import type {
 
 const DEFAULT_DELIVERY_TIMEOUT_MS = 30_000;
 const DEFAULT_UNKNOWN_FILE_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
+const DEFAULT_INBOUND_RETRY_DELAYS_MS = [100, 500] as const;
+const DEFAULT_OUTBOUND_RECOVERY_CONCURRENCY = 4;
 
 type PersistentTransportOptions = {
   db: Database.Database;
@@ -31,6 +33,8 @@ type PersistentTransportOptions = {
   storageDir: string;
   deliveryTimeoutMs?: number;
   unknownFileRetentionMs?: number;
+  inboundRetryDelaysMs?: number[];
+  outboundRecoveryConcurrency?: number;
 };
 
 type DeliveryResult = string | undefined;
@@ -45,8 +49,13 @@ export class PersistentTransport implements TransportClient {
   private readonly managedFileRoot: string;
   private readonly deliveryTimeoutMs: number;
   private readonly unknownFileRetentionMs: number;
+  private readonly inboundRetryDelaysMs: number[];
+  private readonly outboundRecoveryConcurrency: number;
   private readonly log: ReturnType<typeof createLogger>;
   private inboundHandler?: InboundHandler;
+  private readonly inboundRetryTimers = new Map<number, ReturnType<typeof setTimeout>>();
+  private recoveryPromise?: Promise<void>;
+  private stopped = false;
 
   constructor(options: PersistentTransportOptions) {
     this.adapter = options.adapter;
@@ -55,6 +64,11 @@ export class PersistentTransport implements TransportClient {
     this.managedFileRoot = path.join(options.storageDir, "transport-outbox");
     this.deliveryTimeoutMs = options.deliveryTimeoutMs ?? DEFAULT_DELIVERY_TIMEOUT_MS;
     this.unknownFileRetentionMs = options.unknownFileRetentionMs ?? DEFAULT_UNKNOWN_FILE_RETENTION_MS;
+    this.inboundRetryDelaysMs = options.inboundRetryDelaysMs ?? [...DEFAULT_INBOUND_RETRY_DELAYS_MS];
+    this.outboundRecoveryConcurrency = Math.max(
+      1,
+      Math.floor(options.outboundRecoveryConcurrency ?? DEFAULT_OUTBOUND_RECOVERY_CONCURRENCY),
+    );
     this.store = new TransportStore(options.db, options.botId, options.platform);
     this.log = createLogger("transport", options.botId);
     this.adapter.onMessage((message) => this.receive(message));
@@ -65,14 +79,24 @@ export class PersistentTransport implements TransportClient {
   }
 
   async start(): Promise<void> {
+    this.stopped = false;
     await this.adapter.start();
+    if (this.stopped) await this.adapter.stop();
   }
 
   async stop(): Promise<void> {
+    this.stopped = true;
+    for (const timer of this.inboundRetryTimers.values()) clearTimeout(timer);
+    this.inboundRetryTimers.clear();
     await this.adapter.stop();
   }
 
-  async recover(): Promise<void> {
+  recover(): Promise<void> {
+    this.recoveryPromise ??= this.performRecovery();
+    return this.recoveryPromise;
+  }
+
+  private async performRecovery(): Promise<void> {
     const outbound = this.store.prepareOutboundRecovery();
     const inbound = this.store.prepareInboundRecovery();
     const expiredUnknownFiles = this.store.getExpiredUnknownFileRequests(
@@ -98,35 +122,38 @@ export class PersistentTransport implements TransportClient {
       }
     }
 
-    for (const row of outbound.pending) {
-      try {
-        await this.deliverPersisted(row, {});
-      } catch (error) {
-        this.log.warn("outbox recovery delivery failed", {
-          requestId: row.requestId,
-          kind: row.kind,
-          error: errorMessage(error),
-        });
-      }
-    }
     for (const row of inbound.pending) {
       await this.dispatchInbound(row, true);
     }
+    void this.recoverOutboundInBackground(outbound.pending).catch((error) => {
+      this.log.error("outbox background recovery failed", { error: errorMessage(error) });
+    });
   }
 
   getStatusCounts(): TransportStatusCounts {
     return this.store.getStatusCounts();
   }
 
-  markInboundQueued(inboxId: number, messageId: number): void {
-    if (!this.store.markInboundQueued(inboxId, messageId)) {
-      this.log.warn("inbox queued transition ignored", { inboxId, messageId });
+  markInboundQueued(inboxId: number, claimToken: string, messageId: number): void {
+    if (!this.store.markInboundQueued(inboxId, claimToken, messageId)) {
+      throw new Error(`Invalid inbox queued transition: ${inboxId}`);
     }
   }
 
-  markInboundTerminal(inboxId: number, status: InboundTerminalStatus, error?: string): void {
-    if (!this.store.markInboundTerminal(inboxId, status, error)) {
-      this.log.warn("inbox terminal transition ignored", { inboxId, status });
+  markInboundProcessing(inboxId: number, claimToken: string, messageId: number): void {
+    if (!this.store.markInboundProcessing(inboxId, claimToken, messageId)) {
+      throw new Error(`Invalid inbox processing transition: ${inboxId}`);
+    }
+  }
+
+  markInboundTerminal(
+    inboxId: number,
+    claimToken: string,
+    status: InboundTerminalStatus,
+    error?: string,
+  ): void {
+    if (!this.store.markInboundTerminal(inboxId, claimToken, status, error)) {
+      throw new Error(`Invalid inbox terminal transition: ${inboxId} -> ${status}`);
     }
   }
 
@@ -223,6 +250,7 @@ export class PersistentTransport implements TransportClient {
         platformMsgId,
         status: persisted.row.status,
       });
+      if (persisted.row.status === "pending") this.scheduleInboundRetry(persisted.row, 0);
       return;
     }
     await this.dispatchInbound(persisted.row, false);
@@ -233,22 +261,73 @@ export class PersistentTransport implements TransportClient {
       this.log.warn("inbound message persisted without handler", { inboxId: row.id, replayed });
       return;
     }
-    if (!this.store.markInboundAttempt(row.id)) return;
+    const claimToken = randomUUID();
+    const claimed = this.store.claimInbound(row.id, claimToken);
+    if (!claimed) return;
     try {
       await this.inboundHandler({
-        inboxId: row.id,
-        message: deserializeInbound(row.payloadJson),
+        inboxId: claimed.id,
+        claimToken,
+        message: deserializeInbound(claimed.payloadJson),
         replayed,
-        messageId: row.messageId,
+        messageId: claimed.messageId,
       });
     } catch (error) {
-      this.store.markInboundHandlerError(row.id, error);
+      const released = this.store.releaseInboundClaim(claimed.id, claimToken, error);
       this.log.error("inbound handler failed", {
-        inboxId: row.id,
+        inboxId: claimed.id,
         replayed,
         error: errorMessage(error),
       });
+      if (released?.status === "pending") this.scheduleInboundRetry(released);
     }
+  }
+
+  private scheduleInboundRetry(row: InboundRow, overrideDelayMs?: number): void {
+    if (this.stopped || this.inboundRetryTimers.has(row.id)) return;
+    const delayIndex = Math.max(0, row.attemptCount - 1);
+    const delayMs = overrideDelayMs
+      ?? this.inboundRetryDelaysMs[Math.min(delayIndex, this.inboundRetryDelaysMs.length - 1)]
+      ?? 0;
+    const timer = setTimeout(() => {
+      this.inboundRetryTimers.delete(row.id);
+      if (this.stopped) return;
+      const current = this.store.getInbound(row.id);
+      if (current?.status === "pending") {
+        void this.dispatchInbound(current, true).catch((error) => {
+          this.log.error("inbox retry dispatch failed", {
+            inboxId: current.id,
+            error: errorMessage(error),
+          });
+        });
+      }
+    }, delayMs);
+    this.inboundRetryTimers.set(row.id, timer);
+  }
+
+  private async recoverOutboundInBackground(rows: OutboundRow[]): Promise<void> {
+    if (rows.length === 0) return;
+    let next = 0;
+    const worker = async () => {
+      while (next < rows.length) {
+        const row = rows[next++];
+        if (!row) return;
+        try {
+          await this.deliverPersisted(row, {});
+        } catch (error) {
+          this.log.warn("outbox recovery delivery failed", {
+            requestId: row.requestId,
+            kind: row.kind,
+            error: errorMessage(error),
+          });
+        }
+      }
+    };
+    const workers = Array.from(
+      { length: Math.min(this.outboundRecoveryConcurrency, rows.length) },
+      () => worker(),
+    );
+    await Promise.all(workers);
   }
 
   private async enqueueOutbound(

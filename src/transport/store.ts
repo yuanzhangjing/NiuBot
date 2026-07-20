@@ -3,6 +3,7 @@ import type { InboundTerminalStatus, OutboundKind, OutboundRequest } from "./typ
 
 export type InboundStatus =
   | "pending"
+  | "dispatching"
   | "queued"
   | "processing"
   | "completed"
@@ -22,6 +23,7 @@ export type InboundRow = {
   status: InboundStatus;
   messageId?: number;
   runId?: string;
+  claimToken?: string;
   attemptCount: number;
   error?: string;
 };
@@ -74,7 +76,7 @@ export class TransportStore {
   getInbound(id: number): InboundRow | undefined {
     return mapInboundRow(this.db.prepare(`
       SELECT id, bot_id, platform, platform_msg_id, payload_json, status,
-             message_id, run_id, attempt_count, error
+             message_id, run_id, claim_token, attempt_count, error
       FROM transport_inbox
       WHERE bot_id = ? AND platform = ? AND id = ?
     `).get(this.botId, this.platform, id) as RawInboundRow | undefined);
@@ -83,47 +85,78 @@ export class TransportStore {
   getInboundByPlatformMessageId(platformMsgId: string): InboundRow | undefined {
     return mapInboundRow(this.db.prepare(`
       SELECT id, bot_id, platform, platform_msg_id, payload_json, status,
-             message_id, run_id, attempt_count, error
+             message_id, run_id, claim_token, attempt_count, error
       FROM transport_inbox
       WHERE bot_id = ? AND platform = ? AND platform_msg_id = ?
     `).get(this.botId, this.platform, platformMsgId) as RawInboundRow | undefined);
   }
 
-  markInboundAttempt(id: number): boolean {
-    return this.db.prepare(`
+  claimInbound(id: number, claimToken: string): InboundRow | undefined {
+    const changed = this.db.prepare(`
       UPDATE transport_inbox
-      SET attempt_count = attempt_count + 1, error = NULL, updated_at = datetime('now')
+      SET status = 'dispatching', claim_token = ?, claimed_at = datetime('now'),
+          attempt_count = attempt_count + 1, error = NULL, updated_at = datetime('now')
       WHERE bot_id = ? AND platform = ? AND id = ? AND status = 'pending'
-    `).run(this.botId, this.platform, id).changes === 1;
+    `).run(claimToken, this.botId, this.platform, id).changes;
+    if (changed !== 1) return undefined;
+    const row = this.getInbound(id);
+    return row?.claimToken === claimToken ? row : undefined;
   }
 
-  markInboundHandlerError(id: number, error: unknown): void {
-    this.db.prepare(`
+  releaseInboundClaim(id: number, claimToken: string, error: unknown): InboundRow | undefined {
+    const changed = this.db.prepare(`
       UPDATE transport_inbox
-      SET status = CASE WHEN attempt_count >= 3 THEN 'failed' ELSE status END,
+      SET status = CASE WHEN attempt_count >= 3 THEN 'failed' ELSE 'pending' END,
+          claim_token = NULL,
           error = ?,
           completed_at = CASE WHEN attempt_count >= 3 THEN datetime('now') ELSE completed_at END,
           updated_at = datetime('now')
-      WHERE bot_id = ? AND platform = ? AND id = ? AND status = 'pending'
-    `).run(limitError(error), this.botId, this.platform, id);
+      WHERE bot_id = ? AND platform = ? AND id = ?
+        AND status IN ('dispatching', 'queued') AND claim_token = ?
+    `).run(limitError(error), this.botId, this.platform, id, claimToken).changes;
+    return changed === 1 ? this.getInbound(id) : undefined;
   }
 
-  markInboundQueued(id: number, messageId: number): boolean {
+  markInboundQueued(id: number, claimToken: string, messageId: number): boolean {
     return this.db.prepare(`
       UPDATE transport_inbox
       SET status = 'queued', message_id = ?, queued_at = COALESCE(queued_at, datetime('now')),
           error = NULL, updated_at = datetime('now')
-      WHERE bot_id = ? AND platform = ? AND id = ? AND status IN ('pending', 'queued')
-    `).run(messageId, this.botId, this.platform, id).changes === 1;
+      WHERE bot_id = ? AND platform = ? AND id = ?
+        AND status = 'dispatching' AND claim_token = ?
+    `).run(messageId, this.botId, this.platform, id, claimToken).changes === 1;
   }
 
-  markInboundTerminal(id: number, status: InboundTerminalStatus, error?: unknown): boolean {
+  markInboundProcessing(id: number, claimToken: string, messageId: number): boolean {
     return this.db.prepare(`
       UPDATE transport_inbox
-      SET status = ?, error = ?, completed_at = datetime('now'), updated_at = datetime('now')
+      SET status = 'processing', message_id = ?, processing_at = COALESCE(processing_at, datetime('now')),
+          error = NULL, updated_at = datetime('now')
       WHERE bot_id = ? AND platform = ? AND id = ?
-        AND status IN ('pending', 'queued', 'processing')
-    `).run(status, error == null ? null : limitError(error), this.botId, this.platform, id).changes === 1;
+        AND status = 'dispatching' AND claim_token = ?
+    `).run(messageId, this.botId, this.platform, id, claimToken).changes === 1;
+  }
+
+  markInboundTerminal(
+    id: number,
+    claimToken: string,
+    status: InboundTerminalStatus,
+    error?: unknown,
+  ): boolean {
+    return this.db.prepare(`
+      UPDATE transport_inbox
+      SET status = ?, claim_token = NULL, error = ?,
+          completed_at = datetime('now'), updated_at = datetime('now')
+      WHERE bot_id = ? AND platform = ? AND id = ?
+        AND claim_token = ? AND status IN ('dispatching', 'queued', 'processing')
+    `).run(
+      status,
+      error == null ? null : limitError(error),
+      this.botId,
+      this.platform,
+      id,
+      claimToken,
+    ).changes === 1;
   }
 
   markInboundRunState(messageIds: number[], runId: string, stage: string, error?: unknown): number {
@@ -152,7 +185,8 @@ export class TransportStore {
     if (!terminalStatus) return 0;
     return this.db.prepare(`
       UPDATE transport_inbox
-      SET status = ?, run_id = ?, error = ?, completed_at = datetime('now'), updated_at = datetime('now')
+      SET status = ?, run_id = ?, claim_token = NULL, error = ?,
+          completed_at = datetime('now'), updated_at = datetime('now')
       WHERE bot_id = ? AND platform = ? AND message_id IN (${placeholders})
         AND status IN ('queued', 'processing')
     `).run(
@@ -168,7 +202,8 @@ export class TransportStore {
     const placeholders = messageIds.map(() => "?").join(", ");
     return this.db.prepare(`
       UPDATE transport_inbox
-      SET status = 'discarded', completed_at = datetime('now'), updated_at = datetime('now')
+      SET status = 'discarded', claim_token = NULL,
+          completed_at = datetime('now'), updated_at = datetime('now')
       WHERE bot_id = ? AND platform = ? AND message_id IN (${placeholders})
         AND status IN ('pending', 'queued')
     `).run(this.botId, this.platform, ...messageIds).changes;
@@ -178,18 +213,19 @@ export class TransportStore {
     const tx = this.db.transaction(() => {
       const interrupted = this.db.prepare(`
         UPDATE transport_inbox
-        SET status = 'interrupted', error = 'Engine stopped after Backend execution began',
+        SET status = 'interrupted', claim_token = NULL,
+            error = 'Engine stopped after non-repeatable processing began',
             completed_at = datetime('now'), updated_at = datetime('now')
         WHERE bot_id = ? AND platform = ? AND status = 'processing'
       `).run(this.botId, this.platform).changes;
       const requeued = this.db.prepare(`
         UPDATE transport_inbox
-        SET status = 'pending', run_id = NULL, error = NULL, updated_at = datetime('now')
-        WHERE bot_id = ? AND platform = ? AND status = 'queued'
+        SET status = 'pending', run_id = NULL, claim_token = NULL, error = NULL, updated_at = datetime('now')
+        WHERE bot_id = ? AND platform = ? AND status IN ('dispatching', 'queued')
       `).run(this.botId, this.platform).changes;
       const pending = (this.db.prepare(`
         SELECT id, bot_id, platform, platform_msg_id, payload_json, status,
-               message_id, run_id, attempt_count, error
+               message_id, run_id, claim_token, attempt_count, error
         FROM transport_inbox
         WHERE bot_id = ? AND platform = ? AND status = 'pending'
         ORDER BY id
@@ -311,6 +347,7 @@ type RawInboundRow = {
   status: InboundStatus;
   message_id: number | null;
   run_id: string | null;
+  claim_token: string | null;
   attempt_count: number;
   error: string | null;
 };
@@ -344,6 +381,7 @@ function mapInboundRowRequired(row: RawInboundRow): InboundRow {
     status: row.status,
     messageId: row.message_id ?? undefined,
     runId: row.run_id ?? undefined,
+    claimToken: row.claim_token ?? undefined,
     attemptCount: row.attempt_count,
     error: row.error ?? undefined,
   };
@@ -385,6 +423,7 @@ function limitError(error: unknown): string {
 function emptyInboundCounts(): Record<InboundStatus, number> {
   return {
     pending: 0,
+    dispatching: 0,
     queued: 0,
     processing: 0,
     completed: 0,

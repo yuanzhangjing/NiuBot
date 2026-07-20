@@ -45,6 +45,7 @@ export type InboundTerminalStatus = "completed" | "failed" | "stopped" | "discar
 
 export type InboundDelivery = {
   inboxId: number;
+  claimToken: string;
   message: NormalizedMessage;
   replayed: boolean;
   /** Existing chat-history row when recovering work that had already reached Engine's queue. */
@@ -81,8 +82,9 @@ export interface TransportClient {
   getAppCreatorId(): Promise<string | undefined>;
 
   /** Reliable implementations use these hooks to connect Engine lifecycle to inbox state. */
-  markInboundQueued?(inboxId: number, messageId: number): void;
-  markInboundTerminal?(inboxId: number, status: InboundTerminalStatus, error?: string): void;
+  markInboundQueued?(inboxId: number, claimToken: string, messageId: number): void;
+  markInboundProcessing?(inboxId: number, claimToken: string, messageId: number): void;
+  markInboundTerminal?(inboxId: number, claimToken: string, status: InboundTerminalStatus, error?: string): void;
   markInboundRunState?(messageIds: number[], runId: string, stage: string, error?: string): void;
   discardInboundMessages?(messageIds: number[]): void;
 }

@@ -61,7 +61,14 @@ function createAdapter(overrides: Partial<PlatformAdapter> = {}) {
   };
 }
 
-function createRuntime(adapter: PlatformAdapter, options: { unknownFileRetentionMs?: number } = {}) {
+function createRuntime(
+  adapter: PlatformAdapter,
+  options: {
+    unknownFileRetentionMs?: number;
+    deliveryTimeoutMs?: number;
+    inboundRetryDelaysMs?: number[];
+  } = {},
+) {
   const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-persistent-transport-"));
   tempDirs.push(dir);
   const db = initDatabase(path.join(dir, "niubot.db"));
@@ -73,6 +80,8 @@ function createRuntime(adapter: PlatformAdapter, options: { unknownFileRetention
     adapter,
     storageDir: dir,
     unknownFileRetentionMs: options.unknownFileRetentionMs,
+    deliveryTimeoutMs: options.deliveryTimeoutMs,
+    inboundRetryDelaysMs: options.inboundRetryDelaysMs,
   });
   return { runtime, db, dir };
 }
@@ -87,13 +96,28 @@ afterEach(() => {
 });
 
 describe("PersistentTransport inbound", () => {
+  test("stops an adapter whose slow start finishes after shutdown", async () => {
+    let finishStart!: () => void;
+    const delayedStart = new Promise<void>((resolve) => { finishStart = resolve; });
+    const fake = createAdapter({ async start() { await delayedStart; } });
+    const { runtime } = createRuntime(fake.adapter);
+
+    const starting = runtime.start();
+    await Promise.resolve();
+    await runtime.stop();
+    finishStart();
+    await starting;
+
+    expect(fake.calls.filter((call) => call.method === "stop")).toHaveLength(2);
+  });
+
   test("persists before dispatch and skips duplicate platform delivery", async () => {
     const { adapter, emit } = createAdapter();
     const { runtime } = createRuntime(adapter);
     const deliveries: number[] = [];
     runtime.onInbound((delivery) => {
       deliveries.push(delivery.inboxId);
-      runtime.markInboundTerminal(delivery.inboxId, "completed");
+      runtime.markInboundTerminal(delivery.inboxId, delivery.claimToken, "completed");
     });
 
     await emit(createMessage());
@@ -108,7 +132,7 @@ describe("PersistentTransport inbound", () => {
     const { runtime, db, dir } = createRuntime(firstAdapter.adapter);
     runtime.onInbound((delivery) => {
       const messageId = delivery.message.platformMsgId === "queued" ? 1 : 2;
-      runtime.markInboundQueued(delivery.inboxId, messageId);
+      runtime.markInboundQueued(delivery.inboxId, delivery.claimToken, messageId);
       if (messageId === 2) runtime.markInboundRunState([messageId], "run-2", "agent_running");
     });
     await firstAdapter.emit(createMessage({ platformMsgId: "queued" }));
@@ -127,7 +151,7 @@ describe("PersistentTransport inbound", () => {
     recovered.onInbound((delivery) => {
       replayed.push(delivery.message.platformMsgId!);
       recoveredMessageIds.push(delivery.messageId);
-      recovered.markInboundTerminal(delivery.inboxId, "completed");
+      recovered.markInboundTerminal(delivery.inboxId, delivery.claimToken, "completed");
     });
 
     await recovered.recover();
@@ -135,6 +159,39 @@ describe("PersistentTransport inbound", () => {
     expect(replayed).toEqual(["queued"]);
     expect(recoveredMessageIds).toEqual([1]);
     expect(recovered.getStatusCounts().inbox.interrupted).toBe(1);
+  });
+
+  test("retries transient handler failures in-process and stops after success", async () => {
+    const fake = createAdapter();
+    const { runtime } = createRuntime(fake.adapter, { inboundRetryDelaysMs: [0, 0] });
+    let attempts = 0;
+    runtime.onInbound((delivery) => {
+      attempts += 1;
+      if (attempts < 3) throw new Error("temporary handler failure");
+      runtime.markInboundTerminal(delivery.inboxId, delivery.claimToken, "completed");
+    });
+
+    await fake.emit(createMessage());
+    await viWaitFor(() => attempts === 3);
+
+    expect(runtime.getStatusCounts().inbox.completed).toBe(1);
+    expect(runtime.getStatusCounts().inbox.failed).toBe(0);
+  });
+
+  test("prepares startup recovery only once when callers race", async () => {
+    const fake = createAdapter();
+    const { runtime } = createRuntime(fake.adapter);
+    await fake.emit(createMessage());
+    let deliveries = 0;
+    runtime.onInbound((delivery) => {
+      deliveries += 1;
+      runtime.markInboundQueued(delivery.inboxId, delivery.claimToken, 1);
+    });
+
+    await Promise.all([runtime.recover(), runtime.recover()]);
+
+    expect(deliveries).toBe(1);
+    expect(runtime.getStatusCounts().inbox.queued).toBe(1);
   });
 });
 
@@ -185,8 +242,25 @@ describe("PersistentTransport outbox", () => {
 
     await runtime.recover();
 
+    await viWaitFor(() => runtime.getStatusCounts().outbox.sent === 1);
     expect(fake.calls.map((call) => call.method)).toEqual(["sendText"]);
     expect(runtime.getStatusCounts().outbox.sent).toBe(1);
+  });
+
+  test("does not block recovery while pending outbox delivery is slow", async () => {
+    const never = new Promise<string>(() => {});
+    const fake = createAdapter({ async sendText() { return never; } });
+    const { runtime, db } = createRuntime(fake.adapter, { deliveryTimeoutMs: 10 });
+    new TransportStore(db, "NiuBot", "feishu").insertOutbound(
+      "pending-request",
+      { kind: "text", chatId: "chat-1", text: "recover me" },
+      JSON.stringify({ kind: "text", chatId: "chat-1", text: "recover me" }),
+    );
+
+    await runtime.recover();
+
+    expect(runtime.getStatusCounts().outbox.sending).toBe(1);
+    await viWaitFor(() => runtime.getStatusCounts().outbox.unknown === 1);
   });
 
   test("copies outgoing files into managed storage and cleans the copy after success", async () => {
@@ -240,3 +314,11 @@ describe("PersistentTransport outbox", () => {
     expect(recovered.getStatusCounts().outbox.unknown).toBe(1);
   });
 });
+
+async function viWaitFor(predicate: () => boolean, timeoutMs = 1_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error("Timed out waiting for condition");
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+}

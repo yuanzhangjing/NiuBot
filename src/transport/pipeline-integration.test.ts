@@ -77,7 +77,11 @@ function message(platformMsgId: string, contentText: string): NormalizedMessage 
   };
 }
 
-function createSystem(agent = new TestAgent(), bufferMs = 0) {
+function createSystem(
+  agent = new TestAgent(),
+  bufferMs = 0,
+  transportOptions: { inboundRetryDelaysMs?: number[] } = {},
+) {
   const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-transport-pipeline-"));
   tempDirs.push(dir);
   const dbPath = path.join(dir, "niubot.db");
@@ -90,6 +94,7 @@ function createSystem(agent = new TestAgent(), bufferMs = 0) {
     platform: "feishu",
     adapter: platform.adapter,
     storageDir: dir,
+    inboundRetryDelaysMs: transportOptions.inboundRetryDelaysMs,
   });
   const pipeline = new Pipeline(
     db,
@@ -197,5 +202,82 @@ describe("PersistentTransport and Pipeline", () => {
     ).get() as { count: number };
     expect(userMessages.count).toBe(1);
     secondPipeline.stop();
+  });
+
+  test("rolls back the chat-history row when inbox queue association fails", async () => {
+    const system = createSystem(new TestAgent(), 0, { inboundRetryDelaysMs: [0, 0] });
+    await system.pipeline.start();
+    vi.spyOn(system.transport, "markInboundQueued").mockImplementation(() => {
+      throw new Error("injected queue association failure");
+    });
+
+    await system.platform.emit(message("msg-atomic", "must stay atomic"));
+    await vi.waitFor(() => expect(system.transport.getStatusCounts().inbox.failed).toBe(1));
+
+    const stored = system.db.prepare(
+      "SELECT COUNT(*) AS count FROM messages WHERE platform_msg_id = 'msg-atomic'",
+    ).get() as { count: number };
+    expect(stored.count).toBe(0);
+    expect(system.agent.messages).toHaveLength(0);
+    system.pipeline.stop();
+  });
+
+  test("retries a deferred message when processing after a session transition fails", async () => {
+    const system = createSystem(new TestAgent(), 60_000, { inboundRetryDelaysMs: [0, 0] });
+    await system.pipeline.start();
+
+    let finishTransition!: () => void;
+    const transition = new Promise<void>((resolve) => { finishTransition = resolve; });
+    (system.pipeline as any).startGlobalSessionTransition("chat-open-id", async () => transition);
+
+    const queuedTransition = system.platform.emit(message("msg-transition", "after transition"));
+    await vi.waitFor(() => expect(system.transport.getStatusCounts().inbox.dispatching).toBe(1));
+
+    vi.spyOn(system.transport, "markInboundQueued")
+      .mockImplementationOnce(() => { throw new Error("injected deferred association failure"); });
+    finishTransition();
+    await queuedTransition;
+
+    await vi.waitFor(() => expect(system.transport.getStatusCounts().inbox.queued).toBe(1));
+    const stored = system.db.prepare(
+      "SELECT COUNT(*) AS count FROM messages WHERE platform_msg_id = 'msg-transition'",
+    ).get() as { count: number };
+    expect(stored.count).toBe(1);
+    expect(system.agent.messages).toHaveLength(0);
+    system.pipeline.stop();
+  });
+
+  test("retries persisted queued work when the in-memory queue rejects it", async () => {
+    const system = createSystem(new TestAgent(), 60_000, { inboundRetryDelaysMs: [0, 0] });
+    await system.pipeline.start();
+    vi.spyOn((system.pipeline as any).queue, "push")
+      .mockImplementationOnce(() => { throw new Error("injected in-memory queue failure"); });
+
+    await system.platform.emit(message("msg-queue", "retry queue"));
+
+    await vi.waitFor(() => expect(system.transport.getStatusCounts().inbox.queued).toBe(1));
+    const stored = system.db.prepare(
+      "SELECT COUNT(*) AS count FROM messages WHERE platform_msg_id = 'msg-queue'",
+    ).get() as { count: number };
+    expect(stored.count).toBe(1);
+    expect(system.agent.messages).toHaveLength(0);
+    system.pipeline.stop();
+  });
+
+  test("does not re-run a command after its non-repeatable boundary was persisted", async () => {
+    const system = createSystem();
+    await system.pipeline.start();
+    vi.spyOn(system.pipeline as any, "handleBuiltinCommand").mockImplementation(() => {
+      throw new Error("injected crash after command boundary");
+    });
+
+    await system.platform.emit(message("msg-command", "/help"));
+
+    expect(system.transport.getStatusCounts().inbox.processing).toBe(1);
+    expect(system.transport.getStatusCounts().outbox.pending).toBe(0);
+    await system.transport.recover();
+    expect(system.transport.getStatusCounts().inbox.interrupted).toBe(1);
+    expect(system.transport.getStatusCounts().inbox.pending).toBe(0);
+    system.pipeline.stop();
   });
 });
