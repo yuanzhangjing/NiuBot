@@ -159,8 +159,8 @@ export function restoreRestartDatabaseSnapshot(snapshot: RestartDatabaseSnapshot
         `.${path.basename(record.databasePath)}.niubot-restore-${randomUUID()}.tmp`,
       );
       fs.copyFileSync(record.rollbackPath, temporaryPath, fs.constants.COPYFILE_EXCL);
-      fs.chmodSync(temporaryPath, record.mode ?? 0o600);
       syncFile(temporaryPath);
+      fs.chmodSync(temporaryPath, record.mode ?? 0o600);
       staged.set(record, temporaryPath);
     }
 
@@ -236,7 +236,7 @@ function removeDatabaseSidecars(databasePath: string): void {
 }
 
 function syncFile(filePath: string): void {
-  const fd = fs.openSync(filePath, "r");
+  const fd = fs.openSync(filePath, "r+");
   try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
 }
 
