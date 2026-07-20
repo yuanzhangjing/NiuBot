@@ -11,7 +11,7 @@ import {
 import type { AgentBackend } from "./agent/types.js";
 import type { CliAgentBackend } from "./agent/cli-base.js";
 import { createBotInstance, type BotInstance } from "./bot-instance.js";
-import { loadPersistedBotRuntimeState } from "./database/schema.js";
+import { LATEST_SCHEMA_VERSION, loadPersistedBotRuntimeState } from "./database/schema.js";
 import { createLogger, setLogLevel } from "./logger.js";
 import { ensureRuntimeNbtShim, prependNiubotBinToPath } from "./platform/cli-runtime.js";
 import { summarizeProxyEnvironment } from "./proxy-env.js";
@@ -25,6 +25,11 @@ import { EngineControlServer, type EngineIdentity } from "./local-api/engine-ser
 import { clearProcessState, readProcessState, writeProcessState } from "./process-state.js";
 import { waitForProcessStartMarker } from "./platform/process.js";
 import { samePlatformPath } from "./platform/files.js";
+import {
+  applyPreflightDatabaseManifest,
+  assertDatabasesAtSchemaVersion,
+  PREFLIGHT_DATABASE_MANIFEST_ENV,
+} from "./database/restart-snapshot.js";
 
 const log = createLogger("main");
 
@@ -103,7 +108,21 @@ async function main(): Promise<void> {
     log.warn("nbt shim setup failed", { error: String(err) });
   }
 
-  const config = loadConfig();
+  let config = loadConfig();
+  let legacyReadOnlyPreflight = false;
+  if (preflight) {
+    const manifestPath = process.env[PREFLIGHT_DATABASE_MANIFEST_ENV];
+    if (manifestPath) {
+      config = applyPreflightDatabaseManifest(config, manifestPath);
+    } else {
+      assertDatabasesAtSchemaVersion(
+        config.bots.map((bot) => bot.dbPath),
+        LATEST_SCHEMA_VERSION,
+      );
+      legacyReadOnlyPreflight = true;
+      log.info("legacy preflight restricted to read-only compatibility checks");
+    }
+  }
   log.info("config loaded", {
     botCount: config.bots.length,
     bots: config.bots.map((b) => `${b.id}(${b.backend})`).join(", "),
@@ -123,6 +142,19 @@ async function main(): Promise<void> {
       reason: capability.reason ?? null,
     })),
   });
+
+  if (preflight && legacyReadOnlyPreflight) {
+    for (const bot of config.bots) {
+      const backend = normalizeBackend(bot.backend);
+      if (!backend) continue;
+      const capability = initialCapabilities.find((candidate) => candidate.backend === backend);
+      if (!capability?.selectable) {
+        throw new Error(`Configured backend '${backend}' is unavailable: ${capability?.reason ?? "not installed"}`);
+      }
+    }
+    log.info("legacy read-only preflight check passed");
+    process.exit(0);
+  }
 
   const backends = new Map<string, AgentBackend>();
 
@@ -190,6 +222,7 @@ async function main(): Promise<void> {
         config.restart,
         autoUpdateNotificationsEnabled,
         getBackendCapabilities,
+        { preflight },
       );
       bots.push(instance);
       log.info("bot backend assigned", {

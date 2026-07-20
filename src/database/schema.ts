@@ -455,7 +455,7 @@ const migrations: Migration[] = [
   },
 ];
 
-const LATEST_VERSION = migrations[migrations.length - 1]!.version;
+export const LATEST_SCHEMA_VERSION = migrations[migrations.length - 1]!.version;
 
 // ── Database initialization ─────────────────────────────────────────
 
@@ -809,9 +809,9 @@ function runMigrations(db: Database.Database): void {
   }
 
   // 版本高于代码：DB 由更新版本创建，拒绝启动防止数据损坏
-  if (currentVersion > LATEST_VERSION) {
+  if (currentVersion > LATEST_SCHEMA_VERSION) {
     throw new Error(
-      `Database schema version (${currentVersion}) is newer than code (${LATEST_VERSION}). ` +
+      `Database schema version (${currentVersion}) is newer than code (${LATEST_SCHEMA_VERSION}). ` +
       "Please upgrade NiuBot to a version that supports this database.",
     );
   }
