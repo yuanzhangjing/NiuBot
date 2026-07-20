@@ -45,28 +45,33 @@ export async function createBotInstance(
   restartConfig?: RestartConfig,
   autoUpdateNotificationsEnabled = true,
   getBackendCapabilities?: () => BackendCapability[] | Promise<BackendCapability[]>,
+  options: { preflight?: boolean } = {},
 ): Promise<BotInstance> {
   const log = createLogger("bot-instance", botConfig.id);
 
   // 1. 确保目录和默认文件存在
   fs.mkdirSync(path.dirname(botConfig.dbPath), { recursive: true });
-  fs.mkdirSync(botConfig.workingDirectory, { recursive: true });
-  ensureBotProfileFile(botConfig.botProfilePath, {
-    personaPath: botConfig.personaPath,
-    instructionsPath: botConfig.instructionsPath,
-    workspaceDirectory: botConfig.workingDirectory,
-  });
-  ensureStaticContextFiles({
-    instructionsPath: botConfig.instructionsPath,
-    projectContextPath: botConfig.projectContextPath,
-  });
+  if (!options.preflight) {
+    fs.mkdirSync(botConfig.workingDirectory, { recursive: true });
+    ensureBotProfileFile(botConfig.botProfilePath, {
+      personaPath: botConfig.personaPath,
+      instructionsPath: botConfig.instructionsPath,
+      workspaceDirectory: botConfig.workingDirectory,
+    });
+    ensureStaticContextFiles({
+      instructionsPath: botConfig.instructionsPath,
+      projectContextPath: botConfig.projectContextPath,
+    });
+  }
 
   // 2. 初始化数据库
   const db = initDatabase(botConfig.dbPath);
   log.info("database initialized", { dbPath: botConfig.dbPath });
 
   // 3. 确保 workspace AGENTS.md 存在；已有用户文件不覆盖
-  const refreshAgentContextFiles = () => generateAgentFiles(botConfig, log);
+  const refreshAgentContextFiles = options.preflight
+    ? () => {}
+    : () => generateAgentFiles(botConfig, log);
   refreshAgentContextFiles();
 
   // 4. 创建 IM adapter（注入 DB resolver 用于 merge_forward 等场景）
