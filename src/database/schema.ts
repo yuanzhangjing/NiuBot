@@ -340,6 +340,64 @@ const migrations: Migration[] = [
       }
     },
   },
+  {
+    version: 17,
+    description: "Add persistent transport inbox and outbox",
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS transport_inbox (
+          id                INTEGER PRIMARY KEY AUTOINCREMENT,
+          bot_id            TEXT NOT NULL,
+          platform          TEXT NOT NULL,
+          platform_msg_id   TEXT NOT NULL,
+          payload_json      TEXT NOT NULL,
+          status            TEXT NOT NULL DEFAULT 'pending'
+                            CHECK(status IN ('pending', 'queued', 'processing', 'completed', 'failed', 'stopped', 'discarded', 'interrupted')),
+          message_id        INTEGER,
+          run_id            TEXT,
+          attempt_count     INTEGER NOT NULL DEFAULT 0,
+          error             TEXT,
+          received_at       TEXT NOT NULL DEFAULT (datetime('now')),
+          queued_at         TEXT,
+          processing_at     TEXT,
+          completed_at      TEXT,
+          updated_at        TEXT NOT NULL DEFAULT (datetime('now')),
+          UNIQUE(bot_id, platform, platform_msg_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_transport_inbox_recovery
+          ON transport_inbox(bot_id, status, id);
+        CREATE INDEX IF NOT EXISTS idx_transport_inbox_message
+          ON transport_inbox(bot_id, message_id);
+        CREATE INDEX IF NOT EXISTS idx_transport_inbox_run
+          ON transport_inbox(bot_id, run_id);
+
+        CREATE TABLE IF NOT EXISTS transport_outbox (
+          id                INTEGER PRIMARY KEY AUTOINCREMENT,
+          request_id        TEXT NOT NULL UNIQUE,
+          bot_id            TEXT NOT NULL,
+          platform          TEXT NOT NULL,
+          kind              TEXT NOT NULL,
+          chat_id           TEXT,
+          payload_json      TEXT NOT NULL,
+          status            TEXT NOT NULL DEFAULT 'pending'
+                            CHECK(status IN ('pending', 'sending', 'sent', 'failed', 'unknown')),
+          attempt_count     INTEGER NOT NULL DEFAULT 0,
+          platform_msg_id   TEXT,
+          error             TEXT,
+          created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+          sending_at        TEXT,
+          completed_at      TEXT,
+          updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_transport_outbox_recovery
+          ON transport_outbox(bot_id, status, id);
+        CREATE INDEX IF NOT EXISTS idx_transport_outbox_chat
+          ON transport_outbox(bot_id, chat_id, id);
+      `);
+    },
+  },
 ];
 
 const LATEST_VERSION = migrations[migrations.length - 1]!.version;
