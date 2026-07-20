@@ -21,6 +21,7 @@ import type {
 } from "./types.js";
 
 const DEFAULT_DELIVERY_TIMEOUT_MS = 30_000;
+const DEFAULT_UNKNOWN_FILE_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
 
 type PersistentTransportOptions = {
   db: Database.Database;
@@ -29,6 +30,7 @@ type PersistentTransportOptions = {
   adapter: PlatformAdapter;
   storageDir: string;
   deliveryTimeoutMs?: number;
+  unknownFileRetentionMs?: number;
 };
 
 type DeliveryResult = string | undefined;
@@ -42,6 +44,7 @@ export class PersistentTransport implements TransportClient {
   private readonly platform: string;
   private readonly managedFileRoot: string;
   private readonly deliveryTimeoutMs: number;
+  private readonly unknownFileRetentionMs: number;
   private readonly log: ReturnType<typeof createLogger>;
   private inboundHandler?: InboundHandler;
 
@@ -51,6 +54,7 @@ export class PersistentTransport implements TransportClient {
     this.platform = options.platform;
     this.managedFileRoot = path.join(options.storageDir, "transport-outbox");
     this.deliveryTimeoutMs = options.deliveryTimeoutMs ?? DEFAULT_DELIVERY_TIMEOUT_MS;
+    this.unknownFileRetentionMs = options.unknownFileRetentionMs ?? DEFAULT_UNKNOWN_FILE_RETENTION_MS;
     this.store = new TransportStore(options.db, options.botId, options.platform);
     this.log = createLogger("transport", options.botId);
     this.adapter.onMessage((message) => this.receive(message));
@@ -71,13 +75,28 @@ export class PersistentTransport implements TransportClient {
   async recover(): Promise<void> {
     const outbound = this.store.prepareOutboundRecovery();
     const inbound = this.store.prepareInboundRecovery();
+    const expiredUnknownFiles = this.store.getExpiredUnknownFileRequests(
+      new Date(Date.now() - this.unknownFileRetentionMs),
+    );
     this.log.info("transport recovery prepared", {
       pendingInbound: inbound.pending.length,
       requeuedInbound: inbound.requeued,
       interruptedInbound: inbound.interrupted,
       pendingOutbound: outbound.pending.length,
       unknownOutbound: outbound.unknown,
+      expiredUnknownFiles: expiredUnknownFiles.length,
     });
+
+    for (const row of expiredUnknownFiles) {
+      try {
+        await this.cleanupManagedFile(parseOutbound(row.payloadJson));
+      } catch (error) {
+        this.log.warn("expired unknown outbox file cleanup failed", {
+          requestId: row.requestId,
+          error: errorMessage(error),
+        });
+      }
+    }
 
     for (const row of outbound.pending) {
       try {
@@ -220,6 +239,7 @@ export class PersistentTransport implements TransportClient {
         inboxId: row.id,
         message: deserializeInbound(row.payloadJson),
         replayed,
+        messageId: row.messageId,
       });
     } catch (error) {
       this.store.markInboundHandlerError(row.id, error);

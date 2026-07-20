@@ -287,7 +287,7 @@ async function main(): Promise<void> {
     log.info("shutting down...");
 
     for (const bot of bots) {
-      try { await bot.im.stop(); } catch (e) { log.error("im.stop failed", { bot: bot.id, error: String(e) }); }
+      try { await bot.transport.stop(); } catch (e) { log.error("transport.stop failed", { bot: bot.id, error: String(e) }); }
       bot.cronScheduler.stop();
       bot.pipeline.stop();
       bot.apiServer.stop();

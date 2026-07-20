@@ -7,7 +7,7 @@ import type { NormalizedMessage, TransportClient } from "../transport/types.js";
 
 export type { MentionInfo, MessageNode, NormalizedMessage } from "../transport/types.js";
 
-export type MessageHandler = (msg: NormalizedMessage) => void;
+export type MessageHandler = (msg: NormalizedMessage) => void | Promise<void>;
 
 export interface PlatformAdapter extends TransportClient {
   /** 注册消息回调 */

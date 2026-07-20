@@ -273,6 +273,18 @@ export class TransportStore {
     return tx();
   }
 
+  getExpiredUnknownFileRequests(cutoff: Date): OutboundRow[] {
+    const cutoffSql = cutoff.toISOString().slice(0, 19).replace("T", " ");
+    return (this.db.prepare(`
+      SELECT id, request_id, bot_id, platform, kind, chat_id, payload_json, status,
+             attempt_count, platform_msg_id, error
+      FROM transport_outbox
+      WHERE bot_id = ? AND platform = ? AND kind = 'file' AND status = 'unknown'
+        AND completed_at IS NOT NULL AND completed_at <= ?
+      ORDER BY id
+    `).all(this.botId, this.platform, cutoffSql) as RawOutboundRow[]).map(mapOutboundRowRequired);
+  }
+
   getStatusCounts(): TransportStatusCounts {
     const inbox = emptyInboundCounts();
     const outbox = emptyOutboundCounts();

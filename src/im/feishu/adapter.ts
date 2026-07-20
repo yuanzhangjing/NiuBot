@@ -166,7 +166,7 @@ export class FeishuAdapter implements PlatformAdapter {
       "im.message.receive_v1": async (data) => {
         try {
           const msg = await this.normalize(data);
-          if (msg) this.handler?.(msg);
+          if (msg) await this.handler?.(msg);
         } catch (err) {
           log.error("failed to process message", { error: String(err) });
         }
