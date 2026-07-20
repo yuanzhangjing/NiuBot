@@ -11,4 +11,3 @@ export class DeliveryUncertainError extends Error {
 export function isDeliveryUncertainError(error: unknown): error is DeliveryUncertainError {
   return error instanceof DeliveryUncertainError;
 }
-
