@@ -54,3 +54,27 @@ describe("MessageQueue error isolation", () => {
     queue.stop();
   });
 });
+
+describe("MessageQueue discard semantics", () => {
+  test("reports messages removed by an explicit drain", () => {
+    const queue = new MessageQueue(10_000);
+    const discarded: QueuedMessage[] = [];
+    queue.onDiscard((messages) => discarded.push(...messages));
+    queue.push(message({ dbMsgId: 1 }));
+    queue.push(message({ dbMsgId: 2 }));
+
+    expect(queue.drain("c1")).toBe(2);
+    expect(discarded.map((item) => item.dbMsgId)).toEqual([1, 2]);
+  });
+
+  test("does not mark buffered work discarded during service shutdown", () => {
+    const queue = new MessageQueue(10_000);
+    const discarded: QueuedMessage[] = [];
+    queue.onDiscard((messages) => discarded.push(...messages));
+    queue.push(message({ dbMsgId: 1 }));
+
+    queue.stop();
+
+    expect(discarded).toEqual([]);
+  });
+});

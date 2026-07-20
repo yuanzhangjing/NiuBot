@@ -61,7 +61,7 @@ function createAdapter(overrides: Partial<PlatformAdapter> = {}) {
   };
 }
 
-function createRuntime(adapter: PlatformAdapter) {
+function createRuntime(adapter: PlatformAdapter, options: { unknownFileRetentionMs?: number } = {}) {
   const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-persistent-transport-"));
   tempDirs.push(dir);
   const db = initDatabase(path.join(dir, "niubot.db"));
@@ -72,6 +72,7 @@ function createRuntime(adapter: PlatformAdapter) {
     platform: "feishu",
     adapter,
     storageDir: dir,
+    unknownFileRetentionMs: options.unknownFileRetentionMs,
   });
   return { runtime, db, dir };
 }
@@ -122,14 +123,17 @@ describe("PersistentTransport inbound", () => {
       storageDir: dir,
     });
     const replayed: string[] = [];
+    const recoveredMessageIds: Array<number | undefined> = [];
     recovered.onInbound((delivery) => {
       replayed.push(delivery.message.platformMsgId!);
+      recoveredMessageIds.push(delivery.messageId);
       recovered.markInboundTerminal(delivery.inboxId, "completed");
     });
 
     await recovered.recover();
 
     expect(replayed).toEqual(["queued"]);
+    expect(recoveredMessageIds).toEqual([1]);
     expect(recovered.getStatusCounts().inbox.interrupted).toBe(1);
   });
 });
@@ -204,5 +208,35 @@ describe("PersistentTransport outbox", () => {
     expect(existsSync(deliveredPath)).toBe(false);
     expect(existsSync(source)).toBe(true);
   });
-});
 
+  test("cleans managed copies for expired unknown file deliveries during recovery", async () => {
+    let deliveredPath = "";
+    const never = new Promise<string>(() => {});
+    const firstAdapter = createAdapter({
+      async sendFile(_chatId, filePath) {
+        deliveredPath = filePath;
+        return never;
+      },
+    });
+    const { runtime, db, dir } = createRuntime(firstAdapter.adapter);
+    const source = path.join(dir, "source.txt");
+    writeFileSync(source, "content");
+
+    await expect(runtime.sendFile("chat-1", source, "report.txt", { timeoutMs: 1 }))
+      .rejects.toBeInstanceOf(DeliveryUncertainError);
+    expect(existsSync(deliveredPath)).toBe(true);
+
+    const recovered = new PersistentTransport({
+      db,
+      botId: "NiuBot",
+      platform: "feishu",
+      adapter: createAdapter().adapter,
+      storageDir: dir,
+      unknownFileRetentionMs: 0,
+    });
+    await recovered.recover();
+
+    expect(existsSync(deliveredPath)).toBe(false);
+    expect(recovered.getStatusCounts().outbox.unknown).toBe(1);
+  });
+});

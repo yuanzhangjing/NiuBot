@@ -398,7 +398,7 @@ afterEach(() => {
 });
 
 describe("Pipeline.start", () => {
-  test("registers message entrypoint without waiting for platform probes", async () => {
+  test("starts Engine logic without registering a platform callback", async () => {
     vi.useFakeTimers();
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
@@ -406,9 +406,7 @@ describe("Pipeline.start", () => {
     const db = initDatabase(path.join(dir, "niubot.db"));
     const im = createImStub();
     let messageHandlerRegistered = false;
-    im.onMessage = () => {
-      messageHandlerRegistered = true;
-    };
+    im.onMessage = () => { messageHandlerRegistered = true; };
     im.getBotOpenId = async () => new Promise<string | undefined>(() => {});
     im.getBotName = async () => new Promise<string | undefined>(() => {});
     im.getAppCreatorId = async () => new Promise<string | undefined>(() => {});
@@ -431,7 +429,7 @@ describe("Pipeline.start", () => {
     await Promise.resolve();
 
     expect(resolved).toBe(true);
-    expect(messageHandlerRegistered).toBe(true);
+    expect(messageHandlerRegistered).toBe(false);
     pipeline.stop();
   });
 
@@ -2295,7 +2293,7 @@ describe("Pipeline.recover", () => {
     expect(agent.createSessionCalls).toHaveLength(1);
   });
 
-  test("falls back to text and releases queue when card send times out", async () => {
+  test("does not retry an uncertain card timeout and still releases the queue", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
@@ -2333,7 +2331,7 @@ describe("Pipeline.recover", () => {
 
     await new Promise((resolve) => setTimeout(resolve, 5));
 
-    expect(sentTexts).toContain("agent reply");
+    expect(sentTexts).toEqual([]);
     (pipeline as any).handleMessage(createMessage({
       contentText: "second",
     }));
@@ -3638,7 +3636,7 @@ describe("Pipeline.recover", () => {
     tempDirs.push(dir);
 
     const db = initDatabase(path.join(dir, "niubot.db"));
-    const { im, sentCards, dispatchMessage } = createRecordingImStub();
+    const { im, sentCards } = createRecordingImStub();
     const pipeline = new Pipeline(
       db,
       im,
@@ -3651,7 +3649,7 @@ describe("Pipeline.recover", () => {
     );
 
     await pipeline.start();
-    dispatchMessage(createMessage({
+    (pipeline as any).handleMessage(createMessage({
       contentText: "/help",
       platformMsgId: "m1",
     }));
@@ -4023,13 +4021,13 @@ describe("Pipeline.recover", () => {
     tempDirs.push(dir);
     const db = initDatabase(path.join(dir, "niubot.db"));
     const agent = new ReplyAgent();
-    const { im, dispatchMessage } = createRecordingImStub();
+    const { im } = createRecordingImStub();
     const pipeline = new Pipeline(
       db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex",
     );
     await pipeline.start();
 
-    dispatchMessage(createMessage({
+    (pipeline as any).handleMessage(createMessage({
       chatPlatformId: "group-open-id",
       chatType: "group",
       contentText: "silent message",
@@ -4039,7 +4037,7 @@ describe("Pipeline.recover", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(agent.sendMessageCalls).toHaveLength(0);
 
-    dispatchMessage(createMessage({
+    (pipeline as any).handleMessage(createMessage({
       chatPlatformId: "group-open-id",
       chatType: "group",
       contentText: "@NiuBot ping",

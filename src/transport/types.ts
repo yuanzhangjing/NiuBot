@@ -47,6 +47,8 @@ export type InboundDelivery = {
   inboxId: number;
   message: NormalizedMessage;
   replayed: boolean;
+  /** Existing chat-history row when recovering work that had already reached Engine's queue. */
+  messageId?: number;
 };
 
 export type InboundHandler = (delivery: InboundDelivery) => void | Promise<void>;
@@ -94,4 +96,3 @@ export type OutboundRequest =
   | { kind: "card"; chatId: string; header: string; content: string; footer?: string; replyToMsgId?: string }
   | { kind: "file"; chatId: string; filePath: string; fileName?: string }
   | { kind: "edit"; msgId: string; text: string };
-

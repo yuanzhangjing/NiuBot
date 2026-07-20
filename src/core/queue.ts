@@ -43,6 +43,7 @@ export class MessageQueue {
   private bufferMs: number;
   private pendingFn: ((msg: QueuedMessage) => void) | null = null;
   private stateFn: ((chatId: string, snapshot: QueueSnapshot) => void) | null = null;
+  private discardFn: ((messages: QueuedMessage[]) => void) | null = null;
   private stopped = false;
 
   constructor(bufferMs = 1500) {
@@ -62,6 +63,11 @@ export class MessageQueue {
   /** 注册队列状态变更通知，用于外部同步观测状态 */
   onStateChange(fn: (chatId: string, snapshot: QueueSnapshot) => void): void {
     this.stateFn = fn;
+  }
+
+  /** 注册显式丢弃回调；服务关闭时保留队列供持久层恢复，不调用此回调。 */
+  onDiscard(fn: (messages: QueuedMessage[]) => void): void {
+    this.discardFn = fn;
   }
 
   /** 推入一条新消息，返回是否进入 pending 队列 */
@@ -108,7 +114,8 @@ export class MessageQueue {
   drain(chatId: string): number {
     const q = this.queues.get(chatId);
     if (!q) return 0;
-    const dropped = q.buffer.length + q.pending.length;
+    const discarded = [...q.buffer, ...q.pending];
+    const dropped = discarded.length;
     q.buffer = [];
     q.pending = [];
     if (q.bufferTimer) {
@@ -117,6 +124,11 @@ export class MessageQueue {
     }
     if (dropped > 0) {
       log.info("drain", { chatId, dropped });
+      try {
+        this.discardFn?.(discarded);
+      } catch (err) {
+        log.warn("discard callback failed", { chatId, error: String(err) });
+      }
     }
     this.emitState(chatId, q);
     return dropped;
