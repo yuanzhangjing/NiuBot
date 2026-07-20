@@ -72,7 +72,7 @@ describe("resolveSendEndpoint", () => {
       NIUBOT_HOME: "/home/niubot",
       NIUBOT_DB_PATH: "/data/custom/bot.db",
       NIUBOT_BOT_NAME: "TestBot",
-    }).address).toBe("/data/custom/api.sock");
+    }, "linux").address).toBe("/data/custom/api.sock");
   });
 });
 

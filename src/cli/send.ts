@@ -8,6 +8,7 @@ import { resolveSessionBotEndpoint, type LocalIpcEndpoint } from "../platform/ip
 
 export function resolveSendEndpoint(
   env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
 ): LocalIpcEndpoint {
   const niubotHome = env["NIUBOT_HOME"];
   if (!niubotHome) throw new Error("NIUBOT_HOME is not set. nbt must run inside a NiuBot session.");
@@ -16,6 +17,7 @@ export function resolveSendEndpoint(
     botId: env["NIUBOT_BOT_NAME"],
     dbPath: env["NIUBOT_DB_PATH"],
     configuredAddress: env["NIUBOT_API_SOCKET"],
+    platform,
   });
 }
 
