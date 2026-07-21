@@ -37,6 +37,7 @@ import { handleSend } from "./cli/send.js";
 import { handleCron } from "./cli/cron.js";
 import { handleTask } from "./cli/task.js";
 import { handleSessions } from "./cli/session.js";
+import { parseArgs } from "./cli/args.js";
 import { formatLocalDateTimeWithTZ } from "./tz.js";
 
 // ─── Context ───────────────────────────────────────────────
@@ -127,30 +128,6 @@ function openDb(): Database.Database {
     console.error(`Error: cannot open database at ${DB_PATH}`);
     process.exit(1);
   }
-}
-
-// ─── Arg parsing ───────────────────────────────────────────
-
-function parseArgs(args: string[]): { positional: string[]; flags: Record<string, string> } {
-  const positional: string[] = [];
-  const flags: Record<string, string> = {};
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i]!;
-    if (arg.startsWith("--")) {
-      const key = arg.slice(2);
-      const next = args[i + 1];
-      if (next && !next.startsWith("--")) { flags[key] = next; i++; }
-      else { flags[key] = "true"; }
-    } else if (arg.startsWith("-") && arg.length === 2) {
-      const key = arg.slice(1);
-      const next = args[i + 1];
-      if (next && !next.startsWith("-")) { flags[key] = next; i++; }
-      else { flags[key] = "true"; }
-    } else {
-      positional.push(arg);
-    }
-  }
-  return { positional, flags };
 }
 
 // ─── Main ──────────────────────────────────────────────────

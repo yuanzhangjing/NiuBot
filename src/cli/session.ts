@@ -139,6 +139,14 @@ async function sessionSearch(
   const includeTools = flags["include-tools"] === "true";
   const sessionScanLimit = boundedCountFlag(flags["sessions"], 500, 10_000);
   const eventRange = userTimeRangeToUtc({ since: flags["since"], before: flags["before"] });
+  let through: { endedAt: string; id: string } | undefined;
+  if (flags["through-session"]) {
+    const anchor = getSessionForAccess(db, flags["through-session"], { currentChatId, chatType });
+    if (!anchor || anchor.chat_id !== targetChatId || anchor.status !== "archived" || !anchor.ended_at) {
+      throw new Error(`Search anchor session not found: ${flags["through-session"]}`);
+    }
+    through = { endedAt: anchor.ended_at, id: anchor.id };
+  }
   const candidateRows = listSessionsOverlappingUtcRange(db, {
     currentChatId,
     chatType,
@@ -146,7 +154,9 @@ async function sessionSearch(
     limit: sessionScanLimit + 1,
     sinceUtc: eventRange.since,
     beforeUtc: eventRange.before,
+    through,
   });
+  const throughSessionId = through?.id ?? candidateRows[0]?.id;
   const candidateSessionsTruncated = candidateRows.length > sessionScanLimit;
   const rows = candidateRows.slice(0, sessionScanLimit);
   const needle = query.toLocaleLowerCase();
@@ -203,7 +213,13 @@ async function sessionSearch(
     console.log(`注意：只扫描了最近 ${sessionScanLimit} 个 session；使用 --sessions <数量> 调高范围`);
   }
   if (hasMore) {
-    console.log(`下一页：${searchContinuationCommand(query, page.at(-1)!.eventId, pageSize, flags)}`);
+    console.log(`下一页：${searchContinuationCommand(
+      query,
+      page.at(-1)!.eventId,
+      pageSize,
+      throughSessionId,
+      flags,
+    )}`);
   }
 }
 
@@ -270,16 +286,22 @@ async function sessionGet(
     return;
   }
   let remainingChars = maxChars;
-  let lastPrintedTurn: TranscriptTurn | undefined;
+  let lastCompleteTurn: TranscriptTurn | undefined;
+  let pageTruncated = false;
   for (const turn of selection.turns) {
     const result = printTurn(botName, row.id, turn, remainingChars);
-    lastPrintedTurn = turn;
     remainingChars = result.remainingChars;
-    if (result.truncated) break;
+    if (result.truncated) {
+      pageTruncated = true;
+      break;
+    }
+    lastCompleteTurn = turn;
     if (turn !== selection.turns.at(-1)) console.log("---\n");
   }
-  if (!targetTurn && lastPrintedTurn && lastPrintedTurn.number < selection.totalTurns) {
-    console.log(`下一页：/nbt sessions get ${row.id} --after-turn ${lastPrintedTurn.number} --page-size ${pageSize}`);
+  if (pageTruncated) {
+    printTurnRetryCommand(row.id, targetTurn, lastCompleteTurn?.number ?? afterTurn, pageSize, maxChars);
+  } else if (!targetTurn && lastCompleteTurn && lastCompleteTurn.number < selection.totalTurns) {
+    console.log(`下一页：/nbt sessions get ${row.id} --after-turn ${lastCompleteTurn.number} --page-size ${pageSize}`);
   }
 }
 
@@ -379,9 +401,33 @@ async function selectTranscriptTurns(
 
 function defaultTurnEvents(turn: TranscriptTurn): IdentifiedTranscriptEvent[] {
   const users = turn.events.filter((item) => item.event.type === "user");
+  const { finalMessages } = assistantSections(turn);
+  return [...users, ...finalMessages];
+}
+
+function assistantSections(turn: TranscriptTurn): {
+  processMessages: IdentifiedTranscriptEvent[];
+  finalMessages: IdentifiedTranscriptEvent[];
+} {
   const assistants = turn.events.filter((item) => item.event.type === "assistant");
-  const finalAssistant = assistants.at(-1);
-  return finalAssistant ? [...users, finalAssistant] : users;
+  const last = turn.events.at(-1);
+  if (!last || last.event.type !== "assistant") {
+    return { processMessages: assistants, finalMessages: [] };
+  }
+  let finalStart = turn.events.length - 1;
+  if (last.event.timestamp) {
+    while (finalStart > 0) {
+      const previous = turn.events[finalStart - 1]!;
+      if (previous.event.type !== "assistant" || previous.event.timestamp !== last.event.timestamp) break;
+      finalStart--;
+    }
+  }
+  const finalMessages = turn.events.slice(finalStart);
+  const finalIds = new Set(finalMessages.map((item) => item.eventId));
+  return {
+    processMessages: assistants.filter((item) => !finalIds.has(item.eventId)),
+    finalMessages,
+  };
 }
 
 function printTurnSessionHeader(row: SessionRow, turns: TranscriptTurn[], totalTurns: number): void {
@@ -407,9 +453,7 @@ function printTurn(
   console.log(`## 第 ${turn.number} 轮 · ${time}\n`);
 
   const users = turn.events.filter((item) => item.event.type === "user");
-  const assistants = turn.events.filter((item) => item.event.type === "assistant");
-  const processMessages = assistants.slice(0, -1);
-  const finalAssistant = assistants.at(-1);
+  const { processMessages, finalMessages } = assistantSections(turn);
   const toolCalls = turn.events.filter((item) => item.event.type === "tool_call");
   const toolResults = turn.events.filter((item) => item.event.type === "tool_result");
   let remainingChars = maxChars;
@@ -427,7 +471,10 @@ function printTurn(
   }
 
   console.log(`\n${botName}：`);
-  const finalResult = printLimitedText(finalAssistant?.event.content ?? "（本轮没有最终回复）", remainingChars);
+  const finalResult = printLimitedText(
+    finalMessages.map((item) => item.event.content).join("\n\n") || "（本轮没有最终回复）",
+    remainingChars,
+  );
   remainingChars = finalResult.remainingChars;
   if (processMessages.length > 0 || toolCalls.length > 0 || toolResults.length > 0) {
     console.log(`\n查看本轮详情：/nbt sessions get ${sessionId} --turn ${turn.number} --verbose`);
@@ -441,8 +488,7 @@ function printVerboseTurn(
   maxChars: number,
   options: { afterEventId?: string; pageSize: number },
 ): void {
-  const assistants = turn.events.filter((item) => item.event.type === "assistant");
-  const finalAssistantId = assistants.at(-1)?.eventId;
+  const finalAssistantIds = new Set(assistantSections(turn).finalMessages.map((item) => item.eventId));
   let start = 0;
   if (options.afterEventId) {
     const cursor = turn.events.findIndex((item) => item.eventId === options.afterEventId);
@@ -459,7 +505,7 @@ function printVerboseTurn(
   let contentTruncated = false;
   for (const item of page) {
     lastPrinted = item;
-    const label = verboseEventLabel(item, finalAssistantId);
+    const label = verboseEventLabel(item, finalAssistantIds);
     console.log(`${label}\n<!-- event_id: ${item.eventId}${item.event.callId ? `; call_id: ${escapeComment(item.event.callId)}` : ""} -->\n`);
     const result = limitEventContent(item.event, remainingChars);
     if (item.event.type === "tool_call" || item.event.type === "tool_result") {
@@ -480,18 +526,21 @@ function printVerboseTurn(
     : start;
   const hasMore = displayedEnd < turn.events.length;
   console.log(`本页 ${displayedEnd - start} 个事件，共 ${turn.events.length} 个${hasMore ? "，还有更多" : "，已到最后一页"}`);
-  if (hasMore && lastPrinted) {
+  if (contentTruncated) {
+    console.log("当前事件内容已截断；请先读取完整事件，分页游标未推进");
+    if (hasMore && lastPrinted) {
+      console.log(`读取完整事件后继续：/nbt sessions get ${sessionId} --turn ${turn.number} --verbose --after-event ${lastPrinted.eventId} --event-page-size ${options.pageSize}`);
+    }
+  } else if (hasMore && lastPrinted) {
     console.log(`下一页：/nbt sessions get ${sessionId} --turn ${turn.number} --verbose --after-event ${lastPrinted.eventId} --event-page-size ${options.pageSize}`);
-  } else if (contentTruncated) {
-    console.log("当前事件内容已截断，请先读取完整事件");
   }
 }
 
-function verboseEventLabel(item: IdentifiedTranscriptEvent, finalAssistantId: string | undefined): string {
+function verboseEventLabel(item: IdentifiedTranscriptEvent, finalAssistantIds: Set<string>): string {
   const name = item.event.name ? ` · ${item.event.name}` : "";
   switch (item.event.type) {
     case "user": return "用户：";
-    case "assistant": return item.eventId === finalAssistantId ? "最终回复：" : "过程消息：";
+    case "assistant": return finalAssistantIds.has(item.eventId) ? "最终回复：" : "过程消息：";
     case "tool_call": return `工具调用${name}：`;
     case "tool_result": return `工具结果${name}：`;
   }
@@ -581,6 +630,7 @@ function searchContinuationCommand(
   query: string,
   after: string,
   pageSize: number,
+  throughSessionId: string | undefined,
   flags: Record<string, string>,
 ): string {
   const parts = [
@@ -593,8 +643,28 @@ function searchContinuationCommand(
   appendPreservedFlag(parts, flags, "before");
   appendPreservedFlag(parts, flags, "chat-id");
   appendPreservedFlag(parts, flags, "sessions");
+  if (throughSessionId) parts.push(`--through-session ${quoteArg(throughSessionId)}`);
   if (flags["include-tools"] === "true") parts.push("--include-tools");
   return parts.join(" ");
+}
+
+function printTurnRetryCommand(
+  sessionId: string,
+  targetTurn: number | undefined,
+  afterTurn: number,
+  pageSize: number,
+  maxChars: number,
+): void {
+  if (maxChars >= MAX_OUTPUT_CHARS) {
+    console.log("当前页内容已截断且达到输出上限；请用 --turn <number> --verbose 按事件查看");
+    return;
+  }
+  const nextMaxChars = Math.min(MAX_OUTPUT_CHARS, maxChars * 2);
+  const selection = targetTurn
+    ? `--turn ${targetTurn}`
+    : `--after-turn ${afterTurn} --page-size ${pageSize}`;
+  console.log(`当前页内容已截断，分页游标未推进`);
+  console.log(`调高限制后重试：/nbt sessions get ${sessionId} ${selection} --max-chars ${nextMaxChars}`);
 }
 
 function appendPreservedFlag(parts: string[], flags: Record<string, string>, name: string): void {

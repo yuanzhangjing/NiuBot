@@ -70,6 +70,7 @@ export function listSessionsOverlappingUtcRange(
     limit: number;
     sinceUtc?: string;
     beforeUtc?: string;
+    through?: { endedAt: string; id: string };
   },
 ): SessionRow[] {
   assertChatAccess({
@@ -87,12 +88,16 @@ export function listSessionsOverlappingUtcRange(
     conditions.push("started_at < ?");
     params.push(options.beforeUtc);
   }
+  if (options.through) {
+    conditions.push("(ended_at < ? OR (ended_at = ? AND id <= ?))");
+    params.push(options.through.endedAt, options.through.endedAt, options.through.id);
+  }
   params.push(Math.max(1, Math.abs(options.limit)));
   return db.prepare(`
     SELECT ${SESSION_COLUMNS}
     FROM sessions
     WHERE ${conditions.join(" AND ")}
-    ORDER BY ended_at DESC
+    ORDER BY ended_at DESC, id DESC
     LIMIT ?
   `).all(...params) as SessionRow[];
 }

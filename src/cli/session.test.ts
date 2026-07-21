@@ -6,6 +6,7 @@ import type { AgentBackend } from "../agent/types.js";
 import { initDatabase, storeMessage } from "../database/schema.js";
 import { archiveAgentSession } from "../session-archive/archive.js";
 import { readCodexTranscript } from "../session-archive/native-transcript.js";
+import { parseArgs } from "./args.js";
 import { handleSessions, markdownCodeFence } from "./session.js";
 
 const tempDirs: string[] = [];
@@ -14,21 +15,37 @@ afterEach(() => {
   for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-function parseArgs(args: string[]): { positional: string[]; flags: Record<string, string> } {
-  const positional: string[] = [];
-  const flags: Record<string, string> = {};
-  for (let index = 0; index < args.length; index++) {
-    const arg = args[index]!;
-    if (arg.startsWith("--")) {
-      const next = args[index + 1];
-      flags[arg.slice(2)] = next && !next.startsWith("-") ? (index++, next) : "true";
-    } else if (arg === "-n") {
-      flags.n = args[++index]!;
-    } else {
-      positional.push(arg);
-    }
-  }
-  return { positional, flags };
+async function addArchivedCodexSession(
+  db: ReturnType<typeof initDatabase>,
+  home: string,
+  id: string,
+  start: string,
+  end: string,
+  timestamp: string,
+  finalReply: string,
+): Promise<void> {
+  db.prepare(`
+    INSERT INTO sessions (
+      id, chat_id, user_id, source, status, backend_type, agent_session_id,
+      started_at, ended_at, last_active_at
+    ) VALUES (?, 'c1', 'u2', 'user', 'archived', 'codex', ?, ?, ?, ?)
+  `).run(id, `agent-${id}`, start, end, end);
+  const native = join(home, `${id}.jsonl`);
+  writeFileSync(native, [
+    { type: "response_item", timestamp, payload: { type: "message", role: "user", content: [{ type: "input_text", text: `问题 ${id}` }] } },
+    { type: "response_item", timestamp, payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: finalReply }] } },
+  ].map((row) => JSON.stringify(row)).join("\n") + "\n");
+  const transcript = { ...readCodexTranscript(native, `agent-${id}`), sources: [{ path: native, role: "session" }] };
+  const backend = { exportSessionTranscript: async () => transcript } as AgentBackend;
+  await archiveAgentSession(home, backend, { id: `agent-${id}` }, {
+    botId: "NiuBot",
+    chatId: "c1",
+    sessionId: id,
+    source: "user",
+    backend: "codex",
+    startedAt: start,
+    archivedAt: end,
+  });
 }
 
 describe("nbt sessions", () => {
@@ -67,11 +84,15 @@ describe("nbt sessions", () => {
       { type: "response_item", timestamp: "2026-07-13T01:00:02Z", payload: { type: "custom_tool_call_output", call_id: "long-output", output: longOutput } },
       { type: "response_item", timestamp: "2026-07-13T01:00:03Z", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "已经处理" }] } },
       { type: "response_item", timestamp: "2026-07-13T01:01:00Z", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "第二轮问题" }] } },
-      { type: "response_item", timestamp: "2026-07-13T01:01:01Z", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "第二轮完成" }] } },
+      { type: "response_item", timestamp: "2026-07-13T01:01:01Z", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: `第二轮完成 ${"y".repeat(200)}` }] } },
       { type: "response_item", timestamp: "2026-07-13T01:02:00Z", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "第三轮问题" }] } },
       { type: "response_item", timestamp: "2026-07-13T01:02:01Z", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "第三轮完成" }] } },
       { type: "response_item", timestamp: "2026-07-13T01:03:00Z", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "第四轮问题" }] } },
       { type: "response_item", timestamp: "2026-07-13T01:03:01Z", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "第四轮完成" }] } },
+      { type: "response_item", timestamp: "2026-07-13T01:04:00Z", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "中断问题" }] } },
+      { type: "response_item", timestamp: "2026-07-13T01:04:01Z", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "中断过程标记" }] } },
+      { type: "response_item", timestamp: "2026-07-13T01:04:02Z", payload: { type: "function_call", name: "shell", call_id: "call-interrupted", arguments: "{}" } },
+      { type: "response_item", timestamp: "2026-07-13T01:04:03Z", payload: { type: "function_call_output", call_id: "call-interrupted", output: "done without final reply" } },
     ].map((row) => JSON.stringify(row)).join("\n") + "\n");
     const transcript = { ...readCodexTranscript(native, "thread-1"), sources: [{ path: native, role: "session" }] };
     const backend = { exportSessionTranscript: async () => transcript } as AgentBackend;
@@ -114,7 +135,7 @@ describe("nbt sessions", () => {
 
     lines.length = 0;
     await handleSessions(db, ["get", "s1"], "c1", "p2p", home, "NiuBot", parseArgs);
-    expect(lines.join("\n")).toContain("范围：第 1～2 轮，共 4 轮");
+    expect(lines.join("\n")).toContain("范围：第 1～2 轮，共 5 轮");
     expect(lines.join("\n")).toContain("用户：\n查找唯一标记 NEEDLE_FULL_TEXT");
     expect(lines.join("\n")).toContain("工具调用 1 次：shell ×1");
     expect(lines.join("\n")).toContain("NiuBot：\n已经处理");
@@ -124,8 +145,28 @@ describe("nbt sessions", () => {
 
     lines.length = 0;
     await handleSessions(db, ["get", "s1", "--after-turn", "2"], "c1", "p2p", home, "NiuBot", parseArgs);
-    expect(lines.join("\n")).toContain("范围：第 3～4 轮，共 4 轮");
+    expect(lines.join("\n")).toContain("范围：第 3～4 轮，共 5 轮");
     expect(lines.join("\n")).toContain("第四轮问题");
+
+    lines.length = 0;
+    await handleSessions(db, ["get", "s1", "--turn", "5"], "c1", "p2p", home, "NiuBot", parseArgs);
+    expect(lines.join("\n")).toContain("过程消息 1 条，已折叠");
+    expect(lines.join("\n")).toContain("NiuBot：\n（本轮没有最终回复）");
+    expect(lines.join("\n")).not.toContain("NiuBot：\n中断过程标记");
+
+    lines.length = 0;
+    await handleSessions(db, ["search", "中断过程标记"], "c1", "p2p", home, "NiuBot", parseArgs);
+    expect(lines).toEqual(["(无匹配 transcript 事件)"]);
+
+    lines.length = 0;
+    await handleSessions(db, ["search", "中断过程标记", "--include-tools"], "c1", "p2p", home, "NiuBot", parseArgs);
+    expect(lines.join("\n")).toContain("中断过程标记");
+
+    lines.length = 0;
+    await handleSessions(db, ["get", "s1", "--max-chars", "100"], "c1", "p2p", home, "NiuBot", parseArgs);
+    expect(lines.join("\n")).toContain("分页游标未推进");
+    expect(lines.join("\n")).toContain("--after-turn 1 --page-size 2 --max-chars 200");
+    expect(lines.join("\n")).not.toContain("下一页：/nbt sessions get s1 --after-turn 2");
 
     lines.length = 0;
     await handleSessions(db, ["get", "s1", "--turn", "1", "--verbose", "--max-chars", "30000"], "c1", "p2p", home, "NiuBot", parseArgs);
@@ -150,6 +191,15 @@ describe("nbt sessions", () => {
     expect(lines.join("\n")).toContain("本页 2 个事件，共 4 个，已到最后一页");
 
     lines.length = 0;
+    await handleSessions(db, [
+      "get", "s1", "--turn", "1", "--verbose",
+      "--after-event", eventCursor!, "--event-page-size", "2", "--max-chars", "1000",
+    ], "c1", "p2p", home, "NiuBot", parseArgs);
+    expect(lines.join("\n")).toContain("当前事件内容已截断");
+    expect(lines.join("\n")).toContain("读取完整事件后继续：");
+    expect(lines.join("\n")).not.toContain("下一页：");
+
+    lines.length = 0;
     await handleSessions(db, ["search", "FENCE_MARK"], "c1", "p2p", home, "NiuBot", parseArgs);
     expect(lines).toEqual(["(无匹配 transcript 事件)"]);
 
@@ -160,6 +210,11 @@ describe("nbt sessions", () => {
     await handleSessions(db, ["get", fenceEventId!], "c1", "p2p", home, "NiuBot", parseArgs);
     expect(lines.join("\n")).toContain("````text");
     expect(lines.join("\n")).toContain("call_id: call—fence");
+
+    lines.length = 0;
+    await handleSessions(db, ["search", "FENCE_MARK", "--include-tools", "-n", "1"], "c1", "p2p", home, "NiuBot", parseArgs);
+    expect(lines.join("\n")).toContain("FENCE_MARK");
+    expect(lines.join("\n")).toContain("本页 1 条");
 
     lines.length = 0;
     await handleSessions(db, ["search", "LONG_OUTPUT", "--include-tools"], "c1", "p2p", home, "NiuBot", parseArgs);
@@ -221,6 +276,45 @@ describe("nbt sessions", () => {
     await handleSessions(db, ["list", "-n", "2", "--after", "s2"], "c1", "p2p", home, "NiuBot", parseArgs);
     expect(lines.join("\n")).toContain("[s1]");
     expect(lines.join("\n")).toContain("已到最后一页");
+    db.close();
+  });
+
+  it("keeps search pagination anchored when newer sessions are archived", async () => {
+    const home = mkdtempSync(join(tmpdir(), "niubot-sessions-search-cursor-"));
+    tempDirs.push(home);
+    const db = initDatabase(join(home, "niubot.db"));
+    db.prepare("INSERT INTO users (id, platform, platform_id, name) VALUES ('u2', 'feishu', 'u2p', 'Zen')").run();
+    db.prepare("INSERT INTO chats (id, platform, platform_id, type, user_id) VALUES ('c1', 'feishu', 'c1p', 'p2p', 'u2')").run();
+    await addArchivedCodexSession(
+      db, home, "s1", "2026-07-13 01:00:00", "2026-07-13 01:10:00",
+      "2026-07-13T01:09:00Z", "稳定游标 s1",
+    );
+    await addArchivedCodexSession(
+      db, home, "s2", "2026-07-13 02:00:00", "2026-07-13 02:10:00",
+      "2026-07-13T02:09:00Z", "稳定游标 s2",
+    );
+
+    const lines: string[] = [];
+    vi.spyOn(console, "log").mockImplementation((...values) => lines.push(values.join(" ")));
+    await handleSessions(db, ["search", "稳定游标", "-n", "1", "--sessions", "2"], "c1", "p2p", home, "NiuBot", parseArgs);
+    const firstPage = lines.join("\n");
+    const eventCursor = /--after ([^ ]+)/.exec(firstPage)?.[1];
+    const throughSession = /--through-session ([^ ]+)/.exec(firstPage)?.[1];
+    expect(firstPage).toContain("稳定游标 s2");
+    expect(eventCursor).toBeTruthy();
+    expect(throughSession).toBe("s2");
+
+    await addArchivedCodexSession(
+      db, home, "s3", "2026-07-13 03:00:00", "2026-07-13 03:10:00",
+      "2026-07-13T03:09:00Z", "稳定游标 s3",
+    );
+    lines.length = 0;
+    await handleSessions(db, [
+      "search", "稳定游标", "-n", "1", "--sessions", "2",
+      "--after", eventCursor!, "--through-session", throughSession!,
+    ], "c1", "p2p", home, "NiuBot", parseArgs);
+    expect(lines.join("\n")).toContain("稳定游标 s1");
+    expect(lines.join("\n")).not.toContain("稳定游标 s3");
     db.close();
   });
 });
