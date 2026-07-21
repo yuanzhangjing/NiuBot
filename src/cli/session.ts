@@ -128,13 +128,21 @@ function sessionList(
   }
   const hasMore = rows.length > pageSize;
   const page = rows.slice(0, pageSize);
+  console.log(`Timezone: ${TZ}`);
+  let currentDate: string | undefined;
   for (const row of page) {
     const archive = locate(niubotHome, botName, row);
     const archiveLabel = archive ? "source-reference" : "missing";
-    console.log(formatSessionRow(row, archiveLabel));
+    const time = sessionListTime(row);
+    if (time.date !== currentDate) {
+      if (currentDate !== undefined) console.log("");
+      console.log(time.date);
+      currentDate = time.date;
+    }
+    console.log(formatSessionListRow(row, archiveLabel, time.range));
     const exchange = getSessionLastExchange(db, row.id);
-    console.log(`  user: ${exchange.user ? sessionListPreview(exchange.user.content_text) : "(无)"}`);
-    console.log(`  response: ${exchange.response ? sessionListPreview(exchange.response.content_text) : "(无)"}`);
+    console.log(`  用户: ${exchange.user ? sessionListPreview(exchange.user.content_text) : "(无)"}`);
+    console.log(`  最终回复: ${exchange.response ? sessionListPreview(exchange.response.content_text) : "(无)"}`);
   }
   console.log(`\n本页 ${page.length} 条${hasMore ? "，还有更多" : "，已到最后一页"}`);
   if (hasMore) {
@@ -904,10 +912,18 @@ function quoteArg(value: string): string {
     : `'${value.replaceAll("'", `'\\''`)}'`;
 }
 
-function formatSessionRow(row: SessionRow, archive: string): string {
-  const start = formatLocalDateTimeWithTZ(row.started_at);
-  const end = row.ended_at ? formatLocalDateTimeWithTZ(row.ended_at) : "ongoing";
-  return `[${row.id}] ${start} ~ ${end} backend=${row.backend_type ?? "unknown"} archive=${archive}`;
+function sessionListTime(row: SessionRow): { date: string; range: string } {
+  const [startDate = "日期未知", startTime = "时间未知"] = utcToLocalDateTime(row.started_at).split(" ");
+  if (!row.ended_at) return { date: startDate, range: `${startTime}～进行中` };
+  const [endDate = "日期未知", endTime = "时间未知"] = utcToLocalDateTime(row.ended_at).split(" ");
+  return {
+    date: endDate,
+    range: startDate === endDate ? `${startTime}～${endTime}` : `${startDate} ${startTime}～${endTime}`,
+  };
+}
+
+function formatSessionListRow(row: SessionRow, archive: string, timeRange: string): string {
+  return `[${row.id}] [${timeRange}] ${row.backend_type ?? "unknown"} · ${archive}`;
 }
 
 function sessionListPreview(content: string, maxRunes = 160): string {
