@@ -18,7 +18,9 @@ import {
 import {
   formatLocalDateTimeWithTZ,
   instantIsInUtcRange,
+  TZ,
   userTimeRangeToUtc,
+  utcToLocalDateTime,
 } from "../tz.js";
 
 type ParseArgs = (args: string[]) => { positional: string[]; flags: Record<string, string> };
@@ -567,18 +569,16 @@ function printTimeline(
     flags: Record<string, string>;
   },
 ): void {
-  console.log(`# Session ${row.id}`);
-  console.log(`时间：${formatLocalDateTimeWithTZ(row.started_at)} ～ ${row.ended_at ? formatLocalDateTimeWithTZ(row.ended_at) : "ongoing"}`);
-  console.log(`Backend：${row.backend_type ?? "unknown"}`);
-  console.log("视图：执行过程");
+  console.log(`Timezone: ${TZ}`);
+  console.log(`Session ${row.id} · ${row.backend_type ?? "unknown"} · ${compactSessionTimeRange(row)}`);
   if (selection.items.length > 0) {
     const first = selection.items[0]!.stepNumber;
     const last = selection.items.at(-1)!.stepNumber;
-    const scope = options.targetTurn ? `第 ${options.targetTurn} 轮，` : "";
-    console.log(`范围：${scope}第 ${first}～${last} 步\n`);
+    const scope = options.targetTurn ? ` · 第 ${options.targetTurn} 轮` : "";
+    console.log(`步骤 ${first}～${last}${scope}`);
   } else {
     const scope = options.targetTurn ? `第 ${options.targetTurn} 轮` : "整个 Session";
-    console.log(`范围：${scope}\n`);
+    console.log(scope);
     console.log(selection.seenEvents === 0 && !options.flags["after-event"]
       ? "(没有执行步骤)"
       : "(没有更多执行步骤)");
@@ -587,27 +587,37 @@ function printTimeline(
 
   let remainingChars = options.maxChars;
   let currentTurn: number | undefined;
+  let currentDate: string | undefined;
   let lastPrinted: TimelineItem | undefined;
   let printed = 0;
   for (const item of selection.items) {
     if (lastPrinted && remainingChars < 100) break;
-    if (item.turnNumber !== currentTurn) {
-      if (currentTurn !== undefined) console.log("---\n");
+    const localTimestamp = compactEventTimestamp(item.event.timestamp);
+    if (item.turnNumber !== currentTurn || localTimestamp.date !== currentDate) {
+      if (currentTurn !== undefined) console.log("");
+      const dateChanged = localTimestamp.date !== currentDate;
       currentTurn = item.turnNumber;
-      console.log(`## 第 ${currentTurn} 轮\n`);
+      currentDate = localTimestamp.date;
+      console.log(dateChanged
+        ? `${localTimestamp.date} · 第 ${currentTurn} 轮`
+        : `第 ${currentTurn} 轮`);
     }
-    const time = item.event.timestamp ? formatLocalDateTimeWithTZ(item.event.timestamp) : "time unavailable";
-    console.log(`### 步骤 ${item.stepNumber} · ${timelineEventLabel(item)} · ${time}`);
-    console.log(`<!-- event_id: ${item.eventId}${item.event.callId ? `; call_id: ${escapeComment(item.event.callId)}` : ""} -->\n`);
     const preview = timelinePreview(item.event.content, Math.min(options.eventChars, remainingChars));
+    const header = `[${item.stepNumber}] [${localTimestamp.time}] ${compactTimelineEventLabel(item)}:`;
+    const inline = (item.event.type === "user" || item.event.type === "assistant")
+      && !preview.truncated
+      && !preview.content.includes("\n");
+    console.log(inline ? `${header} ${preview.content}` : header);
+    if (options.verbose) {
+      console.log(`    event=${item.eventId}${item.event.callId ? ` call=${item.event.callId}` : ""}`);
+    }
     if (item.event.type === "tool_call" || item.event.type === "tool_result") {
       const fence = markdownCodeFence(preview.content);
       console.log(`${fence}text\n${preview.content}\n${fence}`);
-    } else {
+    } else if (!inline) {
       console.log(preview.content);
     }
-    if (preview.truncated) console.log(`\n展开该步骤：/nbt sessions get ${item.eventId}`);
-    console.log("");
+    if (preview.truncated) console.log(`〔内容已截断：/nbt sessions get ${item.eventId}〕`);
     remainingChars -= preview.content.length;
     lastPrinted = item;
     printed++;
@@ -621,14 +631,31 @@ function printTimeline(
   }
 }
 
-function timelineEventLabel(item: TimelineItem): string {
-  const name = item.event.name ? ` · ${item.event.name}` : "";
+function compactTimelineEventLabel(item: TimelineItem): string {
+  const name = item.event.name;
   switch (item.event.type) {
-    case "user": return "用户输入";
+    case "user": return "用户";
     case "assistant": return item.finalAssistant ? "最终回复" : "过程消息";
-    case "tool_call": return `工具调用${name}`;
-    case "tool_result": return `工具结果${name}`;
+    case "tool_call": return name ? `${name} 调用` : "工具调用";
+    case "tool_result": return name ? `${name} 结果` : "工具结果";
   }
+}
+
+function compactSessionTimeRange(row: SessionRow): string {
+  const start = utcToLocalDateTime(row.started_at);
+  if (!row.ended_at) return `${start}～进行中`;
+  const end = utcToLocalDateTime(row.ended_at);
+  const [startDate = "", startTime = ""] = start.split(" ");
+  const [endDate = "", endTime = ""] = end.split(" ");
+  return startDate === endDate
+    ? `${startDate} ${startTime}～${endTime}`
+    : `${start}～${end}`;
+}
+
+function compactEventTimestamp(timestamp: string | undefined): { date: string; time: string } {
+  if (!timestamp) return { date: "日期未知", time: "时间未知" };
+  const [date = "日期未知", time = "时间未知"] = utcToLocalDateTime(timestamp).split(" ");
+  return { date, time };
 }
 
 function timelinePreview(content: string, maxChars: number): { content: string; truncated: boolean } {

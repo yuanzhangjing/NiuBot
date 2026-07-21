@@ -171,21 +171,26 @@ describe("nbt sessions", () => {
 
     lines.length = 0;
     await handleSessions(db, ["get", "s1"], "c1", "p2p", home, "NiuBot", parseArgs);
-    expect(lines.join("\n")).toContain("范围：第 1～10 步");
+    expect(lines.join("\n")).toContain("Timezone: Asia/Shanghai");
+    expect(lines.join("\n")).toContain("Session s1 · codex · 2026-07-13 09:00～10:00");
+    expect(lines.join("\n")).toContain("步骤 1～10");
+    expect(lines.join("\n").match(/2026-07-13 · 第/g)).toHaveLength(1);
+    expect(lines.join("\n")).toContain("\n第 2 轮\n");
     expect(lines.join("\n")).toContain("本页显示 10 步，还有更多");
     expect(lines.join("\n")).toContain("下一页：/nbt sessions get s1 --after-event");
 
     lines.length = 0;
     await handleSessions(db, ["get", "s1", "--page-size", "3", "--event-chars", "200"], "c1", "p2p", home, "NiuBot", parseArgs);
     const timelinePage = lines.join("\n");
-    expect(timelinePage).toContain("视图：执行过程");
-    expect(timelinePage).toContain("范围：第 1～3 步");
-    expect(timelinePage).toContain("步骤 1 · 用户输入");
-    expect(timelinePage).toContain("步骤 2 · 工具调用 · shell");
-    expect(timelinePage).toContain("步骤 3 · 工具结果");
+    expect(timelinePage).toContain("步骤 1～3");
+    expect(timelinePage).toContain("2026-07-13 · 第 1 轮");
+    expect(timelinePage).toContain("[1] [09:00] 用户: 查找唯一标记 NEEDLE_FULL_TEXT");
+    expect(timelinePage).toContain("[2] [09:00] shell 调用:");
+    expect(timelinePage).toContain("[3] [09:00] 工具结果:");
     expect(timelinePage).toContain("LONG_OUTPUT");
-    expect(timelinePage).toContain("展开该步骤：/nbt sessions get s1:");
+    expect(timelinePage).toContain("〔内容已截断：/nbt sessions get s1:");
     expect(timelinePage).toContain("--after-event");
+    expect(timelinePage).not.toContain("event=");
     expect(timelinePage).not.toContain("TAIL_MARKER");
     expect(timelinePage).not.toContain("recommended_plugins");
 
@@ -226,15 +231,17 @@ describe("nbt sessions", () => {
 
     lines.length = 0;
     await handleSessions(db, ["get", "s1", "--turn", "1", "--verbose", "--max-chars", "30000"], "c1", "p2p", home, "NiuBot", parseArgs);
-    expect(lines.join("\n")).toContain("步骤 2 · 工具调用 · shell");
+    expect(lines.join("\n")).toContain("[2] [09:00] shell 调用:");
+    expect(lines.join("\n")).toContain("event=s1:");
+    expect(lines.join("\n")).toContain("call=call--fence");
     expect(lines.join("\n")).toContain("LONG_OUTPUT");
-    expect(lines.join("\n")).toContain("步骤 4 · 最终回复");
+    expect(lines.join("\n")).toContain("[4] [09:00] 最终回复: 已经处理");
 
     lines.length = 0;
     await handleSessions(db, ["get", "s1", "--turn", "1", "--verbose", "--event-page-size", "2"], "c1", "p2p", home, "NiuBot", parseArgs);
     const verboseFirstPage = lines.join("\n");
     const eventCursor = /--after-event ([^ ]+)/.exec(verboseFirstPage)?.[1];
-    expect(verboseFirstPage).toContain("范围：第 1 轮，第 1～2 步");
+    expect(verboseFirstPage).toContain("步骤 1～2 · 第 1 轮");
     expect(verboseFirstPage).toContain("本页显示 2 步，还有更多");
     expect(eventCursor).toBeTruthy();
     expect(verboseFirstPage).not.toContain("LONG_OUTPUT");
@@ -252,7 +259,7 @@ describe("nbt sessions", () => {
       "get", "s1", "--turn", "1", "--verbose",
       "--after-event", eventCursor!, "--event-page-size", "2", "--max-chars", "1000",
     ], "c1", "p2p", home, "NiuBot", parseArgs);
-    expect(lines.join("\n")).toContain("展开该步骤：");
+    expect(lines.join("\n")).toContain("〔内容已截断：");
     expect(lines.join("\n")).toContain("下一页：");
 
     lines.length = 0;
