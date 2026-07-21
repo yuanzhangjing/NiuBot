@@ -170,7 +170,7 @@ describe("ResponseSender", () => {
     ]);
   });
 
-  test("continues to text when card times out", async () => {
+  test("does not retry with text when card delivery times out", async () => {
     vi.useFakeTimers();
     const { im, calls } = createAdapter({
       async sendCard(chatId, _header, content, _footer, replyToMsgId) {
@@ -188,8 +188,12 @@ describe("ResponseSender", () => {
 
     await vi.advanceTimersByTimeAsync(100);
 
-    await expect(pending).resolves.toEqual({ ok: true, platformMsgId: "text-msg", method: "text" });
-    expect(calls.map((call) => call.method)).toEqual(["card", "text"]);
+    await expect(pending).resolves.toMatchObject({
+      ok: false,
+      uncertain: true,
+      methodsTried: ["card:create"],
+    });
+    expect(calls.map((call) => call.method)).toEqual(["card"]);
   });
 
   test("returns failure instead of throwing when all methods fail", async () => {

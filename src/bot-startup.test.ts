@@ -7,7 +7,7 @@ afterEach(() => {
 });
 
 describe("startBotRuntime", () => {
-  test("starts API and cron without waiting for Feishu websocket", async () => {
+  test("recovers Transport state and starts API and cron without waiting for the platform connection", async () => {
     vi.useFakeTimers();
     const order: string[] = [];
     const warnings: Array<Record<string, unknown> | undefined> = [];
@@ -17,9 +17,10 @@ describe("startBotRuntime", () => {
         start: async () => { order.push("pipeline.start"); },
         recover: async () => { order.push("pipeline.recover"); },
       },
-      im: {
+      transport: {
+        recover: async () => { order.push("transport.recover"); },
         start: async () => {
-          order.push("im.start");
+          order.push("transport.start");
           await new Promise<void>(() => {});
         },
       },
@@ -43,15 +44,16 @@ describe("startBotRuntime", () => {
     expect(order).toEqual([
       "pipeline.start",
       "pipeline.recover",
+      "transport.recover",
       "api.start",
       "cron.start",
-      "im.start",
+      "transport.start",
     ]);
 
     await vi.advanceTimersByTimeAsync(100);
     expect(warnings).toContainEqual(expect.objectContaining({
       name: "NiuBot",
-      error: "TimeoutError: im.start timed out after 100ms",
+      error: "TimeoutError: transport.start timed out after 100ms",
     }));
   });
 });

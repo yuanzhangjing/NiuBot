@@ -10,6 +10,7 @@ import {
   getMessageByPlatformId,
 } from "./database/schema.js";
 import { FeishuAdapter } from "./im/feishu/adapter.js";
+import { PersistentTransport } from "./transport/persistent-transport.js";
 import { Pipeline, type BotIdentity } from "./core/pipeline.js";
 import { ApiServer, type ApiHandler } from "./core/api.js";
 import { CronScheduler } from "./core/cron.js";
@@ -25,7 +26,7 @@ export interface BotInstance {
   id: string;
   config: BotConfig;
   db: Database.Database;
-  im: FeishuAdapter;
+  transport: PersistentTransport;
   pipeline: Pipeline;
   apiServer: ApiServer;
   cronScheduler: CronScheduler;
@@ -101,9 +102,17 @@ export async function createBotInstance(
     model: runtimeConfig?.model,
   };
 
+  const transport = new PersistentTransport({
+    db,
+    botId: botConfig.id,
+    platform: "feishu",
+    adapter: im,
+    storageDir: path.dirname(botConfig.dbPath),
+  });
+
   const pipeline = new Pipeline(
     db,
-    im,
+    transport,
     agent,
     botIdentity,
     botConfig.workingDirectory,
@@ -123,6 +132,7 @@ export async function createBotInstance(
     undefined,
     getBackendCapabilities,
   );
+  transport.onInbound((delivery) => pipeline.handleInbound(delivery));
 
   // 6. 创建 API Server
   const endpoint = resolveBotEndpoint(NIUBOT_HOME, botConfig.id, { unixSocketDirectory: path.dirname(botConfig.dbPath) });
@@ -160,7 +170,7 @@ export async function createBotInstance(
     id: botConfig.id,
     config: botConfig,
     db,
-    im,
+    transport,
     pipeline,
     apiServer,
     cronScheduler,

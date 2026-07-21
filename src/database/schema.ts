@@ -342,20 +342,148 @@ const migrations: Migration[] = [
   },
 ];
 
+const transportMigrations: Migration[] = [
+  {
+    version: 1,
+    description: "Add persistent transport inbox and outbox",
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS transport_inbox (
+          id                INTEGER PRIMARY KEY AUTOINCREMENT,
+          bot_id            TEXT NOT NULL,
+          platform          TEXT NOT NULL,
+          platform_msg_id   TEXT NOT NULL,
+          payload_json      TEXT NOT NULL,
+          status            TEXT NOT NULL DEFAULT 'pending'
+                            CHECK(status IN ('pending', 'queued', 'processing', 'completed', 'failed', 'stopped', 'discarded', 'interrupted')),
+          message_id        INTEGER,
+          run_id            TEXT,
+          attempt_count     INTEGER NOT NULL DEFAULT 0,
+          error             TEXT,
+          received_at       TEXT NOT NULL DEFAULT (datetime('now')),
+          queued_at         TEXT,
+          processing_at     TEXT,
+          completed_at      TEXT,
+          updated_at        TEXT NOT NULL DEFAULT (datetime('now')),
+          UNIQUE(bot_id, platform, platform_msg_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_transport_inbox_recovery
+          ON transport_inbox(bot_id, status, id);
+        CREATE INDEX IF NOT EXISTS idx_transport_inbox_message
+          ON transport_inbox(bot_id, message_id);
+        CREATE INDEX IF NOT EXISTS idx_transport_inbox_run
+          ON transport_inbox(bot_id, run_id);
+
+        CREATE TABLE IF NOT EXISTS transport_outbox (
+          id                INTEGER PRIMARY KEY AUTOINCREMENT,
+          request_id        TEXT NOT NULL UNIQUE,
+          bot_id            TEXT NOT NULL,
+          platform          TEXT NOT NULL,
+          kind              TEXT NOT NULL,
+          chat_id           TEXT,
+          payload_json      TEXT NOT NULL,
+          status            TEXT NOT NULL DEFAULT 'pending'
+                            CHECK(status IN ('pending', 'sending', 'sent', 'failed', 'unknown')),
+          attempt_count     INTEGER NOT NULL DEFAULT 0,
+          platform_msg_id   TEXT,
+          error             TEXT,
+          created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+          sending_at        TEXT,
+          completed_at      TEXT,
+          updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_transport_outbox_recovery
+          ON transport_outbox(bot_id, status, id);
+        CREATE INDEX IF NOT EXISTS idx_transport_outbox_chat
+          ON transport_outbox(bot_id, chat_id, id);
+      `);
+    },
+  },
+  {
+    version: 2,
+    description: "Add atomic claim state to persistent transport inbox",
+    up: (db) => {
+      db.exec(`
+        DROP INDEX IF EXISTS idx_transport_inbox_recovery;
+        DROP INDEX IF EXISTS idx_transport_inbox_message;
+        DROP INDEX IF EXISTS idx_transport_inbox_run;
+
+        ALTER TABLE transport_inbox RENAME TO transport_inbox_v1;
+
+        CREATE TABLE transport_inbox (
+          id                INTEGER PRIMARY KEY AUTOINCREMENT,
+          bot_id            TEXT NOT NULL,
+          platform          TEXT NOT NULL,
+          platform_msg_id   TEXT NOT NULL,
+          payload_json      TEXT NOT NULL,
+          status            TEXT NOT NULL DEFAULT 'pending'
+                            CHECK(status IN ('pending', 'dispatching', 'queued', 'processing', 'completed', 'failed', 'stopped', 'discarded', 'interrupted')),
+          message_id        INTEGER,
+          run_id            TEXT,
+          claim_token       TEXT,
+          attempt_count     INTEGER NOT NULL DEFAULT 0,
+          error             TEXT,
+          received_at       TEXT NOT NULL DEFAULT (datetime('now')),
+          claimed_at        TEXT,
+          queued_at         TEXT,
+          processing_at     TEXT,
+          completed_at      TEXT,
+          updated_at        TEXT NOT NULL DEFAULT (datetime('now')),
+          UNIQUE(bot_id, platform, platform_msg_id)
+        );
+
+        INSERT INTO transport_inbox (
+          id, bot_id, platform, platform_msg_id, payload_json, status,
+          message_id, run_id, attempt_count, error, received_at,
+          queued_at, processing_at, completed_at, updated_at
+        )
+        SELECT
+          id, bot_id, platform, platform_msg_id, payload_json, status,
+          message_id, run_id, attempt_count, error, received_at,
+          queued_at, processing_at, completed_at, updated_at
+        FROM transport_inbox_v1;
+
+        DROP TABLE transport_inbox_v1;
+
+        CREATE INDEX idx_transport_inbox_recovery
+          ON transport_inbox(bot_id, status, id);
+        CREATE INDEX idx_transport_inbox_message
+          ON transport_inbox(bot_id, message_id);
+        CREATE INDEX idx_transport_inbox_run
+          ON transport_inbox(bot_id, run_id);
+      `);
+    },
+  },
+];
+
 export const LATEST_SCHEMA_VERSION = migrations[migrations.length - 1]!.version;
+export const ROLLBACK_COMPATIBLE_SCHEMA_VERSIONS = [15, 16] as const;
+export const LATEST_TRANSPORT_SCHEMA_VERSION = transportMigrations[transportMigrations.length - 1]!.version;
 
 // ── Database initialization ─────────────────────────────────────────
 
 export function initDatabase(dbPath: string): Database.Database {
   const db = new Database(dbPath);
-  db.pragma("journal_mode = WAL");
-  db.pragma("foreign_keys = ON");
-  db.pragma("busy_timeout = 5000");
+  try {
+    db.pragma("journal_mode = WAL");
+    db.pragma("foreign_keys = ON");
+    db.pragma("busy_timeout = 5000");
 
-  runMigrations(db);
+    runMigrations(db);
+    runTransportMigrations(db);
 
-  log.info("database initialized", { path: dbPath, schemaVersion: getSchemaVersion(db) });
-  return db;
+    log.info("database initialized", {
+      path: dbPath,
+      schemaVersion: getSchemaVersion(db),
+      transportSchemaVersion: getComponentSchemaVersion(db, "transport"),
+    });
+    return db;
+  } catch (err) {
+    db.close();
+    throw err;
+  }
 }
 
 export function getBotRuntimeBackend(db: Database.Database, botName: string): AgentBackendType | undefined {
@@ -678,6 +806,77 @@ function setSchemaVersion(db: Database.Database, version: number): void {
   db.pragma(`user_version = ${version}`);
 }
 
+function ensureComponentSchemaTable(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS niubot_component_schema_versions (
+      component  TEXT PRIMARY KEY,
+      version    INTEGER NOT NULL,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `);
+}
+
+function getComponentSchemaVersion(db: Database.Database, component: string): number {
+  const row = db.prepare(
+    "SELECT version FROM niubot_component_schema_versions WHERE component = ?",
+  ).get(component) as { version: number } | undefined;
+  return row?.version ?? 0;
+}
+
+function setComponentSchemaVersion(db: Database.Database, component: string, version: number): void {
+  db.prepare(`
+    INSERT INTO niubot_component_schema_versions (component, version, updated_at)
+    VALUES (?, ?, datetime('now'))
+    ON CONFLICT(component) DO UPDATE SET
+      version = excluded.version,
+      updated_at = excluded.updated_at
+  `).run(component, version);
+}
+
+function detectTransportSchemaVersion(db: Database.Database): number {
+  const tables = db.prepare(`
+    SELECT name FROM sqlite_master
+    WHERE type = 'table' AND name IN ('transport_inbox', 'transport_outbox')
+  `).pluck().all() as string[];
+  if (tables.length === 0) return 0;
+  if (tables.length !== 2) {
+    throw new Error("Transport schema is incomplete; manual recovery is required.");
+  }
+  const inboxColumns = tableColumns(db, "transport_inbox");
+  const outboxColumns = tableColumns(db, "transport_outbox");
+  assertRequiredColumns("transport_inbox", inboxColumns, [
+    "id", "bot_id", "platform", "platform_msg_id", "payload_json", "status",
+    "message_id", "run_id", "attempt_count", "error", "received_at", "queued_at",
+    "processing_at", "completed_at", "updated_at",
+  ]);
+  assertRequiredColumns("transport_outbox", outboxColumns, [
+    "id", "request_id", "bot_id", "platform", "kind", "chat_id", "payload_json",
+    "status", "attempt_count", "platform_msg_id", "error", "created_at", "sending_at",
+    "completed_at", "updated_at",
+  ]);
+  const hasClaimToken = inboxColumns.has("claim_token");
+  const hasClaimedAt = inboxColumns.has("claimed_at");
+  if (hasClaimToken !== hasClaimedAt) {
+    throw new Error("Transport inbox claim schema is incomplete; manual recovery is required.");
+  }
+  return hasClaimToken ? 2 : 1;
+}
+
+function tableColumns(db: Database.Database, table: string): Set<string> {
+  const columns = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+  return new Set(columns.map((column) => column.name));
+}
+
+function assertRequiredColumns(table: string, columns: Set<string>, required: string[]): void {
+  const missing = required.filter((column) => !columns.has(column));
+  if (missing.length > 0) {
+    throw new Error(
+      `Transport schema table ${table} is missing columns: ${missing.join(", ")}; ` +
+      "manual recovery is required.",
+    );
+  }
+}
+
 function runMigrations(db: Database.Database): void {
   let currentVersion = getSchemaVersion(db);
 
@@ -703,6 +902,11 @@ function runMigrations(db: Database.Database): void {
     );
   }
 
+  // schema 15 是最近公开版本仍在使用的回滚边界。migration 16 只增加
+  // nullable cron timezone 字段，可以安全补齐，但不能提高 user_version，
+  // 否则旧代码回滚后会拒绝打开数据库。
+  const preserveLegacyVersion = currentVersion === 15;
+
   // 跑 pending migrations
   const pending = migrations.filter((m) => m.version > currentVersion);
   if (pending.length === 0) return;
@@ -711,9 +915,58 @@ function runMigrations(db: Database.Database): void {
     log.info("running migration", { version: migration.version, description: migration.description });
     db.transaction(() => {
       migration.up(db);
-      setSchemaVersion(db, migration.version);
+      if (!(preserveLegacyVersion && migration.version === 16)) {
+        setSchemaVersion(db, migration.version);
+      }
     })();
-    log.info("migration completed", { version: migration.version });
+    log.info("migration completed", {
+      version: migration.version,
+      schemaVersion: getSchemaVersion(db),
+      rollbackCompatible: preserveLegacyVersion && migration.version === 16,
+    });
+  }
+}
+
+function runTransportMigrations(db: Database.Database): void {
+  ensureComponentSchemaTable(db);
+  let currentVersion = getComponentSchemaVersion(db, "transport");
+  const detected = detectTransportSchemaVersion(db);
+  if (currentVersion === 0) {
+    if (detected > 0) {
+      setComponentSchemaVersion(db, "transport", detected);
+      currentVersion = detected;
+    }
+  } else if (detected !== currentVersion) {
+    throw new Error(
+      `Transport schema metadata (${currentVersion}) does not match its tables (${detected}); ` +
+      "manual recovery is required.",
+    );
+  }
+
+  if (currentVersion > LATEST_TRANSPORT_SCHEMA_VERSION) {
+    throw new Error(
+      `Transport schema version (${currentVersion}) is newer than code (${LATEST_TRANSPORT_SCHEMA_VERSION}). ` +
+      "Please upgrade NiuBot to a version that supports this transport schema.",
+    );
+  }
+
+  for (const migration of transportMigrations.filter((item) => item.version > currentVersion)) {
+    log.info("running transport migration", {
+      version: migration.version,
+      description: migration.description,
+    });
+    db.transaction(() => {
+      migration.up(db);
+      setComponentSchemaVersion(db, "transport", migration.version);
+    })();
+    log.info("transport migration completed", { version: migration.version });
+  }
+
+  const finalVersion = detectTransportSchemaVersion(db);
+  if (finalVersion !== LATEST_TRANSPORT_SCHEMA_VERSION) {
+    throw new Error(
+      `Transport schema migration finished at ${finalVersion}, expected ${LATEST_TRANSPORT_SCHEMA_VERSION}.`,
+    );
   }
 }
 

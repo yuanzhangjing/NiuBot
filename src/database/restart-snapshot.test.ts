@@ -4,10 +4,14 @@ import path from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, test } from "vitest";
 import type { NiuBotConfig } from "../config.js";
-import { initDatabase, LATEST_SCHEMA_VERSION } from "./schema.js";
+import {
+  initDatabase,
+  LATEST_SCHEMA_VERSION,
+  ROLLBACK_COMPATIBLE_SCHEMA_VERSIONS,
+} from "./schema.js";
 import {
   applyPreflightDatabaseManifest,
-  assertDatabasesAtSchemaVersion,
+  assertDatabasesAtCompatibleSchemaVersion,
   cleanupRestartDatabaseSnapshot,
   createRestartDatabaseSnapshot,
   restoreRestartDatabaseSnapshot,
@@ -22,7 +26,7 @@ afterEach(() => {
 });
 
 describe("restart database snapshot", () => {
-  test("keeps the bridge release on schema 16 without transport tables", () => {
+  test("keeps transport schema separate from the core schema", () => {
     const root = temporaryDirectory();
     const database = initDatabase(path.join(root, "bridge.db"));
 
@@ -30,7 +34,10 @@ describe("restart database snapshot", () => {
     expect(database.pragma("user_version", { simple: true })).toBe(16);
     expect(database.prepare(
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('transport_inbox', 'transport_outbox')",
-    ).all()).toEqual([]);
+    ).all()).toHaveLength(2);
+    expect(database.prepare(
+      "SELECT version FROM niubot_component_schema_versions WHERE component = 'transport'",
+    ).pluck().get()).toBe(2);
 
     database.close();
   });
@@ -108,16 +115,32 @@ describe("restart database snapshot", () => {
       .toThrow(/inside the snapshot directory/);
   });
 
-  test("only allows legacy preflight when no schema migration is pending", () => {
+  test("only allows legacy preflight for rollback-compatible core schemas", () => {
     const root = temporaryDirectory();
     const databasePath = path.join(root, "bot.db");
     const database = new Database(databasePath);
     database.pragma(`user_version = ${LATEST_SCHEMA_VERSION}`);
     database.close();
 
-    expect(() => assertDatabasesAtSchemaVersion([databasePath], LATEST_SCHEMA_VERSION)).not.toThrow();
-    expect(() => assertDatabasesAtSchemaVersion([databasePath], LATEST_SCHEMA_VERSION + 1)).toThrow(/cannot migrate/);
-    expect(() => assertDatabasesAtSchemaVersion([path.join(root, "missing.db")], LATEST_SCHEMA_VERSION))
+    expect(() => assertDatabasesAtCompatibleSchemaVersion(
+      [databasePath],
+      ROLLBACK_COMPATIBLE_SCHEMA_VERSIONS,
+    )).not.toThrow();
+
+    const legacy = new Database(databasePath);
+    legacy.pragma("user_version = 15");
+    legacy.close();
+    expect(() => assertDatabasesAtCompatibleSchemaVersion(
+      [databasePath],
+      ROLLBACK_COMPATIBLE_SCHEMA_VERSIONS,
+    )).not.toThrow();
+
+    expect(() => assertDatabasesAtCompatibleSchemaVersion([databasePath], [LATEST_SCHEMA_VERSION + 1]))
+      .toThrow(/cannot safely upgrade/);
+    expect(() => assertDatabasesAtCompatibleSchemaVersion(
+      [path.join(root, "missing.db")],
+      ROLLBACK_COMPATIBLE_SCHEMA_VERSIONS,
+    ))
       .toThrow(/missing database/);
   });
 

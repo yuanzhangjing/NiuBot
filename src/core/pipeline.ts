@@ -6,8 +6,9 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import type Database from "better-sqlite3";
-import type { PlatformAdapter, NormalizedMessage } from "../im/types.js";
 import { escapeYamlContent, renderMessageNodes } from "../im/render.js";
+import { isDeliveryUncertainError } from "../transport/errors.js";
+import type { InboundDelivery, NormalizedMessage, TransportClient } from "../transport/types.js";
 import { ERROR_DISPLAY_MAX_LEN } from "../agent/types.js";
 import { AgentSessionNotStartedError, type AgentBackend, type AgentSession, type AgentSessionActivity, type SessionConfig } from "../agent/types.js";
 import { CliAgentBackend, buildNiubotEnv } from "../agent/cli-base.js";
@@ -89,6 +90,10 @@ const INTERRUPT_WORDS = new Set([
   "等等", "等一下", "稍等",
   "stop", "cancel", "abort",
 ]);
+const BUILTIN_COMMANDS = new Set([
+  "/restart", "/update", "/service", "/new", "/cron", "/agent", "/model",
+  "/admin", "/help", "/stop", "/clear", "/flush", "/task", "/status", "/history",
+]);
 // ── Watchdog 常量 ──
 const AGENT_WATCHDOG_INTERVAL_MS = 15_000;     // 15 秒检测间隔
 const AGENT_IDLE_THRESHOLD_MS = 600_000;       // 10 分钟：第一次 idle 通知
@@ -152,13 +157,18 @@ interface RunningTask {
 
 interface PendingTransitionMessage {
   msg: NormalizedMessage;
+  inboxId?: number;
+  claimToken?: string;
+  recoveredMessageId?: number;
+  resolve: () => void;
+  reject: (error: unknown) => void;
 }
 
 type SessionEndStatus = "archived" | "archive_failed" | "discarded";
 
 export class Pipeline {
   private db: Database.Database;
-  private im: PlatformAdapter;
+  private transport: TransportClient;
   private agent: AgentBackend;
   private backendType: AgentBackendType;
   private backendResolver?: (type: AgentBackendType) => Promise<AgentBackend>;
@@ -262,7 +272,7 @@ export class Pipeline {
 
   constructor(
     db: Database.Database,
-    im: PlatformAdapter,
+    transport: TransportClient,
     agent: AgentBackend,
     botIdentity: BotIdentity,
     workingDirectory: string,
@@ -279,7 +289,7 @@ export class Pipeline {
     getBackendCapabilities?: () => BackendCapability[] | Promise<BackendCapability[]>,
   ) {
     this.db = db;
-    this.im = im;
+    this.transport = transport;
     this.agent = agent;
     this.backendType = backendType;
     this.backendResolver = backendResolver;
@@ -306,7 +316,7 @@ export class Pipeline {
       onEvent: (event) => this.persistRuntimeEvent(event),
     });
     this.queue = new ChatManager(bufferMs, this.runtimeState);
-    this.responseSender = new ResponseSender(im);
+    this.responseSender = new ResponseSender(transport);
     this.runManager = new RunManager(this.agent, this.runtimeState, this.responseSender);
 
     // 初始 backend 的模型配置入缓存，确保切走再切回来能恢复
@@ -317,6 +327,11 @@ export class Pipeline {
     this.queue.onProcess((runId, chatId, mergedText, messages, signal) => (
       this.process(chatId, mergedText, messages, signal, runId)
     ));
+    this.queue.onDiscard((messages) => {
+      this.transport.discardInboundMessages?.(
+        messages.map((message) => message.dbMsgId).filter((id): id is number => id != null),
+      );
+    });
   }
 
   private async createAgentSession(config: SessionConfig, backend: AgentBackend = this.agent): Promise<AgentSession> {
@@ -328,7 +343,7 @@ export class Pipeline {
     return backend.createSession(config);
   }
 
-  /** 启动管道：注册 IM 消息回调 */
+  /** 启动 Engine 管道；Transport 入站入口由装配层连接。 */
   async start(): Promise<void> {
     // 先用配置里的占位 bot id 建立本地身份，平台真实身份放后台补齐。
     this.botUserId = ensureUser(
@@ -342,7 +357,6 @@ export class Pipeline {
     this.markUnfinishedRuntimeRunsFailedByRestart();
     this.restoreAdminsFromDb();
 
-    this.im.onMessage((msg) => this.handleMessage(msg));
     // 启动 watchdog 定时器
     this.watchdogTimer = setInterval(() => this.runIdleWatchdogSafely(), AGENT_WATCHDOG_INTERVAL_MS);
     if (this.autoUpdateNotificationsEnabled) {
@@ -380,8 +394,8 @@ export class Pipeline {
         label: "bot identity lookup",
         timeoutMs: STARTUP_PLATFORM_TIMEOUT_MS,
         fn: async () => Promise.all([
-          this.im.getBotOpenId(),
-          this.im.getBotName(),
+          this.transport.getBotOpenId(),
+          this.transport.getBotName(),
         ]),
       });
       if (realBotId) {
@@ -468,7 +482,7 @@ export class Pipeline {
 
   /** 通过 IPC 发送消息到指定 chat */
   async sendToChat(platformChatId: string, text: string): Promise<void> {
-    const platformMsgId = await this.im.sendText(platformChatId, text);
+    const platformMsgId = await this.transport.sendText(platformChatId, text);
     const chatRow = this.db.prepare("SELECT id FROM chats WHERE platform_id = ?")
       .get(platformChatId) as { id: string } | undefined;
     if (chatRow) {
@@ -478,7 +492,7 @@ export class Pipeline {
 
   /** 通过 IPC 发送卡片到指定 chat */
   async sendCardToChat(platformChatId: string, header: string, content: string): Promise<void> {
-    const platformMsgId = await this.im.sendCard(platformChatId, header, content);
+    const platformMsgId = await this.transport.sendCard(platformChatId, header, content);
     const chatRow = this.db.prepare("SELECT id FROM chats WHERE platform_id = ?")
       .get(platformChatId) as { id: string } | undefined;
     if (chatRow) {
@@ -488,7 +502,7 @@ export class Pipeline {
 
   /** 通过 IPC 发送文件到指定 chat */
   async sendFileToChat(platformChatId: string, filePath: string): Promise<void> {
-    const platformMsgId = await this.im.sendFile(platformChatId, filePath);
+    const platformMsgId = await this.transport.sendFile(platformChatId, filePath);
     const chatRow = this.db.prepare("SELECT id FROM chats WHERE platform_id = ?")
       .get(platformChatId) as { id: string } | undefined;
     if (chatRow) {
@@ -500,7 +514,7 @@ export class Pipeline {
     if (!msgId || this.pinnedMsgIds.has(msgId)) return;
     this.pinnedMsgIds.add(msgId);
     this.log.info("reaction request", { chatPlatformId, msgId, emoji: MERGED_EMOJI, phase: "queued" });
-    this.im.addReaction(chatPlatformId, msgId, MERGED_EMOJI).catch(() => {});
+    this.transport.addReaction(chatPlatformId, msgId, MERGED_EMOJI).catch(() => {});
   }
 
   private moveMessageToProcessing(chatPlatformId: string, msgId?: string): void {
@@ -509,7 +523,7 @@ export class Pipeline {
     if (this.processingMsgIds.has(msgId)) return;
     this.processingMsgIds.add(msgId);
     this.log.info("reaction request", { chatPlatformId, msgId, emoji: PROCESSING_EMOJI, phase: "processing" });
-    this.im.addReaction(chatPlatformId, msgId, PROCESSING_EMOJI).catch(() => {});
+    this.transport.addReaction(chatPlatformId, msgId, PROCESSING_EMOJI).catch(() => {});
   }
 
   /**
@@ -574,6 +588,22 @@ export class Pipeline {
         event: event.event,
         error: String(err),
       });
+    } finally {
+      try {
+        this.transport.markInboundRunState?.(
+          event.messageIds,
+          event.runId,
+          event.stage,
+          event.error,
+        );
+      } catch (err) {
+        this.log.error("failed to persist inbox run state", {
+          chatId: event.chatId,
+          runId: event.runId,
+          stage: event.stage,
+          error: String(err),
+        });
+      }
     }
   }
 
@@ -722,12 +752,47 @@ export class Pipeline {
     }
   }
 
-  private handleMessage(msg: NormalizedMessage, replayedAfterTransition = false): void {
+  /** Standard Transport entrypoint. Platform events are persisted before reaching this method. */
+  handleInbound(delivery: InboundDelivery): void | Promise<void> {
+    try {
+      const result = this.handleMessage(
+        delivery.message,
+        delivery.replayed,
+        delivery.inboxId,
+        delivery.claimToken,
+        delivery.messageId,
+      );
+      if (result) {
+        return result.catch((error) => {
+          if (delivery.message.platformMsgId) {
+            this.processedMsgIds.delete(delivery.message.platformMsgId);
+          }
+          throw error;
+        });
+      }
+    } catch (error) {
+      if (delivery.message.platformMsgId) {
+        this.processedMsgIds.delete(delivery.message.platformMsgId);
+      }
+      throw error;
+    }
+  }
+
+  private handleMessage(
+    msg: NormalizedMessage,
+    replayedAfterTransition = false,
+    inboxId?: number,
+    claimToken?: string,
+    recoveredMessageId?: number,
+  ): void | Promise<void> {
     const platform = this.botIdentity.platform;
 
     // 消息去重（飞书 WebSocket 可能重复推送）
     if (msg.platformMsgId && this.processedMsgIds.has(msg.platformMsgId)) {
       this.log.debug("duplicate message, skipping", { platformMsgId: msg.platformMsgId });
+      if (inboxId != null && claimToken) {
+        this.transport.markInboundTerminal?.(inboxId, claimToken, "completed");
+      }
       return;
     }
     if (msg.platformMsgId) {
@@ -747,7 +812,10 @@ export class Pipeline {
           msgId: msg.platformMsgId,
         });
         if (msg.platformMsgId) {
-          this.im.addReaction(msg.chatPlatformId, msg.platformMsgId, "Alarm").catch(() => {});
+          this.transport.addReaction(msg.chatPlatformId, msg.platformMsgId, "Alarm").catch(() => {});
+        }
+        if (inboxId != null && claimToken) {
+          this.transport.markInboundTerminal?.(inboxId, claimToken, "discarded", "stale message");
         }
         return;
       }
@@ -762,7 +830,13 @@ export class Pipeline {
 
       if (!isReplyToBot) {
         // 群聊中未 @ bot 也未回复 bot，只存消息不触发
-        this.storeMessageOnly(msg, platform);
+        this.persistInboundMessage({
+          inboxId,
+          claimToken,
+          recoveredMessageId,
+          state: "completed",
+          store: () => this.storeMessageOnly(msg, platform),
+        });
         return;
       }
     }
@@ -795,15 +869,14 @@ export class Pipeline {
         msgId: msg.platformMsgId,
         type: msg.contentType,
       });
-      this.enqueuePendingTransitionMessage(chatId, msg);
-      return;
+      return this.enqueuePendingTransitionMessage(chatId, msg, inboxId, claimToken, recoveredMessageId);
     }
 
     // Fetch group chat name if not known
     if (msg.chatType === "group") {
       const chatRow = this.db.prepare("SELECT name FROM chats WHERE id = ?").get(chatId) as { name: string | null } | undefined;
       if (!chatRow?.name) {
-        this.im.getChatName(msg.chatPlatformId).then((name) => {
+        this.transport.getChatName(msg.chatPlatformId).then((name) => {
           if (name) updateChatName(this.db, chatId, name);
         }).catch(() => {});
       }
@@ -821,17 +894,23 @@ export class Pipeline {
       : undefined;
 
     const sessionId = this.chatSessions.get(chatId)?.sessionId;
-    const incomingMsgId = storeMessage(this.db, {
-      chatId,
-      senderId: userId,
-      sessionId,
-      role: "user",
-      contentText: msg.contentText,
-      contentType: msg.contentType,
-      platform,
-      platformMsgId: msg.platformMsgId,
-      platformTs: platformTsStr,
-      platformRaw: JSON.stringify(msg.raw),
+    const persistIncomingMessage = (state: "queued" | "processing"): number => this.persistInboundMessage({
+      inboxId,
+      claimToken,
+      recoveredMessageId,
+      state,
+      store: () => storeMessage(this.db, {
+        chatId,
+        senderId: userId,
+        sessionId,
+        role: "user",
+        contentText: msg.contentText,
+        contentType: msg.contentType,
+        platform,
+        platformMsgId: msg.platformMsgId,
+        platformTs: platformTsStr,
+        platformRaw: JSON.stringify(msg.raw),
+      }),
     });
 
     this.log.info("message received", {
@@ -873,19 +952,31 @@ export class Pipeline {
     // 短词打断检测（不清空队列，只 kill 当前进程，与 /stop 行为一致）
     const trimmedText = msg.contentText.trim().toLowerCase();
     if (INTERRUPT_WORDS.has(trimmedText) && this.chatSessions.has(chatId)) {
+      persistIncomingMessage("processing");
       this.log.info("interrupt word detected", { chatId, word: trimmedText });
       this.cancelChat(chatId).catch(() => {});
       const interruptText = "好的，已停止。";
-      this.im.sendText(msg.chatPlatformId, interruptText).then((pmid) => {
+      this.transport.sendText(msg.chatPlatformId, interruptText).then((pmid) => {
         this.storeBotResponse(chatId, interruptText, pmid);
       }).catch(() => {});
+      if (inboxId != null && claimToken) {
+        this.transport.markInboundTerminal?.(inboxId, claimToken, "completed");
+      }
       return;
     }
 
     // 内置命令拦截：/xxx 开头的消息先匹配内置命令，命中则不传给 agent
-    if (this.handleBuiltinCommand(msg.contentText.trim(), userId, chatId, msg.chatPlatformId, msg.chatType, msg.platformMsgId)) {
+    const commandText = msg.contentText.trim();
+    if (this.isBuiltinCommand(commandText, userId)) {
+      persistIncomingMessage("processing");
+      this.handleBuiltinCommand(commandText, userId, chatId, msg.chatPlatformId, msg.chatType, msg.platformMsgId);
+      if (inboxId != null && claimToken) {
+        this.transport.markInboundTerminal?.(inboxId, claimToken, "completed");
+      }
       return;
     }
+
+    const incomingMsgId = persistIncomingMessage("queued");
 
     // Reaction 策略：收到即二选一；pending 先 Pin，非 pending 先 Get；pending 开始处理后再补 Get
     const isPending = this.queue.push({
@@ -926,7 +1017,7 @@ export class Pipeline {
   }
 
   /** Store message without triggering agent (for group chat non-targeted messages) */
-  private storeMessageOnly(msg: NormalizedMessage, platform: string): void {
+  private storeMessageOnly(msg: NormalizedMessage, platform: string): number {
     const userId = ensureUser(this.db, platform, msg.senderPlatformId, msg.senderName, "bot_sender");
     const chatId = ensureChat(this.db, platform, msg.chatPlatformId, msg.chatType, msg.chatName);
 
@@ -934,7 +1025,7 @@ export class Pipeline {
       ? utcDateTimeForSql(new Date(msg.platformTs))
       : undefined;
 
-    storeMessage(this.db, {
+    const messageId = storeMessage(this.db, {
       chatId,
       senderId: userId,
       role: "user",
@@ -954,6 +1045,31 @@ export class Pipeline {
         }
       }
     }
+    return messageId;
+  }
+
+  private persistInboundMessage(options: {
+    inboxId?: number;
+    claimToken?: string;
+    recoveredMessageId?: number;
+    state: "queued" | "processing" | "completed";
+    store: () => number;
+  }): number {
+    const persist = this.db.transaction(() => {
+      const messageId = options.recoveredMessageId ?? options.store();
+      if (options.inboxId != null && options.claimToken) {
+        if (options.state === "queued") {
+          this.transport.markInboundQueued?.(options.inboxId, options.claimToken, messageId);
+        } else if (options.state === "processing") {
+          this.transport.markInboundProcessing?.(options.inboxId, options.claimToken, messageId);
+        } else {
+          this.transport.markInboundQueued?.(options.inboxId, options.claimToken, messageId);
+          this.transport.markInboundTerminal?.(options.inboxId, options.claimToken, "completed");
+        }
+      }
+      return messageId;
+    });
+    return persist();
   }
 
   /** Check if a platform message was sent by the bot */
@@ -976,7 +1092,7 @@ export class Pipeline {
     }
 
     // Fallback: try API (async — cache result for next time)
-    this.im.getMessageContent(parentPlatformMsgId).then((content) => {
+    this.transport.getMessageContent(parentPlatformMsgId).then((content) => {
       if (content && dbMsg) {
         // Update the existing message's content for future lookups
         updateMessageContent(this.db, dbMsg.id, content);
@@ -1024,7 +1140,7 @@ export class Pipeline {
       const creatorId = await withTimeout({
         label: "app creator detection",
         timeoutMs: STARTUP_PLATFORM_TIMEOUT_MS,
-        fn: async () => this.im.getAppCreatorId(),
+        fn: async () => this.transport.getAppCreatorId(),
       });
       if (creatorId) {
         const userId = ensureUser(this.db, platform, creatorId, undefined, undefined);
@@ -1046,7 +1162,7 @@ export class Pipeline {
    *   3. return false → 转发给 agent
    */
   private handleBuiltinCommand(text: string, userId: string, chatId: string, platformChatId: string, chatType: string, msgId?: string): boolean {
-    if (!text.startsWith("/") || text.startsWith("//")) return false;
+    if (!this.isBuiltinCommand(text, userId)) return false;
 
     const parts = text.split(/\s+/);
     const cmd = parts[0].toLowerCase();
@@ -1240,6 +1356,15 @@ export class Pipeline {
     return false;
   }
 
+  private isBuiltinCommand(text: string, userId: string): boolean {
+    if (!text.startsWith("/") || text.startsWith("//")) return false;
+    const firstToken = text.split(/\s+/, 1)[0]?.toLowerCase();
+    if (firstToken && BUILTIN_COMMANDS.has(firstToken)) return true;
+    if (!this.adminRoles.has(userId)) return false;
+    const executable = text.slice(1).split(/\s+/, 1)[0];
+    return !!executable && commandExistsSync(executable);
+  }
+
   /** //xxx 表示强制透传给 agent，实际发送时去掉一个前缀 / */
   private normalizeUserTextForAgent(text: string): string {
     return text.startsWith("//") ? text.slice(1) : text;
@@ -1248,8 +1373,8 @@ export class Pipeline {
   /** 回复文本：有 msgId 时引用回复，否则直接发送，并存入 DB */
   private replyText(chatId: string, platformChatId: string, msgId: string | undefined, text: string): void {
     const sendPromise = msgId
-      ? this.im.sendReply(platformChatId, text, msgId)
-      : this.im.sendText(platformChatId, text);
+      ? this.transport.sendReply(platformChatId, text, msgId)
+      : this.transport.sendText(platformChatId, text);
     sendPromise.then((pmid) => {
       this.storeBotResponse(chatId, text, pmid);
     }).catch(() => {});
@@ -1351,7 +1476,7 @@ export class Pipeline {
       ...sections,
     ].join("\n\n");
     const header = count > 0 ? `Running · ${count} 个任务` : "Status";
-    this.im.sendCard(platformChatId, header, content, undefined, msgId)
+    this.transport.sendCard(platformChatId, header, content, undefined, msgId)
       .then((pmid) => { this.storeBotResponse(chatId, content, pmid); })
       .catch((err) => this.log.error("running list card send failed", { chatId, error: String(err) }));
   }
@@ -1392,7 +1517,7 @@ export class Pipeline {
       `**Working directory:** \`${this.workingDirectory}\``,
     ].join("\n");
 
-    const send = this.im.sendCard(platformChatId, "service", content, undefined, msgId);
+    const send = this.transport.sendCard(platformChatId, "service", content, undefined, msgId);
     send
       .then((pmid) => {
         this.storeBotResponse(chatId, content, pmid);
@@ -1518,7 +1643,7 @@ export class Pipeline {
     }
 
     const content = lines.join("\n");
-    const send = this.im.sendCard(platformChatId, "Cron", content, undefined, msgId);
+    const send = this.transport.sendCard(platformChatId, "Cron", content, undefined, msgId);
     send
       .then((pmid) => {
         this.storeBotResponse(chatId, content, pmid);
@@ -1686,7 +1811,7 @@ export class Pipeline {
 
       const emoji = source === "cron" ? "⏰" : "⚡";
       const header = `${emoji} ${description || prompt.slice(0, 40)}`;
-      const sentPlatformMsgId = await this.im.sendCard(platformChatId, header, response.text, footer);
+      const sentPlatformMsgId = await this.transport.sendCard(platformChatId, header, response.text, footer);
 
       if (sentPlatformMsgId) {
         updateMessagePlatformId(this.db, replyMsgId, sentPlatformMsgId);
@@ -1792,11 +1917,19 @@ export class Pipeline {
     });
   }
 
-  private enqueuePendingTransitionMessage(chatId: string, msg: NormalizedMessage): void {
-    const pending = this.pendingTransitionMessages.get(chatId) ?? [];
-    pending.push({ msg });
-    this.pendingTransitionMessages.set(chatId, pending);
-    this.markQueuedMessage(msg.chatPlatformId, msg.platformMsgId);
+  private enqueuePendingTransitionMessage(
+    chatId: string,
+    msg: NormalizedMessage,
+    inboxId?: number,
+    claimToken?: string,
+    recoveredMessageId?: number,
+  ): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      const pending = this.pendingTransitionMessages.get(chatId) ?? [];
+      pending.push({ msg, inboxId, claimToken, recoveredMessageId, resolve, reject });
+      this.pendingTransitionMessages.set(chatId, pending);
+      this.markQueuedMessage(msg.chatPlatformId, msg.platformMsgId);
+    });
   }
 
   private drainPendingTransitionMessages(chatId: string): void {
@@ -1808,7 +1941,13 @@ export class Pipeline {
       if (entry.msg.platformMsgId) {
         this.processedMsgIds.delete(entry.msg.platformMsgId);
       }
-      this.handleMessage(entry.msg, true);
+      try {
+        Promise.resolve(
+          this.handleMessage(entry.msg, true, entry.inboxId, entry.claimToken, entry.recoveredMessageId),
+        ).then(entry.resolve, entry.reject);
+      } catch (error) {
+        entry.reject(error);
+      }
     }
   }
 
@@ -2051,7 +2190,7 @@ export class Pipeline {
       const progress = `正在探测模型 **${resolvedModel}**，可能需要几十秒，请稍等…`;
       try {
         // 进度提示不入库，避免污染会话历史；发送失败不阻断探测
-        await this.im.sendCard(platformChatId, "Model", progress, undefined, msgId);
+        await this.transport.sendCard(platformChatId, "Model", progress, undefined, msgId);
       } catch (err) {
         this.log.warn("model probe progress send failed", { model: resolvedModel, error: String(err) });
       }
@@ -2201,7 +2340,7 @@ export class Pipeline {
     }
 
     const content = lines.join("\n");
-    const send = this.im.sendCard(platformChatId, "Model", content, undefined, msgId);
+    const send = this.transport.sendCard(platformChatId, "Model", content, undefined, msgId);
     send
       .then((pmid) => { this.storeBotResponse(chatId, content, pmid); })
       .catch(() => {});
@@ -2209,7 +2348,7 @@ export class Pipeline {
 
   /** 发送 Agent 命令卡片回复 */
   private sendAgentCard(chatId: string, platformChatId: string, msgId: string | undefined, header: string, content: string): void {
-    const send = this.im.sendCard(platformChatId, header, content, undefined, msgId);
+    const send = this.transport.sendCard(platformChatId, header, content, undefined, msgId);
     send
       .then((pmid) => { this.storeBotResponse(chatId, content, pmid); })
       .catch((err) => this.log.warn("agent card send failed", {
@@ -2246,7 +2385,7 @@ export class Pipeline {
       );
     }
     const content = lines.join("\n");
-    const send = this.im.sendCard(platformChatId, "Help", content, undefined, msgId);
+    const send = this.transport.sendCard(platformChatId, "Help", content, undefined, msgId);
     send
       .then((pmid) => { this.storeBotResponse(chatId, content, pmid); })
       .catch(() => {});
@@ -2257,7 +2396,7 @@ export class Pipeline {
     this.log.info("shell command", { cmd });
 
     const sendResult = (content: string) => {
-      const sendPromise = this.im.sendCard(platformChatId, "Shell", content, undefined, msgId);
+      const sendPromise = this.transport.sendCard(platformChatId, "Shell", content, undefined, msgId);
       sendPromise.then((pmid) => {
         this.storeBotResponse(chatId, content, pmid);
       }).catch(() => {});
@@ -2317,7 +2456,7 @@ export class Pipeline {
       if (entry.exitCode !== 0) line += ` (exit ${entry.exitCode})`;
       return line;
     });
-    this.im.sendCard(platformChatId, "Shell History", lines.join("\n"), undefined, msgId)
+    this.transport.sendCard(platformChatId, "Shell History", lines.join("\n"), undefined, msgId)
       .then((pmid) => { this.storeBotResponse(chatId, lines.join("\n"), pmid); })
       .catch(() => {});
   }
@@ -2347,14 +2486,14 @@ export class Pipeline {
       const latest = await this.fetchLatestVersion();
       if (!latest || !isNewerPackageVersion(latest, currentVersion)) {
         const text = `已是最新版本 (${currentVersion})。`;
-        const send = this.im.sendCard(platformChatId, "Update", text, undefined, msgId);
+        const send = this.transport.sendCard(platformChatId, "Update", text, undefined, msgId);
         send.then((pmid) => { this.storeBotResponse(chatId, text, pmid); }).catch((err) => this.log.warn("update card send failed", { error: String(err) }));
         return;
       }
 
       if (!confirmed) {
         const text = `发现新版本：${currentVersion} → ${latest}\n发送 \`${UPDATE_CONFIRM_COMMAND}\` 升级并重启。`;
-        const send = this.im.sendCard(platformChatId, "Update", text, undefined, msgId);
+        const send = this.transport.sendCard(platformChatId, "Update", text, undefined, msgId);
         send.then((pmid) => { this.storeBotResponse(chatId, text, pmid); }).catch((err) => this.log.warn("update card send failed", { error: String(err) }));
         return;
       }
@@ -2419,7 +2558,7 @@ export class Pipeline {
     let delivered = false;
     for (const platformChatId of platformChatIds) {
       try {
-        await this.im.sendCard(platformChatId, "Update", text);
+        await this.transport.sendCard(platformChatId, "Update", text);
         delivered = true;
       } catch (err) {
         this.log.warn("failed to send update notification", { platformChatId, error: String(err) });
@@ -2454,7 +2593,7 @@ export class Pipeline {
 
     // 发送"正在重启..."通知
     if (platformChatId) {
-      this.im.sendText(platformChatId, "正在重启...").catch(() => {});
+      this.transport.sendText(platformChatId, "正在重启...").catch(() => {});
     }
 
     try {
@@ -2477,7 +2616,7 @@ export class Pipeline {
       const errMsg = (err instanceof Error ? err.message : String(err)).slice(0, ERROR_DISPLAY_MAX_LEN);
       this.log.error("restart worker failed to launch", { error: errMsg });
       if (platformChatId) {
-        this.im.sendText(platformChatId, `重启失败：\n\`\`\`\n${errMsg.replace(/`{3,}/g, "``")}\n\`\`\``).catch(() => {});
+        this.transport.sendText(platformChatId, `重启失败：\n\`\`\`\n${errMsg.replace(/`{3,}/g, "``")}\n\`\`\``).catch(() => {});
       }
     }
   }
@@ -2703,7 +2842,8 @@ export class Pipeline {
         }
         try {
           return await this.responseSender.sendReply(chatSession.platformChatId, text, triggerMsgId, signal);
-        } catch {
+        } catch (error) {
+          if (isUncertainSendError(error)) throw error;
           return this.responseSender.sendText(chatSession.platformChatId, text, signal);
         }
       };
@@ -2712,7 +2852,8 @@ export class Pipeline {
         if (triggerMsgId) {
           try {
             sentPlatformMsgId = await this.responseSender.sendCard(chatSession.platformChatId, "", displayText, footer, triggerMsgId, signal);
-          } catch {
+          } catch (error) {
+            if (isUncertainSendError(error)) throw error;
             sentPlatformMsgId = await this.responseSender.sendCard(chatSession.platformChatId, "", displayText, footer, undefined, signal);
           }
         } else {
@@ -2724,32 +2865,39 @@ export class Pipeline {
           error: String(sendErr),
           responseLength: response.text.length,
         });
-        const preferOriginalText = sendErr instanceof TimeoutError;
-        try {
-          deliveredText = preferOriginalText ? displayText : `发送失败：${extractPlatformErrorDetail(sendErr)}`;
-          sentPlatformMsgId = await sendTextWithReplyFallback(deliveredText);
-        } catch (firstFallbackErr) {
-          this.log.warn("failed to send first fallback text", { chatId, error: String(firstFallbackErr) });
+        if (isUncertainSendError(sendErr)) {
+          this.log.warn("response delivery result unknown, skipping fallback", { chatId, error: String(sendErr) });
+        } else {
           try {
-            deliveredText = preferOriginalText ? displayText : buildPlatformFailureFallback(sendErr);
+            deliveredText = `发送失败：${extractPlatformErrorDetail(sendErr)}`;
             sentPlatformMsgId = await sendTextWithReplyFallback(deliveredText);
-          } catch (fallbackSendErr) {
-            const fileContent = footer ? `${deliveredText}\n\n---\n${footer}` : deliveredText;
-            const result = await this.runManager.sendFinalResponse({
-              runId: runId!,
-              chatId: chatSession.platformChatId,
-              header: "",
-              content: fileContent,
-              signal,
-            });
-            if (result.ok) {
-              sentPlatformMsgId = result.platformMsgId;
-            } else {
-              this.log.error("failed to send degraded response", {
-                chatId,
-                error: result.error,
-                methodsTried: result.methodsTried,
-              });
+          } catch (firstFallbackErr) {
+            this.log.warn("failed to send first fallback text", { chatId, error: String(firstFallbackErr) });
+            if (!isUncertainSendError(firstFallbackErr)) {
+              try {
+                deliveredText = buildPlatformFailureFallback(sendErr);
+                sentPlatformMsgId = await sendTextWithReplyFallback(deliveredText);
+              } catch (fallbackSendErr) {
+                if (!isUncertainSendError(fallbackSendErr)) {
+                  const fileContent = footer ? `${deliveredText}\n\n---\n${footer}` : deliveredText;
+                  const result = await this.runManager.sendFinalResponse({
+                    runId: runId!,
+                    chatId: chatSession.platformChatId,
+                    header: "",
+                    content: fileContent,
+                    signal,
+                  });
+                  if (result.ok) {
+                    sentPlatformMsgId = result.platformMsgId;
+                  } else {
+                    this.log.error("failed to send degraded response", {
+                      chatId,
+                      error: result.error,
+                      methodsTried: result.methodsTried,
+                    });
+                  }
+                }
+              }
             }
           }
         }
@@ -2787,7 +2935,7 @@ export class Pipeline {
           ? `处理出错了：\n\`\`\`\n${detail.replace(/`{3,}/g, "``")}\n\`\`\``
           : "处理出错了，请稍后再试。";
         try {
-          const pmid = await this.im.sendText(platformChatId, errorText);
+          const pmid = await this.transport.sendText(platformChatId, errorText);
           this.storeBotResponse(chatId, errorText, pmid);
         } catch { /* give up */ }
       }
@@ -3058,7 +3206,7 @@ export class Pipeline {
   private sendWatchdogNotification(chatId: string, text: string): void {
     const platformChatId = this.platformChatIds.get(chatId);
     if (!platformChatId) return;
-    this.im.sendText(platformChatId, text).then((pmid) => {
+    this.transport.sendText(platformChatId, text).then((pmid) => {
       this.storeBotResponse(chatId, text, pmid);
     }).catch(() => {});
   }
@@ -3066,7 +3214,7 @@ export class Pipeline {
   private sendWatchdogCard(chatId: string, header: string, content: string): void {
     const platformChatId = this.platformChatIds.get(chatId);
     if (!platformChatId) return;
-    this.im.sendCard(platformChatId, header, content).then((pmid) => {
+    this.transport.sendCard(platformChatId, header, content).then((pmid) => {
       this.storeBotResponse(chatId, content, pmid);
     }).catch(() => {});
   }
@@ -3318,6 +3466,10 @@ function extractAgentErrorDetail(err: unknown): string | null {
   // readable and don't flood IM.
   const joined = unique.join("\n");
   return joined.length > ERROR_DISPLAY_MAX_LEN ? joined.slice(0, ERROR_DISPLAY_MAX_LEN) + "…" : joined;
+}
+
+function isUncertainSendError(error: unknown): boolean {
+  return isDeliveryUncertainError(error) || error instanceof TimeoutError;
 }
 
 function extractPlatformErrorDetail(err: unknown): string {

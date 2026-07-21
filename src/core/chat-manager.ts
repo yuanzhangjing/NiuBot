@@ -51,6 +51,10 @@ export class ChatManager {
     this.queue.onPending(fn);
   }
 
+  onDiscard(fn: (messages: QueuedMessage[]) => void): void {
+    this.queue.onDiscard(fn);
+  }
+
   enqueue(msg: QueuedMessage): boolean {
     const pending = this.queue.push(msg);
     const state = this.runtimeState.getChatState(msg.chatId);

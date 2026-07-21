@@ -11,7 +11,7 @@ import {
 import type { AgentBackend } from "./agent/types.js";
 import type { CliAgentBackend } from "./agent/cli-base.js";
 import { createBotInstance, type BotInstance } from "./bot-instance.js";
-import { LATEST_SCHEMA_VERSION, loadPersistedBotRuntimeState } from "./database/schema.js";
+import { ROLLBACK_COMPATIBLE_SCHEMA_VERSIONS, loadPersistedBotRuntimeState } from "./database/schema.js";
 import { createLogger, setLogLevel } from "./logger.js";
 import { ensureRuntimeNbtShim, prependNiubotBinToPath } from "./platform/cli-runtime.js";
 import { summarizeProxyEnvironment } from "./proxy-env.js";
@@ -27,7 +27,7 @@ import { waitForProcessStartMarker } from "./platform/process.js";
 import { samePlatformPath } from "./platform/files.js";
 import {
   applyPreflightDatabaseManifest,
-  assertDatabasesAtSchemaVersion,
+  assertDatabasesAtCompatibleSchemaVersion,
   PREFLIGHT_DATABASE_MANIFEST_ENV,
 } from "./database/restart-snapshot.js";
 
@@ -115,9 +115,9 @@ async function main(): Promise<void> {
     if (manifestPath) {
       config = applyPreflightDatabaseManifest(config, manifestPath);
     } else {
-      assertDatabasesAtSchemaVersion(
+      assertDatabasesAtCompatibleSchemaVersion(
         config.bots.map((bot) => bot.dbPath),
-        LATEST_SCHEMA_VERSION,
+        ROLLBACK_COMPATIBLE_SCHEMA_VERSIONS,
       );
       legacyReadOnlyPreflight = true;
       log.info("legacy preflight restricted to read-only compatibility checks");
@@ -287,7 +287,7 @@ async function main(): Promise<void> {
     log.info("shutting down...");
 
     for (const bot of bots) {
-      try { await bot.im.stop(); } catch (e) { log.error("im.stop failed", { bot: bot.id, error: String(e) }); }
+      try { await bot.transport.stop(); } catch (e) { log.error("transport.stop failed", { bot: bot.id, error: String(e) }); }
       bot.cronScheduler.stop();
       bot.pipeline.stop();
       bot.apiServer.stop();

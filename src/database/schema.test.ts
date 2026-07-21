@@ -257,5 +257,169 @@ describe("cron timezone schema", () => {
     const migrated = initDatabase(dbPath);
     const columns = migrated.prepare("PRAGMA table_info(cron_jobs)").all() as Array<{ name: string }>;
     expect(columns.map((column) => column.name)).toContain("timezone");
+    expect(migrated.pragma("user_version", { simple: true })).toBe(15);
+  });
+});
+
+describe("public upgrade rollback compatibility", () => {
+  test.each([15, 16])(
+    "keeps a schema %i database openable by its previous release after transport setup",
+    (legacyVersion) => {
+      const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-test-"));
+      tempDirs.push(dir);
+      const dbPath = path.join(dir, "niubot.db");
+      const fixture = initDatabase(dbPath);
+      fixture.exec(`
+        DROP TABLE niubot_component_schema_versions;
+        DROP TABLE transport_inbox;
+        DROP TABLE transport_outbox;
+      `);
+      if (legacyVersion === 15) fixture.exec("ALTER TABLE cron_jobs DROP COLUMN timezone");
+      fixture.pragma(`user_version = ${legacyVersion}`);
+      fixture.close();
+
+      const upgraded = initDatabase(dbPath);
+      expect(upgraded.pragma("user_version", { simple: true })).toBe(legacyVersion);
+      expect(upgraded.prepare(
+        "SELECT version FROM niubot_component_schema_versions WHERE component = 'transport'",
+      ).pluck().get()).toBe(2);
+      expect((upgraded.prepare("PRAGMA table_info(cron_jobs)").all() as Array<{ name: string }>)
+        .some((column) => column.name === "timezone")).toBe(true);
+      upgraded.close();
+
+      // 模拟旧版本回滚后的数据库打开和写入：旧代码只检查 user_version，
+      // 并继续使用不包含 timezone 的原有 SQL。
+      const rolledBack = new Database(dbPath);
+      expect(rolledBack.pragma("user_version", { simple: true })).toBe(legacyVersion);
+      expect(() => rolledBack.prepare(`
+        INSERT INTO cron_jobs (
+          chat_id, creator_user_id, cron_expr, run_at, prompt,
+          description, max_times, until_time
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run("c1", "u1", "0 * * * *", null, "legacy", "", null, null)).not.toThrow();
+      rolledBack.close();
+    },
+  );
+});
+
+describe("transport inbox claim schema", () => {
+  test("migrates transport component version 1 rows without losing state", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-test-"));
+    tempDirs.push(dir);
+    const dbPath = path.join(dir, "niubot.db");
+    const legacy = new Database(dbPath);
+    legacy.exec(`
+      CREATE TABLE transport_inbox (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        bot_id TEXT NOT NULL,
+        platform TEXT NOT NULL,
+        platform_msg_id TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending'
+          CHECK(status IN ('pending', 'queued', 'processing', 'completed', 'failed', 'stopped', 'discarded', 'interrupted')),
+        message_id INTEGER,
+        run_id TEXT,
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        error TEXT,
+        received_at TEXT NOT NULL DEFAULT (datetime('now')),
+        queued_at TEXT,
+        processing_at TEXT,
+        completed_at TEXT,
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE(bot_id, platform, platform_msg_id)
+      );
+      CREATE INDEX idx_transport_inbox_recovery ON transport_inbox(bot_id, status, id);
+      CREATE INDEX idx_transport_inbox_message ON transport_inbox(bot_id, message_id);
+      CREATE INDEX idx_transport_inbox_run ON transport_inbox(bot_id, run_id);
+      CREATE TABLE transport_outbox (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        request_id TEXT NOT NULL UNIQUE,
+        bot_id TEXT NOT NULL,
+        platform TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        chat_id TEXT,
+        payload_json TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending'
+          CHECK(status IN ('pending', 'sending', 'sent', 'failed', 'unknown')),
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        platform_msg_id TEXT,
+        error TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        sending_at TEXT,
+        completed_at TEXT,
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE TABLE niubot_component_schema_versions (
+        component TEXT PRIMARY KEY,
+        version INTEGER NOT NULL,
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      INSERT INTO niubot_component_schema_versions (component, version)
+      VALUES ('transport', 1);
+      INSERT INTO transport_inbox (
+        bot_id, platform, platform_msg_id, payload_json, status, message_id, attempt_count
+      ) VALUES ('NiuBot', 'feishu', 'msg-1', '{}', 'queued', 42, 1);
+      PRAGMA user_version = 16;
+    `);
+    legacy.close();
+
+    const migrated = initDatabase(dbPath);
+    const row = migrated.prepare(`
+      SELECT status, message_id, attempt_count, claim_token, claimed_at
+      FROM transport_inbox WHERE platform_msg_id = 'msg-1'
+    `).get() as Record<string, unknown>;
+
+    expect(row).toMatchObject({
+      status: "queued",
+      message_id: 42,
+      attempt_count: 1,
+      claim_token: null,
+      claimed_at: null,
+    });
+    expect(migrated.pragma("user_version", { simple: true })).toBe(16);
+    expect(migrated.prepare(
+      "SELECT version FROM niubot_component_schema_versions WHERE component = 'transport'",
+    ).pluck().get()).toBe(2);
+  });
+
+  test("rejects incomplete transport tables instead of trusting inferred state", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-test-"));
+    tempDirs.push(dir);
+    const dbPath = path.join(dir, "niubot.db");
+    const database = initDatabase(dbPath);
+    database.exec(`
+      DELETE FROM niubot_component_schema_versions WHERE component = 'transport';
+      DROP TABLE transport_outbox;
+    `);
+    database.close();
+
+    expect(() => openDatabase(dbPath)).toThrow(/Transport schema is incomplete/);
+  });
+
+  test("rejects component metadata that disagrees with transport tables", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-test-"));
+    tempDirs.push(dir);
+    const dbPath = path.join(dir, "niubot.db");
+    const database = initDatabase(dbPath);
+    database.prepare(
+      "UPDATE niubot_component_schema_versions SET version = 1 WHERE component = 'transport'",
+    ).run();
+    database.close();
+
+    expect(() => openDatabase(dbPath)).toThrow(/does not match its tables/);
+  });
+
+  test("rejects transport tables with incomplete claim columns", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-test-"));
+    tempDirs.push(dir);
+    const dbPath = path.join(dir, "niubot.db");
+    const database = initDatabase(dbPath);
+    database.exec(`
+      ALTER TABLE transport_inbox DROP COLUMN claimed_at;
+      DELETE FROM niubot_component_schema_versions WHERE component = 'transport';
+    `);
+    database.close();
+
+    expect(() => openDatabase(dbPath)).toThrow(/claim schema is incomplete/);
   });
 });
