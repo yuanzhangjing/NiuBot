@@ -132,14 +132,13 @@ function sessionList(
   let currentDate: string | undefined;
   for (const row of page) {
     const archive = locate(niubotHome, botName, row);
-    const archiveLabel = archive ? "source-reference" : "missing";
     const time = sessionListTime(row);
     if (time.date !== currentDate) {
       if (currentDate !== undefined) console.log("");
       console.log(time.date);
       currentDate = time.date;
     }
-    console.log(formatSessionListRow(row, archiveLabel, time.range));
+    console.log(formatSessionListRow(row, !archive, time.range));
     const exchange = getSessionLastExchange(db, row.id);
     console.log(`  用户: ${exchange.user ? sessionListPreview(exchange.user.content_text) : "(无)"}`);
     console.log(`  最终回复: ${exchange.response ? sessionListPreview(exchange.response.content_text) : "(无)"}`);
@@ -346,8 +345,15 @@ async function printSessionSummary(
   let remainingChars = maxChars;
   let lastCompleteTurn: TranscriptTurn | undefined;
   let pageTruncated = false;
+  let currentDate: string | undefined;
   for (const turn of selection.turns) {
-    const result = printTurn(botName, row.id, turn, remainingChars);
+    const timestamp = compactEventTimestamp(turn.events[0]?.event.timestamp);
+    const showDate = timestamp.date !== currentDate;
+    currentDate = timestamp.date;
+    const result = printTurn(botName, row.id, turn, remainingChars, {
+      date: showDate ? timestamp.date : undefined,
+      time: timestamp.time,
+    });
     remainingChars = result.remainingChars;
     if (result.truncated) {
       pageTruncated = true;
@@ -704,9 +710,8 @@ function assistantSections(turn: TranscriptTurn): {
 }
 
 function printTurnSessionHeader(row: SessionRow, turns: TranscriptTurn[], totalTurns: number): void {
-  console.log(`# Session ${row.id}`);
-  console.log(`时间：${formatLocalDateTimeWithTZ(row.started_at)} ～ ${row.ended_at ? formatLocalDateTimeWithTZ(row.ended_at) : "ongoing"}`);
-  console.log(`Backend：${row.backend_type ?? "unknown"}`);
+  console.log(`Timezone: ${TZ}`);
+  console.log(`Session ${row.id} · ${row.backend_type ?? "unknown"} · ${compactSessionTimeRange(row)}`);
   if (turns.length > 0) {
     console.log(`范围：第 ${turns[0]!.number}～${turns.at(-1)!.number} 轮，共 ${totalTurns} 轮\n`);
   } else {
@@ -719,11 +724,10 @@ function printTurn(
   sessionId: string,
   turn: TranscriptTurn,
   maxChars: number,
+  timestamp: { date?: string; time: string },
 ): { remainingChars: number; truncated: boolean } {
-  const time = turn.events[0]?.event.timestamp
-    ? formatLocalDateTimeWithTZ(turn.events[0]!.event.timestamp!)
-    : "time unavailable";
-  console.log(`## 第 ${turn.number} 轮 · ${time}\n`);
+  const date = timestamp.date ? `${timestamp.date} · ` : "";
+  console.log(`## ${date}第 ${turn.number} 轮 · ${timestamp.time}\n`);
 
   const users = turn.events.filter((item) => item.event.type === "user");
   const { processMessages, finalMessages } = assistantSections(turn);
@@ -918,12 +922,29 @@ function sessionListTime(row: SessionRow): { date: string; range: string } {
   const [endDate = "日期未知", endTime = "时间未知"] = utcToLocalDateTime(row.ended_at).split(" ");
   return {
     date: endDate,
-    range: startDate === endDate ? `${startTime}～${endTime}` : `${startDate} ${startTime}～${endTime}`,
+    range: startDate === endDate
+      ? (startTime === endTime ? startTime : `${startTime}～${endTime}`)
+      : `${startDate} ${startTime}～${endTime}`,
   };
 }
 
-function formatSessionListRow(row: SessionRow, archive: string, timeRange: string): string {
-  return `[${row.id}] [${timeRange}] ${row.backend_type ?? "unknown"} · ${archive}`;
+function formatSessionListRow(row: SessionRow, archiveMissing: boolean, timeRange: string): string {
+  const archive = archiveMissing ? " · 归档缺失" : "";
+  const metadata = [
+    sessionSourceLabel(row.source),
+    row.backend_type ?? "unknown",
+    `${row.turn_count ?? 0}轮`,
+  ].join(" · ");
+  return `[${row.id}] [${timeRange}] ${metadata}${archive}`;
+}
+
+function sessionSourceLabel(source: string): string {
+  switch (source) {
+    case "user": return "对话";
+    case "cron": return "定时任务";
+    case "task": return "后台任务";
+    default: return source || "未知来源";
+  }
 }
 
 function sessionListPreview(content: string, maxRunes = 160): string {

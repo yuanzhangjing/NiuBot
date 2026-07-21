@@ -15,11 +15,12 @@ export interface SessionRow {
   start_msg_id: number | null;
   end_msg_id: number | null;
   message_count: number | null;
+  turn_count: number | null;
 }
 
 const SESSION_COLUMNS = `
   id, chat_id, user_id, source, status, backend_type, agent_session_id,
-  started_at, ended_at, start_msg_id, end_msg_id, message_count
+  started_at, ended_at, start_msg_id, end_msg_id, message_count, turn_count
 `;
 
 export function listSessions(

@@ -99,10 +99,10 @@ describe("nbt sessions", () => {
     db.prepare(`
       INSERT INTO sessions (
         id, chat_id, user_id, source, status, backend_type, agent_session_id,
-        started_at, ended_at, last_active_at
+        started_at, ended_at, last_active_at, turn_count
       ) VALUES (
         's1', 'c1', 'u2', 'user', 'archived', 'codex', 'thread-1',
-        '2026-07-13 01:00:00', '2026-07-13 02:00:00', '2026-07-13 02:00:00'
+        '2026-07-13 01:00:00', '2026-07-13 02:00:00', '2026-07-13 02:00:00', 5
       )
     `).run();
     const messageId = storeMessage(db, {
@@ -140,7 +140,9 @@ describe("nbt sessions", () => {
     const lines: string[] = [];
     vi.spyOn(console, "log").mockImplementation((...values) => lines.push(values.join(" ")));
     await handleSessions(db, ["list"], "c1", "p2p", home, "NiuBot", parseArgs);
-    expect(lines.join("\n")).toContain("codex · source-reference");
+    expect(lines.join("\n")).toContain("[s1] [09:00～10:00] 对话 · codex · 5轮");
+    expect(lines.join("\n")).not.toContain("source-reference");
+    expect(lines.join("\n")).not.toContain("归档缺失");
 
     lines.length = 0;
     await handleSessions(db, ["search", "NEEDLE_FULL_TEXT"], "c1", "p2p", home, "NiuBot", parseArgs);
@@ -196,13 +198,19 @@ describe("nbt sessions", () => {
 
     lines.length = 0;
     await handleSessions(db, ["get", "s1", "--summary"], "c1", "p2p", home, "NiuBot", parseArgs);
-    expect(lines.join("\n")).toContain("范围：第 1～2 轮，共 5 轮");
-    expect(lines.join("\n")).toContain("用户：\n查找唯一标记 NEEDLE_FULL_TEXT");
-    expect(lines.join("\n")).toContain("工具调用 1 次：shell ×1");
-    expect(lines.join("\n")).toContain("NiuBot：\n已经处理");
-    expect(lines.join("\n")).toContain("--summary --after-turn 2 --page-size 2");
-    expect(lines.join("\n")).not.toContain("recommended_plugins");
-    expect(lines.join("\n")).not.toContain("LONG_OUTPUT");
+    const summaryPage = lines.join("\n");
+    expect(summaryPage).toContain("Timezone: Asia/Shanghai");
+    expect(summaryPage).toContain("Session s1 · codex · 2026-07-13 09:00～10:00");
+    expect(summaryPage).toContain("## 2026-07-13 · 第 1 轮 · 09:00");
+    expect(summaryPage).toContain("## 第 2 轮 · 09:01");
+    expect(summaryPage).not.toContain("(Asia/Shanghai)");
+    expect(summaryPage).toContain("范围：第 1～2 轮，共 5 轮");
+    expect(summaryPage).toContain("用户：\n查找唯一标记 NEEDLE_FULL_TEXT");
+    expect(summaryPage).toContain("工具调用 1 次：shell ×1");
+    expect(summaryPage).toContain("NiuBot：\n已经处理");
+    expect(summaryPage).toContain("--summary --after-turn 2 --page-size 2");
+    expect(summaryPage).not.toContain("recommended_plugins");
+    expect(summaryPage).not.toContain("LONG_OUTPUT");
 
     lines.length = 0;
     await handleSessions(db, ["get", "s1", "--summary", "--after-turn", "2"], "c1", "p2p", home, "NiuBot", parseArgs);
@@ -365,12 +373,12 @@ describe("nbt sessions", () => {
     const insert = db.prepare(`
       INSERT INTO sessions (
         id, chat_id, user_id, source, status, backend_type, agent_session_id,
-        started_at, ended_at, last_active_at
-      ) VALUES (?, 'c1', 'u2', 'user', 'archived', 'codex', ?, ?, ?, ?)
+        started_at, ended_at, last_active_at, turn_count
+      ) VALUES (?, 'c1', 'u2', ?, 'archived', 'codex', ?, ?, ?, ?, ?)
     `);
-    insert.run("s1", "a1", "2026-07-13 01:00:00", "2026-07-13 01:10:00", "2026-07-13 01:10:00");
-    insert.run("s2", "a2", "2026-07-13 02:00:00", "2026-07-13 02:10:00", "2026-07-13 02:10:00");
-    insert.run("s3", "a3", "2026-07-12 03:00:00", "2026-07-13 03:10:00", "2026-07-13 03:10:00");
+    insert.run("s1", "user", "a1", "2026-07-13 01:00:00", "2026-07-13 01:10:00", "2026-07-13 01:10:00", 3);
+    insert.run("s2", "cron", "a2", "2026-07-13 02:00:00", "2026-07-13 02:00:00", "2026-07-13 02:00:00", 1);
+    insert.run("s3", "task", "a3", "2026-07-12 03:00:00", "2026-07-13 03:10:00", "2026-07-13 03:10:00", 1);
     storeMessage(db, {
       chatId: "c1", senderId: "u2", sessionId: "s3", role: "user",
       contentText: "旧 prompt", platform: "feishu",
@@ -406,8 +414,8 @@ describe("nbt sessions", () => {
     const firstPage = lines.join("\n");
     expect(firstPage).toContain("Timezone: Asia/Shanghai");
     expect(firstPage.match(/2026-07-13/g)).toHaveLength(1);
-    expect(firstPage).toContain("[s3] [2026-07-12 11:00～11:10] codex · missing");
-    expect(firstPage).toContain("[s2] [10:00～10:10] codex · missing");
+    expect(firstPage).toContain("[s3] [2026-07-12 11:00～11:10] 后台任务 · codex · 1轮 · 归档缺失");
+    expect(firstPage).toContain("[s2] [10:00] 定时任务 · codex · 1轮 · 归档缺失");
     expect(firstPage).not.toContain("[s1]");
     expect(firstPage).toContain("用户: 最后的 user prompt 第二行");
     expect(firstPage).toContain("最终回复: 最后的 response");
@@ -422,7 +430,7 @@ describe("nbt sessions", () => {
 
     lines.length = 0;
     await handleSessions(db, ["list", "-n", "2", "--after", "s2"], "c1", "p2p", home, "NiuBot", parseArgs);
-    expect(lines.join("\n")).toContain("[s1]");
+    expect(lines.join("\n")).toContain("[s1] [09:00～09:10] 对话 · codex · 3轮 · 归档缺失");
     expect(lines.join("\n")).toContain("用户: (无)");
     expect(lines.join("\n")).toContain("最终回复: (无)");
     expect(lines.join("\n")).toContain("已到最后一页");
