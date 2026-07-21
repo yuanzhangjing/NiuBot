@@ -29,6 +29,8 @@ const DEFAULT_TURN_PAGE_SIZE = 2;
 const MAX_TURN_PAGE_SIZE = 20;
 const DEFAULT_EVENT_PAGE_SIZE = 10;
 const MAX_EVENT_PAGE_SIZE = 100;
+const DEFAULT_EVENT_PREVIEW_CHARS = 1_200;
+const MAX_EVENT_PREVIEW_CHARS = 20_000;
 const TRUNCATED_NOTICE = "\n\n[内容已截断；使用 --max-chars <n> 调高限制]";
 
 interface IdentifiedTranscriptEvent {
@@ -40,6 +42,18 @@ interface IdentifiedTranscriptEvent {
 interface TranscriptTurn {
   number: number;
   events: IdentifiedTranscriptEvent[];
+}
+
+interface TimelineItem extends IdentifiedTranscriptEvent {
+  turnNumber: number;
+  stepNumber: number;
+  finalAssistant: boolean;
+}
+
+interface TimelineSelection {
+  items: TimelineItem[];
+  totalEvents: number;
+  totalTurns: number;
 }
 
 interface SearchMatch {
@@ -136,7 +150,7 @@ async function sessionSearch(
   if (!query) throw new Error("Usage: nbt sessions search <query>");
   const targetChatId = requireChatId(flags["chat-id"] ?? currentChatId);
   const pageSize = boundedCountFlag(flags["limit"] ?? flags["n"], 10, 100);
-  const includeTools = flags["include-tools"] === "true";
+  const messagesOnly = flags["messages-only"] === "true";
   const sessionScanLimit = boundedCountFlag(flags["sessions"], 500, 10_000);
   const eventRange = userTimeRangeToUtc({ since: flags["since"], before: flags["before"] });
   let through: { endedAt: string; id: string } | undefined;
@@ -168,7 +182,7 @@ async function sessionSearch(
       const transcript = transcriptFor(row, archive);
       const messageIds = sessionMessageIds(db, row.id);
       for await (const turn of transcriptTurns(row.id, transcript.events, messageIds)) {
-        const candidates = includeTools ? turn.events : defaultTurnEvents(turn);
+        const candidates = messagesOnly ? defaultTurnEvents(turn) : turn.events;
         for (const item of candidates) {
           if (!instantIsInUtcRange(item.event.timestamp, eventRange)) continue;
           const index = item.event.content.toLocaleLowerCase().indexOf(needle);
@@ -178,7 +192,7 @@ async function sessionSearch(
             messageId: item.messageId,
             sessionId: row.id,
             turnNumber: turn.number,
-            event: item.event,
+            event: { ...item.event, content: "" },
             snippet: snippet(item.event.content, index, query.length),
           });
         }
@@ -250,7 +264,8 @@ async function sessionGet(
   if (!archive) throw new Error(`Session archive not found: ${sessionId}`);
 
   if (flags["format"] === "jsonl"
-    && (flags["turn"] || flags["after-turn"] || flags["after-event"] || flags["verbose"] === "true")) {
+    && (flags["turn"] || flags["after-turn"] || flags["after-event"]
+      || flags["verbose"] === "true" || flags["summary"] === "true")) {
     throw new Error("turn and event pagination flags cannot be combined with --format jsonl");
   }
   const transcript = transcriptFor(row, archive);
@@ -259,30 +274,59 @@ async function sessionGet(
     return;
   }
   const targetTurn = optionalPositiveIntegerFlag(flags["turn"], "--turn");
-  const afterTurn = optionalNonNegativeIntegerFlag(flags["after-turn"], "--after-turn") ?? 0;
+  const summary = flags["summary"] === "true";
+  if (summary) {
+    if (flags["after-event"]) throw new Error("--after-event cannot be combined with --summary");
+    if (flags["verbose"] === "true") throw new Error("--verbose cannot be combined with --summary");
+    await printSessionSummary(row, transcript.events, botName, targetTurn, flags, maxChars);
+    return;
+  }
+  if (flags["after-turn"]) throw new Error("--after-turn requires --summary");
+  const pageSize = boundedCountFlag(
+    flags["page-size"] ?? flags["event-page-size"],
+    DEFAULT_EVENT_PAGE_SIZE,
+    MAX_EVENT_PAGE_SIZE,
+  );
   const verbose = flags["verbose"] === "true";
+  const eventChars = boundedPreviewFlag(
+    flags["event-chars"],
+    verbose ? DEFAULT_EVENT_MAX_CHARS : DEFAULT_EVENT_PREVIEW_CHARS,
+    MAX_EVENT_PREVIEW_CHARS,
+  );
+  const selection = await selectTimelineEvents(row.id, transcript.events, {
+    targetTurn,
+    afterEventId: flags["after-event"],
+    pageSize,
+  });
+  if (targetTurn && targetTurn > selection.totalTurns) throw new Error(`Turn not found: ${targetTurn}`);
+  printTimeline(row, selection, {
+    targetTurn,
+    pageSize,
+    eventChars,
+    maxChars,
+    verbose,
+    flags,
+  });
+}
+
+async function printSessionSummary(
+  row: SessionRow,
+  events: SessionTranscript["events"],
+  botName: string,
+  targetTurn: number | undefined,
+  flags: Record<string, string>,
+  maxChars: number,
+): Promise<void> {
+  const afterTurn = optionalNonNegativeIntegerFlag(flags["after-turn"], "--after-turn") ?? 0;
   if (targetTurn && flags["after-turn"]) throw new Error("--turn cannot be combined with --after-turn");
-  if (verbose && !targetTurn) throw new Error("--verbose requires --turn <number>");
-  if (flags["after-event"] && !verbose) throw new Error("--after-event requires --turn <number> --verbose");
   const pageSize = targetTurn
     ? 1
     : boundedCountFlag(flags["page-size"], DEFAULT_TURN_PAGE_SIZE, MAX_TURN_PAGE_SIZE);
-  const selection = await selectTranscriptTurns(row.id, transcript.events, {
-    targetTurn,
-    afterTurn,
-    pageSize,
-  });
+  const selection = await selectTranscriptTurns(row.id, events, { targetTurn, afterTurn, pageSize });
   if (targetTurn && selection.turns.length === 0) throw new Error(`Turn not found: ${targetTurn}`);
   printTurnSessionHeader(row, selection.turns, selection.totalTurns);
   if (selection.turns.length === 0) {
     console.log("(没有更多 turn)");
-    return;
-  }
-  if (verbose) {
-    printVerboseTurn(row.id, selection.turns[0]!, maxChars, {
-      afterEventId: flags["after-event"],
-      pageSize: boundedCountFlag(flags["event-page-size"], DEFAULT_EVENT_PAGE_SIZE, MAX_EVENT_PAGE_SIZE),
-    });
     return;
   }
   let remainingChars = maxChars;
@@ -301,7 +345,7 @@ async function sessionGet(
   if (pageTruncated) {
     printTurnRetryCommand(row.id, targetTurn, lastCompleteTurn?.number ?? afterTurn, pageSize, maxChars);
   } else if (!targetTurn && lastCompleteTurn && lastCompleteTurn.number < selection.totalTurns) {
-    console.log(`下一页：/nbt sessions get ${row.id} --after-turn ${lastCompleteTurn.number} --page-size ${pageSize}`);
+    console.log(`下一页：/nbt sessions get ${row.id} --summary --after-turn ${lastCompleteTurn.number} --page-size ${pageSize}`);
   }
 }
 
@@ -399,6 +443,124 @@ async function selectTranscriptTurns(
   return { turns, totalTurns };
 }
 
+async function selectTimelineEvents(
+  sessionId: string,
+  events: SessionTranscript["events"],
+  options: { targetTurn?: number; afterEventId?: string; pageSize: number },
+): Promise<TimelineSelection> {
+  const items: TimelineItem[] = [];
+  let totalEvents = 0;
+  let totalTurns = 0;
+  let cursorFound = options.afterEventId === undefined;
+  for await (const turn of transcriptTurns(sessionId, events)) {
+    totalTurns = turn.number;
+    if (options.targetTurn && turn.number !== options.targetTurn) continue;
+    const finalIds = new Set(assistantSections(turn).finalMessages.map((item) => item.eventId));
+    for (const item of turn.events) {
+      totalEvents++;
+      if (!cursorFound) {
+        if (item.eventId === options.afterEventId) cursorFound = true;
+        continue;
+      }
+      if (items.length < options.pageSize) {
+        items.push({
+          ...item,
+          turnNumber: turn.number,
+          stepNumber: totalEvents,
+          finalAssistant: finalIds.has(item.eventId),
+        });
+      }
+    }
+  }
+  if (!cursorFound) {
+    const scope = options.targetTurn ? ` in turn ${options.targetTurn}` : "";
+    throw new Error(`Event cursor not found${scope}: ${options.afterEventId}`);
+  }
+  return { items, totalEvents, totalTurns };
+}
+
+function printTimeline(
+  row: SessionRow,
+  selection: TimelineSelection,
+  options: {
+    targetTurn?: number;
+    pageSize: number;
+    eventChars: number;
+    maxChars: number;
+    verbose: boolean;
+    flags: Record<string, string>;
+  },
+): void {
+  console.log(`# Session ${row.id}`);
+  console.log(`时间：${formatLocalDateTimeWithTZ(row.started_at)} ～ ${row.ended_at ? formatLocalDateTimeWithTZ(row.ended_at) : "ongoing"}`);
+  console.log(`Backend：${row.backend_type ?? "unknown"}`);
+  console.log("视图：执行过程");
+  if (selection.items.length > 0) {
+    const first = selection.items[0]!.stepNumber;
+    const last = selection.items.at(-1)!.stepNumber;
+    const scope = options.targetTurn ? `第 ${options.targetTurn} 轮，` : "";
+    console.log(`范围：${scope}第 ${first}～${last} 步，共 ${selection.totalEvents} 步；整个 Session 共 ${selection.totalTurns} 轮\n`);
+  } else {
+    const scope = options.targetTurn ? `第 ${options.targetTurn} 轮` : "整个 Session";
+    console.log(`范围：${scope}，共 ${selection.totalEvents} 步；整个 Session 共 ${selection.totalTurns} 轮\n`);
+    console.log(selection.totalEvents === 0 ? "(没有执行步骤)" : "(没有更多执行步骤)");
+    return;
+  }
+
+  let remainingChars = options.maxChars;
+  let currentTurn: number | undefined;
+  let lastPrinted: TimelineItem | undefined;
+  let printed = 0;
+  for (const item of selection.items) {
+    if (lastPrinted && remainingChars < 100) break;
+    if (item.turnNumber !== currentTurn) {
+      if (currentTurn !== undefined) console.log("---\n");
+      currentTurn = item.turnNumber;
+      console.log(`## 第 ${currentTurn} 轮\n`);
+    }
+    const time = item.event.timestamp ? formatLocalDateTimeWithTZ(item.event.timestamp) : "time unavailable";
+    console.log(`### 步骤 ${item.stepNumber} · ${timelineEventLabel(item)} · ${time}`);
+    console.log(`<!-- event_id: ${item.eventId}${item.event.callId ? `; call_id: ${escapeComment(item.event.callId)}` : ""} -->\n`);
+    const preview = timelinePreview(item.event.content, Math.min(options.eventChars, remainingChars));
+    if (item.event.type === "tool_call" || item.event.type === "tool_result") {
+      const fence = markdownCodeFence(preview.content);
+      console.log(`${fence}text\n${preview.content}\n${fence}`);
+    } else {
+      console.log(preview.content);
+    }
+    if (preview.truncated) console.log(`\n展开该步骤：/nbt sessions get ${item.eventId}`);
+    console.log("");
+    remainingChars -= preview.content.length;
+    lastPrinted = item;
+    printed++;
+  }
+
+  const hasMore = !!lastPrinted && lastPrinted.stepNumber < selection.totalEvents;
+  console.log(`本页显示 ${printed} 步${hasMore ? "，还有更多" : "，已到最后一步"}`);
+  if (hasMore && lastPrinted) {
+    console.log(`下一页：${timelineContinuationCommand(row.id, lastPrinted.eventId, options)}`);
+  }
+}
+
+function timelineEventLabel(item: TimelineItem): string {
+  const name = item.event.name ? ` · ${item.event.name}` : "";
+  switch (item.event.type) {
+    case "user": return "用户输入";
+    case "assistant": return item.finalAssistant ? "最终回复" : "过程消息";
+    case "tool_call": return `工具调用${name}`;
+    case "tool_result": return `工具结果${name}`;
+  }
+}
+
+function timelinePreview(content: string, maxChars: number): { content: string; truncated: boolean } {
+  if (content.length <= maxChars) return { content, truncated: false };
+  const notice = "\n\n[…本步骤内容较长，已显示开头…]";
+  return {
+    content: content.slice(0, Math.max(0, maxChars - notice.length)) + notice,
+    truncated: true,
+  };
+}
+
 function defaultTurnEvents(turn: TranscriptTurn): IdentifiedTranscriptEvent[] {
   const users = turn.events.filter((item) => item.event.type === "user");
   const { finalMessages } = assistantSections(turn);
@@ -480,70 +642,6 @@ function printTurn(
     console.log(`\n查看本轮详情：/nbt sessions get ${sessionId} --turn ${turn.number} --verbose`);
   }
   return { remainingChars, truncated: finalResult.truncated };
-}
-
-function printVerboseTurn(
-  sessionId: string,
-  turn: TranscriptTurn,
-  maxChars: number,
-  options: { afterEventId?: string; pageSize: number },
-): void {
-  const finalAssistantIds = new Set(assistantSections(turn).finalMessages.map((item) => item.eventId));
-  let start = 0;
-  if (options.afterEventId) {
-    const cursor = turn.events.findIndex((item) => item.eventId === options.afterEventId);
-    if (cursor < 0) throw new Error(`Event cursor not found in turn ${turn.number}: ${options.afterEventId}`);
-    start = cursor + 1;
-  }
-  const page = turn.events.slice(start, start + options.pageSize);
-  if (page.length === 0) {
-    console.log("(本轮没有更多事件)");
-    return;
-  }
-  let remainingChars = maxChars;
-  let lastPrinted: IdentifiedTranscriptEvent | undefined;
-  let contentTruncated = false;
-  for (const item of page) {
-    lastPrinted = item;
-    const label = verboseEventLabel(item, finalAssistantIds);
-    console.log(`${label}\n<!-- event_id: ${item.eventId}${item.event.callId ? `; call_id: ${escapeComment(item.event.callId)}` : ""} -->\n`);
-    const result = limitEventContent(item.event, remainingChars);
-    if (item.event.type === "tool_call" || item.event.type === "tool_result") {
-      const fence = markdownCodeFence(result.event.content);
-      console.log(`${fence}text\n${result.event.content}\n${fence}\n`);
-    } else {
-      console.log(`${result.event.content}\n`);
-    }
-    remainingChars -= result.event.content.length;
-    if (result.truncated || remainingChars <= 0) {
-      contentTruncated = true;
-      console.log(`完整事件：/nbt sessions get ${item.eventId} --max-chars 1000000`);
-      break;
-    }
-  }
-  const displayedEnd = lastPrinted
-    ? turn.events.findIndex((item) => item.eventId === lastPrinted!.eventId) + 1
-    : start;
-  const hasMore = displayedEnd < turn.events.length;
-  console.log(`本页 ${displayedEnd - start} 个事件，共 ${turn.events.length} 个${hasMore ? "，还有更多" : "，已到最后一页"}`);
-  if (contentTruncated) {
-    console.log("当前事件内容已截断；请先读取完整事件，分页游标未推进");
-    if (hasMore && lastPrinted) {
-      console.log(`读取完整事件后继续：/nbt sessions get ${sessionId} --turn ${turn.number} --verbose --after-event ${lastPrinted.eventId} --event-page-size ${options.pageSize}`);
-    }
-  } else if (hasMore && lastPrinted) {
-    console.log(`下一页：/nbt sessions get ${sessionId} --turn ${turn.number} --verbose --after-event ${lastPrinted.eventId} --event-page-size ${options.pageSize}`);
-  }
-}
-
-function verboseEventLabel(item: IdentifiedTranscriptEvent, finalAssistantIds: Set<string>): string {
-  const name = item.event.name ? ` · ${item.event.name}` : "";
-  switch (item.event.type) {
-    case "user": return "用户：";
-    case "assistant": return finalAssistantIds.has(item.eventId) ? "最终回复：" : "过程消息：";
-    case "tool_call": return `工具调用${name}：`;
-    case "tool_result": return `工具结果${name}：`;
-  }
 }
 
 function printLimitedText(content: string, maxChars: number): { remainingChars: number; truncated: boolean } {
@@ -644,7 +742,32 @@ function searchContinuationCommand(
   appendPreservedFlag(parts, flags, "chat-id");
   appendPreservedFlag(parts, flags, "sessions");
   if (throughSessionId) parts.push(`--through-session ${quoteArg(throughSessionId)}`);
+  if (flags["messages-only"] === "true") parts.push("--messages-only");
   if (flags["include-tools"] === "true") parts.push("--include-tools");
+  return parts.join(" ");
+}
+
+function timelineContinuationCommand(
+  sessionId: string,
+  afterEventId: string,
+  options: {
+    targetTurn?: number;
+    pageSize: number;
+    eventChars: number;
+    verbose: boolean;
+    flags: Record<string, string>;
+  },
+): string {
+  const parts = [
+    "/nbt sessions get",
+    quoteArg(sessionId),
+    `--after-event ${quoteArg(afterEventId)}`,
+    `--page-size ${options.pageSize}`,
+  ];
+  if (options.targetTurn) parts.push(`--turn ${options.targetTurn}`);
+  if (options.verbose) parts.push("--verbose");
+  if (options.flags["event-chars"]) parts.push(`--event-chars ${options.eventChars}`);
+  appendPreservedFlag(parts, options.flags, "max-chars");
   return parts.join(" ");
 }
 
@@ -664,7 +787,7 @@ function printTurnRetryCommand(
     ? `--turn ${targetTurn}`
     : `--after-turn ${afterTurn} --page-size ${pageSize}`;
   console.log(`当前页内容已截断，分页游标未推进`);
-  console.log(`调高限制后重试：/nbt sessions get ${sessionId} ${selection} --max-chars ${nextMaxChars}`);
+  console.log(`调高限制后重试：/nbt sessions get ${sessionId} --summary ${selection} --max-chars ${nextMaxChars}`);
 }
 
 function appendPreservedFlag(parts: string[], flags: Record<string, string>, name: string): void {
@@ -715,6 +838,10 @@ function boundedCountFlag(value: string | undefined, fallback: number, maximum: 
   return Math.max(1, Math.min(numberFlag(value, fallback), maximum));
 }
 
+function boundedPreviewFlag(value: string | undefined, fallback: number, maximum: number): number {
+  return Math.max(100, Math.min(numberFlag(value, fallback), maximum));
+}
+
 function limitEventContent(event: TranscriptEvent, maxChars: number): {
   event: TranscriptEvent;
   truncated: boolean;
@@ -751,17 +878,18 @@ function printHelp(): void {
 
 Commands:
   list                         List archived sessions
-  search <query>               Search user messages and final replies
-  get <session-id>             Show a session grouped by turn
+  search <query>               Search every execution event in archived sessions
+  get <session-id>             Show the execution timeline with event pagination
   get <event-id>               Show one complete event returned by search
 
 Options:
   list:   -n <count> | --after <session-id> | --since/--before <datetime>
-  search: -n <count> | --after <event-id> | --include-tools | --sessions <count>
+  search: -n <count> | --after <event-id> | --messages-only | --sessions <count>
           --since/--before <datetime>
-  get:    --page-size <count> | --after-turn <number>
-          --turn <number> [--verbose [--event-page-size <count> --after-event <event-id>]]
-  --format jsonl               Output normalized events instead of turns
+  get:    --page-size <events> | --after-event <event-id> | --turn <number>
+          --event-chars <count> | --verbose
+          --summary [--page-size <turns> --after-turn <number>]
+  --format jsonl               Output all normalized events as JSONL
   --max-chars <count>          Limit get output (default: event 20000, session 100000; max 1000000)
   --since/--before <datetime>  List: filter archive time; search: filter event time
                                Date/local datetime uses configured timezone; ISO Z/offset is accepted

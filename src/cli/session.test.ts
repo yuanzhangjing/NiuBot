@@ -135,50 +135,71 @@ describe("nbt sessions", () => {
 
     lines.length = 0;
     await handleSessions(db, ["get", "s1"], "c1", "p2p", home, "NiuBot", parseArgs);
+    expect(lines.join("\n")).toContain("范围：第 1～10 步，共 14 步；整个 Session 共 5 轮");
+    expect(lines.join("\n")).toContain("本页显示 10 步，还有更多");
+    expect(lines.join("\n")).toContain("下一页：/nbt sessions get s1 --after-event");
+
+    lines.length = 0;
+    await handleSessions(db, ["get", "s1", "--page-size", "3", "--event-chars", "200"], "c1", "p2p", home, "NiuBot", parseArgs);
+    const timelinePage = lines.join("\n");
+    expect(timelinePage).toContain("视图：执行过程");
+    expect(timelinePage).toContain("范围：第 1～3 步，共 14 步；整个 Session 共 5 轮");
+    expect(timelinePage).toContain("步骤 1 · 用户输入");
+    expect(timelinePage).toContain("步骤 2 · 工具调用 · shell");
+    expect(timelinePage).toContain("步骤 3 · 工具结果");
+    expect(timelinePage).toContain("LONG_OUTPUT");
+    expect(timelinePage).toContain("展开该步骤：/nbt sessions get s1:");
+    expect(timelinePage).toContain("--after-event");
+    expect(timelinePage).not.toContain("TAIL_MARKER");
+    expect(timelinePage).not.toContain("recommended_plugins");
+
+    lines.length = 0;
+    await handleSessions(db, ["get", "s1", "--summary"], "c1", "p2p", home, "NiuBot", parseArgs);
     expect(lines.join("\n")).toContain("范围：第 1～2 轮，共 5 轮");
     expect(lines.join("\n")).toContain("用户：\n查找唯一标记 NEEDLE_FULL_TEXT");
     expect(lines.join("\n")).toContain("工具调用 1 次：shell ×1");
     expect(lines.join("\n")).toContain("NiuBot：\n已经处理");
-    expect(lines.join("\n")).toContain("--after-turn 2 --page-size 2");
+    expect(lines.join("\n")).toContain("--summary --after-turn 2 --page-size 2");
     expect(lines.join("\n")).not.toContain("recommended_plugins");
     expect(lines.join("\n")).not.toContain("LONG_OUTPUT");
 
     lines.length = 0;
-    await handleSessions(db, ["get", "s1", "--after-turn", "2"], "c1", "p2p", home, "NiuBot", parseArgs);
+    await handleSessions(db, ["get", "s1", "--summary", "--after-turn", "2"], "c1", "p2p", home, "NiuBot", parseArgs);
     expect(lines.join("\n")).toContain("范围：第 3～4 轮，共 5 轮");
     expect(lines.join("\n")).toContain("第四轮问题");
 
     lines.length = 0;
-    await handleSessions(db, ["get", "s1", "--turn", "5"], "c1", "p2p", home, "NiuBot", parseArgs);
+    await handleSessions(db, ["get", "s1", "--summary", "--turn", "5"], "c1", "p2p", home, "NiuBot", parseArgs);
     expect(lines.join("\n")).toContain("过程消息 1 条，已折叠");
     expect(lines.join("\n")).toContain("NiuBot：\n（本轮没有最终回复）");
     expect(lines.join("\n")).not.toContain("NiuBot：\n中断过程标记");
 
     lines.length = 0;
-    await handleSessions(db, ["search", "中断过程标记"], "c1", "p2p", home, "NiuBot", parseArgs);
+    await handleSessions(db, ["search", "中断过程标记", "--messages-only"], "c1", "p2p", home, "NiuBot", parseArgs);
     expect(lines).toEqual(["(无匹配 transcript 事件)"]);
 
     lines.length = 0;
-    await handleSessions(db, ["search", "中断过程标记", "--include-tools"], "c1", "p2p", home, "NiuBot", parseArgs);
+    await handleSessions(db, ["search", "中断过程标记"], "c1", "p2p", home, "NiuBot", parseArgs);
     expect(lines.join("\n")).toContain("中断过程标记");
 
     lines.length = 0;
-    await handleSessions(db, ["get", "s1", "--max-chars", "100"], "c1", "p2p", home, "NiuBot", parseArgs);
+    await handleSessions(db, ["get", "s1", "--summary", "--max-chars", "100"], "c1", "p2p", home, "NiuBot", parseArgs);
     expect(lines.join("\n")).toContain("分页游标未推进");
-    expect(lines.join("\n")).toContain("--after-turn 1 --page-size 2 --max-chars 200");
+    expect(lines.join("\n")).toContain("--summary --after-turn 1 --page-size 2 --max-chars 200");
     expect(lines.join("\n")).not.toContain("下一页：/nbt sessions get s1 --after-turn 2");
 
     lines.length = 0;
     await handleSessions(db, ["get", "s1", "--turn", "1", "--verbose", "--max-chars", "30000"], "c1", "p2p", home, "NiuBot", parseArgs);
-    expect(lines.join("\n")).toContain("工具调用 · shell：");
+    expect(lines.join("\n")).toContain("步骤 2 · 工具调用 · shell");
     expect(lines.join("\n")).toContain("LONG_OUTPUT");
-    expect(lines.join("\n")).toContain("最终回复：");
+    expect(lines.join("\n")).toContain("步骤 4 · 最终回复");
 
     lines.length = 0;
     await handleSessions(db, ["get", "s1", "--turn", "1", "--verbose", "--event-page-size", "2"], "c1", "p2p", home, "NiuBot", parseArgs);
     const verboseFirstPage = lines.join("\n");
     const eventCursor = /--after-event ([^ ]+)/.exec(verboseFirstPage)?.[1];
-    expect(verboseFirstPage).toContain("本页 2 个事件，共 4 个，还有更多");
+    expect(verboseFirstPage).toContain("范围：第 1 轮，第 1～2 步，共 4 步");
+    expect(verboseFirstPage).toContain("本页显示 2 步，还有更多");
     expect(eventCursor).toBeTruthy();
     expect(verboseFirstPage).not.toContain("LONG_OUTPUT");
 
@@ -188,23 +209,22 @@ describe("nbt sessions", () => {
       "--after-event", eventCursor!, "--event-page-size", "2", "--max-chars", "30000",
     ], "c1", "p2p", home, "NiuBot", parseArgs);
     expect(lines.join("\n")).toContain("LONG_OUTPUT");
-    expect(lines.join("\n")).toContain("本页 2 个事件，共 4 个，已到最后一页");
+    expect(lines.join("\n")).toContain("本页显示 2 步，已到最后一步");
 
     lines.length = 0;
     await handleSessions(db, [
       "get", "s1", "--turn", "1", "--verbose",
       "--after-event", eventCursor!, "--event-page-size", "2", "--max-chars", "1000",
     ], "c1", "p2p", home, "NiuBot", parseArgs);
-    expect(lines.join("\n")).toContain("当前事件内容已截断");
-    expect(lines.join("\n")).toContain("读取完整事件后继续：");
-    expect(lines.join("\n")).not.toContain("下一页：");
+    expect(lines.join("\n")).toContain("展开该步骤：");
+    expect(lines.join("\n")).toContain("下一页：");
 
     lines.length = 0;
-    await handleSessions(db, ["search", "FENCE_MARK"], "c1", "p2p", home, "NiuBot", parseArgs);
+    await handleSessions(db, ["search", "FENCE_MARK", "--messages-only"], "c1", "p2p", home, "NiuBot", parseArgs);
     expect(lines).toEqual(["(无匹配 transcript 事件)"]);
 
     lines.length = 0;
-    await handleSessions(db, ["search", "FENCE_MARK", "--include-tools"], "c1", "p2p", home, "NiuBot", parseArgs);
+    await handleSessions(db, ["search", "FENCE_MARK"], "c1", "p2p", home, "NiuBot", parseArgs);
     const fenceEventId = /\[event ([^\]]+)\]/.exec(lines[0] ?? "")?.[1];
     lines.length = 0;
     await handleSessions(db, ["get", fenceEventId!], "c1", "p2p", home, "NiuBot", parseArgs);
