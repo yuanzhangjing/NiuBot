@@ -371,6 +371,34 @@ describe("nbt sessions", () => {
     insert.run("s1", "a1", "2026-07-13 01:00:00", "2026-07-13 01:10:00", "2026-07-13 01:10:00");
     insert.run("s2", "a2", "2026-07-13 02:00:00", "2026-07-13 02:10:00", "2026-07-13 02:10:00");
     insert.run("s3", "a3", "2026-07-13 03:00:00", "2026-07-13 03:10:00", "2026-07-13 03:10:00");
+    storeMessage(db, {
+      chatId: "c1", senderId: "u2", sessionId: "s3", role: "user",
+      contentText: "旧 prompt", platform: "feishu",
+    });
+    storeMessage(db, {
+      chatId: "c1", senderId: "u2", sessionId: "s3", role: "assistant",
+      contentText: "旧 response", platform: "feishu",
+    });
+    storeMessage(db, {
+      chatId: "c1", senderId: "u2", sessionId: "s3", role: "user",
+      contentText: "最后的 user prompt\n第二行", platform: "feishu",
+    });
+    storeMessage(db, {
+      chatId: "c1", senderId: "u2", sessionId: "s3", role: "assistant",
+      contentText: "最后的 response", platform: "feishu",
+    });
+    storeMessage(db, {
+      chatId: "c1", senderId: "u2", sessionId: "s2", role: "user",
+      contentText: "已回复的 prompt", platform: "feishu",
+    });
+    storeMessage(db, {
+      chatId: "c1", senderId: "u2", sessionId: "s2", role: "assistant",
+      contentText: "上一轮 response", platform: "feishu",
+    });
+    storeMessage(db, {
+      chatId: "c1", senderId: "u2", sessionId: "s2", role: "user",
+      contentText: "尚未回复的 prompt", platform: "feishu",
+    });
 
     const lines: string[] = [];
     vi.spyOn(console, "log").mockImplementation((...values) => lines.push(values.join(" ")));
@@ -378,11 +406,20 @@ describe("nbt sessions", () => {
     expect(lines.join("\n")).toContain("[s3]");
     expect(lines.join("\n")).toContain("[s2]");
     expect(lines.join("\n")).not.toContain("[s1]");
+    expect(lines.join("\n")).toContain("user: 最后的 user prompt 第二行");
+    expect(lines.join("\n")).toContain("response: 最后的 response");
+    expect(lines.join("\n")).not.toContain("旧 prompt");
+    expect(lines.join("\n")).not.toContain("旧 response");
+    expect(lines.join("\n")).toContain("user: 已回复的 prompt");
+    expect(lines.join("\n")).toContain("response: 上一轮 response");
+    expect(lines.join("\n")).not.toContain("尚未回复的 prompt");
     expect(lines.join("\n")).toContain("/nbt sessions list --after s2 -n 2");
 
     lines.length = 0;
     await handleSessions(db, ["list", "-n", "2", "--after", "s2"], "c1", "p2p", home, "NiuBot", parseArgs);
     expect(lines.join("\n")).toContain("[s1]");
+    expect(lines.join("\n")).toContain("user: (无)");
+    expect(lines.join("\n")).toContain("response: (无)");
     expect(lines.join("\n")).toContain("已到最后一页");
     db.close();
   });

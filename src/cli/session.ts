@@ -8,7 +8,7 @@ import {
   type LocatedSessionArchive,
 } from "../session-archive/reader.js";
 import { isStandaloneInjectedContext } from "../session-archive/native-transcript.js";
-import { listSessionMessages } from "../messages/store.js";
+import { getSessionLastExchange, listSessionMessages } from "../messages/store.js";
 import {
   getSessionForAccess,
   listSessions,
@@ -132,6 +132,9 @@ function sessionList(
     const archive = locate(niubotHome, botName, row);
     const archiveLabel = archive ? "source-reference" : "missing";
     console.log(formatSessionRow(row, archiveLabel));
+    const exchange = getSessionLastExchange(db, row.id);
+    console.log(`  user: ${exchange.user ? sessionListPreview(exchange.user.content_text) : "(无)"}`);
+    console.log(`  response: ${exchange.response ? sessionListPreview(exchange.response.content_text) : "(无)"}`);
   }
   console.log(`\n本页 ${page.length} 条${hasMore ? "，还有更多" : "，已到最后一页"}`);
   if (hasMore) {
@@ -907,6 +910,12 @@ function formatSessionRow(row: SessionRow, archive: string): string {
   return `[${row.id}] ${start} ~ ${end} backend=${row.backend_type ?? "unknown"} archive=${archive}`;
 }
 
+function sessionListPreview(content: string, maxRunes = 160): string {
+  const flattened = content.replace(/\s+/g, " ").trim() || "(空)";
+  const runes = [...flattened];
+  return runes.length <= maxRunes ? flattened : `${runes.slice(0, maxRunes).join("")}...`;
+}
+
 function requireChatId(value: string | undefined): string {
   if (!value) throw new Error("NIUBOT_CHAT_ID not set and --chat-id not provided");
   return value;
@@ -978,7 +987,7 @@ function printHelp(): void {
   console.log(`Query archived backend transcripts.
 
 Commands:
-  list                         List archived sessions
+  list                         List archived sessions with their last user/response preview
   search <query>               Search every execution event in archived sessions
   get <session-id>             Show the execution timeline with event pagination
   get <event-id>               Show one complete event returned by search

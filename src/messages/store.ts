@@ -26,6 +26,11 @@ export interface SessionMessageRow {
   content_text: string;
 }
 
+export interface SessionLastExchange {
+  user?: SessionMessageRow;
+  response?: SessionMessageRow;
+}
+
 export interface MessageFilter {
   since?: string;
   before?: string;
@@ -184,6 +189,33 @@ export function listSessionMessages(db: Database.Database, sessionId: string): S
     WHERE session_key = ? AND role IN ('user', 'assistant') AND content_text IS NOT NULL
     ORDER BY id
   `).all(sessionId) as SessionMessageRow[];
+}
+
+/** Last completed user/assistant exchange, without scanning transcript sources. */
+export function getSessionLastExchange(db: Database.Database, sessionId: string): SessionLastExchange {
+  const response = db.prepare(`
+    SELECT id, role, content_text
+    FROM messages
+    WHERE session_key = ? AND role = 'assistant' AND content_text IS NOT NULL
+    ORDER BY id DESC
+    LIMIT 1
+  `).get(sessionId) as SessionMessageRow | undefined;
+  const user = response
+    ? db.prepare(`
+        SELECT id, role, content_text
+        FROM messages
+        WHERE session_key = ? AND role = 'user' AND content_text IS NOT NULL AND id < ?
+        ORDER BY id DESC
+        LIMIT 1
+      `).get(sessionId, response.id) as SessionMessageRow | undefined
+    : db.prepare(`
+        SELECT id, role, content_text
+        FROM messages
+        WHERE session_key = ? AND role = 'user' AND content_text IS NOT NULL
+        ORDER BY id DESC
+        LIMIT 1
+      `).get(sessionId) as SessionMessageRow | undefined;
+  return { user, response };
 }
 
 function appendMessageFilters(sql: string, params: unknown[], filters: MessageFilter): string {
