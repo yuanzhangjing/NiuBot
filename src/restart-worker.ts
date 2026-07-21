@@ -9,7 +9,7 @@ import yaml from "yaml";
 import { loadConfig, resolveHomePath } from "./config.js";
 import { localApiRequest, waitForLocalApiHealth } from "./local-api/client.js";
 import { waitForEngineIdentity } from "./local-api/engine-client.js";
-import { resolveBotEndpoint } from "./platform/ipc.js";
+import { endpointFromAddress, resolveBotEndpoint } from "./platform/ipc.js";
 import { runCommand } from "./platform/command.js";
 import { resolveNpmExecutableForNode } from "./platform/executable.js";
 import { inspectRunningEngine, launchDetachedEngine, stopEngine } from "./process-manager.js";
@@ -43,6 +43,7 @@ interface RestartContext {
   previousRuntimeMode: string;
   updateVersion?: string;
   notifyChatId?: string;
+  legacyNotifyEndpoint?: string;
   logFile: string;
   debugLog: string;
   store: ReleaseStore;
@@ -84,7 +85,8 @@ export async function runRestartWorker(env: NodeJS.ProcessEnv = process.env): Pr
     workerRuntimePath,
     previousRuntimeMode: env["NIUBOT_RUNTIME_MODE"] || "",
     updateVersion: env["NIUBOT_UPDATE_VERSION"],
-    notifyChatId: env["NIUBOT_RESTART_NOTIFY_CHAT_ID"],
+    notifyChatId: env["NIUBOT_RESTART_NOTIFY_CHAT_ID"] || env["NIUBOT_CHAT_ID"],
+    legacyNotifyEndpoint: env["NIUBOT_API_SOCKET"],
     logFile: path.join(logDirectory, `niubot-${localDate()}.log`),
     debugLog: path.join(logDirectory, "restart-debug.log"),
     store: new ReleaseStore(botDirectory),
@@ -547,7 +549,12 @@ async function notify(context: RestartContext, text: string): Promise<void> {
     const config = loadConfig(path.join(context.niubotHome, "config.yaml"));
     const bot = config.bots.find((candidate) => candidate.id === context.botName) ?? config.bots[0];
     if (!bot) return;
-    const endpoint = resolveBotEndpoint(context.niubotHome, bot.id, { unixSocketDirectory: path.dirname(bot.dbPath) });
+    // Old restart callers supplied the exact API socket but not a bot name.
+    // Prefer that address when present so multi-bot upgrades notify through
+    // the same Bot that accepted the command.
+    const endpoint = context.legacyNotifyEndpoint
+      ? endpointFromAddress(context.legacyNotifyEndpoint)
+      : resolveBotEndpoint(context.niubotHome, bot.id, { unixSocketDirectory: path.dirname(bot.dbPath) });
     const response = await localApiRequest(endpoint, "/send", {
       method: "POST",
       body: { chat_id: context.notifyChatId, text },

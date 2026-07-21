@@ -29,6 +29,38 @@ describe("resolveHomePath", () => {
 });
 
 describe("loadConfig", () => {
+  it("loads the legacy bot name and legacy single-bot config formats", () => {
+    vi.stubEnv("NIUBOT_DB_PATH", undefined);
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-config-"));
+    tempDirs.push(dir);
+    const namedConfigPath = path.join(dir, "named.yaml");
+    fs.writeFileSync(namedConfigPath, `
+bots:
+  - name: LegacyBot
+    appId: app-id
+    appSecret: app-secret
+    backend: codex
+`, "utf-8");
+    expect(loadConfig(namedConfigPath).bots[0]?.id).toBe("LegacyBot");
+
+    const singleConfigPath = path.join(dir, "single.yaml");
+    fs.writeFileSync(singleConfigPath, `
+feishu:
+  appId: app-id
+  appSecret: app-secret
+agent:
+  backend: codex
+  workingDirectory: ${dir}/workspace
+database:
+  path: ${dir}/legacy.db
+`, "utf-8");
+    expect(loadConfig(singleConfigPath).bots[0]).toMatchObject({
+      id: "NiuBot",
+      backend: "codex",
+      dbPath: path.join(dir, "legacy.db"),
+    });
+  });
+
   it("rejects unsupported custom backend names", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-config-"));
     tempDirs.push(dir);

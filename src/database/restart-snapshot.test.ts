@@ -125,23 +125,42 @@ describe("restart database snapshot", () => {
     expect(() => assertDatabasesAtCompatibleSchemaVersion(
       [databasePath],
       ROLLBACK_COMPATIBLE_SCHEMA_VERSIONS,
+      LATEST_SCHEMA_VERSION,
     )).not.toThrow();
 
-    const legacy = new Database(databasePath);
-    legacy.pragma("user_version = 15");
-    legacy.close();
+    for (const version of ROLLBACK_COMPATIBLE_SCHEMA_VERSIONS) {
+      const legacy = new Database(databasePath);
+      legacy.pragma(`user_version = ${version}`);
+      legacy.close();
+      expect(() => assertDatabasesAtCompatibleSchemaVersion(
+        [databasePath],
+        ROLLBACK_COMPATIBLE_SCHEMA_VERSIONS,
+        LATEST_SCHEMA_VERSION,
+      )).not.toThrow();
+    }
+
+    const unsupported = new Database(databasePath);
+    unsupported.pragma("user_version = 9");
+    unsupported.close();
     expect(() => assertDatabasesAtCompatibleSchemaVersion(
       [databasePath],
       ROLLBACK_COMPATIBLE_SCHEMA_VERSIONS,
-    )).not.toThrow();
-
-    expect(() => assertDatabasesAtCompatibleSchemaVersion([databasePath], [LATEST_SCHEMA_VERSION + 1]))
+      LATEST_SCHEMA_VERSION,
+    ))
       .toThrow(/cannot safely upgrade/);
     expect(() => assertDatabasesAtCompatibleSchemaVersion(
       [path.join(root, "missing.db")],
       ROLLBACK_COMPATIBLE_SCHEMA_VERSIONS,
+      LATEST_SCHEMA_VERSION,
     ))
       .toThrow(/missing database/);
+
+    expect(() => assertDatabasesAtCompatibleSchemaVersion(
+      [databasePath],
+      ROLLBACK_COMPATIBLE_SCHEMA_VERSIONS,
+      LATEST_SCHEMA_VERSION + 1,
+    ))
+      .toThrow(/candidate schema 17/);
   });
 
   test("preserves the snapshot directory when restore cannot proceed", async () => {

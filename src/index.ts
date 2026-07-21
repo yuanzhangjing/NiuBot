@@ -11,7 +11,11 @@ import {
 import type { AgentBackend } from "./agent/types.js";
 import type { CliAgentBackend } from "./agent/cli-base.js";
 import { createBotInstance, type BotInstance } from "./bot-instance.js";
-import { ROLLBACK_COMPATIBLE_SCHEMA_VERSIONS, loadPersistedBotRuntimeState } from "./database/schema.js";
+import {
+  LATEST_SCHEMA_VERSION,
+  ROLLBACK_COMPATIBLE_SCHEMA_VERSIONS,
+  loadPersistedBotRuntimeState,
+} from "./database/schema.js";
 import { createLogger, setLogLevel } from "./logger.js";
 import { ensureRuntimeNbtShim, prependNiubotBinToPath } from "./platform/cli-runtime.js";
 import { summarizeProxyEnvironment } from "./proxy-env.js";
@@ -118,6 +122,7 @@ async function main(): Promise<void> {
       assertDatabasesAtCompatibleSchemaVersion(
         config.bots.map((bot) => bot.dbPath),
         ROLLBACK_COMPATIBLE_SCHEMA_VERSIONS,
+        LATEST_SCHEMA_VERSION,
       );
       legacyReadOnlyPreflight = true;
       log.info("legacy preflight restricted to read-only compatibility checks");

@@ -33,6 +33,7 @@
     "build": "node scripts/build.mjs",
     "start": "node dist/index.js",
     "test": "vitest run",
+    "test:public-upgrades": "node scripts/check-public-upgrades.mjs",
     "test:watch": "vitest",
     "pack:check": "node scripts/check-package.mjs",
     "pack:smoke": "node scripts/smoke-package.mjs",

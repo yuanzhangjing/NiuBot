@@ -33,5 +33,8 @@ jobs:
       - name: Check
         run: npm run release:check
 
+      - name: Check every public upgrade and rollback path
+        run: npm run test:public-upgrades
+
       - name: Publish
         run: npm publish --access public --registry https://registry.npmjs.org

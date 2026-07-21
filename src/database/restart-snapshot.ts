@@ -31,7 +31,14 @@ export interface RestartDatabaseSnapshot {
 export function assertDatabasesAtCompatibleSchemaVersion(
   databasePaths: string[],
   compatibleVersions: readonly number[],
+  candidateSchemaVersion: number,
 ): void {
+  if (!compatibleVersions.includes(candidateSchemaVersion)) {
+    throw new Error(
+      `legacy preflight cannot safely run candidate schema ${candidateSchemaVersion}; ` +
+      "use the migration-safe restart worker",
+    );
+  }
   const checked = new Set<string>();
   for (const configuredPath of databasePaths) {
     const databasePath = resolveDatabaseTarget(path.resolve(configuredPath));

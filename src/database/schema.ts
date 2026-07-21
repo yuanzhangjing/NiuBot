@@ -266,8 +266,16 @@ const migrations: Migration[] = [
     version: 12,
     description: "Persist runtime model choices per bot",
     up: (db) => {
-      db.exec("ALTER TABLE bot_runtime_state ADD COLUMN model TEXT");
-      db.exec("ALTER TABLE bot_runtime_state ADD COLUMN lite_model TEXT");
+      const columns = new Set(
+        (db.prepare("PRAGMA table_info(bot_runtime_state)").all() as Array<{ name: string }>)
+          .map((column) => column.name),
+      );
+      if (!columns.has("model")) {
+        db.exec("ALTER TABLE bot_runtime_state ADD COLUMN model TEXT");
+      }
+      if (!columns.has("lite_model")) {
+        db.exec("ALTER TABLE bot_runtime_state ADD COLUMN lite_model TEXT");
+      }
     },
   },
   {
@@ -459,7 +467,10 @@ const transportMigrations: Migration[] = [
 ];
 
 export const LATEST_SCHEMA_VERSION = migrations[migrations.length - 1]!.version;
-export const ROLLBACK_COMPATIBLE_SCHEMA_VERSIONS = [15, 16] as const;
+// npm 上所有公开版本（v0.1.12 起）的全局 schema 都在 10..16。
+// 这一区间之后的迁移只有加表、加 nullable 列和加索引，旧版本会忽略，
+// 因此保留原 user_version 后可以安全回到升级前的同一版本。
+export const ROLLBACK_COMPATIBLE_SCHEMA_VERSIONS = [10, 11, 12, 13, 14, 15, 16] as const;
 export const LATEST_TRANSPORT_SCHEMA_VERSION = transportMigrations[transportMigrations.length - 1]!.version;
 
 // ── Database initialization ─────────────────────────────────────────
@@ -902,10 +913,13 @@ function runMigrations(db: Database.Database): void {
     );
   }
 
-  // schema 15 是最近公开版本仍在使用的回滚边界。migration 16 只增加
-  // nullable cron timezone 字段，可以安全补齐，但不能提高 user_version，
-  // 否则旧代码回滚后会拒绝打开数据库。
-  const preserveLegacyVersion = currentVersion === 15;
+  // 公开版本 schema 10..16 之后的迁移均向后兼容。旧 worker 只能回滚程序，
+  // 不能恢复数据库，所以必须保留升级前的 user_version，让原版本仍能打开。
+  // 未来新增超过当前兼容上限的迁移时会正常提高版本号，不能误延长承诺。
+  const preserveLegacyVersion = ROLLBACK_COMPATIBLE_SCHEMA_VERSIONS.includes(
+    currentVersion as (typeof ROLLBACK_COMPATIBLE_SCHEMA_VERSIONS)[number],
+  );
+  const rollbackCompatibleCeiling = ROLLBACK_COMPATIBLE_SCHEMA_VERSIONS.at(-1)!;
 
   // 跑 pending migrations
   const pending = migrations.filter((m) => m.version > currentVersion);
@@ -915,14 +929,14 @@ function runMigrations(db: Database.Database): void {
     log.info("running migration", { version: migration.version, description: migration.description });
     db.transaction(() => {
       migration.up(db);
-      if (!(preserveLegacyVersion && migration.version === 16)) {
+      if (!(preserveLegacyVersion && migration.version <= rollbackCompatibleCeiling)) {
         setSchemaVersion(db, migration.version);
       }
     })();
     log.info("migration completed", {
       version: migration.version,
       schemaVersion: getSchemaVersion(db),
-      rollbackCompatible: preserveLegacyVersion && migration.version === 16,
+      rollbackCompatible: preserveLegacyVersion && migration.version <= rollbackCompatibleCeiling,
     });
   }
 }

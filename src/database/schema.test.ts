@@ -262,19 +262,20 @@ describe("cron timezone schema", () => {
 });
 
 describe("public upgrade rollback compatibility", () => {
-  test.each([15, 16])(
-    "keeps a schema %i database openable by its previous release after transport setup",
+  test.each([10, 11, 12, 13, 14, 15, 16])(
+    "supports schema %i upgrade, exact-version rollback, and re-upgrade",
     (legacyVersion) => {
       const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-test-"));
       tempDirs.push(dir);
       const dbPath = path.join(dir, "niubot.db");
       const fixture = initDatabase(dbPath);
-      fixture.exec(`
-        DROP TABLE niubot_component_schema_versions;
-        DROP TABLE transport_inbox;
-        DROP TABLE transport_outbox;
-      `);
-      if (legacyVersion === 15) fixture.exec("ALTER TABLE cron_jobs DROP COLUMN timezone");
+      downgradeToPublicSchemaFixture(fixture, legacyVersion);
+      fixture.prepare(`
+        INSERT INTO cron_jobs (
+          chat_id, creator_user_id, cron_expr, run_at, prompt,
+          description, max_times, until_time
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run("c1", "u1", "0 * * * *", null, "before-upgrade", "", null, null);
       fixture.pragma(`user_version = ${legacyVersion}`);
       fixture.close();
 
@@ -285,10 +286,17 @@ describe("public upgrade rollback compatibility", () => {
       ).pluck().get()).toBe(2);
       expect((upgraded.prepare("PRAGMA table_info(cron_jobs)").all() as Array<{ name: string }>)
         .some((column) => column.name === "timezone")).toBe(true);
+      expect((upgraded.prepare("PRAGMA table_info(bot_runtime_state)").all() as Array<{ name: string }>)
+        .map((column) => column.name)).toEqual(expect.arrayContaining(["model", "lite_model"]));
+      upgraded.prepare(`
+        INSERT INTO transport_inbox (
+          bot_id, platform, platform_msg_id, payload_json, status
+        ) VALUES ('NiuBot', 'feishu', 'compat-pending', '{}', 'pending')
+      `).run();
       upgraded.close();
 
-      // 模拟旧版本回滚后的数据库打开和写入：旧代码只检查 user_version，
-      // 并继续使用不包含 timezone 的原有 SQL。
+      // 模拟回滚到升级前的同一公开版本：旧代码看到原 user_version，
+      // 忽略新增表和 nullable 列，并继续使用原有 SQL。
       const rolledBack = new Database(dbPath);
       expect(rolledBack.pragma("user_version", { simple: true })).toBe(legacyVersion);
       expect(() => rolledBack.prepare(`
@@ -296,11 +304,69 @@ describe("public upgrade rollback compatibility", () => {
           chat_id, creator_user_id, cron_expr, run_at, prompt,
           description, max_times, until_time
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      `).run("c1", "u1", "0 * * * *", null, "legacy", "", null, null)).not.toThrow();
+      `).run("c1", "u1", "30 * * * *", null, "during-rollback", "", null, null)).not.toThrow();
       rolledBack.close();
+
+      const reupgraded = initDatabase(dbPath);
+      expect(reupgraded.pragma("user_version", { simple: true })).toBe(legacyVersion);
+      expect(reupgraded.prepare(
+        "SELECT prompt FROM cron_jobs ORDER BY id",
+      ).pluck().all()).toEqual(["before-upgrade", "during-rollback"]);
+      expect(reupgraded.prepare(
+        "SELECT status FROM transport_inbox WHERE platform_msg_id = 'compat-pending'",
+      ).pluck().get()).toBe("pending");
+      expect(reupgraded.prepare(
+        "SELECT version FROM niubot_component_schema_versions WHERE component = 'transport'",
+      ).pluck().get()).toBe(2);
+      reupgraded.close();
     },
   );
+
+  test("resumes an interrupted additive migration without duplicate-column failure", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-test-"));
+    tempDirs.push(dir);
+    const dbPath = path.join(dir, "niubot.db");
+    const fixture = initDatabase(dbPath);
+    downgradeToPublicSchemaFixture(fixture, 10);
+    fixture.exec(`
+      CREATE TABLE model_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        backend TEXT NOT NULL,
+        model_name TEXT NOT NULL,
+        last_used_at TEXT DEFAULT (datetime('now')),
+        UNIQUE(backend, model_name)
+      );
+      ALTER TABLE bot_runtime_state ADD COLUMN model TEXT;
+      PRAGMA user_version = 10;
+    `);
+    fixture.close();
+
+    const resumed = initDatabase(dbPath);
+    expect(resumed.pragma("user_version", { simple: true })).toBe(10);
+    expect((resumed.prepare("PRAGMA table_info(bot_runtime_state)").all() as Array<{ name: string }>)
+      .map((column) => column.name)).toEqual(expect.arrayContaining(["model", "lite_model"]));
+    expect(resumed.prepare(
+      "SELECT version FROM niubot_component_schema_versions WHERE component = 'transport'",
+    ).pluck().get()).toBe(2);
+  });
 });
+
+function downgradeToPublicSchemaFixture(db: Database.Database, version: number): void {
+  db.exec(`
+    DROP TABLE niubot_component_schema_versions;
+    DROP TABLE transport_inbox;
+    DROP TABLE transport_outbox;
+  `);
+  if (version < 16) db.exec("ALTER TABLE cron_jobs DROP COLUMN timezone");
+  if (version < 15) db.exec("DROP TABLE runtime_events");
+  if (version < 14) db.exec("DROP TABLE update_notifications");
+  if (version < 13) db.exec("DROP TABLE bot_backend_model_state");
+  if (version < 12) {
+    db.exec("ALTER TABLE bot_runtime_state DROP COLUMN lite_model");
+    db.exec("ALTER TABLE bot_runtime_state DROP COLUMN model");
+  }
+  if (version < 11) db.exec("DROP TABLE model_history");
+}
 
 describe("transport inbox claim schema", () => {
   test("migrates transport component version 1 rows without losing state", () => {
