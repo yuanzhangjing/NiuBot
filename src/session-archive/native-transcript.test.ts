@@ -254,6 +254,42 @@ describe("native transcript parsers", () => {
     ]);
   });
 
+  it("omits standalone Codex plugin and skill context messages", async () => {
+    const file = jsonl([
+      { type: "response_item", payload: { type: "message", role: "user", content: [
+        { type: "input_text", text: "<recommended_plugins>private plugins</recommended_plugins>" },
+      ] } },
+      { type: "response_item", payload: { type: "message", role: "user", content: [
+        { type: "input_text", text: "<skill><name>private</name><path>/private/skill</path></skill>" },
+      ] } },
+      { type: "response_item", payload: { type: "message", role: "user", content: [
+        { type: "input_text", text: "真实用户消息" },
+      ] } },
+    ]);
+
+    expect(await collectEvents(await readCodexTranscript(file, "s1"))).toEqual([
+      { type: "user", content: "真实用户消息", timestamp: undefined },
+    ]);
+  });
+
+  it("omits standalone plugin and skill context from Pi transcripts", async () => {
+    const file = jsonl([
+      { type: "message", message: { role: "user", content: [
+        { type: "text", text: "<recommended_plugins>private plugins</recommended_plugins>" },
+      ] } },
+      { type: "message", message: { role: "user", content: [
+        { type: "text", text: "<skill><name>private</name><path>/private/skill</path></skill>" },
+      ] } },
+      { type: "message", message: { role: "user", content: [
+        { type: "text", text: "真实用户消息" },
+      ] } },
+    ]);
+
+    expect(await collectEvents(await readPiTranscript(file, "s1"))).toEqual([
+      { type: "user", content: "真实用户消息", timestamp: undefined },
+    ]);
+  });
+
   it("recovers user text from sessions created before user-message markers", async () => {
     const file = jsonl([
       { type: "response_item", payload: { type: "message", role: "user", content: [{

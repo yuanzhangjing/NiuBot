@@ -60,10 +60,18 @@ describe("nbt sessions", () => {
     const native = join(home, "codex.jsonl");
     const longOutput = `LONG_OUTPUT ${"x".repeat(24_980)} TAIL_MARKER`;
     writeFileSync(native, [
+      { type: "response_item", timestamp: "2026-07-13T00:59:58Z", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "<recommended_plugins>internal plugin list</recommended_plugins>" }] } },
+      { type: "response_item", timestamp: "2026-07-13T00:59:59Z", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "<skill><name>internal</name><path>/private/skill</path></skill>" }] } },
       { type: "response_item", timestamp: "2026-07-13T01:00:00Z", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "查找唯一标记 NEEDLE_FULL_TEXT" }] } },
       { type: "response_item", timestamp: "2026-07-13T01:00:00Z", payload: { type: "function_call", name: "shell", call_id: "call--fence", arguments: '{"text":"FENCE_MARK\\n```"}' } },
-      { type: "response_item", timestamp: "2026-07-13T01:00:01Z", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "已经处理" }] } },
       { type: "response_item", timestamp: "2026-07-13T01:00:02Z", payload: { type: "custom_tool_call_output", call_id: "long-output", output: longOutput } },
+      { type: "response_item", timestamp: "2026-07-13T01:00:03Z", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "已经处理" }] } },
+      { type: "response_item", timestamp: "2026-07-13T01:01:00Z", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "第二轮问题" }] } },
+      { type: "response_item", timestamp: "2026-07-13T01:01:01Z", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "第二轮完成" }] } },
+      { type: "response_item", timestamp: "2026-07-13T01:02:00Z", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "第三轮问题" }] } },
+      { type: "response_item", timestamp: "2026-07-13T01:02:01Z", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "第三轮完成" }] } },
+      { type: "response_item", timestamp: "2026-07-13T01:03:00Z", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "第四轮问题" }] } },
+      { type: "response_item", timestamp: "2026-07-13T01:03:01Z", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "第四轮完成" }] } },
     ].map((row) => JSON.stringify(row)).join("\n") + "\n");
     const transcript = { ...readCodexTranscript(native, "thread-1"), sources: [{ path: native, role: "session" }] };
     const backend = { exportSessionTranscript: async () => transcript } as AgentBackend;
@@ -105,7 +113,48 @@ describe("nbt sessions", () => {
     expect(lines.join("\n")).toContain(`event_id: ${eventId}`);
 
     lines.length = 0;
+    await handleSessions(db, ["get", "s1"], "c1", "p2p", home, "NiuBot", parseArgs);
+    expect(lines.join("\n")).toContain("范围：第 1～2 轮，共 4 轮");
+    expect(lines.join("\n")).toContain("用户：\n查找唯一标记 NEEDLE_FULL_TEXT");
+    expect(lines.join("\n")).toContain("工具调用 1 次：shell ×1");
+    expect(lines.join("\n")).toContain("NiuBot：\n已经处理");
+    expect(lines.join("\n")).toContain("--after-turn 2 --page-size 2");
+    expect(lines.join("\n")).not.toContain("recommended_plugins");
+    expect(lines.join("\n")).not.toContain("LONG_OUTPUT");
+
+    lines.length = 0;
+    await handleSessions(db, ["get", "s1", "--after-turn", "2"], "c1", "p2p", home, "NiuBot", parseArgs);
+    expect(lines.join("\n")).toContain("范围：第 3～4 轮，共 4 轮");
+    expect(lines.join("\n")).toContain("第四轮问题");
+
+    lines.length = 0;
+    await handleSessions(db, ["get", "s1", "--turn", "1", "--verbose", "--max-chars", "30000"], "c1", "p2p", home, "NiuBot", parseArgs);
+    expect(lines.join("\n")).toContain("工具调用 · shell：");
+    expect(lines.join("\n")).toContain("LONG_OUTPUT");
+    expect(lines.join("\n")).toContain("最终回复：");
+
+    lines.length = 0;
+    await handleSessions(db, ["get", "s1", "--turn", "1", "--verbose", "--event-page-size", "2"], "c1", "p2p", home, "NiuBot", parseArgs);
+    const verboseFirstPage = lines.join("\n");
+    const eventCursor = /--after-event ([^ ]+)/.exec(verboseFirstPage)?.[1];
+    expect(verboseFirstPage).toContain("本页 2 个事件，共 4 个，还有更多");
+    expect(eventCursor).toBeTruthy();
+    expect(verboseFirstPage).not.toContain("LONG_OUTPUT");
+
+    lines.length = 0;
+    await handleSessions(db, [
+      "get", "s1", "--turn", "1", "--verbose",
+      "--after-event", eventCursor!, "--event-page-size", "2", "--max-chars", "30000",
+    ], "c1", "p2p", home, "NiuBot", parseArgs);
+    expect(lines.join("\n")).toContain("LONG_OUTPUT");
+    expect(lines.join("\n")).toContain("本页 2 个事件，共 4 个，已到最后一页");
+
+    lines.length = 0;
     await handleSessions(db, ["search", "FENCE_MARK"], "c1", "p2p", home, "NiuBot", parseArgs);
+    expect(lines).toEqual(["(无匹配 transcript 事件)"]);
+
+    lines.length = 0;
+    await handleSessions(db, ["search", "FENCE_MARK", "--include-tools"], "c1", "p2p", home, "NiuBot", parseArgs);
     const fenceEventId = /\[event ([^\]]+)\]/.exec(lines[0] ?? "")?.[1];
     lines.length = 0;
     await handleSessions(db, ["get", fenceEventId!], "c1", "p2p", home, "NiuBot", parseArgs);
@@ -113,7 +162,7 @@ describe("nbt sessions", () => {
     expect(lines.join("\n")).toContain("call_id: call—fence");
 
     lines.length = 0;
-    await handleSessions(db, ["search", "LONG_OUTPUT"], "c1", "p2p", home, "NiuBot", parseArgs);
+    await handleSessions(db, ["search", "LONG_OUTPUT", "--include-tools"], "c1", "p2p", home, "NiuBot", parseArgs);
     const longEventId = /\[event ([^\]]+)\]/.exec(lines[0] ?? "")?.[1];
     lines.length = 0;
     await handleSessions(db, ["get", longEventId!], "c1", "p2p", home, "NiuBot", parseArgs);
@@ -125,10 +174,53 @@ describe("nbt sessions", () => {
     expect(lines.join("\n")).toContain("TAIL_MARKER");
     expect(lines.join("\n")).not.toContain("内容已截断");
 
+    lines.length = 0;
+    await handleSessions(db, ["search", "轮", "-n", "2"], "c1", "p2p", home, "NiuBot", parseArgs);
+    const firstSearchPage = lines.join("\n");
+    const searchCursor = /--after ([^ ]+)/.exec(firstSearchPage)?.[1];
+    expect(firstSearchPage).toContain("本页 2 条，共 6 条，还有更多");
+    expect(searchCursor).toBeTruthy();
+
+    lines.length = 0;
+    await handleSessions(db, ["search", "轮", "-n", "2", "--after", searchCursor!], "c1", "p2p", home, "NiuBot", parseArgs);
+    expect(lines.join("\n")).toContain("本页 2 条，共 6 条，还有更多");
+    expect(lines.join("\n")).not.toEqual(firstSearchPage);
+
     await expect(handleSessions(db, ["get", "s1", "--raw"], "c1", "p2p", home, "NiuBot", parseArgs))
       .rejects.toThrow("--raw is not supported");
     await expect(handleSessions(db, ["list", "--chat-id", "private-chat"], "c1", "group", home, "NiuBot", parseArgs))
       .rejects.toThrow("cross-chat query is not allowed in group chat");
+    db.close();
+  });
+
+  it("paginates session lists with a stable session cursor", async () => {
+    const home = mkdtempSync(join(tmpdir(), "niubot-sessions-list-"));
+    tempDirs.push(home);
+    const db = initDatabase(join(home, "niubot.db"));
+    db.prepare("INSERT INTO users (id, platform, platform_id, name) VALUES ('u2', 'feishu', 'u2p', 'Zen')").run();
+    db.prepare("INSERT INTO chats (id, platform, platform_id, type, user_id) VALUES ('c1', 'feishu', 'c1p', 'p2p', 'u2')").run();
+    const insert = db.prepare(`
+      INSERT INTO sessions (
+        id, chat_id, user_id, source, status, backend_type, agent_session_id,
+        started_at, ended_at, last_active_at
+      ) VALUES (?, 'c1', 'u2', 'user', 'archived', 'codex', ?, ?, ?, ?)
+    `);
+    insert.run("s1", "a1", "2026-07-13 01:00:00", "2026-07-13 01:10:00", "2026-07-13 01:10:00");
+    insert.run("s2", "a2", "2026-07-13 02:00:00", "2026-07-13 02:10:00", "2026-07-13 02:10:00");
+    insert.run("s3", "a3", "2026-07-13 03:00:00", "2026-07-13 03:10:00", "2026-07-13 03:10:00");
+
+    const lines: string[] = [];
+    vi.spyOn(console, "log").mockImplementation((...values) => lines.push(values.join(" ")));
+    await handleSessions(db, ["list", "-n", "2"], "c1", "p2p", home, "NiuBot", parseArgs);
+    expect(lines.join("\n")).toContain("[s3]");
+    expect(lines.join("\n")).toContain("[s2]");
+    expect(lines.join("\n")).not.toContain("[s1]");
+    expect(lines.join("\n")).toContain("/nbt sessions list --after s2 -n 2");
+
+    lines.length = 0;
+    await handleSessions(db, ["list", "-n", "2", "--after", "s2"], "c1", "p2p", home, "NiuBot", parseArgs);
+    expect(lines.join("\n")).toContain("[s1]");
+    expect(lines.join("\n")).toContain("已到最后一页");
     db.close();
   });
 });

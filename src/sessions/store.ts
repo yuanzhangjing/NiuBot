@@ -29,6 +29,7 @@ export function listSessions(
     limit: number;
     since?: string;
     before?: string;
+    after?: { endedAt: string; id: string };
   },
 ): SessionRow[] {
   assertChatAccess({
@@ -47,12 +48,16 @@ export function listSessions(
     conditions.push("ended_at < ?");
     params.push(range.before);
   }
+  if (options.after) {
+    conditions.push("(ended_at < ? OR (ended_at = ? AND id < ?))");
+    params.push(options.after.endedAt, options.after.endedAt, options.after.id);
+  }
   params.push(Math.max(1, Math.abs(options.limit)));
   return db.prepare(`
     SELECT ${SESSION_COLUMNS}
     FROM sessions
     WHERE ${conditions.join(" AND ")}
-    ORDER BY ended_at DESC
+    ORDER BY ended_at DESC, id DESC
     LIMIT ?
   `).all(...params) as SessionRow[];
 }

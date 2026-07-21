@@ -6,17 +6,33 @@ import type { SessionTranscript, TranscriptEvent } from "../agent/types.js";
 type JsonObject = Record<string, unknown>;
 const INJECTED_USER_MARKER = /<niubot-user-message id="([a-f0-9-]+)" length="(\d+)">\n/g;
 const INJECTED_CONTEXT_TAGS = new Set([
+  "apps_instructions",
   "bot-identity",
   "bot-profile",
   "compact-recovery",
   "current-speaker",
   "environment_context",
+  "multi_agent_mode",
   "niubot-system-rules",
+  "permissions_instructions",
+  "plugins_instructions",
+  "recommended_plugins",
   "session-archives",
   "session-profile",
   "session-state",
+  "skill",
+  "skills_instructions",
   "speakers",
   "system-reminder",
+]);
+const STANDALONE_HARNESS_TAGS = new Set([
+  "apps_instructions",
+  "multi_agent_mode",
+  "permissions_instructions",
+  "plugins_instructions",
+  "recommended_plugins",
+  "skill",
+  "skills_instructions",
 ]);
 const CODEX_AGENTS_CONTEXT_PREFIX = "# AGENTS.md instructions for ";
 const MEDIA_TYPES = new Set(["image", "input_image", "output_image", "audio", "video", "file", "media"]);
@@ -253,8 +269,8 @@ function extractInjectedUserMessage(content: string, omitCodexHarnessContext = f
     }
   }
   const legacy = stripInjectedContextPrefix(content);
-  if (omitCodexHarnessContext && legacy.content.length === 0
-    && (legacy.first === "codex-agents" || legacy.first === "environment_context")) {
+  if (legacy.stripped && legacy.content.length === 0
+    && (omitCodexHarnessContext || (legacy.first && STANDALONE_HARNESS_TAGS.has(legacy.first)))) {
     return "";
   }
   const legacyEnginePrompt = legacy.blocks >= 2
