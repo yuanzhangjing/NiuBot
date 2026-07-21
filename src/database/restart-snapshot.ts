@@ -28,7 +28,10 @@ export interface RestartDatabaseSnapshot {
   records: SnapshotRecord[];
 }
 
-export function assertDatabasesAtSchemaVersion(databasePaths: string[], expectedVersion: number): void {
+export function assertDatabasesAtCompatibleSchemaVersion(
+  databasePaths: string[],
+  compatibleVersions: readonly number[],
+): void {
   const checked = new Set<string>();
   for (const configuredPath of databasePaths) {
     const databasePath = resolveDatabaseTarget(path.resolve(configuredPath));
@@ -41,9 +44,10 @@ export function assertDatabasesAtSchemaVersion(databasePaths: string[], expected
     const db = new Database(databasePath, { readonly: true, fileMustExist: true });
     try {
       const version = db.pragma("user_version", { simple: true }) as number;
-      if (version !== expectedVersion) {
+      if (!compatibleVersions.includes(version)) {
         throw new Error(
-          `legacy preflight cannot migrate database schema ${version} to ${expectedVersion}; ` +
+          `legacy preflight cannot safely upgrade database schema ${version}; ` +
+          `compatible versions are ${compatibleVersions.join(", ")}; ` +
           "use the migration-safe restart worker",
         );
       }
