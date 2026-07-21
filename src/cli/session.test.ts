@@ -141,6 +141,7 @@ describe("nbt sessions", () => {
     vi.spyOn(console, "log").mockImplementation((...values) => lines.push(values.join(" ")));
     await handleSessions(db, ["list"], "c1", "p2p", home, "NiuBot", parseArgs);
     expect(lines.join("\n")).toContain("[s1] [09:00～10:00] 对话 · codex · 5轮");
+    expect(lines.join("\n")).toContain("概要: 问「查找唯一标记 NEEDLE_FULL_TEXT」→答「未回复」");
     expect(lines.join("\n")).not.toContain("source-reference");
     expect(lines.join("\n")).not.toContain("归档缺失");
 
@@ -380,6 +381,10 @@ describe("nbt sessions", () => {
     insert.run("s2", "cron", "a2", "2026-07-13 02:00:00", "2026-07-13 02:00:00", "2026-07-13 02:00:00", 1);
     insert.run("s3", "task", "a3", "2026-07-12 03:00:00", "2026-07-13 03:10:00", "2026-07-13 03:10:00", 1);
     storeMessage(db, {
+      chatId: "c1", senderId: "u2", sessionId: "s3", role: "assistant",
+      contentText: "没有前置用户消息的系统回复", platform: "feishu",
+    });
+    storeMessage(db, {
       chatId: "c1", senderId: "u2", sessionId: "s3", role: "user",
       contentText: "旧 prompt", platform: "feishu",
     });
@@ -417,22 +422,21 @@ describe("nbt sessions", () => {
     expect(firstPage).toContain("[s3] [2026-07-12 11:00～11:10] 后台任务 · codex · 1轮 · 归档缺失");
     expect(firstPage).toContain("[s2] [10:00] 定时任务 · codex · 1轮 · 归档缺失");
     expect(firstPage).not.toContain("[s1]");
-    expect(firstPage).toContain("用户: 最后的 user prompt 第二行");
-    expect(firstPage).toContain("最终回复: 最后的 response");
-    expect(firstPage).not.toContain("旧 prompt");
-    expect(firstPage).not.toContain("旧 response");
-    expect(firstPage).toContain("用户: 已回复的 prompt");
-    expect(firstPage).toContain("最终回复: 上一轮 response");
+    expect(firstPage).toContain("概要: 首问「旧 prompt」→首答「旧 response」；末问「最后的 user prompt 第二行」→末答「最后的 response」");
+    expect(firstPage).not.toContain("没有前置用户消息的系统回复");
+    expect(firstPage).toContain("概要: 问「已回复的 prompt」→答「上一轮 response」");
     expect(firstPage).not.toContain("尚未回复的 prompt");
     expect(firstPage).not.toContain("backend=");
     expect(firstPage).not.toContain("archive=");
     expect(firstPage).toContain("/nbt sessions list --after s2 -n 2");
+    for (const line of lines.filter((line) => line.trimStart().startsWith("概要:"))) {
+      expect([...line.trimStart()].length).toBeLessThanOrEqual(180);
+    }
 
     lines.length = 0;
     await handleSessions(db, ["list", "-n", "2", "--after", "s2"], "c1", "p2p", home, "NiuBot", parseArgs);
     expect(lines.join("\n")).toContain("[s1] [09:00～09:10] 对话 · codex · 3轮 · 归档缺失");
-    expect(lines.join("\n")).toContain("用户: (无)");
-    expect(lines.join("\n")).toContain("最终回复: (无)");
+    expect(lines.join("\n")).toContain("概要: 问「未记录」→答「未回复」");
     expect(lines.join("\n")).toContain("已到最后一页");
     db.close();
   });

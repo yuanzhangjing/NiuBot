@@ -8,7 +8,12 @@ import {
   type LocatedSessionArchive,
 } from "../session-archive/reader.js";
 import { isStandaloneInjectedContext } from "../session-archive/native-transcript.js";
-import { getSessionLastExchange, listSessionMessages } from "../messages/store.js";
+import {
+  getSessionEdgeExchanges,
+  listSessionMessages,
+  type SessionEdgeExchanges,
+  type SessionExchange,
+} from "../messages/store.js";
 import {
   getSessionForAccess,
   listSessions,
@@ -139,9 +144,7 @@ function sessionList(
       currentDate = time.date;
     }
     console.log(formatSessionListRow(row, !archive, time.range));
-    const exchange = getSessionLastExchange(db, row.id);
-    console.log(`  用户: ${exchange.user ? sessionListPreview(exchange.user.content_text) : "(无)"}`);
-    console.log(`  最终回复: ${exchange.response ? sessionListPreview(exchange.response.content_text) : "(无)"}`);
+    console.log(`  ${sessionOverviewPreview(getSessionEdgeExchanges(db, row.id))}`);
   }
   console.log(`\n本页 ${page.length} 条${hasMore ? "，还有更多" : "，已到最后一页"}`);
   if (hasMore) {
@@ -947,10 +950,30 @@ function sessionSourceLabel(source: string): string {
   }
 }
 
-function sessionListPreview(content: string, maxRunes = 160): string {
-  const flattened = content.replace(/\s+/g, " ").trim() || "(空)";
-  const runes = [...flattened];
-  return runes.length <= maxRunes ? flattened : `${runes.slice(0, maxRunes).join("")}...`;
+function sessionOverviewPreview(exchanges: SessionEdgeExchanges, maxRunes = 180): string {
+  const first = exchanges.first;
+  const last = exchanges.last;
+  const overview = sameExchange(first, last)
+    ? `概要: 问「${exchangeText(first.user?.content_text, 28, "未记录")}」→答「${exchangeText(first.response?.content_text, 42, "未回复")}」`
+    : `概要: 首问「${exchangeText(first.user?.content_text, 28, "未记录")}」→首答「${exchangeText(first.response?.content_text, 42, "未回复")}」；末问「${exchangeText(last.user?.content_text, 28, "未记录")}」→末答「${exchangeText(last.response?.content_text, 42, "未回复")}」`;
+  return truncateRunes(overview, maxRunes);
+}
+
+function sameExchange(first: SessionExchange, last: SessionExchange): boolean {
+  if (first.response || last.response) return first.response?.id === last.response?.id;
+  return first.user?.id === last.user?.id;
+}
+
+function exchangeText(content: string | undefined, maxRunes: number, fallback: string): string {
+  const flattened = content?.replace(/\s+/g, " ").trim() || fallback;
+  return truncateRunes(flattened, maxRunes);
+}
+
+function truncateRunes(content: string, maxRunes: number): string {
+  const runes = [...content];
+  if (runes.length <= maxRunes) return content;
+  if (maxRunes <= 1) return "…".slice(0, maxRunes);
+  return `${runes.slice(0, maxRunes - 1).join("")}…`;
 }
 
 function requireChatId(value: string | undefined): string {
