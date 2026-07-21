@@ -25,15 +25,6 @@ const INJECTED_CONTEXT_TAGS = new Set([
   "speakers",
   "system-reminder",
 ]);
-const STANDALONE_HARNESS_TAGS = new Set([
-  "apps_instructions",
-  "multi_agent_mode",
-  "permissions_instructions",
-  "plugins_instructions",
-  "recommended_plugins",
-  "skill",
-  "skills_instructions",
-]);
 const CODEX_AGENTS_CONTEXT_PREFIX = "# AGENTS.md instructions for ";
 const MEDIA_TYPES = new Set(["image", "input_image", "output_image", "audio", "video", "file", "media"]);
 
@@ -60,7 +51,7 @@ export function readCodexTranscript(file: string, agentSessionId: string, backen
     if (payloadType === "message") {
       const role = string(payload["role"]);
       if (role === "user" || role === "assistant") {
-        return messageContentEvents(role, payload["content"], timestamp, true);
+        return messageContentEvents(role, payload["content"], timestamp);
       }
     } else if (payloadType === "function_call" || payloadType === "custom_tool_call") {
       return [{
@@ -215,11 +206,10 @@ function messageContentEvents(
   role: "user" | "assistant",
   value: unknown,
   timestamp?: string,
-  omitCodexHarnessContext = false,
 ): TranscriptEvent[] {
   const events: TranscriptEvent[] = [];
   if (typeof value === "string") {
-    const content = role === "user" ? extractInjectedUserMessage(value, omitCodexHarnessContext) : value;
+    const content = role === "user" ? extractInjectedUserMessage(value) : value;
     if (content) events.push({ timestamp, type: role, content: sanitizeTranscriptString(content) });
     return events;
   }
@@ -230,7 +220,7 @@ function messageContentEvents(
     const type = string(block["type"]);
     if (type === "text" || type === "input_text" || type === "output_text") {
       const text = string(block["text"]);
-      const content = role === "user" && text ? extractInjectedUserMessage(text, omitCodexHarnessContext) : text;
+      const content = role === "user" && text ? extractInjectedUserMessage(text) : text;
       if (content) events.push({ timestamp, type: role, content: sanitizeTranscriptString(content) });
     } else if (type === "tool_use" || type === "tool_call" || type === "toolCall" || type === "function_call") {
       events.push({
@@ -255,7 +245,7 @@ function messageContentEvents(
   return events;
 }
 
-function extractInjectedUserMessage(content: string, omitCodexHarnessContext = false): string {
+function extractInjectedUserMessage(content: string): string {
   INJECTED_USER_MARKER.lastIndex = 0;
   let match: RegExpExecArray | null;
   while ((match = INJECTED_USER_MARKER.exec(content)) !== null) {
@@ -269,13 +259,19 @@ function extractInjectedUserMessage(content: string, omitCodexHarnessContext = f
     }
   }
   const legacy = stripInjectedContextPrefix(content);
-  if (legacy.stripped && legacy.content.length === 0
-    && (omitCodexHarnessContext || (legacy.first && STANDALONE_HARNESS_TAGS.has(legacy.first)))) {
-    return "";
-  }
+  // A standalone context-looking block is ambiguous: it may be backend harness
+  // context, but it may also be the user's literal message. Keep it here. The
+  // session CLI can safely hide synthetic context by checking the messages table.
+  if (legacy.stripped && legacy.content.length === 0) return content;
   const legacyEnginePrompt = legacy.blocks >= 2
     && (legacy.first === "niubot-system-rules" || legacy.first === "compact-recovery");
   return legacyEnginePrompt ? legacy.content : content;
+}
+
+/** Whether a complete user event only contains known injected context blocks. */
+export function isStandaloneInjectedContext(content: string): boolean {
+  const stripped = stripInjectedContextPrefix(content);
+  return stripped.stripped && stripped.content.length === 0;
 }
 
 /**

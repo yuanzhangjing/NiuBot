@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { readClaudeTranscript, readCodexTranscript, readCursorTranscript, readGrokTranscript, readPiTranscript, transcriptFromOpencodeRows, wrapInjectedUserMessage } from "./native-transcript.js";
+import { isStandaloneInjectedContext, readClaudeTranscript, readCodexTranscript, readCursorTranscript, readGrokTranscript, readPiTranscript, transcriptFromOpencodeRows, wrapInjectedUserMessage } from "./native-transcript.js";
 import type { SessionTranscript, TranscriptEvent } from "../agent/types.js";
 
 const tempDirs: string[] = [];
@@ -237,7 +237,7 @@ describe("native transcript parsers", () => {
     ]);
   });
 
-  it("omits Codex AGENTS and environment context emitted as user messages", async () => {
+  it("preserves standalone Codex context for DB-aware filtering", async () => {
     const original = "检查归档";
     const file = jsonl([
       { type: "response_item", payload: { type: "message", role: "user", content: [
@@ -249,12 +249,17 @@ describe("native transcript parsers", () => {
       ] } },
     ]);
 
-    expect(await collectEvents(await readCodexTranscript(file, "s1"))).toEqual([
-      { type: "user", content: original, timestamp: undefined },
+    const events = await collectEvents(await readCodexTranscript(file, "s1"));
+    expect(events).toHaveLength(3);
+    expect(events.map((event) => event.content)).toEqual([
+      "# AGENTS.md instructions for /tmp/project\n\n<INSTRUCTIONS>\nproject rules\n</INSTRUCTIONS>",
+      "<environment_context>\n  <cwd>/tmp/project</cwd>\n</environment_context>",
+      original,
     ]);
+    expect(events.slice(0, 2).every((event) => isStandaloneInjectedContext(event.content))).toBe(true);
   });
 
-  it("omits standalone Codex plugin and skill context messages", async () => {
+  it("preserves standalone Codex plugin and skill context for DB-aware filtering", async () => {
     const file = jsonl([
       { type: "response_item", payload: { type: "message", role: "user", content: [
         { type: "input_text", text: "<recommended_plugins>private plugins</recommended_plugins>" },
@@ -267,12 +272,16 @@ describe("native transcript parsers", () => {
       ] } },
     ]);
 
-    expect(await collectEvents(await readCodexTranscript(file, "s1"))).toEqual([
-      { type: "user", content: "真实用户消息", timestamp: undefined },
+    const events = await collectEvents(await readCodexTranscript(file, "s1"));
+    expect(events.map((event) => event.content)).toEqual([
+      "<recommended_plugins>private plugins</recommended_plugins>",
+      "<skill><name>private</name><path>/private/skill</path></skill>",
+      "真实用户消息",
     ]);
+    expect(events.slice(0, 2).every((event) => isStandaloneInjectedContext(event.content))).toBe(true);
   });
 
-  it("omits standalone plugin and skill context from Pi transcripts", async () => {
+  it("preserves standalone Pi context for DB-aware filtering", async () => {
     const file = jsonl([
       { type: "message", message: { role: "user", content: [
         { type: "text", text: "<recommended_plugins>private plugins</recommended_plugins>" },
@@ -285,9 +294,13 @@ describe("native transcript parsers", () => {
       ] } },
     ]);
 
-    expect(await collectEvents(await readPiTranscript(file, "s1"))).toEqual([
-      { type: "user", content: "真实用户消息", timestamp: undefined },
+    const events = await collectEvents(await readPiTranscript(file, "s1"));
+    expect(events.map((event) => event.content)).toEqual([
+      "<recommended_plugins>private plugins</recommended_plugins>",
+      "<skill><name>private</name><path>/private/skill</path></skill>",
+      "真实用户消息",
     ]);
+    expect(events.slice(0, 2).every((event) => isStandaloneInjectedContext(event.content))).toBe(true);
   });
 
   it("recovers user text from sessions created before user-message markers", async () => {

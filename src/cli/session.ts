@@ -7,6 +7,7 @@ import {
   loadArchivedTranscript,
   type LocatedSessionArchive,
 } from "../session-archive/reader.js";
+import { isStandaloneInjectedContext } from "../session-archive/native-transcript.js";
 import { listSessionMessages } from "../messages/store.js";
 import {
   getSessionForAccess,
@@ -33,7 +34,7 @@ const DEFAULT_EVENT_PREVIEW_CHARS = 1_200;
 const MAX_EVENT_PREVIEW_CHARS = 20_000;
 const TRUNCATED_NOTICE = "\n\n[内容已截断；使用 --max-chars <n> 调高限制]";
 
-interface IdentifiedTranscriptEvent {
+export interface IdentifiedTranscriptEvent {
   eventId: string;
   messageId?: number;
   event: TranscriptEvent;
@@ -44,16 +45,17 @@ interface TranscriptTurn {
   events: IdentifiedTranscriptEvent[];
 }
 
-interface TimelineItem extends IdentifiedTranscriptEvent {
+export interface TimelineItem extends IdentifiedTranscriptEvent {
   turnNumber: number;
   stepNumber: number;
   finalAssistant: boolean;
 }
 
-interface TimelineSelection {
+export interface TimelineSelection {
   items: TimelineItem[];
-  totalEvents: number;
-  totalTurns: number;
+  hasMore: boolean;
+  seenEvents: number;
+  seenTurns: number;
 }
 
 interface SearchMatch {
@@ -174,43 +176,44 @@ async function sessionSearch(
   const candidateSessionsTruncated = candidateRows.length > sessionScanLimit;
   const rows = candidateRows.slice(0, sessionScanLimit);
   const needle = query.toLocaleLowerCase();
-  const matches: SearchMatch[] = [];
-  for (const row of rows) {
+  const page: SearchMatch[] = [];
+  let cursorFound = flags["after"] === undefined;
+  let hasMore = false;
+  scan: for (const row of rows) {
     const archive = locate(niubotHome, botName, row);
     if (!archive) continue;
     try {
-      const transcript = transcriptFor(row, archive);
+      const transcript = transcriptFor(db, row, archive);
       const messageIds = sessionMessageIds(db, row.id);
-      for await (const turn of transcriptTurns(row.id, transcript.events, messageIds)) {
-        const candidates = messagesOnly ? defaultTurnEvents(turn) : turn.events;
-        for (const item of candidates) {
-          if (!instantIsInUtcRange(item.event.timestamp, eventRange)) continue;
-          const index = item.event.content.toLocaleLowerCase().indexOf(needle);
-          if (index < 0) continue;
-          matches.push({
-            eventId: item.eventId,
-            messageId: item.messageId,
-            sessionId: row.id,
-            turnNumber: turn.number,
-            event: { ...item.event, content: "" },
-            snippet: snippet(item.event.content, index, query.length),
-          });
+      for await (const item of timelineEvents(row.id, transcript.events, messageIds)) {
+        if (messagesOnly && item.event.type !== "user" && !item.finalAssistant) continue;
+        if (!instantIsInUtcRange(item.event.timestamp, eventRange)) continue;
+        const index = item.event.content.toLocaleLowerCase().indexOf(needle);
+        if (index < 0) continue;
+        if (!cursorFound) {
+          if (item.eventId === flags["after"]) cursorFound = true;
+          continue;
         }
+        if (page.length >= pageSize) {
+          hasMore = true;
+          break scan;
+        }
+        page.push({
+          eventId: item.eventId,
+          messageId: item.messageId,
+          sessionId: row.id,
+          turnNumber: item.turnNumber,
+          event: { ...item.event, content: "" },
+          snippet: snippet(item.event.content, index, query.length),
+        });
       }
     } catch (err) {
       console.error(`Warning: cannot read session ${row.id}: ${(err as Error).message}`);
     }
   }
-  matches.sort(compareSearchMatches);
-  let start = 0;
-  if (flags["after"]) {
-    const cursor = matches.findIndex((match) => match.eventId === flags["after"]);
-    if (cursor < 0) throw new Error(`Search cursor not found: ${flags["after"]}`);
-    start = cursor + 1;
-  }
-  const page = matches.slice(start, start + pageSize);
+  if (!cursorFound) throw new Error(`Search cursor not found: ${flags["after"]}`);
   if (page.length === 0) {
-    console.log(matches.length === 0 ? "(无匹配 transcript 事件)" : "(没有更多匹配结果)");
+    console.log(flags["after"] ? "(没有更多匹配结果)" : "(无匹配 transcript 事件)");
     if (candidateSessionsTruncated) {
       console.log(`注意：只扫描了最近 ${sessionScanLimit} 个 session；使用 --sessions <数量> 调高范围`);
     }
@@ -221,8 +224,7 @@ async function sessionSearch(
     console.log(match.snippet);
     console.log("---");
   }
-  const hasMore = start + page.length < matches.length;
-  console.log(`本页 ${page.length} 条，共 ${matches.length} 条${hasMore ? "，还有更多" : "，已到最后一页"}`);
+  console.log(`本页 ${page.length} 条${hasMore ? "，还有更多" : "，当前扫描范围已到最后一页"}`);
   if (candidateSessionsTruncated) {
     console.log(`注意：只扫描了最近 ${sessionScanLimit} 个 session；使用 --sessions <数量> 调高范围`);
   }
@@ -268,7 +270,7 @@ async function sessionGet(
       || flags["verbose"] === "true" || flags["summary"] === "true")) {
     throw new Error("turn and event pagination flags cannot be combined with --format jsonl");
   }
-  const transcript = transcriptFor(row, archive);
+  const transcript = transcriptFor(db, row, archive);
   if (requestedEventId || flags["format"] === "jsonl") {
     await printEventStream(row.id, transcript.events, requestedEventId, flags["format"], maxChars);
     return;
@@ -298,7 +300,6 @@ async function sessionGet(
     afterEventId: flags["after-event"],
     pageSize,
   });
-  if (targetTurn && targetTurn > selection.totalTurns) throw new Error(`Turn not found: ${targetTurn}`);
   printTimeline(row, selection, {
     targetTurn,
     pageSize,
@@ -353,9 +354,29 @@ function locate(niubotHome: string, botName: string, row: SessionRow): LocatedSe
   return findSessionArchive(getSessionArchiveDirectory(niubotHome, botName, row.chat_id), row.id);
 }
 
-function transcriptFor(row: SessionRow, archive: LocatedSessionArchive): SessionTranscript {
+function transcriptFor(db: Database.Database, row: SessionRow, archive: LocatedSessionArchive): SessionTranscript {
   const transcript = loadArchivedTranscript(archive.path).transcript;
-  return { ...transcript, events: inferToolResultNames(transcript.events) };
+  const realUserMessages = new Map<string, number>();
+  for (const message of listSessionMessages(db, row.id)) {
+    if (message.role !== "user" || !isStandaloneInjectedContext(message.content_text)) continue;
+    realUserMessages.set(message.content_text, (realUserMessages.get(message.content_text) ?? 0) + 1);
+  }
+  const events = omitSyntheticContextEvents(transcript.events, realUserMessages);
+  return { ...transcript, events: inferToolResultNames(events) };
+}
+
+async function* omitSyntheticContextEvents(
+  events: SessionTranscript["events"],
+  realUserMessages: Map<string, number>,
+): AsyncGenerator<TranscriptEvent> {
+  for await (const event of events) {
+    if (event.type === "user" && isStandaloneInjectedContext(event.content)) {
+      const remaining = realUserMessages.get(event.content) ?? 0;
+      if (remaining === 0) continue;
+      realUserMessages.set(event.content, remaining - 1);
+    }
+    yield event;
+  }
 }
 
 async function* inferToolResultNames(
@@ -366,8 +387,10 @@ async function* inferToolResultNames(
     if (event.type === "tool_call" && event.callId && event.name) names.set(event.callId, event.name);
     if (event.type === "tool_result" && !event.name && event.callId) {
       yield { ...event, name: names.get(event.callId) };
+      names.delete(event.callId);
     } else {
       yield event;
+      if (event.type === "tool_result" && event.callId) names.delete(event.callId);
     }
   }
 }
@@ -397,30 +420,84 @@ async function printEventStream(
   if (requestedEventId) throw new Error(`Transcript event not found: ${requestedEventId}`);
 }
 
+async function* timelineEvents(
+  sessionId: string,
+  events: SessionTranscript["events"],
+  messageIds?: Map<string, number[]>,
+): AsyncGenerator<TimelineItem> {
+  const seen = new Map<string, number>();
+  let turnNumber = 0;
+  let stepNumber = 0;
+  let currentHasOnlyUsers = false;
+  let lastUserTimestamp: string | undefined;
+  let pendingAssistants: TimelineItem[] = [];
+
+  for await (const event of events) {
+    const eventId = makeEventId(sessionId, event, seen);
+    if (event.type === "user") {
+      const isSameUserMessage = turnNumber > 0
+        && currentHasOnlyUsers
+        && lastUserTimestamp === event.timestamp;
+      if (!isSameUserMessage) turnNumber++;
+      currentHasOnlyUsers = true;
+      lastUserTimestamp = event.timestamp;
+    } else if (turnNumber > 0) {
+      currentHasOnlyUsers = false;
+    }
+    if (turnNumber === 0) continue;
+
+    const item: TimelineItem = {
+      eventId,
+      messageId: messageIds ? takeMessageId(messageIds, event) : undefined,
+      event,
+      turnNumber,
+      stepNumber: ++stepNumber,
+      finalAssistant: false,
+    };
+
+    if (event.type === "assistant") {
+      const pendingTimestamp = pendingAssistants[0]?.event.timestamp;
+      const sameNativeMessage = pendingAssistants.length > 0
+        && pendingTimestamp !== undefined
+        && pendingTimestamp === event.timestamp;
+      if (!sameNativeMessage) {
+        for (const pending of pendingAssistants) yield pending;
+        pendingAssistants = [];
+      }
+      pendingAssistants.push(item);
+      continue;
+    }
+
+    if (pendingAssistants.length > 0) {
+      const previousTurn = pendingAssistants[0]!.turnNumber;
+      const finalAssistant = event.type === "user" && turnNumber > previousTurn;
+      for (const pending of pendingAssistants) yield { ...pending, finalAssistant };
+      pendingAssistants = [];
+    }
+    yield item;
+  }
+
+  for (const pending of pendingAssistants) yield { ...pending, finalAssistant: true };
+}
+
 async function* transcriptTurns(
   sessionId: string,
   events: SessionTranscript["events"],
   messageIds?: Map<string, number[]>,
 ): AsyncGenerator<TranscriptTurn> {
-  const seen = new Map<string, number>();
   let current: TranscriptTurn | undefined;
-  let nextTurnNumber = 1;
-  for await (const event of events) {
+  for await (const timelineItem of timelineEvents(sessionId, events, messageIds)) {
+    const { eventId, messageId, event, turnNumber } = timelineItem;
     const item: IdentifiedTranscriptEvent = {
-      eventId: makeEventId(sessionId, event, seen),
-      messageId: messageIds ? takeMessageId(messageIds, event) : undefined,
+      eventId,
+      messageId,
       event,
     };
-    if (event.type === "user") {
-      const isSameUserMessage = current
-        && current.events.every((candidate) => candidate.event.type === "user")
-        && current.events.at(-1)?.event.timestamp === event.timestamp;
-      if (!isSameUserMessage) {
-        if (current) yield current;
-        current = { number: nextTurnNumber++, events: [] };
-      }
+    if (!current || current.number !== turnNumber) {
+      if (current) yield current;
+      current = { number: turnNumber, events: [] };
     }
-    if (current) current.events.push(item);
+    current.events.push(item);
   }
   if (current) yield current;
 }
@@ -443,40 +520,39 @@ async function selectTranscriptTurns(
   return { turns, totalTurns };
 }
 
-async function selectTimelineEvents(
+export async function selectTimelineEvents(
   sessionId: string,
   events: SessionTranscript["events"],
   options: { targetTurn?: number; afterEventId?: string; pageSize: number },
 ): Promise<TimelineSelection> {
   const items: TimelineItem[] = [];
-  let totalEvents = 0;
-  let totalTurns = 0;
+  let seenEvents = 0;
+  let seenTurns = 0;
+  let targetTurnFound = options.targetTurn === undefined;
   let cursorFound = options.afterEventId === undefined;
-  for await (const turn of transcriptTurns(sessionId, events)) {
-    totalTurns = turn.number;
-    if (options.targetTurn && turn.number !== options.targetTurn) continue;
-    const finalIds = new Set(assistantSections(turn).finalMessages.map((item) => item.eventId));
-    for (const item of turn.events) {
-      totalEvents++;
-      if (!cursorFound) {
-        if (item.eventId === options.afterEventId) cursorFound = true;
-        continue;
-      }
-      if (items.length < options.pageSize) {
-        items.push({
-          ...item,
-          turnNumber: turn.number,
-          stepNumber: totalEvents,
-          finalAssistant: finalIds.has(item.eventId),
-        });
-      }
+  let hasMore = false;
+  for await (const item of timelineEvents(sessionId, events)) {
+    seenTurns = Math.max(seenTurns, item.turnNumber);
+    if (options.targetTurn && item.turnNumber > options.targetTurn) break;
+    if (options.targetTurn && item.turnNumber !== options.targetTurn) continue;
+    targetTurnFound = true;
+    seenEvents++;
+    if (!cursorFound) {
+      if (item.eventId === options.afterEventId) cursorFound = true;
+      continue;
     }
+    if (items.length >= options.pageSize) {
+      hasMore = true;
+      break;
+    }
+    items.push(item);
   }
+  if (!targetTurnFound) throw new Error(`Turn not found: ${options.targetTurn}`);
   if (!cursorFound) {
     const scope = options.targetTurn ? ` in turn ${options.targetTurn}` : "";
     throw new Error(`Event cursor not found${scope}: ${options.afterEventId}`);
   }
-  return { items, totalEvents, totalTurns };
+  return { items, hasMore, seenEvents, seenTurns };
 }
 
 function printTimeline(
@@ -499,11 +575,13 @@ function printTimeline(
     const first = selection.items[0]!.stepNumber;
     const last = selection.items.at(-1)!.stepNumber;
     const scope = options.targetTurn ? `第 ${options.targetTurn} 轮，` : "";
-    console.log(`范围：${scope}第 ${first}～${last} 步，共 ${selection.totalEvents} 步；整个 Session 共 ${selection.totalTurns} 轮\n`);
+    console.log(`范围：${scope}第 ${first}～${last} 步\n`);
   } else {
     const scope = options.targetTurn ? `第 ${options.targetTurn} 轮` : "整个 Session";
-    console.log(`范围：${scope}，共 ${selection.totalEvents} 步；整个 Session 共 ${selection.totalTurns} 轮\n`);
-    console.log(selection.totalEvents === 0 ? "(没有执行步骤)" : "(没有更多执行步骤)");
+    console.log(`范围：${scope}\n`);
+    console.log(selection.seenEvents === 0 && !options.flags["after-event"]
+      ? "(没有执行步骤)"
+      : "(没有更多执行步骤)");
     return;
   }
 
@@ -535,7 +613,8 @@ function printTimeline(
     printed++;
   }
 
-  const hasMore = !!lastPrinted && lastPrinted.stepNumber < selection.totalEvents;
+  const hasUnprintedSelectedItems = printed < selection.items.length;
+  const hasMore = !!lastPrinted && (selection.hasMore || hasUnprintedSelectedItems);
   console.log(`本页显示 ${printed} 步${hasMore ? "，还有更多" : "，已到最后一步"}`);
   if (hasMore && lastPrinted) {
     console.log(`下一页：${timelineContinuationCommand(row.id, lastPrinted.eventId, options)}`);
@@ -559,12 +638,6 @@ function timelinePreview(content: string, maxChars: number): { content: string; 
     content: content.slice(0, Math.max(0, maxChars - notice.length)) + notice,
     truncated: true,
   };
-}
-
-function defaultTurnEvents(turn: TranscriptTurn): IdentifiedTranscriptEvent[] {
-  const users = turn.events.filter((item) => item.event.type === "user");
-  const { finalMessages } = assistantSections(turn);
-  return [...users, ...finalMessages];
 }
 
 function assistantSections(turn: TranscriptTurn): {
@@ -679,7 +752,13 @@ function eventLabel(event: TranscriptEvent): string {
 }
 
 function makeEventId(sessionId: string, event: TranscriptEvent, seen: Map<string, number>): string {
-  const digest = createHash("sha256").update(JSON.stringify(event)).digest("hex").slice(0, 12);
+  const identity = {
+    type: event.type,
+    timestamp: event.timestamp ?? null,
+    callId: event.callId ?? null,
+    name: event.callId ? null : (event.name ?? null),
+  };
+  const digest = createHash("sha256").update(JSON.stringify(identity)).digest("hex").slice(0, 12);
   const count = (seen.get(digest) ?? 0) + 1;
   seen.set(digest, count);
   return `${sessionId}:e${digest}${count > 1 ? `-${count}` : ""}`;
@@ -705,11 +784,6 @@ function snippet(content: string, index: number, queryLength: number): string {
   const start = Math.max(0, index - 100);
   const end = Math.min(content.length, index + queryLength + 140);
   return `${start > 0 ? "…" : ""}${content.slice(start, end).replace(/\s+/g, " ")}${end < content.length ? "…" : ""}`;
-}
-
-function compareSearchMatches(left: SearchMatch, right: SearchMatch): number {
-  const byTime = (right.event.timestamp ?? "").localeCompare(left.event.timestamp ?? "");
-  return byTime || right.eventId.localeCompare(left.eventId);
 }
 
 function listContinuationCommand(

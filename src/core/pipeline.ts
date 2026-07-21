@@ -2726,7 +2726,9 @@ export class Pipeline {
         }
       }
 
-      if (messageToSend !== mergedText && messageToSend.endsWith(mergedText)) {
+      if (messageToSend === mergedText) {
+        messageToSend = wrapInjectedUserMessage(mergedText);
+      } else if (messageToSend.endsWith(mergedText)) {
         messageToSend = `${messageToSend.slice(0, messageToSend.length - mergedText.length)}${wrapInjectedUserMessage(mergedText)}`;
       }
 

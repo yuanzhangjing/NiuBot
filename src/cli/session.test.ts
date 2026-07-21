@@ -2,12 +2,12 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { AgentBackend } from "../agent/types.js";
+import type { AgentBackend, TranscriptEvent } from "../agent/types.js";
 import { initDatabase, storeMessage } from "../database/schema.js";
 import { archiveAgentSession } from "../session-archive/archive.js";
-import { readCodexTranscript } from "../session-archive/native-transcript.js";
+import { readCodexTranscript, wrapInjectedUserMessage } from "../session-archive/native-transcript.js";
 import { parseArgs } from "./args.js";
-import { handleSessions, markdownCodeFence } from "./session.js";
+import { handleSessions, markdownCodeFence, selectTimelineEvents } from "./session.js";
 
 const tempDirs: string[] = [];
 afterEach(() => {
@@ -52,6 +52,42 @@ describe("nbt sessions", () => {
   it("chooses a fence without expanding every backtick run as function arguments", () => {
     expect(markdownCodeFence("` ".repeat(200_000))).toBe("```");
     expect(markdownCodeFence("before ```` after")).toBe("`````");
+  });
+
+  it("stops timeline loading after the current page and one lookahead event", async () => {
+    let consumed = 0;
+    async function* events(): AsyncGenerator<TranscriptEvent> {
+      for (let turn = 1; turn <= 100; turn++) {
+        consumed++;
+        yield { type: "user", timestamp: `2026-07-13T01:${String(turn % 60).padStart(2, "0")}:00Z`, content: `问题 ${turn}` };
+        consumed++;
+        yield { type: "assistant", timestamp: `2026-07-13T01:${String(turn % 60).padStart(2, "0")}:01Z`, content: `回答 ${turn}` };
+      }
+    }
+
+    const page = await selectTimelineEvents("s1", events(), { pageSize: 2 });
+    expect(page.items).toHaveLength(2);
+    expect(page.hasMore).toBe(true);
+    expect(consumed).toBe(3);
+  });
+
+  it("keeps event cursors stable when normalized content changes", async () => {
+    const first = await selectTimelineEvents("s1", [
+      { type: "user", timestamp: "2026-07-13T01:00:00Z", content: "旧内容" },
+    ], { pageSize: 1 });
+    const second = await selectTimelineEvents("s1", [
+      { type: "user", timestamp: "2026-07-13T01:00:00Z", content: "新内容" },
+    ], { pageSize: 1 });
+    expect(first.items[0]?.eventId).toBe(second.items[0]?.eventId);
+  });
+
+  it("marks every text block in the final native assistant message as final", async () => {
+    const page = await selectTimelineEvents("s1", [
+      { type: "user", timestamp: "2026-07-13T01:00:00Z", content: "问题" },
+      { type: "assistant", timestamp: "2026-07-13T01:00:01Z", content: "回答上半段" },
+      { type: "assistant", timestamp: "2026-07-13T01:00:01Z", content: "回答下半段" },
+    ], { pageSize: 10 });
+    expect(page.items.map((item) => item.finalAssistant)).toEqual([false, true, true]);
   });
 
   it("lists linked archives, searches parsed events, and gets a complete event", async () => {
@@ -135,7 +171,7 @@ describe("nbt sessions", () => {
 
     lines.length = 0;
     await handleSessions(db, ["get", "s1"], "c1", "p2p", home, "NiuBot", parseArgs);
-    expect(lines.join("\n")).toContain("范围：第 1～10 步，共 14 步；整个 Session 共 5 轮");
+    expect(lines.join("\n")).toContain("范围：第 1～10 步");
     expect(lines.join("\n")).toContain("本页显示 10 步，还有更多");
     expect(lines.join("\n")).toContain("下一页：/nbt sessions get s1 --after-event");
 
@@ -143,7 +179,7 @@ describe("nbt sessions", () => {
     await handleSessions(db, ["get", "s1", "--page-size", "3", "--event-chars", "200"], "c1", "p2p", home, "NiuBot", parseArgs);
     const timelinePage = lines.join("\n");
     expect(timelinePage).toContain("视图：执行过程");
-    expect(timelinePage).toContain("范围：第 1～3 步，共 14 步；整个 Session 共 5 轮");
+    expect(timelinePage).toContain("范围：第 1～3 步");
     expect(timelinePage).toContain("步骤 1 · 用户输入");
     expect(timelinePage).toContain("步骤 2 · 工具调用 · shell");
     expect(timelinePage).toContain("步骤 3 · 工具结果");
@@ -198,7 +234,7 @@ describe("nbt sessions", () => {
     await handleSessions(db, ["get", "s1", "--turn", "1", "--verbose", "--event-page-size", "2"], "c1", "p2p", home, "NiuBot", parseArgs);
     const verboseFirstPage = lines.join("\n");
     const eventCursor = /--after-event ([^ ]+)/.exec(verboseFirstPage)?.[1];
-    expect(verboseFirstPage).toContain("范围：第 1 轮，第 1～2 步，共 4 步");
+    expect(verboseFirstPage).toContain("范围：第 1 轮，第 1～2 步");
     expect(verboseFirstPage).toContain("本页显示 2 步，还有更多");
     expect(eventCursor).toBeTruthy();
     expect(verboseFirstPage).not.toContain("LONG_OUTPUT");
@@ -253,18 +289,63 @@ describe("nbt sessions", () => {
     await handleSessions(db, ["search", "轮", "-n", "2"], "c1", "p2p", home, "NiuBot", parseArgs);
     const firstSearchPage = lines.join("\n");
     const searchCursor = /--after ([^ ]+)/.exec(firstSearchPage)?.[1];
-    expect(firstSearchPage).toContain("本页 2 条，共 6 条，还有更多");
+    expect(firstSearchPage).toContain("本页 2 条，还有更多");
     expect(searchCursor).toBeTruthy();
 
     lines.length = 0;
     await handleSessions(db, ["search", "轮", "-n", "2", "--after", searchCursor!], "c1", "p2p", home, "NiuBot", parseArgs);
-    expect(lines.join("\n")).toContain("本页 2 条，共 6 条，还有更多");
+    expect(lines.join("\n")).toContain("本页 2 条，还有更多");
     expect(lines.join("\n")).not.toEqual(firstSearchPage);
 
     await expect(handleSessions(db, ["get", "s1", "--raw"], "c1", "p2p", home, "NiuBot", parseArgs))
       .rejects.toThrow("--raw is not supported");
     await expect(handleSessions(db, ["list", "--chat-id", "private-chat"], "c1", "group", home, "NiuBot", parseArgs))
       .rejects.toThrow("cross-chat query is not allowed in group chat");
+    db.close();
+  });
+
+  it("keeps a real context-shaped user message while hiding synthetic context", async () => {
+    const home = mkdtempSync(join(tmpdir(), "niubot-sessions-context-message-"));
+    tempDirs.push(home);
+    const db = initDatabase(join(home, "niubot.db"));
+    db.prepare("INSERT INTO users (id, platform, platform_id, name) VALUES ('u2', 'feishu', 'u2p', 'Zen')").run();
+    db.prepare("INSERT INTO chats (id, platform, platform_id, type, user_id) VALUES ('c1', 'feishu', 'c1p', 'p2p', 'u2')").run();
+    db.prepare(`
+      INSERT INTO sessions (
+        id, chat_id, user_id, source, status, backend_type, agent_session_id,
+        started_at, ended_at, last_active_at
+      ) VALUES (
+        'literal', 'c1', 'u2', 'user', 'archived', 'codex', 'agent-literal',
+        '2026-07-13 01:00:00', '2026-07-13 01:10:00', '2026-07-13 01:10:00'
+      )
+    `).run();
+    const literal = "<skill><name>literal</name></skill>";
+    storeMessage(db, {
+      chatId: "c1", senderId: "u2", sessionId: "literal", role: "user",
+      contentText: literal, platform: "feishu",
+    });
+
+    const native = join(home, "literal.jsonl");
+    writeFileSync(native, [
+      { type: "response_item", timestamp: "2026-07-13T01:00:00Z", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "<recommended_plugins>synthetic</recommended_plugins>" }] } },
+      { type: "response_item", timestamp: "2026-07-13T01:00:01Z", payload: { type: "message", role: "user", content: [{ type: "input_text", text: literal }] } },
+      { type: "response_item", timestamp: "2026-07-13T01:00:02Z", payload: { type: "message", role: "user", content: [{ type: "input_text", text: `<niubot-system-rules>private</niubot-system-rules>\n\n${wrapInjectedUserMessage(literal)}` }] } },
+      { type: "response_item", timestamp: "2026-07-13T01:00:03Z", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "已保留" }] } },
+    ].map((row) => JSON.stringify(row)).join("\n") + "\n");
+    const transcript = { ...readCodexTranscript(native, "agent-literal"), sources: [{ path: native, role: "session" }] };
+    const backend = { exportSessionTranscript: async () => transcript } as AgentBackend;
+    await archiveAgentSession(home, backend, { id: "agent-literal" }, {
+      botId: "NiuBot", chatId: "c1", sessionId: "literal", source: "user", backend: "codex",
+      startedAt: "2026-07-13 01:00:00", archivedAt: "2026-07-13 01:10:00",
+    });
+
+    const lines: string[] = [];
+    vi.spyOn(console, "log").mockImplementation((...values) => lines.push(values.join(" ")));
+    await handleSessions(db, ["get", "literal"], "c1", "p2p", home, "NiuBot", parseArgs);
+    const output = lines.join("\n");
+    expect(output.match(new RegExp(literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g"))).toHaveLength(1);
+    expect(output).not.toContain("recommended_plugins");
+    expect(output).toContain("已保留");
     db.close();
   });
 

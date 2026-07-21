@@ -2859,6 +2859,9 @@ describe("Pipeline.recover", () => {
     expect(agent.sendMessageCalls[3]).toContain(COMPACT_RECOVERY_REMINDER);
     expect(agent.sendMessageCalls[3]).not.toContain("<niubot-system-rules>");
     expect(agent.sendMessageCalls[3]).toContain("fourth");
+    for (const call of agent.sendMessageCalls) {
+      expect(call).toContain("<niubot-user-message");
+    }
     expect(SYSTEM_RULES).toContain("nbt system-rules");
   });
 
