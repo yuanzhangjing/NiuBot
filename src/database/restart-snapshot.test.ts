@@ -4,6 +4,7 @@ import path from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, test } from "vitest";
 import type { NiuBotConfig } from "../config.js";
+import { initDatabase, LATEST_SCHEMA_VERSION } from "./schema.js";
 import {
   applyPreflightDatabaseManifest,
   assertDatabasesAtSchemaVersion,
@@ -21,6 +22,19 @@ afterEach(() => {
 });
 
 describe("restart database snapshot", () => {
+  test("keeps the bridge release on schema 16 without transport tables", () => {
+    const root = temporaryDirectory();
+    const database = initDatabase(path.join(root, "bridge.db"));
+
+    expect(LATEST_SCHEMA_VERSION).toBe(16);
+    expect(database.pragma("user_version", { simple: true })).toBe(16);
+    expect(database.prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('transport_inbox', 'transport_outbox')",
+    ).all()).toEqual([]);
+
+    database.close();
+  });
+
   test("backs up a live WAL database and maps preflight to an isolated copy", async () => {
     const root = temporaryDirectory();
     const databasePath = path.join(root, "live", "bot.db");
@@ -98,12 +112,12 @@ describe("restart database snapshot", () => {
     const root = temporaryDirectory();
     const databasePath = path.join(root, "bot.db");
     const database = new Database(databasePath);
-    database.pragma("user_version = 18");
+    database.pragma(`user_version = ${LATEST_SCHEMA_VERSION}`);
     database.close();
 
-    expect(() => assertDatabasesAtSchemaVersion([databasePath], 18)).not.toThrow();
-    expect(() => assertDatabasesAtSchemaVersion([databasePath], 19)).toThrow(/cannot migrate/);
-    expect(() => assertDatabasesAtSchemaVersion([path.join(root, "missing.db")], 18))
+    expect(() => assertDatabasesAtSchemaVersion([databasePath], LATEST_SCHEMA_VERSION)).not.toThrow();
+    expect(() => assertDatabasesAtSchemaVersion([databasePath], LATEST_SCHEMA_VERSION + 1)).toThrow(/cannot migrate/);
+    expect(() => assertDatabasesAtSchemaVersion([path.join(root, "missing.db")], LATEST_SCHEMA_VERSION))
       .toThrow(/missing database/);
   });
 
