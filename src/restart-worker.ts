@@ -18,6 +18,13 @@ import { acquireProcessLock } from "./process-lock.js";
 import { ReleaseStore, type ReleaseState } from "./release-store.js";
 import { RestartStateWriter } from "./restart-state.js";
 import { dateInTimeZone } from "./tz.js";
+import {
+  cleanupRestartDatabaseSnapshot,
+  createRestartDatabaseSnapshot,
+  PREFLIGHT_DATABASE_MANIFEST_ENV,
+  restoreRestartDatabaseSnapshot,
+  type RestartDatabaseSnapshot,
+} from "./database/restart-snapshot.js";
 
 const PACKAGE_NAME = "@yuanzhangjing/niubot";
 const DEFAULT_INSTALL_TIMEOUT_MS = 120_000;
@@ -154,15 +161,35 @@ async function runNpmUpdate(context: RestartContext): Promise<void> {
 
 async function runProductionRestart(context: RestartContext): Promise<void> {
   const runtimePath = context.sourceDirectory;
-  context.state.write("production_preflight");
-  await runPreflight(context, runtimePath);
+  context.state.write("production_preflight_snapshot");
+  const preflightSnapshot = await createDatabaseSnapshot(context, "preflight");
+  try {
+    context.state.write("production_preflight");
+    await runPreflight(context, runtimePath, preflightSnapshot.manifestPath);
+  } catch (err) {
+    cleanupSnapshot(context, preflightSnapshot);
+    throw err;
+  }
+  cleanupSnapshot(context, preflightSnapshot);
   context.state.write("production_stop_service");
   const old = await inspectRunningEngine(context.niubotHome);
   const recoveryTarget = old ? runtimeTargetFromRunning(old) : undefined;
   await stopEngine(context.niubotHome);
-  context.state.write("production_start_service", { oldPid: old?.state.pid });
-  sanitizeOneShotEnvironment();
+  let snapshot: RestartDatabaseSnapshot;
   try {
+    context.state.write("production_rollback_snapshot");
+    snapshot = await createDatabaseSnapshot(context, "rollback");
+  } catch (err) {
+    if (recoveryTarget) {
+      const reason = errorMessage(err);
+      await resumeRuntimeAfterSnapshotFailure(context, recoveryTarget, reason);
+      throw new Error(`${reason}; old runtime resumed`, { cause: err });
+    }
+    throw err;
+  }
+  try {
+    context.state.write("production_start_service", { oldPid: old?.state.pid });
+    sanitizeOneShotEnvironment();
     const launched = launchRuntime(context, {
       runtimePath,
       version: readPackage(path.join(runtimePath, "package.json")).version,
@@ -171,15 +198,17 @@ async function runProductionRestart(context: RestartContext): Promise<void> {
     context.state.write("production_health_check", { candidatePid: launched.state.pid });
     if (!await checkRuntimeHealth(context, launched)) throw new Error("health check failed");
     context.state.write("production_success");
-    await notify(context, "重启成功。");
   } catch (err) {
     const reason = `production restart failed: ${errorMessage(err)}`;
     if (!recoveryTarget) {
-      context.state.write("rollback_unavailable", { error: reason });
-      throw new Error(`${reason}; previous runtime is unavailable`, { cause: err });
+      await restoreDatabaseWithoutRuntime(context, snapshot, reason);
+      throw new Error(`${reason}; database restored but previous runtime is unavailable`, { cause: err });
     }
-    await recoverRuntime(context, recoveryTarget, reason, "重启失败，已恢复原版本。");
+    await recoverRuntime(context, recoveryTarget, snapshot, reason, "重启失败，已恢复原版本。");
+    return;
   }
+  cleanupSnapshot(context, snapshot);
+  await notify(context, "重启成功。");
 }
 
 async function switchToCandidate(
@@ -189,17 +218,39 @@ async function switchToCandidate(
   successMessage: string,
 ): Promise<void> {
   const packageDirectory = context.store.packageDirectory(releaseId);
-  context.state.write("preflight_candidate", { candidateRelease: releaseId });
-  await runPreflight(context, packageDirectory);
+  context.state.write("preflight_snapshot", { candidateRelease: releaseId });
+  const preflightSnapshot = await createDatabaseSnapshot(context, "preflight");
+  try {
+    context.state.write("preflight_candidate", { candidateRelease: releaseId });
+    await runPreflight(context, packageDirectory, preflightSnapshot.manifestPath);
+  } catch (err) {
+    cleanupSnapshot(context, preflightSnapshot);
+    throw err;
+  }
+  cleanupSnapshot(context, preflightSnapshot);
 
   const old = await inspectRunningEngine(context.niubotHome);
-  const previous = context.store.readState().lastKnownGood;
+  const previousReleaseState = context.store.readState();
+  const previous = previousReleaseState.lastKnownGood;
+  const rollbackTarget = resolveRollbackTarget(context, old, previous);
   context.state.write("stop_old_service", {
     oldPid: old?.state.pid,
     candidateRelease: releaseId,
     previousRelease: previous,
   });
   await stopEngine(context.niubotHome);
+  let snapshot: RestartDatabaseSnapshot;
+  try {
+    context.state.write("rollback_snapshot", { candidateRelease: releaseId });
+    snapshot = await createDatabaseSnapshot(context, "rollback");
+  } catch (err) {
+    if (rollbackTarget) {
+      const reason = errorMessage(err);
+      await resumeRuntimeAfterSnapshotFailure(context, rollbackTarget, reason);
+      throw new Error(`${reason}; old runtime resumed`, { cause: err });
+    }
+    throw err;
+  }
   try {
     context.store.activate(releaseId);
     sanitizeOneShotEnvironment();
@@ -213,19 +264,31 @@ async function switchToCandidate(
     if (!await checkRuntimeHealth(context, launched)) throw new Error("candidate health check failed");
 
     context.store.markLastKnownGood(releaseId);
-    const active = readProcessState(context.niubotHome)?.processes.engine.runtimePath;
-    context.store.cleanup({ protectedRuntimePaths: active ? [active] : [] });
     context.state.write("success");
-    await notify(context, successMessage);
   } catch (err) {
     const reason = errorMessage(err);
-    const rollbackTarget = resolveRollbackTarget(context, old);
     if (!rollbackTarget) {
-      context.state.write("rollback_unavailable", { error: reason });
-      throw new Error(`${reason}; no recoverable previous runtime`, { cause: err });
+      await restoreDatabaseWithoutRuntime(context, snapshot, reason);
+      throw new Error(`${reason}; database restored but no recoverable previous runtime`, { cause: err });
     }
-    await recoverRuntime(context, rollbackTarget, reason, "新版本启动失败，已回滚到上一版本。");
+    await recoverRuntime(
+      context,
+      rollbackTarget,
+      snapshot,
+      reason,
+      "新版本启动失败，已回滚到上一版本。",
+      previousReleaseState,
+    );
+    return;
   }
+  try {
+    const active = readProcessState(context.niubotHome)?.processes.engine.runtimePath;
+    context.store.cleanup({ protectedRuntimePaths: active ? [active] : [] });
+  } catch (err) {
+    log(context, `release cleanup failed: ${errorMessage(err)}`);
+  }
+  cleanupSnapshot(context, snapshot);
+  await notify(context, successMessage);
 }
 
 function launchRuntime(context: RestartContext, target: RuntimeTarget) {
@@ -251,9 +314,9 @@ function runtimeTargetFromRunning(running: NonNullable<Awaited<ReturnType<typeof
 function resolveRollbackTarget(
   context: RestartContext,
   old: Awaited<ReturnType<typeof inspectRunningEngine>>,
+  rollbackId?: string,
 ): RuntimeTarget | undefined {
   try {
-    const rollbackId = context.store.restoreLastKnownGood();
     if (rollbackId) {
       const runtimePath = context.store.packageDirectory(rollbackId);
       return {
@@ -271,20 +334,63 @@ function resolveRollbackTarget(
 async function recoverRuntime(
   context: RestartContext,
   target: RuntimeTarget,
+  snapshot: RestartDatabaseSnapshot,
   reason: string,
   notification: string,
+  restoreReleaseState?: ReleaseState,
 ): Promise<void> {
   try {
     context.state.write("rollback_stop_candidate", { error: reason });
     await stopEngine(context.niubotHome);
+    context.state.write("rollback_restore_database", { error: reason });
+    restoreRestartDatabaseSnapshot(snapshot);
     context.state.write("rollback_start_lkg", { error: reason });
     const rollback = launchRuntime(context, target);
     context.state.write("health_check_rollback", { candidatePid: rollback.state.pid, error: reason });
     if (!await checkRuntimeHealth(context, rollback)) throw new Error("rollback health check failed");
+    if (restoreReleaseState) context.store.writeState(restoreReleaseState);
     context.state.write("rollback_success", { error: reason });
+    cleanupSnapshot(context, snapshot);
     await notify(context, notification);
   } catch (recoveryError) {
     const message = `${reason}; recovery failed: ${errorMessage(recoveryError)}`;
+    context.state.write("rollback_failed", { error: message });
+    throw new Error(message, { cause: recoveryError });
+  }
+}
+
+async function restoreDatabaseWithoutRuntime(
+  context: RestartContext,
+  snapshot: RestartDatabaseSnapshot,
+  reason: string,
+): Promise<void> {
+  try {
+    context.state.write("rollback_stop_candidate", { error: reason });
+    await stopEngine(context.niubotHome);
+    context.state.write("rollback_restore_database", { error: reason });
+    restoreRestartDatabaseSnapshot(snapshot);
+    context.state.write("rollback_unavailable", { error: reason });
+    cleanupSnapshot(context, snapshot);
+  } catch (restoreError) {
+    const message = `${reason}; database recovery failed: ${errorMessage(restoreError)}`;
+    context.state.write("rollback_failed", { error: message });
+    throw new Error(message, { cause: restoreError });
+  }
+}
+
+async function resumeRuntimeAfterSnapshotFailure(
+  context: RestartContext,
+  target: RuntimeTarget,
+  reason: string,
+): Promise<void> {
+  try {
+    context.state.write("snapshot_failed_restart_old", { error: reason });
+    sanitizeOneShotEnvironment();
+    const resumed = launchRuntime(context, target);
+    context.state.write("health_check_snapshot_recovery", { candidatePid: resumed.state.pid, error: reason });
+    if (!await checkRuntimeHealth(context, resumed)) throw new Error("old runtime health check failed");
+  } catch (recoveryError) {
+    const message = `${reason}; old runtime recovery failed: ${errorMessage(recoveryError)}`;
     context.state.write("rollback_failed", { error: message });
     throw new Error(message, { cause: recoveryError });
   }
@@ -363,15 +469,50 @@ async function packRelease(context: RestartContext, options: PackReleaseOptions)
   }
 }
 
-async function runPreflight(context: RestartContext, runtimePath: string): Promise<void> {
+async function runPreflight(
+  context: RestartContext,
+  runtimePath: string,
+  databaseManifestPath: string,
+): Promise<void> {
   await runLogged(
     context,
     process.execPath,
     [path.join(runtimePath, "dist", "index.js"), "--preflight"],
     runtimePath,
     20_000,
-    runtimeEnvironment(context, context.previousRuntimeMode),
+    {
+      ...runtimeEnvironment(context, context.previousRuntimeMode),
+      [PREFLIGHT_DATABASE_MANIFEST_ENV]: databaseManifestPath,
+    },
   );
+}
+
+async function createDatabaseSnapshot(
+  context: RestartContext,
+  purpose: "preflight" | "rollback",
+): Promise<RestartDatabaseSnapshot> {
+  const config = loadConfig(path.join(context.niubotHome, "config.yaml"));
+  const rootDirectory = path.join(
+    context.botDirectory,
+    "restart",
+    "database-snapshots",
+    `${context.id}-${purpose}`,
+  );
+  const snapshot = await createRestartDatabaseSnapshot({
+    rootDirectory,
+    databasePaths: config.bots.map((bot) => bot.dbPath),
+    backupTimeoutMs: readPositiveMs("NIUBOT_RESTART_DATABASE_BACKUP_TIMEOUT", 120_000),
+  });
+  log(context, `database snapshot ready count=${snapshot.records.length}`);
+  return snapshot;
+}
+
+function cleanupSnapshot(context: RestartContext, snapshot: RestartDatabaseSnapshot): void {
+  try {
+    cleanupRestartDatabaseSnapshot(snapshot);
+  } catch (err) {
+    log(context, `database snapshot cleanup failed: ${errorMessage(err)}`);
+  }
 }
 
 async function checkRuntimeHealth(
@@ -502,6 +643,7 @@ function sanitizeOneShotEnvironment(): void {
     "NIUBOT_RESTART_NOTIFY_CHAT_ID",
     "NIUBOT_CHAT_ID",
     "NIUBOT_API_SOCKET",
+    PREFLIGHT_DATABASE_MANIFEST_ENV,
   ]) delete process.env[name];
 }
 
