@@ -7,7 +7,10 @@ import {
   loadArchivedTranscript,
   type LocatedSessionArchive,
 } from "../session-archive/reader.js";
-import { isStandaloneInjectedContext } from "../session-archive/native-transcript.js";
+import {
+  isExplicitUserMessage,
+  isStandaloneInjectedContext,
+} from "../session-archive/native-transcript.js";
 import {
   getSessionEdgeExchanges,
   listSessionMessages,
@@ -39,6 +42,7 @@ const DEFAULT_EVENT_PAGE_SIZE = 10;
 const MAX_EVENT_PAGE_SIZE = 100;
 const DEFAULT_EVENT_PREVIEW_CHARS = 1_200;
 const MAX_EVENT_PREVIEW_CHARS = 20_000;
+const MAX_PENDING_TIMELINE_ITEMS = 100;
 const TRUNCATED_NOTICE = "\n\n[内容已截断；使用 --max-chars <n> 调高限制]";
 
 export interface IdentifiedTranscriptEvent {
@@ -57,6 +61,7 @@ export interface TimelineItem extends IdentifiedTranscriptEvent {
   stepNumber: number;
   finalAssistant: boolean;
   pairedResult?: IdentifiedTranscriptEvent;
+  pairingLimited?: boolean;
 }
 
 export interface TimelineSelection {
@@ -202,14 +207,14 @@ async function sessionSearch(
       const transcript = transcriptFor(db, row, archive);
       const messageIds = sessionMessageIds(db, row.id);
       for await (const item of timelineEvents(row.id, transcript.events, messageIds)) {
-        if (messagesOnly && item.event.type !== "user" && !item.finalAssistant) continue;
-        if (!instantIsInUtcRange(item.event.timestamp, eventRange)) continue;
-        const index = item.event.content.toLocaleLowerCase().indexOf(needle);
-        if (index < 0) continue;
         if (!cursorFound) {
           if (item.eventId === flags["after"]) cursorFound = true;
           continue;
         }
+        if (messagesOnly && item.event.type !== "user" && !item.finalAssistant) continue;
+        if (!instantIsInUtcRange(item.event.timestamp, eventRange)) continue;
+        const index = item.event.content.toLocaleLowerCase().indexOf(needle);
+        if (index < 0) continue;
         if (page.length >= pageSize) {
           hasMore = true;
           break scan;
@@ -392,14 +397,33 @@ async function* omitSyntheticContextEvents(
   events: SessionTranscript["events"],
   realUserMessages: Map<string, number>,
 ): AsyncGenerator<TranscriptEvent> {
-  for await (const event of events) {
-    if (event.type === "user" && isStandaloneInjectedContext(event.content)) {
+  let pendingContextEvents: TranscriptEvent[] = [];
+
+  const flushPending = (): TranscriptEvent[] => {
+    const kept: TranscriptEvent[] = [];
+    for (const event of pendingContextEvents) {
       const remaining = realUserMessages.get(event.content) ?? 0;
       if (remaining === 0) continue;
       realUserMessages.set(event.content, remaining - 1);
+      kept.push(event);
     }
+    pendingContextEvents = [];
+    return kept;
+  };
+
+  for await (const event of events) {
+    if (event.type === "user" && isStandaloneInjectedContext(event.content)) {
+      if (!isExplicitUserMessage(event)) {
+        pendingContextEvents.push(event);
+        continue;
+      }
+      const remaining = realUserMessages.get(event.content) ?? 0;
+      if (remaining > 0) realUserMessages.set(event.content, remaining - 1);
+    }
+    for (const pending of flushPending()) yield pending;
     yield event;
   }
+  for (const pending of flushPending()) yield pending;
 }
 
 async function* inferToolResultNames(
@@ -530,62 +554,68 @@ async function* timelineSteps(
   events: SessionTranscript["events"],
 ): AsyncGenerator<TimelineItem> {
   let stepNumber = 0;
-  let toolBatch: TimelineItem[] = [];
+  let buffered: Array<{ item: TimelineItem; waitingForResult: boolean }> = [];
+
+  const numbered = (item: TimelineItem): TimelineItem => ({ ...item, stepNumber: ++stepNumber });
+  const drainReady = (): TimelineItem[] => {
+    const ready: TimelineItem[] = [];
+    while (buffered.length > 0 && !buffered[0]!.waitingForResult) {
+      ready.push(buffered.shift()!.item);
+    }
+    return ready;
+  };
+  const flushAll = (pairingLimited: boolean): TimelineItem[] => {
+    const flushed = buffered.map(({ item, waitingForResult }) => (
+      pairingLimited && waitingForResult ? { ...item, pairingLimited: true } : item
+    ));
+    buffered = [];
+    return flushed;
+  };
 
   for await (const item of timelineEvents(sessionId, events)) {
-    if (item.event.type === "tool_call" || item.event.type === "tool_result") {
-      toolBatch.push(item);
+    const boundary = item.event.type === "user"
+      || (item.event.type === "assistant" && item.finalAssistant);
+    if (boundary) {
+      for (const pending of flushAll(false)) yield numbered(pending);
+      yield numbered(item);
       continue;
     }
-    for (const toolItem of pairToolBatch(toolBatch)) {
-      yield { ...toolItem, stepNumber: ++stepNumber };
+
+    if (item.event.type === "tool_call" && item.event.callId) {
+      buffered.push({ item, waitingForResult: true });
+    } else if (item.event.type === "tool_result" && item.event.callId) {
+      const call = buffered.find((candidate) => (
+        candidate.waitingForResult
+        && candidate.item.event.type === "tool_call"
+        && candidate.item.event.callId === item.event.callId
+      ));
+      if (call) {
+        call.waitingForResult = false;
+        call.item = {
+          ...call.item,
+          pairedResult: {
+            eventId: item.eventId,
+            messageId: item.messageId,
+            event: item.event,
+          },
+        };
+      } else {
+        buffered.push({ item, waitingForResult: false });
+      }
+    } else {
+      buffered.push({ item, waitingForResult: false });
     }
-    toolBatch = [];
-    yield { ...item, stepNumber: ++stepNumber };
-  }
-  for (const toolItem of pairToolBatch(toolBatch)) {
-    yield { ...toolItem, stepNumber: ++stepNumber };
-  }
-}
 
-function pairToolBatch(items: TimelineItem[]): TimelineItem[] {
-  const results = new Map<string, TimelineItem[]>();
-  for (const item of items) {
-    if (item.event.type !== "tool_result" || !item.event.callId) continue;
-    const matches = results.get(item.event.callId) ?? [];
-    matches.push(item);
-    results.set(item.event.callId, matches);
-  }
-
-  const consumedResults = new Set<TimelineItem>();
-  const matchedResults = new Map<TimelineItem, TimelineItem>();
-  for (const item of items) {
-    if (item.event.type !== "tool_call" || !item.event.callId) continue;
-    const result = results.get(item.event.callId)?.find((candidate) => !consumedResults.has(candidate));
-    if (!result) continue;
-    consumedResults.add(result);
-    matchedResults.set(item, result);
-  }
-
-  const paired: TimelineItem[] = [];
-  for (const item of items) {
-    if (item.event.type === "tool_call") {
-      const result = matchedResults.get(item);
-      paired.push(result
-        ? {
-            ...item,
-            pairedResult: {
-              eventId: result.eventId,
-              messageId: result.messageId,
-              event: result.event,
-            },
-          }
-        : item);
-    } else if (!consumedResults.has(item)) {
-      paired.push(item);
+    for (const ready of drainReady()) yield numbered(ready);
+    while (buffered.length > MAX_PENDING_TIMELINE_ITEMS) {
+      const oldest = buffered.shift()!;
+      yield numbered(oldest.waitingForResult
+        ? { ...oldest.item, pairingLimited: true }
+        : oldest.item);
+      for (const ready of drainReady()) yield numbered(ready);
     }
   }
-  return paired;
+  for (const pending of flushAll(false)) yield numbered(pending);
 }
 
 async function selectTranscriptTurns(
@@ -717,7 +747,9 @@ function printTimeline(
         }
         remainingChars -= resultPreview.content.length;
       } else {
-        console.log("结果：未返回");
+        console.log(item.pairingLimited
+          ? "结果：未在当前配对窗口内找到"
+          : "结果：未返回");
       }
     } else if (item.event.type === "tool_result") {
       const fence = markdownCodeFence(preview.content);

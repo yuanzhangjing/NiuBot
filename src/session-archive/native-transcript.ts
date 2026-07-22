@@ -27,6 +27,7 @@ const INJECTED_CONTEXT_TAGS = new Set([
 ]);
 const CODEX_AGENTS_CONTEXT_PREFIX = "# AGENTS.md instructions for ";
 const MEDIA_TYPES = new Set(["image", "input_image", "output_image", "audio", "video", "file", "media"]);
+const EXPLICIT_USER_EVENTS = new WeakSet<TranscriptEvent>();
 
 export function wrapInjectedUserMessage(content: string): string {
   const id = randomUUID();
@@ -186,8 +187,8 @@ export function transcriptFromOpencodeRows(
       : undefined;
     if ((role === "user" || role === "assistant") && type === "text") {
       const text = string(part?.["text"]);
-      const content = role === "user" && text ? extractInjectedUserMessage(text) : text;
-      if (content) yield { timestamp, type: role, content: sanitizeTranscriptString(content) };
+      const event = textTranscriptEvent(role, text, timestamp);
+      if (event) yield event;
     } else if (type === "tool") {
       const state = object(part?.["state"]);
       const callId = string(part?.["callID"] ?? part?.["callId"]);
@@ -209,8 +210,8 @@ function messageContentEvents(
 ): TranscriptEvent[] {
   const events: TranscriptEvent[] = [];
   if (typeof value === "string") {
-    const content = role === "user" ? extractInjectedUserMessage(value) : value;
-    if (content) events.push({ timestamp, type: role, content: sanitizeTranscriptString(content) });
+    const event = textTranscriptEvent(role, value, timestamp);
+    if (event) events.push(event);
     return events;
   }
   if (!Array.isArray(value)) return events;
@@ -220,8 +221,8 @@ function messageContentEvents(
     const type = string(block["type"]);
     if (type === "text" || type === "input_text" || type === "output_text") {
       const text = string(block["text"]);
-      const content = role === "user" && text ? extractInjectedUserMessage(text) : text;
-      if (content) events.push({ timestamp, type: role, content: sanitizeTranscriptString(content) });
+      const event = textTranscriptEvent(role, text, timestamp);
+      if (event) events.push(event);
     } else if (type === "tool_use" || type === "tool_call" || type === "toolCall" || type === "function_call") {
       events.push({
         timestamp,
@@ -245,7 +246,26 @@ function messageContentEvents(
   return events;
 }
 
-function extractInjectedUserMessage(content: string): string {
+function textTranscriptEvent(
+  role: "user" | "assistant",
+  text: string | undefined,
+  timestamp?: string,
+): TranscriptEvent | undefined {
+  if (!text) return undefined;
+  const extracted = role === "user"
+    ? extractInjectedUserMessage(text)
+    : { content: text, explicit: false };
+  if (!extracted.content) return undefined;
+  const event: TranscriptEvent = {
+    timestamp,
+    type: role,
+    content: sanitizeTranscriptString(extracted.content),
+  };
+  if (extracted.explicit) EXPLICIT_USER_EVENTS.add(event);
+  return event;
+}
+
+function extractInjectedUserMessage(content: string): { content: string; explicit: boolean } {
   INJECTED_USER_MARKER.lastIndex = 0;
   let match: RegExpExecArray | null;
   while ((match = INJECTED_USER_MARKER.exec(content)) !== null) {
@@ -255,17 +275,22 @@ function extractInjectedUserMessage(content: string): string {
     const start = match.index + match[0].length;
     const closing = `\n</niubot-user-message id="${match[1]}">`;
     if (Number.isSafeInteger(length) && length >= 0 && content.slice(start + length) === closing) {
-      return content.slice(start, start + length);
+      return { content: content.slice(start, start + length), explicit: true };
     }
   }
   const legacy = stripInjectedContextPrefix(content);
   // A standalone context-looking block is ambiguous: it may be backend harness
   // context, but it may also be the user's literal message. Keep it here. The
   // session CLI can safely hide synthetic context by checking the messages table.
-  if (legacy.stripped && legacy.content.length === 0) return content;
+  if (legacy.stripped && legacy.content.length === 0) return { content, explicit: false };
   const legacyEnginePrompt = legacy.blocks >= 2
     && (legacy.first === "niubot-system-rules" || legacy.first === "compact-recovery");
-  return legacyEnginePrompt ? legacy.content : content;
+  return { content: legacyEnginePrompt ? legacy.content : content, explicit: false };
+}
+
+/** Whether this event was recovered from NiuBot's explicit user-message wrapper. */
+export function isExplicitUserMessage(event: TranscriptEvent): boolean {
+  return EXPLICIT_USER_EVENTS.has(event);
 }
 
 /** Whether a complete user event only contains known injected context blocks. */

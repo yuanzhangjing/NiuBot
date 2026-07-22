@@ -119,6 +119,60 @@ describe("nbt sessions", () => {
     expect(secondPage.items[0]?.pairedResult?.event.content).toBe("output 2");
   });
 
+  it("pairs a tool result across an intervening process message", async () => {
+    const page = await selectTimelineEvents("s1", [
+      { type: "user", timestamp: "2026-07-13T01:00:00Z", content: "问题" },
+      { type: "tool_call", timestamp: "2026-07-13T01:00:01Z", name: "exec", callId: "c1", content: "input" },
+      { type: "assistant", timestamp: "2026-07-13T01:00:02Z", content: "仍在处理" },
+      { type: "tool_result", timestamp: "2026-07-13T01:00:03Z", callId: "c1", content: "output" },
+      { type: "assistant", timestamp: "2026-07-13T01:00:04Z", content: "完成" },
+    ], { pageSize: 10 });
+
+    expect(page.items.map((item) => item.event.type)).toEqual([
+      "user", "tool_call", "assistant", "assistant",
+    ]);
+    expect(page.items[1]?.pairedResult?.event.content).toBe("output");
+    expect(page.items.some((item) => item.event.type === "tool_result")).toBe(false);
+  });
+
+  it("keeps tool pairing progressive on a long session", async () => {
+    let consumed = 0;
+    async function* events(): AsyncGenerator<TranscriptEvent> {
+      consumed++;
+      yield { type: "user", timestamp: "2026-07-13T01:00:00Z", content: "问题" };
+      for (let index = 0; index < 1_000; index++) {
+        consumed++;
+        yield { type: "tool_call", callId: `c${index}`, content: `input ${index}` };
+        consumed++;
+        yield { type: "tool_result", callId: `c${index}`, content: `output ${index}` };
+      }
+    }
+
+    const page = await selectTimelineEvents("s1", events(), { pageSize: 2 });
+    expect(page.items).toHaveLength(2);
+    expect(page.items[1]?.pairedResult?.event.content).toBe("output 0");
+    expect(page.hasMore).toBe(true);
+    expect(consumed).toBe(5);
+  });
+
+  it("bounds unresolved tool calls instead of buffering the whole session", async () => {
+    let consumed = 0;
+    async function* events(): AsyncGenerator<TranscriptEvent> {
+      consumed++;
+      yield { type: "user", timestamp: "2026-07-13T01:00:00Z", content: "问题" };
+      for (let index = 0; index < 1_000; index++) {
+        consumed++;
+        yield { type: "tool_call", callId: `c${index}`, content: `input ${index}` };
+      }
+    }
+
+    const page = await selectTimelineEvents("s1", events(), { pageSize: 2 });
+    expect(page.items).toHaveLength(2);
+    expect(page.items[1]?.pairingLimited).toBe(true);
+    expect(page.hasMore).toBe(true);
+    expect(consumed).toBeLessThanOrEqual(103);
+  });
+
   it("lists linked archives, searches parsed events, and gets a complete event", async () => {
     const home = mkdtempSync(join(tmpdir(), "niubot-sessions-cli-"));
     tempDirs.push(home);
@@ -399,6 +453,13 @@ describe("nbt sessions", () => {
     expect(output.match(new RegExp(literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g"))).toHaveLength(1);
     expect(output).not.toContain("recommended_plugins");
     expect(output).toContain("已保留");
+
+    lines.length = 0;
+    await handleSessions(db, ["get", "literal", "--format", "jsonl"], "c1", "p2p", home, "NiuBot", parseArgs);
+    const literalEvents = lines
+      .map((line) => JSON.parse(line) as { type: string; content: string; timestamp?: string })
+      .filter((event) => event.type === "user" && event.content === literal);
+    expect(literalEvents).toEqual([expect.objectContaining({ timestamp: "2026-07-13T01:00:02Z" })]);
     db.close();
   });
 
@@ -502,6 +563,11 @@ describe("nbt sessions", () => {
     expect(firstPage).toContain("稳定游标 s2");
     expect(eventCursor).toBeTruthy();
     expect(throughSession).toBe("s2");
+
+    writeFileSync(join(home, "s2.jsonl"), [
+      { type: "response_item", timestamp: "2026-07-13T02:09:00Z", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "问题 s2" }] } },
+      { type: "response_item", timestamp: "2026-07-13T02:09:00Z", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "正文已经变化" }] } },
+    ].map((row) => JSON.stringify(row)).join("\n") + "\n");
 
     await addArchivedCodexSession(
       db, home, "s3", "2026-07-13 03:00:00", "2026-07-13 03:10:00",
