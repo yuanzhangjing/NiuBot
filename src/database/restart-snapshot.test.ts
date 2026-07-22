@@ -11,6 +11,8 @@ import {
 } from "./schema.js";
 import {
   applyPreflightDatabaseManifest,
+  PREFLIGHT_FULL_VALIDATION_ENV,
+  shouldRunFullPreflight,
   assertDatabasesAtCompatibleSchemaVersion,
   cleanupRestartDatabaseSnapshot,
   createRestartDatabaseSnapshot,
@@ -26,6 +28,12 @@ afterEach(() => {
 });
 
 describe("restart database snapshot", () => {
+  test("only enables full preflight when the restart worker declares support", () => {
+    expect(shouldRunFullPreflight({})).toBe(false);
+    expect(shouldRunFullPreflight({ [PREFLIGHT_FULL_VALIDATION_ENV]: "1" })).toBe(true);
+    expect(shouldRunFullPreflight({ [PREFLIGHT_FULL_VALIDATION_ENV]: "true" })).toBe(false);
+  });
+
   test("keeps transport schema separate from the core schema", () => {
     const root = temporaryDirectory();
     const database = initDatabase(path.join(root, "bridge.db"));

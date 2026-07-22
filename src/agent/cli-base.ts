@@ -15,6 +15,7 @@ import { buildExecutableInvocation, resolveExecutable } from "../platform/execut
 import { shouldDetachChildProcessForTree, terminateSpawnedProcessTree } from "../platform/process.js";
 import { resolveSessionBotEndpoint } from "../platform/ipc.js";
 import { runCommand } from "../platform/command.js";
+import { resolveBackendProbeTimeoutMs } from "../lifecycle-timeouts.js";
 
 /** 子类 session 的基础字段 */
 export interface BaseCliSession {
@@ -160,7 +161,7 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
   /** 检查 CLI 工具是否可用（start 时调用）。默认执行 command() --version */
   async checkAvailable(): Promise<void> {
     try {
-      await runCommand(this.command(), ["--version"], { timeoutMs: 5_000 });
+      await runCommand(this.command(), ["--version"], { timeoutMs: resolveBackendProbeTimeoutMs() });
       this.log.info(`${this.command()} CLI found`);
     } catch {
       throw new Error(`${this.command()} CLI not found in PATH`);

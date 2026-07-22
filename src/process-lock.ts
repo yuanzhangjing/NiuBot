@@ -1,6 +1,11 @@
 import fs from "node:fs";
 import path from "node:path";
-import { isProcessAlive, queryProcessStartMarker, waitForProcessStartMarker } from "./platform/process.js";
+import {
+  isProcessAlive,
+  processStartMarkersMatch,
+  queryProcessStartMarker,
+  waitForProcessStartMarker,
+} from "./platform/process.js";
 
 interface ProcessLockRecord {
   pid: number;
@@ -66,7 +71,7 @@ function readProcessLock(lockFile: string): ProcessLockRecord | undefined {
 function lockOwnerIsAlive(owner: ProcessLockRecord): boolean {
   if (!isProcessAlive(owner.pid)) return false;
   if (!owner.processStartMarker) return true;
-  return queryProcessStartMarker(owner.pid) === owner.processStartMarker;
+  return processStartMarkersMatch(owner.processStartMarker, queryProcessStartMarker(owner.pid));
 }
 
 function isAlreadyExists(err: unknown): boolean {

@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { AGENT_REGISTRY, BUILTIN_BACKENDS, normalizeBackend, type BuiltinBackendType } from "../config.js";
 import { buildExecutableInvocation, resolveExecutable } from "../platform/executable.js";
 import { runCommand } from "../platform/command.js";
+import { resolveBackendProbeTimeoutMs } from "../lifecycle-timeouts.js";
 
 export type BackendPlatformSupport = "native" | "dependency-required" | "wsl-only" | "unknown";
 
@@ -160,12 +161,15 @@ export async function probeAllBackendCapabilitiesAsync(
 }
 
 async function defaultRunVersionAsync(command: string, args: string[]): Promise<string> {
-  return (await runCommand(command, args, { timeoutMs: 5_000, maxOutputBytes: 1024 * 1024 })).stdout;
+  return (await runCommand(command, args, {
+    timeoutMs: resolveBackendProbeTimeoutMs(),
+    maxOutputBytes: 1024 * 1024,
+  })).stdout;
 }
 
 function defaultRunVersion(command: string, args: string[], windowsVerbatimArguments = false): string {
   const result = spawnSync(command, args, {
-    timeout: 5_000,
+    timeout: resolveBackendProbeTimeoutMs(),
     encoding: "utf-8",
     stdio: ["ignore", "pipe", "pipe"],
     windowsVerbatimArguments,

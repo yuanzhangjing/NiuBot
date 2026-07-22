@@ -354,6 +354,29 @@ Get-Content "$HOME\.niubot\logs\niubot-$(Get-Date -Format yyyy-MM-dd).log" -Tail
 ```
 Common causes: invalid Feishu credentials, missing permissions, agent CLI not working.
 
+Engine startup health checks allow 120 seconds by default. This includes
+database initialization, backend validation, Bot creation, and local API
+startup. Slow hosts can raise the shared start deadline in seconds for both
+`niubot start` and restart/update health checks:
+
+```powershell
+$env:NIUBOT_ENGINE_START_TIMEOUT = "180"
+niubot start --restart
+```
+
+Backend version validation allows 60 seconds and runs once for each backend
+that is actually used during startup. It can be adjusted separately:
+
+```powershell
+$env:NIUBOT_BACKEND_PROBE_TIMEOUT = "90"
+```
+
+Graceful shutdown allows 60 seconds by default before process-tree cleanup:
+
+```powershell
+$env:NIUBOT_ENGINE_SHUTDOWN_TIMEOUT = "90"
+```
+
 ### Update preflight times out
 
 Restart and update run the candidate package in read-only preflight mode before
@@ -362,6 +385,22 @@ slower Windows hosts, set a larger value in seconds before retrying:
 
 ```powershell
 $env:NIUBOT_RESTART_PREFLIGHT_TIMEOUT = "180"
+niubot update
+```
+
+The candidate startup after preflight uses `NIUBOT_ENGINE_START_TIMEOUT`.
+`NIUBOT_RESTART_HEALTH_TIMEOUT` remains supported as a compatibility alias,
+but new installations should use the shared setting.
+
+When upgrading from a release whose restart worker still has the old 20-second
+preflight limit, the new candidate automatically uses a fast read-only
+compatibility preflight. Workers from the new release declare extended
+preflight support and run the full validation with the 120-second default.
+The old worker also has a 15-second health default, so set its supported alias
+for that first upgrade on a slow host:
+
+```powershell
+$env:NIUBOT_RESTART_HEALTH_TIMEOUT = "120"
 niubot update
 ```
 

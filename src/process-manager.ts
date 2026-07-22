@@ -9,6 +9,7 @@ import { samePlatformPath } from "./platform/files.js";
 import {
   forceTerminateProcessTree,
   isProcessAlive,
+  processStartMarkersMatch,
   queryProcessCommandLine,
   queryProcessEnvironmentValue,
   queryProcessStartMarker,
@@ -17,6 +18,10 @@ import {
   waitForProcessExit,
 } from "./platform/process.js";
 import { acquireProcessLock } from "./process-lock.js";
+import {
+  DEFAULT_ENGINE_CONTROL_REQUEST_TIMEOUT_MS,
+  resolveEngineShutdownTimeoutMs,
+} from "./lifecycle-timeouts.js";
 import {
   clearProcessState,
   readProcessState,
@@ -48,7 +53,10 @@ export async function inspectRunningEngine(niubotHome: string): Promise<RunningE
   const processState = readProcessState(niubotHome);
   if (!processState) return undefined;
   const state = processState.processes.engine;
-  const identity = await readEngineIdentity(endpointFromAddress(state.endpoint), 750);
+  const identity = await readEngineIdentity(
+    endpointFromAddress(state.endpoint),
+    DEFAULT_ENGINE_CONTROL_REQUEST_TIMEOUT_MS,
+  );
   if (!identity) return undefined;
   if (identity.instanceId !== state.instanceId || identity.pid !== state.pid) return undefined;
   if (identity.startedAt !== state.startedAt || identity.version !== state.version) return undefined;
@@ -160,21 +168,28 @@ export async function stopEngine(niubotHome: string): Promise<{ stopped: boolean
     const endpoint = endpointFromAddress(running.state.endpoint);
     let accepted = false;
     try {
-      accepted = await requestEngineShutdown(endpoint, running.state.controlToken, 2_000);
+      accepted = await requestEngineShutdown(
+        endpoint,
+        running.state.controlToken,
+        DEFAULT_ENGINE_CONTROL_REQUEST_TIMEOUT_MS,
+      );
     } catch {
       // Use the verified PID fallback below.
     }
 
     if (accepted) {
-      const deadline = Date.now() + 20_000;
+      const deadline = Date.now() + resolveEngineShutdownTimeoutMs();
       while (Date.now() < deadline) {
-        const identity = await readEngineIdentity(endpoint, 500);
+        const identity = await readEngineIdentity(
+          endpoint,
+          Math.min(DEFAULT_ENGINE_CONTROL_REQUEST_TIMEOUT_MS, Math.max(1, deadline - Date.now())),
+        );
         if (!identity || identity.instanceId !== running.state.instanceId) break;
         await delay(250);
       }
     }
 
-    const remaining = await readEngineIdentity(endpoint, 500);
+    const remaining = await readEngineIdentity(endpoint, DEFAULT_ENGINE_CONTROL_REQUEST_TIMEOUT_MS);
     if (remaining?.instanceId === running.state.instanceId) {
       await forceStopVerifiedProcess(running.state);
     } else if (running.state.pid !== process.pid && isProcessAlive(running.state.pid)) {
@@ -211,7 +226,7 @@ export async function stopEngine(niubotHome: string): Promise<{ stopped: boolean
 async function forceStopVerifiedProcess(state: EngineProcessState): Promise<void> {
   if (!isProcessAlive(state.pid)) return;
   const currentMarker = waitForProcessStartMarker(state.pid);
-  if (!state.platformStartMarker || !currentMarker || currentMarker !== state.platformStartMarker) {
+  if (!processStartMarkersMatch(state.platformStartMarker, currentMarker)) {
     throw new Error("Engine process state exists, but its identity could not be verified");
   }
   forceTerminateProcessTree(state.pid);
@@ -221,13 +236,13 @@ async function forceStopVerifiedProcess(state: EngineProcessState): Promise<void
 }
 
 function asyncLegacyStop(pid: number, expectedMarker: string): Promise<void> {
-  if (queryProcessStartMarker(pid) !== expectedMarker) {
+  if (!processStartMarkersMatch(expectedMarker, queryProcessStartMarker(pid))) {
     return Promise.reject(new Error("Legacy Engine PID was reused before termination"));
   }
   try { process.kill(pid, "SIGTERM"); } catch { return Promise.resolve(); }
   return waitForProcessExit(pid, 5_000).then((exited) => {
     if (!exited) {
-      if (queryProcessStartMarker(pid) !== expectedMarker) {
+      if (!processStartMarkersMatch(expectedMarker, queryProcessStartMarker(pid))) {
         throw new Error("Legacy Engine PID was reused before forced termination");
       }
       forceTerminateProcessTree(pid);
@@ -257,18 +272,23 @@ export function verifyLegacyEngineProcess(pid: number, niubotHome: string): stri
   }
   const marker = waitForProcessStartMarker(pid);
   const processHome = queryProcessEnvironmentValue(pid, "NIUBOT_HOME");
+  if (!marker || !processHome) {
+    throw new Error(
+      `Legacy PID ${pid} is alive, but it cannot be verified as the NiuBot Engine for this home`,
+    );
+  }
   const commandLine = queryProcessCommandLine(pid);
   const isEngineEntry = commandLine
     ? /(?:^|[\s"']|[\\/])(?:dist|src)[\\/]index\.(?:js|ts)(?=$|[\s"'])/i.test(commandLine)
     : false;
-  if (!marker || !processHome || !samePlatformPath(processHome, niubotHome) || !isEngineEntry) {
+  if (!samePlatformPath(processHome, niubotHome) || !isEngineEntry) {
     throw new Error(
       `Legacy PID ${pid} is alive, but it cannot be verified as the NiuBot Engine for this home`,
     );
   }
   // Close the lookup-to-signal race as far as the platform allows. The marker
   // is checked again immediately before each termination attempt.
-  if (queryProcessStartMarker(pid) !== marker) {
+  if (!processStartMarkersMatch(marker, queryProcessStartMarker(pid))) {
     throw new Error(`Legacy PID ${pid} changed while its identity was being verified`);
   }
   return marker;

@@ -28,6 +28,7 @@ import { waitForLocalApiHealth } from "./local-api/client.js";
 import { resolveBotEndpoint } from "./platform/ipc.js";
 import { probeAllBackendCapabilities, probeBackendCapability } from "./agent/backend-capability.js";
 import { waitForEngineIdentity } from "./local-api/engine-client.js";
+import { resolveEngineStartTimeoutMs } from "./lifecycle-timeouts.js";
 import { inspectRunningEngine, launchDetachedEngine, stopEngine } from "./process-manager.js";
 import { launchRestartWorker } from "./restart-launcher.js";
 import { runCommandSync } from "./platform/command.js";
@@ -943,6 +944,8 @@ async function cmdStart(niubotHome: string, flags: CliFlags): Promise<void> {
   ok(`Process started (PID ${launched.state.pid})`);
   info(`Log: ${logFile}`);
 
+  const engineStartTimeoutMs = resolveEngineStartTimeoutMs();
+  const engineStartDeadline = Date.now() + engineStartTimeoutMs;
   const engineIdentity = await waitForEngineIdentity(
     launched.endpoint,
     {
@@ -951,7 +954,7 @@ async function cmdStart(niubotHome: string, flags: CliFlags): Promise<void> {
       home: niubotHome,
       runtimePath: launched.state.runtimePath,
     },
-    15_000,
+    engineStartTimeoutMs,
     250,
   );
   if (engineIdentity) {
@@ -961,10 +964,15 @@ async function cmdStart(niubotHome: string, flags: CliFlags): Promise<void> {
   }
 
   // Health check — all bots must respond
-  const failedBots: string[] = [];
-  for (const bot of config.bots) {
+  const botHealthTimeoutMs = Math.max(1, engineStartDeadline - Date.now());
+  const botHealth = await Promise.all(config.bots.map(async (bot) => {
     const endpoint = resolveBotEndpoint(niubotHome, bot.id, { unixSocketDirectory: path.dirname(bot.dbPath) });
-    if (await waitForLocalApiHealth(endpoint, 15_000, 1_000)) {
+    const healthy = await waitForLocalApiHealth(endpoint, botHealthTimeoutMs, 1_000);
+    return { bot, healthy };
+  }));
+  const failedBots: string[] = [];
+  for (const { bot, healthy } of botHealth) {
+    if (healthy) {
       ok(`${bot.id} health check passed`);
     } else {
       fail(`${bot.id} health check failed`);

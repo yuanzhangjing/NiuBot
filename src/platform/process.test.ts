@@ -4,7 +4,10 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 import {
+  buildWindowsProcessStartMarkerScript,
+  defaultProcessMarkerTimeoutMs,
   isProcessAlive,
+  processStartMarkersMatch,
   queryProcessFileDescriptorPath,
   queryProcessWorkingDirectory,
   terminateSpawnedProcessTree,
@@ -26,6 +29,22 @@ afterEach(async () => {
 });
 
 describe("process platform helpers", () => {
+  test("gives slow Windows hosts more time without using a CIM query", () => {
+    expect(defaultProcessMarkerTimeoutMs("win32")).toBe(30_000);
+    expect(defaultProcessMarkerTimeoutMs("linux")).toBe(5_000);
+    const script = buildWindowsProcessStartMarkerScript(123);
+    expect(script).toContain("[System.Diagnostics.Process]::GetProcessById(123)");
+    expect(script).not.toContain("Get-CimInstance");
+  });
+
+  test("matches old and new Windows marker precision without weakening other platforms", () => {
+    const oldMarker = "2026-07-22T12:34:56.1234560Z";
+    const newMarker = "2026-07-22T12:34:56.1230000Z";
+    expect(processStartMarkersMatch(oldMarker, newMarker, "win32")).toBe(true);
+    expect(processStartMarkersMatch(oldMarker, newMarker, "linux")).toBe(false);
+    expect(processStartMarkersMatch(oldMarker, "2026-07-22T12:34:56.1240000Z", "win32")).toBe(false);
+  });
+
   test("reads a stable OS-owned marker for a live process", () => {
     expect(isProcessAlive(process.pid)).toBe(true);
     const first = waitForProcessStartMarker(process.pid);

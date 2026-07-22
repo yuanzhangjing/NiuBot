@@ -29,10 +29,12 @@ import { EngineControlServer, type EngineIdentity } from "./local-api/engine-ser
 import { clearProcessState, readProcessState, writeProcessState } from "./process-state.js";
 import { waitForProcessStartMarker } from "./platform/process.js";
 import { samePlatformPath } from "./platform/files.js";
+import { resolveInFlightShutdownTimeoutMs } from "./lifecycle-timeouts.js";
 import {
   applyPreflightDatabaseManifest,
   assertDatabasesAtCompatibleSchemaVersion,
   PREFLIGHT_DATABASE_MANIFEST_ENV,
+  shouldRunFullPreflight,
 } from "./database/restart-snapshot.js";
 
 const log = createLogger("main");
@@ -132,14 +134,18 @@ async function main(): Promise<void> {
     const manifestPath = process.env[PREFLIGHT_DATABASE_MANIFEST_ENV];
     if (manifestPath) {
       config = applyPreflightDatabaseManifest(config, manifestPath);
-    } else {
+    }
+    if (!manifestPath || !shouldRunFullPreflight()) {
       assertDatabasesAtCompatibleSchemaVersion(
         config.bots.map((bot) => bot.dbPath),
         ROLLBACK_COMPATIBLE_SCHEMA_VERSIONS,
         LATEST_SCHEMA_VERSION,
       );
       legacyReadOnlyPreflight = true;
-      log.info("legacy preflight restricted to read-only compatibility checks");
+      log.info("compatibility preflight restricted to read-only checks", {
+        hasDatabaseManifest: Boolean(manifestPath),
+        reason: manifestPath ? "restart worker predates extended preflight" : "database manifest unavailable",
+      });
     }
   }
   logPreflightStage("config_and_database_manifest", configStartedAt, {
@@ -152,10 +158,10 @@ async function main(): Promise<void> {
 
   const capabilityStartedAt = Date.now();
   const initialCapabilities = await probeAllBackendCapabilitiesAsync({
-    // Preflight validates each configured backend through backend.start().
-    // Only discover executables here so Windows does not run every version
+    // Startup validates each configured backend through backend.start(). Only
+    // discover executables here so slow Windows hosts do not run every version
     // command and then immediately run the configured one a second time.
-    verifyVersion: !preflight,
+    verifyVersion: false,
   });
   logPreflightStage("backend_discovery", capabilityStartedAt, {
     backendCount: initialCapabilities.length,
@@ -206,7 +212,6 @@ async function main(): Promise<void> {
     let backend = backends.get(type);
     if (!backend) {
       backend = await createBackend(type);
-      backends.set(type, backend);
       const backendStartedAt = Date.now();
       let validated = false;
       try {
@@ -218,6 +223,7 @@ async function main(): Promise<void> {
           success: validated,
         });
       }
+      backends.set(type, backend);
       log.info("backend started (lazy)", { type });
     }
     return backend;
@@ -351,12 +357,13 @@ async function main(): Promise<void> {
     }
     const busyCount = bots.reduce((n, b) => n + (b.pipeline.hasBusyChats() ? 1 : 0), 0);
     if (busyCount > 0) log.info("waiting for in-flight tasks", { busyBots: busyCount });
-    const deadline = Date.now() + 15_000;
+    const inFlightTimeoutMs = resolveInFlightShutdownTimeoutMs();
+    const deadline = Date.now() + inFlightTimeoutMs;
     while (bots.some((b) => b.pipeline.hasBusyChats()) && Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, 500));
     }
     if (bots.some((b) => b.pipeline.hasBusyChats())) {
-      log.warn("in-flight wait timed out, forcing exit");
+      log.warn("in-flight wait timed out, forcing exit", { timeoutMs: inFlightTimeoutMs });
     } else if (busyCount > 0) {
       log.info("in-flight tasks completed");
     }

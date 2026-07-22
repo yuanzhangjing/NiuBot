@@ -320,6 +320,7 @@ describe("public upgrade rollback compatibility", () => {
       ).pluck().get()).toBe(2);
       reupgraded.close();
     },
+    20_000,
   );
 
   test("resumes an interrupted additive migration without duplicate-column failure", () => {

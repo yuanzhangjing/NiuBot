@@ -1,6 +1,15 @@
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 
+export const DEFAULT_PROCESS_MARKER_TIMEOUT_MS = 5_000;
+export const DEFAULT_WINDOWS_PROCESS_MARKER_TIMEOUT_MS = 30_000;
+
+export function defaultProcessMarkerTimeoutMs(platform: NodeJS.Platform = process.platform): number {
+  return platform === "win32"
+    ? DEFAULT_WINDOWS_PROCESS_MARKER_TIMEOUT_MS
+    : DEFAULT_PROCESS_MARKER_TIMEOUT_MS;
+}
+
 export function isProcessAlive(pid: number): boolean {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
@@ -25,6 +34,7 @@ export function shouldDetachChildProcessForTree(
 export function queryProcessStartMarker(
   pid: number,
   platform: NodeJS.Platform = process.platform,
+  timeoutMs = defaultProcessMarkerTimeoutMs(platform),
 ): string | undefined {
   if (!Number.isInteger(pid) || pid <= 0) return undefined;
   try {
@@ -44,10 +54,7 @@ export function queryProcessStartMarker(
       return output || undefined;
     }
     if (platform === "win32") {
-      const script = [
-        `$p = Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}'`,
-        "if ($null -ne $p) { $p.CreationDate.ToUniversalTime().ToString('o') }",
-      ].join("; ");
+      const script = buildWindowsProcessStartMarkerScript(pid);
       const output = execFileSync("powershell.exe", [
         "-NoLogo",
         "-NoProfile",
@@ -55,7 +62,7 @@ export function queryProcessStartMarker(
         "-Command",
         script,
       ], {
-        timeout: 10_000,
+        timeout: Math.max(1, timeoutMs),
         encoding: "utf-8",
         stdio: ["ignore", "pipe", "ignore"],
         windowsHide: true,
@@ -66,6 +73,26 @@ export function queryProcessStartMarker(
     return undefined;
   }
   return undefined;
+}
+
+export function buildWindowsProcessStartMarkerScript(pid: number): string {
+  return [
+    `$p = [System.Diagnostics.Process]::GetProcessById(${pid})`,
+    "$p.StartTime.ToUniversalTime().ToString('o')",
+  ].join("; ");
+}
+
+export function processStartMarkersMatch(
+  expected: string | undefined,
+  actual: string | undefined,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  if (!expected || !actual) return false;
+  if (expected === actual) return true;
+  if (platform !== "win32") return false;
+  const expectedTime = Date.parse(expected);
+  const actualTime = Date.parse(actual);
+  return Number.isFinite(expectedTime) && Number.isFinite(actualTime) && expectedTime === actualTime;
 }
 
 export function queryProcessCommandLine(
@@ -188,17 +215,18 @@ export function queryProcessEnvironmentValue(
 export function waitForProcessStartMarker(
   pid: number,
   platform: NodeJS.Platform = process.platform,
-  timeoutMs = 5_000,
+  timeoutMs = defaultProcessMarkerTimeoutMs(platform),
   intervalMs = 100,
 ): string | undefined {
   const deadline = Date.now() + timeoutMs;
-  do {
-    const marker = queryProcessStartMarker(pid, platform);
+  while (Date.now() < deadline) {
+    const remainingMs = Math.max(1, deadline - Date.now());
+    const marker = queryProcessStartMarker(pid, platform, remainingMs);
     if (marker) return marker;
     if (!isProcessAlive(pid)) return undefined;
     blockingDelay(Math.min(intervalMs, Math.max(0, deadline - Date.now())));
-  } while (Date.now() < deadline);
-  return queryProcessStartMarker(pid, platform);
+  }
+  return undefined;
 }
 
 export function forceTerminateProcessTree(

@@ -18,10 +18,12 @@ import { acquireProcessLock } from "./process-lock.js";
 import { ReleaseStore, type ReleaseState } from "./release-store.js";
 import { RestartStateWriter } from "./restart-state.js";
 import { dateInTimeZone } from "./tz.js";
+import { readPositiveSecondsAsMs, resolveEngineStartTimeoutMs } from "./lifecycle-timeouts.js";
 import {
   cleanupRestartDatabaseSnapshot,
   createRestartDatabaseSnapshot,
   PREFLIGHT_DATABASE_MANIFEST_ENV,
+  PREFLIGHT_FULL_VALIDATION_ENV,
   restoreRestartDatabaseSnapshot,
   type RestartDatabaseSnapshot,
 } from "./database/restart-snapshot.js";
@@ -490,6 +492,7 @@ async function runPreflight(
       {
         ...runtimeEnvironment(context, context.previousRuntimeMode),
         [PREFLIGHT_DATABASE_MANIFEST_ENV]: databaseManifestPath,
+        [PREFLIGHT_FULL_VALIDATION_ENV]: "1",
       },
     );
     log(context, `preflight command completed durationMs=${Date.now() - startedAt}`);
@@ -532,7 +535,8 @@ async function checkRuntimeHealth(
   context: RestartContext,
   launched: ReturnType<typeof launchDetachedEngine>,
 ): Promise<boolean> {
-  const healthTimeout = readPositiveMs("NIUBOT_RESTART_HEALTH_TIMEOUT", 15_000);
+  const healthTimeout = resolveEngineStartTimeoutMs();
+  log(context, `candidate health check started timeoutMs=${healthTimeout}`);
   const identity = await waitForEngineIdentity(launched.endpoint, {
     instanceId: launched.state.instanceId,
     pid: launched.state.pid,
@@ -700,10 +704,7 @@ function readPositiveMs(
   fallback: number,
   env: NodeJS.ProcessEnv = process.env,
 ): number {
-  const raw = env[name];
-  if (!raw) return fallback;
-  const seconds = Number.parseInt(raw, 10);
-  return Number.isFinite(seconds) && seconds > 0 ? seconds * 1_000 : fallback;
+  return readPositiveSecondsAsMs(name, fallback, env);
 }
 
 async function assertLocalProxyEnvironment(): Promise<void> {

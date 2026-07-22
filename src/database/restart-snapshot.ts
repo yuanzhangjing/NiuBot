@@ -6,6 +6,11 @@ import type { NiuBotConfig } from "../config.js";
 import { removeFileSync, replaceFileSync, samePlatformPath } from "../platform/files.js";
 
 export const PREFLIGHT_DATABASE_MANIFEST_ENV = "NIUBOT_PREFLIGHT_DATABASE_MANIFEST";
+export const PREFLIGHT_FULL_VALIDATION_ENV = "NIUBOT_PREFLIGHT_FULL_VALIDATION";
+
+export function shouldRunFullPreflight(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env[PREFLIGHT_FULL_VALIDATION_ENV] === "1";
+}
 
 interface SnapshotRecord {
   databasePath: string;
