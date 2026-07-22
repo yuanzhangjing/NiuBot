@@ -6,10 +6,35 @@ import type { AgentBackend, TranscriptEvent } from "../agent/types.js";
 import { initDatabase, storeMessage } from "../database/schema.js";
 import { archiveAgentSession } from "../session-archive/archive.js";
 import { readCodexTranscript, wrapInjectedUserMessage } from "../session-archive/native-transcript.js";
+import { TZ, utcToLocalDateTime } from "../tz.js";
 import { parseArgs } from "./args.js";
 import { handleSessions, markdownCodeFence, selectTimelineEvents } from "./session.js";
 
 const tempDirs: string[] = [];
+
+function localParts(utc: string): { date: string; time: string; dateTime: string } {
+  const dateTime = utcToLocalDateTime(utc);
+  const [date = "", time = ""] = dateTime.split(" ");
+  return { date, time, dateTime };
+}
+
+function expectedListRange(startUtc: string, endUtc: string): string {
+  const start = localParts(startUtc);
+  const end = localParts(endUtc);
+  if (start.dateTime === end.dateTime) return start.time;
+  return start.date === end.date
+    ? `${start.time}～${end.time}`
+    : `${start.dateTime}～${end.time}`;
+}
+
+function expectedSessionRange(startUtc: string, endUtc: string): string {
+  const start = localParts(startUtc);
+  const end = localParts(endUtc);
+  return start.date === end.date
+    ? `${start.date} ${start.time}～${end.time}`
+    : `${start.dateTime}～${end.dateTime}`;
+}
+
 afterEach(() => {
   vi.restoreAllMocks();
   for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
@@ -223,7 +248,7 @@ describe("nbt sessions", () => {
     const lines: string[] = [];
     vi.spyOn(console, "log").mockImplementation((...values) => lines.push(values.join(" ")));
     await handleSessions(db, ["list"], "c1", "p2p", home, "NiuBot", parseArgs);
-    expect(lines.join("\n")).toContain("[s1] [09:00～10:00] 对话 · codex · 5轮");
+    expect(lines.join("\n")).toContain(`[s1] [${expectedListRange("2026-07-13 01:00:00", "2026-07-13 02:00:00")}] 对话 · codex · 5轮`);
     expect(lines.join("\n")).toContain("概要: 问「查找唯一标记 NEEDLE_FULL_TEXT」→答「未回复」");
     expect(lines.join("\n")).not.toContain("source-reference");
     expect(lines.join("\n")).not.toContain("归档缺失");
@@ -257,10 +282,12 @@ describe("nbt sessions", () => {
 
     lines.length = 0;
     await handleSessions(db, ["get", "s1"], "c1", "p2p", home, "NiuBot", parseArgs);
-    expect(lines.join("\n")).toContain("Timezone: Asia/Shanghai");
-    expect(lines.join("\n")).toContain("Session s1 · codex · 2026-07-13 09:00～10:00");
+    const firstTurn = localParts("2026-07-13 01:00:00");
+    const secondTurn = localParts("2026-07-13 01:01:00");
+    expect(lines.join("\n")).toContain(`Timezone: ${TZ}`);
+    expect(lines.join("\n")).toContain(`Session s1 · codex · ${expectedSessionRange("2026-07-13 01:00:00", "2026-07-13 02:00:00")}`);
     expect(lines.join("\n")).toContain("步骤 1～10");
-    expect(lines.join("\n").match(/2026-07-13 · 第/g)).toHaveLength(1);
+    expect(lines.join("\n").match(new RegExp(`${firstTurn.date} · 第`, "g"))).toHaveLength(1);
     expect(lines.join("\n")).toContain("\n第 2 轮\n");
     expect(lines.join("\n")).toContain("本页显示 10 步，还有更多");
     expect(lines.join("\n")).toContain("下一页：/nbt sessions get s1 --after-event");
@@ -269,11 +296,11 @@ describe("nbt sessions", () => {
     await handleSessions(db, ["get", "s1", "--page-size", "3", "--event-chars", "200"], "c1", "p2p", home, "NiuBot", parseArgs);
     const timelinePage = lines.join("\n");
     expect(timelinePage).toContain("步骤 1～3");
-    expect(timelinePage).toContain("2026-07-13 · 第 1 轮");
-    expect(timelinePage).toContain("[1] [09:00] 用户: 查找唯一标记 NEEDLE_FULL_TEXT");
-    expect(timelinePage).toContain("[2] [09:00] shell:\n调用：");
+    expect(timelinePage).toContain(`${firstTurn.date} · 第 1 轮`);
+    expect(timelinePage).toContain(`[1] [${firstTurn.time}] 用户: 查找唯一标记 NEEDLE_FULL_TEXT`);
+    expect(timelinePage).toContain(`[2] [${firstTurn.time}] shell:\n调用：`);
     expect(timelinePage).toContain("结果：未返回");
-    expect(timelinePage).toContain("[3] [09:00] 工具结果（未找到对应调用）:");
+    expect(timelinePage).toContain(`[3] [${firstTurn.time}] 工具结果（未找到对应调用）:`);
     expect(timelinePage).toContain("LONG_OUTPUT");
     expect(timelinePage).toContain("〔内容已截断：/nbt sessions get s1:");
     expect(timelinePage).toContain("--after-event");
@@ -284,11 +311,11 @@ describe("nbt sessions", () => {
     lines.length = 0;
     await handleSessions(db, ["get", "s1", "--summary"], "c1", "p2p", home, "NiuBot", parseArgs);
     const summaryPage = lines.join("\n");
-    expect(summaryPage).toContain("Timezone: Asia/Shanghai");
-    expect(summaryPage).toContain("Session s1 · codex · 2026-07-13 09:00～10:00");
-    expect(summaryPage).toContain("## 2026-07-13 · 第 1 轮 · 09:00");
-    expect(summaryPage).toContain("## 第 2 轮 · 09:01");
-    expect(summaryPage).not.toContain("(Asia/Shanghai)");
+    expect(summaryPage).toContain(`Timezone: ${TZ}`);
+    expect(summaryPage).toContain(`Session s1 · codex · ${expectedSessionRange("2026-07-13 01:00:00", "2026-07-13 02:00:00")}`);
+    expect(summaryPage).toContain(`## ${firstTurn.date} · 第 1 轮 · ${firstTurn.time}`);
+    expect(summaryPage).toContain(`## 第 2 轮 · ${secondTurn.time}`);
+    expect(summaryPage).not.toContain(`(${TZ})`);
     expect(summaryPage).toContain("范围：第 1～2 轮，共 5 轮");
     expect(summaryPage).toContain("用户：\n查找唯一标记 NEEDLE_FULL_TEXT");
     expect(summaryPage).toContain("工具调用 1 次：shell ×1");
@@ -331,11 +358,11 @@ describe("nbt sessions", () => {
 
     lines.length = 0;
     await handleSessions(db, ["get", "s1", "--turn", "1", "--verbose", "--max-chars", "30000"], "c1", "p2p", home, "NiuBot", parseArgs);
-    expect(lines.join("\n")).toContain("[2] [09:00] shell:");
+    expect(lines.join("\n")).toContain(`[2] [${firstTurn.time}] shell:`);
     expect(lines.join("\n")).toContain("event=s1:");
     expect(lines.join("\n")).toContain("call=call--fence");
     expect(lines.join("\n")).toContain("LONG_OUTPUT");
-    expect(lines.join("\n")).toContain("[4] [09:00] 最终回复: 已经处理");
+    expect(lines.join("\n")).toContain(`[4] [${firstTurn.time}] 最终回复: 已经处理`);
 
     lines.length = 0;
     await handleSessions(db, ["get", "s1", "--turn", "1", "--verbose", "--event-page-size", "2"], "c1", "p2p", home, "NiuBot", parseArgs);
@@ -515,10 +542,11 @@ describe("nbt sessions", () => {
     vi.spyOn(console, "log").mockImplementation((...values) => lines.push(values.join(" ")));
     await handleSessions(db, ["list", "-n", "2"], "c1", "p2p", home, "NiuBot", parseArgs);
     const firstPage = lines.join("\n");
-    expect(firstPage).toContain("Timezone: Asia/Shanghai");
-    expect(firstPage.match(/2026-07-13/g)).toHaveLength(1);
-    expect(firstPage).toContain("[s3] [2026-07-12 11:00～11:10] 后台任务 · codex · 1轮 · 归档缺失");
-    expect(firstPage).toContain("[s2] [10:00] 定时任务 · codex · 1轮 · 归档缺失");
+    const pageDate = localParts("2026-07-13 03:10:00").date;
+    expect(firstPage).toContain(`Timezone: ${TZ}`);
+    expect(firstPage.match(new RegExp(pageDate, "g"))).toHaveLength(1);
+    expect(firstPage).toContain(`[s3] [${expectedListRange("2026-07-12 03:00:00", "2026-07-13 03:10:00")}] 后台任务 · codex · 1轮 · 归档缺失`);
+    expect(firstPage).toContain(`[s2] [${expectedListRange("2026-07-13 02:00:00", "2026-07-13 02:00:00")}] 定时任务 · codex · 1轮 · 归档缺失`);
     expect(firstPage).not.toContain("[s1]");
     expect(firstPage).toContain("概要: 首问「旧 prompt」→首答「旧 response」；末问「最后的 user prompt 第二行」→末答「最后的 response」");
     expect(firstPage).not.toContain("没有前置用户消息的系统回复");
@@ -533,7 +561,7 @@ describe("nbt sessions", () => {
 
     lines.length = 0;
     await handleSessions(db, ["list", "-n", "2", "--after", "s2"], "c1", "p2p", home, "NiuBot", parseArgs);
-    expect(lines.join("\n")).toContain("[s1] [09:00～09:10] 对话 · codex · 3轮 · 归档缺失");
+    expect(lines.join("\n")).toContain(`[s1] [${expectedListRange("2026-07-13 01:00:00", "2026-07-13 01:10:00")}] 对话 · codex · 3轮 · 归档缺失`);
     expect(lines.join("\n")).toContain("概要: 问「未记录」→答「未回复」");
     expect(lines.join("\n")).toContain("已到最后一页");
     db.close();
