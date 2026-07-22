@@ -56,6 +56,7 @@ export interface TimelineItem extends IdentifiedTranscriptEvent {
   turnNumber: number;
   stepNumber: number;
   finalAssistant: boolean;
+  pairedResult?: IdentifiedTranscriptEvent;
 }
 
 export interface TimelineSelection {
@@ -524,6 +525,69 @@ async function* transcriptTurns(
   if (current) yield current;
 }
 
+async function* timelineSteps(
+  sessionId: string,
+  events: SessionTranscript["events"],
+): AsyncGenerator<TimelineItem> {
+  let stepNumber = 0;
+  let toolBatch: TimelineItem[] = [];
+
+  for await (const item of timelineEvents(sessionId, events)) {
+    if (item.event.type === "tool_call" || item.event.type === "tool_result") {
+      toolBatch.push(item);
+      continue;
+    }
+    for (const toolItem of pairToolBatch(toolBatch)) {
+      yield { ...toolItem, stepNumber: ++stepNumber };
+    }
+    toolBatch = [];
+    yield { ...item, stepNumber: ++stepNumber };
+  }
+  for (const toolItem of pairToolBatch(toolBatch)) {
+    yield { ...toolItem, stepNumber: ++stepNumber };
+  }
+}
+
+function pairToolBatch(items: TimelineItem[]): TimelineItem[] {
+  const results = new Map<string, TimelineItem[]>();
+  for (const item of items) {
+    if (item.event.type !== "tool_result" || !item.event.callId) continue;
+    const matches = results.get(item.event.callId) ?? [];
+    matches.push(item);
+    results.set(item.event.callId, matches);
+  }
+
+  const consumedResults = new Set<TimelineItem>();
+  const matchedResults = new Map<TimelineItem, TimelineItem>();
+  for (const item of items) {
+    if (item.event.type !== "tool_call" || !item.event.callId) continue;
+    const result = results.get(item.event.callId)?.find((candidate) => !consumedResults.has(candidate));
+    if (!result) continue;
+    consumedResults.add(result);
+    matchedResults.set(item, result);
+  }
+
+  const paired: TimelineItem[] = [];
+  for (const item of items) {
+    if (item.event.type === "tool_call") {
+      const result = matchedResults.get(item);
+      paired.push(result
+        ? {
+            ...item,
+            pairedResult: {
+              eventId: result.eventId,
+              messageId: result.messageId,
+              event: result.event,
+            },
+          }
+        : item);
+    } else if (!consumedResults.has(item)) {
+      paired.push(item);
+    }
+  }
+  return paired;
+}
+
 async function selectTranscriptTurns(
   sessionId: string,
   events: SessionTranscript["events"],
@@ -553,14 +617,16 @@ export async function selectTimelineEvents(
   let targetTurnFound = options.targetTurn === undefined;
   let cursorFound = options.afterEventId === undefined;
   let hasMore = false;
-  for await (const item of timelineEvents(sessionId, events)) {
+  for await (const item of timelineSteps(sessionId, events)) {
     seenTurns = Math.max(seenTurns, item.turnNumber);
     if (options.targetTurn && item.turnNumber > options.targetTurn) break;
     if (options.targetTurn && item.turnNumber !== options.targetTurn) continue;
     targetTurnFound = true;
     seenEvents++;
     if (!cursorFound) {
-      if (item.eventId === options.afterEventId) cursorFound = true;
+      if (item.eventId === options.afterEventId || item.pairedResult?.eventId === options.afterEventId) {
+        cursorFound = true;
+      }
       continue;
     }
     if (items.length >= options.pageSize) {
@@ -629,16 +695,42 @@ function printTimeline(
       && !preview.content.includes("\n");
     console.log(inline ? `${header} ${preview.content}` : header);
     if (options.verbose) {
-      console.log(`    event=${item.eventId}${item.event.callId ? ` call=${item.event.callId}` : ""}`);
+      const resultEvent = item.pairedResult ? ` result_event=${item.pairedResult.eventId}` : "";
+      console.log(`    event=${item.eventId}${resultEvent}${item.event.callId ? ` call=${item.event.callId}` : ""}`);
     }
-    if (item.event.type === "tool_call" || item.event.type === "tool_result") {
+    if (item.event.type === "tool_call") {
+      console.log("调用：");
       const fence = markdownCodeFence(preview.content);
       console.log(`${fence}text\n${preview.content}\n${fence}`);
+      if (preview.truncated) console.log(`〔内容已截断：/nbt sessions get ${item.eventId}〕`);
+      remainingChars -= preview.content.length;
+      if (item.pairedResult) {
+        const resultPreview = timelinePreview(
+          item.pairedResult.event.content,
+          Math.min(options.eventChars, Math.max(0, remainingChars)),
+        );
+        console.log("结果：");
+        const resultFence = markdownCodeFence(resultPreview.content);
+        console.log(`${resultFence}text\n${resultPreview.content}\n${resultFence}`);
+        if (resultPreview.truncated) {
+          console.log(`〔内容已截断：/nbt sessions get ${item.pairedResult.eventId}〕`);
+        }
+        remainingChars -= resultPreview.content.length;
+      } else {
+        console.log("结果：未返回");
+      }
+    } else if (item.event.type === "tool_result") {
+      const fence = markdownCodeFence(preview.content);
+      console.log(`${fence}text\n${preview.content}\n${fence}`);
+      if (preview.truncated) console.log(`〔内容已截断：/nbt sessions get ${item.eventId}〕`);
+      remainingChars -= preview.content.length;
     } else if (!inline) {
       console.log(preview.content);
+      if (preview.truncated) console.log(`〔内容已截断：/nbt sessions get ${item.eventId}〕`);
+      remainingChars -= preview.content.length;
+    } else {
+      remainingChars -= preview.content.length;
     }
-    if (preview.truncated) console.log(`〔内容已截断：/nbt sessions get ${item.eventId}〕`);
-    remainingChars -= preview.content.length;
     lastPrinted = item;
     printed++;
   }
@@ -647,7 +739,11 @@ function printTimeline(
   const hasMore = !!lastPrinted && (selection.hasMore || hasUnprintedSelectedItems);
   console.log(`本页显示 ${printed} 步${hasMore ? "，还有更多" : "，已到最后一步"}`);
   if (hasMore && lastPrinted) {
-    console.log(`下一页：${timelineContinuationCommand(row.id, lastPrinted.eventId, options)}`);
+    console.log(`下一页：${timelineContinuationCommand(
+      row.id,
+      lastPrinted.pairedResult?.eventId ?? lastPrinted.eventId,
+      options,
+    )}`);
   }
 }
 
@@ -656,8 +752,8 @@ function compactTimelineEventLabel(item: TimelineItem): string {
   switch (item.event.type) {
     case "user": return "用户";
     case "assistant": return item.finalAssistant ? "最终回复" : "过程消息";
-    case "tool_call": return name ? `${name} 调用` : "工具调用";
-    case "tool_result": return name ? `${name} 结果` : "工具结果";
+    case "tool_call": return name ?? "工具";
+    case "tool_result": return name ? `${name} 结果（未找到对应调用）` : "工具结果（未找到对应调用）";
   }
 }
 
@@ -681,6 +777,9 @@ function compactEventTimestamp(timestamp: string | undefined): { date: string; t
 function timelinePreview(content: string, maxChars: number): { content: string; truncated: boolean } {
   if (content.length <= maxChars) return { content, truncated: false };
   const notice = "\n\n[…本步骤内容较长，已显示开头…]";
+  if (maxChars <= notice.length) {
+    return { content: content.slice(0, Math.max(0, maxChars)), truncated: true };
+  }
   return {
     content: content.slice(0, Math.max(0, maxChars - notice.length)) + notice,
     truncated: true,

@@ -90,6 +90,35 @@ describe("nbt sessions", () => {
     expect(page.items.map((item) => item.finalAssistant)).toEqual([false, true, true]);
   });
 
+  it("pairs tool calls with results by call ID and paginates them as one step", async () => {
+    const firstPage = await selectTimelineEvents("s1", [
+      { type: "user", timestamp: "2026-07-13T01:00:00Z", content: "问题" },
+      { type: "tool_call", timestamp: "2026-07-13T01:00:01Z", name: "first", callId: "c1", content: "input 1" },
+      { type: "tool_call", timestamp: "2026-07-13T01:00:02Z", name: "second", callId: "c2", content: "input 2" },
+      { type: "tool_result", timestamp: "2026-07-13T01:00:03Z", callId: "c2", content: "output 2" },
+      { type: "tool_result", timestamp: "2026-07-13T01:00:04Z", callId: "c1", content: "output 1" },
+      { type: "assistant", timestamp: "2026-07-13T01:00:05Z", content: "完成" },
+    ], { pageSize: 2 });
+
+    expect(firstPage.items).toHaveLength(2);
+    expect(firstPage.items.map((item) => item.stepNumber)).toEqual([1, 2]);
+    expect(firstPage.items[1]?.event.name).toBe("first");
+    expect(firstPage.items[1]?.pairedResult?.event.content).toBe("output 1");
+    expect(firstPage.hasMore).toBe(true);
+
+    const resultCursor = firstPage.items[1]?.pairedResult?.eventId;
+    const secondPage = await selectTimelineEvents("s1", [
+      { type: "user", timestamp: "2026-07-13T01:00:00Z", content: "问题" },
+      { type: "tool_call", timestamp: "2026-07-13T01:00:01Z", name: "first", callId: "c1", content: "input 1" },
+      { type: "tool_call", timestamp: "2026-07-13T01:00:02Z", name: "second", callId: "c2", content: "input 2" },
+      { type: "tool_result", timestamp: "2026-07-13T01:00:03Z", callId: "c2", content: "output 2" },
+      { type: "tool_result", timestamp: "2026-07-13T01:00:04Z", callId: "c1", content: "output 1" },
+      { type: "assistant", timestamp: "2026-07-13T01:00:05Z", content: "完成" },
+    ], { afterEventId: resultCursor, pageSize: 2 });
+    expect(secondPage.items.map((item) => item.event.name ?? item.event.type)).toEqual(["second", "assistant"]);
+    expect(secondPage.items[0]?.pairedResult?.event.content).toBe("output 2");
+  });
+
   it("lists linked archives, searches parsed events, and gets a complete event", async () => {
     const home = mkdtempSync(join(tmpdir(), "niubot-sessions-cli-"));
     tempDirs.push(home);
@@ -188,8 +217,9 @@ describe("nbt sessions", () => {
     expect(timelinePage).toContain("步骤 1～3");
     expect(timelinePage).toContain("2026-07-13 · 第 1 轮");
     expect(timelinePage).toContain("[1] [09:00] 用户: 查找唯一标记 NEEDLE_FULL_TEXT");
-    expect(timelinePage).toContain("[2] [09:00] shell 调用:");
-    expect(timelinePage).toContain("[3] [09:00] 工具结果:");
+    expect(timelinePage).toContain("[2] [09:00] shell:\n调用：");
+    expect(timelinePage).toContain("结果：未返回");
+    expect(timelinePage).toContain("[3] [09:00] 工具结果（未找到对应调用）:");
     expect(timelinePage).toContain("LONG_OUTPUT");
     expect(timelinePage).toContain("〔内容已截断：/nbt sessions get s1:");
     expect(timelinePage).toContain("--after-event");
@@ -225,6 +255,13 @@ describe("nbt sessions", () => {
     expect(lines.join("\n")).not.toContain("NiuBot：\n中断过程标记");
 
     lines.length = 0;
+    await handleSessions(db, ["get", "s1", "--turn", "5", "--page-size", "10"], "c1", "p2p", home, "NiuBot", parseArgs);
+    const pairedToolPage = lines.join("\n");
+    expect(pairedToolPage).toContain("shell:\n调用：");
+    expect(pairedToolPage).toContain("结果：\n```text\ndone without final reply");
+    expect(pairedToolPage).not.toContain("结果：未返回");
+
+    lines.length = 0;
     await handleSessions(db, ["search", "中断过程标记", "--messages-only"], "c1", "p2p", home, "NiuBot", parseArgs);
     expect(lines).toEqual(["(无匹配 transcript 事件)"]);
 
@@ -240,7 +277,7 @@ describe("nbt sessions", () => {
 
     lines.length = 0;
     await handleSessions(db, ["get", "s1", "--turn", "1", "--verbose", "--max-chars", "30000"], "c1", "p2p", home, "NiuBot", parseArgs);
-    expect(lines.join("\n")).toContain("[2] [09:00] shell 调用:");
+    expect(lines.join("\n")).toContain("[2] [09:00] shell:");
     expect(lines.join("\n")).toContain("event=s1:");
     expect(lines.join("\n")).toContain("call=call--fence");
     expect(lines.join("\n")).toContain("LONG_OUTPUT");
