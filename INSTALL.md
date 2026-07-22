@@ -354,6 +354,22 @@ Get-Content "$HOME\.niubot\logs\niubot-$(Get-Date -Format yyyy-MM-dd).log" -Tail
 ```
 Common causes: invalid Feishu credentials, missing permissions, agent CLI not working.
 
+### Update preflight times out
+
+Restart and update run the candidate package in read-only preflight mode before
+stopping the current service. The default preflight timeout is 120 seconds. For
+slower Windows hosts, set a larger value in seconds before retrying:
+
+```powershell
+$env:NIUBOT_RESTART_PREFLIGHT_TIMEOUT = "180"
+niubot update
+```
+
+The current service remains running when candidate preflight fails. Check
+`$HOME\.niubot\logs\restart-debug.log` for per-stage timings covering the
+database snapshot, backend validation, Bot initialization, temporary API start,
+and total preflight duration.
+
 ---
 
 ## Adding a Bot

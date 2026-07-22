@@ -72,6 +72,19 @@ async function loadBackendClass(
 
 async function main(): Promise<void> {
   const preflight = process.argv.includes("--preflight");
+  const preflightStartedAt = Date.now();
+  const logPreflightStage = (
+    stage: string,
+    startedAt: number,
+    fields: Record<string, unknown> = {},
+  ) => {
+    if (!preflight) return;
+    log.info("preflight stage finished", {
+      stage,
+      durationMs: Date.now() - startedAt,
+      ...fields,
+    });
+  };
 
   const envLogLevel = process.env["NIUBOT_LOG_LEVEL"]?.toLowerCase();
   if (envLogLevel && VALID_LOG_LEVELS.has(envLogLevel)) {
@@ -112,6 +125,7 @@ async function main(): Promise<void> {
     log.warn("nbt shim setup failed", { error: String(err) });
   }
 
+  const configStartedAt = Date.now();
   let config = loadConfig();
   let legacyReadOnlyPreflight = false;
   if (preflight) {
@@ -128,12 +142,25 @@ async function main(): Promise<void> {
       log.info("legacy preflight restricted to read-only compatibility checks");
     }
   }
+  logPreflightStage("config_and_database_manifest", configStartedAt, {
+    botCount: config.bots.length,
+  });
   log.info("config loaded", {
     botCount: config.bots.length,
     bots: config.bots.map((b) => `${b.id}(${b.backend})`).join(", "),
   });
 
-  const initialCapabilities = await probeAllBackendCapabilitiesAsync();
+  const capabilityStartedAt = Date.now();
+  const initialCapabilities = await probeAllBackendCapabilitiesAsync({
+    // Preflight validates each configured backend through backend.start().
+    // Only discover executables here so Windows does not run every version
+    // command and then immediately run the configured one a second time.
+    verifyVersion: !preflight,
+  });
+  logPreflightStage("backend_discovery", capabilityStartedAt, {
+    backendCount: initialCapabilities.length,
+    versionCommandsRun: 0,
+  });
   const capabilityCache = new BackendCapabilityCache(
     initialCapabilities,
     () => probeAllBackendCapabilitiesAsync(),
@@ -180,7 +207,17 @@ async function main(): Promise<void> {
     if (!backend) {
       backend = await createBackend(type);
       backends.set(type, backend);
-      await backend.start();
+      const backendStartedAt = Date.now();
+      let validated = false;
+      try {
+        await backend.start();
+        validated = true;
+      } finally {
+        logPreflightStage("backend_validation", backendStartedAt, {
+          backend: type,
+          success: validated,
+        });
+      }
       log.info("backend started (lazy)", { type });
     }
     return backend;
@@ -202,6 +239,8 @@ async function main(): Promise<void> {
 
   const bots: BotInstance[] = [];
   for (const botConfig of config.bots) {
+    const botStartedAt = Date.now();
+    let initialized = false;
     try {
       const autoUpdateNotificationsEnabled = bots.length === 0;
       const runtimeState = loadPersistedBotRuntimeState(botConfig.dbPath, botConfig.id);
@@ -230,6 +269,7 @@ async function main(): Promise<void> {
         { preflight },
       );
       bots.push(instance);
+      initialized = true;
       log.info("bot backend assigned", {
         bot: botConfig.id,
         backend: backendType,
@@ -240,6 +280,11 @@ async function main(): Promise<void> {
       });
     } catch (err) {
       log.error("failed to create bot instance", { bot: botConfig.id, error: String(err) });
+    } finally {
+      logPreflightStage("bot_initialization", botStartedAt, {
+        bot: botConfig.id,
+        success: initialized,
+      });
     }
   }
 
@@ -258,12 +303,15 @@ async function main(): Promise<void> {
       resolveChatPlatformId: () => undefined,
       getDefaultPlatformChatId: () => undefined,
     });
+    const apiStartedAt = Date.now();
     await tempApi.start();
+    logPreflightStage("temporary_api_start", apiStartedAt);
     log.info("preflight check passed");
     tempApi.stop();
     for (const bot of bots) {
       try { bot.db.close(); } catch { /* ignore */ }
     }
+    logPreflightStage("total", preflightStartedAt);
     process.exit(0);
   }
 

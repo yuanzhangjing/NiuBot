@@ -29,6 +29,7 @@ import {
 const PACKAGE_NAME = "@yuanzhangjing/niubot";
 const DEFAULT_INSTALL_TIMEOUT_MS = 120_000;
 const UPDATE_INSTALL_TIMEOUT_MS = 600_000;
+export const DEFAULT_PREFLIGHT_TIMEOUT_MS = 120_000;
 
 type RestartMode = "source" | "npm-update" | "production";
 
@@ -476,23 +477,33 @@ async function runPreflight(
   runtimePath: string,
   databaseManifestPath: string,
 ): Promise<void> {
-  await runLogged(
-    context,
-    process.execPath,
-    [path.join(runtimePath, "dist", "index.js"), "--preflight"],
-    runtimePath,
-    20_000,
-    {
-      ...runtimeEnvironment(context, context.previousRuntimeMode),
-      [PREFLIGHT_DATABASE_MANIFEST_ENV]: databaseManifestPath,
-    },
-  );
+  const timeoutMs = resolvePreflightTimeoutMs();
+  const startedAt = Date.now();
+  log(context, `preflight command started timeoutMs=${timeoutMs}`);
+  try {
+    await runLogged(
+      context,
+      process.execPath,
+      [path.join(runtimePath, "dist", "index.js"), "--preflight"],
+      runtimePath,
+      timeoutMs,
+      {
+        ...runtimeEnvironment(context, context.previousRuntimeMode),
+        [PREFLIGHT_DATABASE_MANIFEST_ENV]: databaseManifestPath,
+      },
+    );
+    log(context, `preflight command completed durationMs=${Date.now() - startedAt}`);
+  } catch (err) {
+    log(context, `preflight command failed durationMs=${Date.now() - startedAt} error=${errorMessage(err)}`);
+    throw err;
+  }
 }
 
 async function createDatabaseSnapshot(
   context: RestartContext,
   purpose: "preflight" | "rollback",
 ): Promise<RestartDatabaseSnapshot> {
+  const startedAt = Date.now();
   const config = loadConfig(path.join(context.niubotHome, "config.yaml"));
   const rootDirectory = path.join(
     context.botDirectory,
@@ -505,7 +516,7 @@ async function createDatabaseSnapshot(
     databasePaths: config.bots.map((bot) => bot.dbPath),
     backupTimeoutMs: readPositiveMs("NIUBOT_RESTART_DATABASE_BACKUP_TIMEOUT", 120_000),
   });
-  log(context, `database snapshot ready count=${snapshot.records.length}`);
+  log(context, `database snapshot ready purpose=${purpose} count=${snapshot.records.length} durationMs=${Date.now() - startedAt}`);
   return snapshot;
 }
 
@@ -603,6 +614,10 @@ export function parseNpmPackFilename(output: string): string {
   throw new Error("npm pack did not return a package filename");
 }
 
+export function resolvePreflightTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  return readPositiveMs("NIUBOT_RESTART_PREFLIGHT_TIMEOUT", DEFAULT_PREFLIGHT_TIMEOUT_MS, env);
+}
+
 export function resolveRestartSourceDirectory(options: {
   niubotHome: string;
   workerRuntimePath: string;
@@ -680,8 +695,12 @@ function installTimeout(context: RestartContext, update: boolean): number {
   );
 }
 
-function readPositiveMs(name: string, fallback: number): number {
-  const raw = process.env[name];
+function readPositiveMs(
+  name: string,
+  fallback: number,
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  const raw = env[name];
   if (!raw) return fallback;
   const seconds = Number.parseInt(raw, 10);
   return Number.isFinite(seconds) && seconds > 0 ? seconds * 1_000 : fallback;

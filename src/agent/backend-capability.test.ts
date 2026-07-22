@@ -24,6 +24,25 @@ describe("backend capability", () => {
     expect(capabilities.every((capability) => capability.selectable)).toBe(true);
     expect(peak).toBeGreaterThan(1);
   });
+
+  it("can discover installed backends without running version commands", async () => {
+    const runVersionAsync = vi.fn(async () => "1.2.3");
+    const capabilities = await probeAllBackendCapabilitiesAsync({
+      platform: "win32",
+      resolveCommand: (command) => `C:\\bin\\${command}.cmd`,
+      runVersionAsync,
+      verifyVersion: false,
+    });
+
+    expect(runVersionAsync).not.toHaveBeenCalled();
+    const codex = capabilities.find((capability) => capability.backend === "codex");
+    expect(codex).toMatchObject({
+      installed: true,
+      selectable: true,
+    });
+    expect(codex).not.toHaveProperty("version");
+  });
+
   it("marks an installed native backend selectable", () => {
     const capability = probeBackendCapability("codex", {
       platform: "win32",

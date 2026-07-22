@@ -2,7 +2,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { parseNpmPackFilename, resolveRestartSourceDirectory } from "./restart-worker.js";
+import {
+  DEFAULT_PREFLIGHT_TIMEOUT_MS,
+  parseNpmPackFilename,
+  resolvePreflightTimeoutMs,
+  resolveRestartSourceDirectory,
+} from "./restart-worker.js";
 
 const tempDirs: string[] = [];
 
@@ -12,6 +17,14 @@ afterEach(() => {
 });
 
 describe("restart worker helpers", () => {
+  it("uses a Windows-safe configurable preflight timeout", () => {
+    expect(DEFAULT_PREFLIGHT_TIMEOUT_MS).toBe(120_000);
+    expect(resolvePreflightTimeoutMs({})).toBe(120_000);
+    expect(resolvePreflightTimeoutMs({ NIUBOT_RESTART_PREFLIGHT_TIMEOUT: "90" })).toBe(90_000);
+    expect(resolvePreflightTimeoutMs({ NIUBOT_RESTART_PREFLIGHT_TIMEOUT: "invalid" })).toBe(120_000);
+    expect(resolvePreflightTimeoutMs({ NIUBOT_RESTART_PREFLIGHT_TIMEOUT: "0" })).toBe(120_000);
+  });
+
   it("parses npm pack JSON without trusting paths", () => {
     expect(parseNpmPackFilename('[{"filename":"yuanzhangjing-niubot-1.2.3.tgz"}]'))
       .toBe("yuanzhangjing-niubot-1.2.3.tgz");

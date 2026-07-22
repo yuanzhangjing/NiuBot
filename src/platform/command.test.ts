@@ -26,6 +26,30 @@ describe("runCommand", () => {
       .rejects.toThrow(/timed out/);
   });
 
+  it("terminates timed-out descendant processes before they can retain output pipes", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-command-tree-"));
+    const marker = path.join(root, "descendant-survived");
+    const descendant = [
+      `setTimeout(() => require("node:fs").writeFileSync(${JSON.stringify(marker)}, "alive"), 2000);`,
+      "setInterval(() => {}, 1000);",
+    ].join("");
+    const parent = [
+      "const { spawn } = require('node:child_process');",
+      `const child = spawn(process.execPath, ["-e", ${JSON.stringify(descendant)}], { stdio: ["ignore", "inherit", "inherit"] });`,
+      "child.once('spawn', () => process.stdout.write('descendant-ready\\n'));",
+      "setInterval(() => {}, 1000);",
+    ].join("");
+
+    try {
+      await expect(runCommand(process.execPath, ["-e", parent], { timeoutMs: 500 }))
+        .rejects.toThrow(/timed out/);
+      await new Promise((resolve) => setTimeout(resolve, 2200));
+      expect(fs.existsSync(marker)).toBe(false);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }, 15_000);
+
   it("bounds captured command output", async () => {
     await expect(runCommand(
       process.execPath,

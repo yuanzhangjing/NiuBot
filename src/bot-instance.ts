@@ -66,8 +66,13 @@ export async function createBotInstance(
   }
 
   // 2. 初始化数据库
+  const databaseStartedAt = Date.now();
   const db = initDatabase(botConfig.dbPath);
-  log.info("database initialized", { dbPath: botConfig.dbPath });
+  log.info("database initialized", {
+    dbPath: botConfig.dbPath,
+    durationMs: Date.now() - databaseStartedAt,
+    preflight: options.preflight === true,
+  });
 
   // 3. 确保 workspace AGENTS.md 存在；已有用户文件不覆盖
   const refreshAgentContextFiles = options.preflight
