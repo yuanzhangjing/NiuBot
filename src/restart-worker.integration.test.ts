@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { inspectRunningEngine, launchDetachedEngine, stopEngine } from "./process-manager.js";
 import { ReleaseStore } from "./release-store.js";
 import { runRestartWorker } from "./restart-worker.js";
@@ -11,6 +11,18 @@ import { endpointFromAddress } from "./platform/ipc.js";
 import Database from "better-sqlite3";
 
 const tempDirs: string[] = [];
+
+beforeEach(() => {
+  // Agent-launched test runs inherit the live chat and local API route. Keep
+  // temporary restart workers from sending their success notices to that chat.
+  for (const name of [
+    "NIUBOT_CHAT_ID",
+    "NIUBOT_API_SOCKET",
+    "NIUBOT_RESTART_NOTIFY_CHAT_ID",
+  ]) {
+    vi.stubEnv(name, "");
+  }
+});
 
 afterEach(async () => {
   vi.unstubAllEnvs();
