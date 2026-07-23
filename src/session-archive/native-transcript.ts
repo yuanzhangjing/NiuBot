@@ -1,5 +1,6 @@
 import { createReadStream } from "node:fs";
 import { createInterface } from "node:readline";
+import { finished } from "node:stream/promises";
 import { randomUUID } from "node:crypto";
 import type { SessionTranscript, TranscriptEvent } from "../agent/types.js";
 
@@ -359,12 +360,18 @@ async function* messageJsonlEvents(
 async function* readJsonl(file: string): AsyncGenerator<JsonObject> {
   const input = createReadStream(file, { encoding: "utf-8" });
   const lines = createInterface({ input, crlfDelay: Infinity });
-  for await (const line of lines) {
-    if (!line.trim()) continue;
-    try {
-      const value = JSON.parse(line) as unknown;
-      if (object(value)) yield value as JsonObject;
-    } catch { /* skip malformed lines */ }
+  try {
+    for await (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        const value = JSON.parse(line) as unknown;
+        if (object(value)) yield value as JsonObject;
+      } catch { /* skip malformed lines */ }
+    }
+  } finally {
+    lines.close();
+    input.destroy();
+    await finished(input).catch(() => undefined);
   }
 }
 

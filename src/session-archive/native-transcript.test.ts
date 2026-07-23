@@ -1,6 +1,6 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { isStandaloneInjectedContext, readClaudeTranscript, readCodexTranscript, readCursorTranscript, readGrokTranscript, readPiTranscript, transcriptFromOpencodeRows, wrapInjectedUserMessage } from "./native-transcript.js";
 import type { SessionTranscript, TranscriptEvent } from "../agent/types.js";
@@ -50,6 +50,22 @@ describe("native transcript parsers", () => {
     ]);
     const transcript = await readCodexTranscript(file, "s1");
     expect((await collectEvents(transcript)).map((event) => event.type)).toEqual(["user", "tool_call", "tool_result", "assistant"]);
+  });
+
+  it("closes a JSONL file when event iteration stops early", async () => {
+    const file = jsonl([
+      { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "first" }] } },
+      { type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "second" }] } },
+    ]);
+    const transcript = readCodexTranscript(file, "s1");
+    const iterator = transcript.events[Symbol.asyncIterator]();
+    expect((await iterator.next()).value?.content).toBe("first");
+    await iterator.return?.();
+
+    const directory = dirname(file);
+    const directoryIndex = tempDirs.indexOf(directory);
+    if (directoryIndex >= 0) tempDirs.splice(directoryIndex, 1);
+    rmSync(directory, { recursive: true, force: true });
   });
 
   it("extracts OpenCode text and tool state rows", async () => {
