@@ -26,7 +26,6 @@ describe("recoverable global npm install", () => {
       packageRoot: fixture.packageRoot,
       npmPrefix: fixture.prefix,
       commandName: "niubot",
-      platform: "linux",
       install: () => {
         expect(fs.existsSync(fixture.commandPath)).toBe(false);
         writeInstallation(fixture, "2.0.0");
@@ -50,7 +49,6 @@ describe("recoverable global npm install", () => {
         packageRoot: fixture.packageRoot,
         npmPrefix: fixture.prefix,
         commandName: "niubot",
-        platform: "linux",
         install: () => {
           fs.rmSync(fixture.packageRoot, { recursive: true, force: true });
           fs.rmSync(fixture.commandPath, { force: true });
@@ -86,7 +84,6 @@ describe("recoverable global npm install", () => {
       packageRoot: fixture.packageRoot,
       npmPrefix: fixture.prefix,
       commandName: "niubot",
-      platform: "linux",
       install: () => writeInstallation(fixture, "2.0.0"),
       verify: () => {
         throw new Error("native module did not load");
@@ -155,7 +152,6 @@ describe("recoverable global npm install", () => {
       packageRoot: otherRoot,
       npmPrefix: fixture.prefix,
       commandName: "niubot",
-      platform: "linux",
       install: () => {
         throw new Error("must not install");
       },
@@ -176,9 +172,11 @@ function createFixture(): {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-global-install-"));
   temporaryRoots.push(root);
   const prefix = path.join(root, "prefix");
-  const packageRoot = path.join(prefix, "lib", "node_modules", "@yuanzhangjing", "niubot");
-  const commandPath = path.join(prefix, "bin", "niubot");
-  const packageLockPath = path.join(prefix, "lib", "node_modules", ".package-lock.json");
+  const packageRoot = process.platform === "win32"
+    ? path.join(prefix, "node_modules", "@yuanzhangjing", "niubot")
+    : path.join(prefix, "lib", "node_modules", "@yuanzhangjing", "niubot");
+  const commandPath = resolvePrimaryGlobalCommand(prefix, "niubot");
+  const packageLockPath = resolveGlobalPackageLockPath(packageRoot);
   const fixture = { root, prefix, packageRoot, commandPath, packageLockPath };
   writeInstallation(fixture, "1.0.0");
   return fixture;
