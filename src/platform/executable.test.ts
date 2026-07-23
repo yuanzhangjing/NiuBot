@@ -49,9 +49,9 @@ describe("resolveExecutable", () => {
 
   it("puts the owning Windows Node runtime first without duplicate Path keys", () => {
     const env = withNodeRuntimeOnPath(
-      "C:\\Users\\Admin\\AppData\\Local\\NiuBotRuntime\\node-v22\\node.exe",
+      "C:\\Tools\\node-v22\\node.exe",
       {
-        Path: "C:\\Users\\Admin\\AppData\\Roaming\\npm;C:\\Program Files\\nodejs;C:\\USERS\\ADMIN\\APPDATA\\LOCAL\\NIUBOTRUNTIME\\NODE-V22",
+        Path: "C:\\Users\\Admin\\AppData\\Roaming\\npm;C:\\Program Files\\nodejs;C:\\TOOLS\\NODE-V22",
         PATH: "C:\\stale",
         TEMP: "C:\\Temp",
       },
@@ -59,7 +59,7 @@ describe("resolveExecutable", () => {
     );
 
     expect(env["Path"]).toBe(
-      "C:\\Users\\Admin\\AppData\\Local\\NiuBotRuntime\\node-v22;C:\\Users\\Admin\\AppData\\Roaming\\npm;C:\\Program Files\\nodejs",
+      "C:\\Tools\\node-v22;C:\\Users\\Admin\\AppData\\Roaming\\npm;C:\\Program Files\\nodejs",
     );
     expect(env["PATH"]).toBeUndefined();
     expect(env["TEMP"]).toBe("C:\\Temp");

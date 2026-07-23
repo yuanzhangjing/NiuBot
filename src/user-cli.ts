@@ -31,7 +31,7 @@ import { waitForEngineIdentity } from "./local-api/engine-client.js";
 import { resolveEngineStartTimeoutMs } from "./lifecycle-timeouts.js";
 import { inspectRunningEngine, launchDetachedEngine, stopEngine } from "./process-manager.js";
 import { launchRestartWorker } from "./restart-launcher.js";
-import { runCommandSync } from "./platform/command.js";
+import { runCommand, runCommandSync } from "./platform/command.js";
 import {
   commandLookupHint,
   deriveNpmPrefixFromPackageRoot,
@@ -46,8 +46,13 @@ import {
   queryProcessWorkingDirectory,
 } from "./platform/process.js";
 import { isNewerPackageVersion } from "./version.js";
-import { preflightGlobalNpmInstall } from "./npm-install-preflight.js";
+import { preflightGlobalNpmInstall, verifyInstalledPackage } from "./npm-install-preflight.js";
 import { isSupportedNodeMajor, SUPPORTED_NODE_MAJORS } from "./node-support.js";
+import {
+  GlobalInstallError,
+  resolvePrimaryGlobalCommand,
+  runRecoverableGlobalInstall,
+} from "./global-npm-install.js";
 
 // ── Paths ──────────────────────────────────────────────────
 
@@ -295,7 +300,7 @@ function checkNativeDependencies(issues: string[]): void {
     hint(`Node: ${process.execPath}`);
     hint(`ABI: ${process.versions.modules}`);
     hint(`Package: ${PROJECT_ROOT}`);
-    hint("Run 'niubot update' with this same Node runtime. NiuBotRuntime users must not use the system npm.");
+    hint("Reinstall or update NiuBot with the npm that belongs to this Node installation.");
     hint(`Error: ${err instanceof Error ? err.message : String(err)}`);
     issues.push("native-dependencies");
   }
@@ -310,7 +315,7 @@ function checkNodeVersion(): CheckResult {
   return {
     passed: false,
     label: `Node.js v${ver} (supported LTS: ${SUPPORTED_NODE_MAJORS.join(", ")})`,
-    hint: `Use Node.js ${SUPPORTED_NODE_MAJORS.join(", ")}. NiuBotRuntime uses its bundled Node.js; do not replace it with the system Node.`,
+    hint: `Use Node.js ${SUPPORTED_NODE_MAJORS.join(", ")} and install NiuBot with that Node installation's npm.`,
   };
 }
 
@@ -1283,7 +1288,7 @@ async function cmdUpdate(niubotHome: string): Promise<void> {
     fail("Refusing to update because the active npm global root could not be determined.");
     hint(`Current Node: ${process.execPath}`);
     hint(`npm command: ${npmCommand}`);
-    hint("Do not retry with a different system npm. Fix the active Runtime installation first.");
+    hint("Fix this Node/npm installation before retrying; do not switch to an unrelated npm global prefix.");
     console.log();
     process.exitCode = 1;
     return;
@@ -1299,17 +1304,26 @@ async function cmdUpdate(niubotHome: string): Promise<void> {
     process.exitCode = 1;
     return;
   }
+  const npmPrefix = deriveNpmPrefixFromPackageRoot(PROJECT_ROOT);
+  if (!npmPrefix) {
+    fail("Refusing to update because the npm global prefix could not be derived from the active package.");
+    hint(`Current niubot package: ${PROJECT_ROOT}`);
+    console.log();
+    process.exitCode = 1;
+    return;
+  }
+  const npmUpdateCwd = resolveNpmUpdateWorkingDirectory(PROJECT_ROOT, npmPrefix);
 
   const npmEnv = npmEnvironmentForCurrentNode();
   info(`Validating ${PKG_NAME}@${latest} in an isolated installation...`);
   try {
-    preflightGlobalNpmInstall({
+    await preflightGlobalNpmInstall({
       npmCommand,
       nodePath: process.execPath,
       packageName: PKG_NAME,
       packageSpec: `${PKG_NAME}@${latest}`,
       expectedVersion: latest,
-      cwd: safeCurrentWorkingDirectory(),
+      cwd: npmUpdateCwd,
       env: npmEnv,
       timeoutMs: 600_000,
     });
@@ -1317,23 +1331,37 @@ async function cmdUpdate(niubotHome: string): Promise<void> {
   } catch (err) {
     fail(`Candidate validation failed: ${err instanceof Error ? err.message : String(err)}`);
     hint("The active global installation was not modified.");
-    hint("NiuBotRuntime users must not retry with the system npm.");
+    hint("Retry with the same Node/npm installation after fixing the reported problem.");
     console.log();
     process.exitCode = 1;
     return;
   }
 
-  // Install
+  // Install with a recoverable snapshot of the active package and npm shims.
   info(`Installing ${PKG_NAME}@${latest} ...`);
   try {
-    runCommandSync(npmCommand, ["install", "-g", `${PKG_NAME}@${latest}`], {
-      timeoutMs: 600_000,
-      cwd: safeCurrentWorkingDirectory(),
-      env: npmEnv,
+    const transaction = await runRecoverableGlobalInstall({
+      packageRoot: PROJECT_ROOT,
+      npmPrefix,
+      commandName: "niubot",
+      install: async () => {
+        await runCommand(npmCommand, ["install", "-g", `${PKG_NAME}@${latest}`], {
+          timeoutMs: 600_000,
+          cwd: npmUpdateCwd,
+          env: npmEnv,
+        });
+      },
+      verify: () => verifyGlobalNpmInstall(PROJECT_ROOT, npmPrefix, latest, npmUpdateCwd, npmEnv),
+      verifyRollback: () => verifyGlobalNpmInstall(PROJECT_ROOT, npmPrefix, current, npmUpdateCwd, npmEnv),
     });
+    if (transaction.cleanupWarning) hint(transaction.cleanupWarning);
   } catch (err) {
     fail(`Install failed: ${err instanceof Error ? err.message : err}`);
-    hint("Do not retry with a different system npm; it may target another global prefix.");
+    if (err instanceof GlobalInstallError && err.restored) {
+      hint("The previous NiuBot package and command files were restored.");
+    } else if (err instanceof GlobalInstallError && err.recoveryDirectory) {
+      hint(`Keep the recovery copy for repair: ${err.recoveryDirectory}`);
+    }
     hint(`Check the active commands with: ${commandLookupHint("node")}, ${commandLookupHint("npm")}, and ${commandLookupHint("niubot")}`);
     console.log();
     process.exitCode = 1;
@@ -1354,6 +1382,40 @@ async function cmdUpdate(niubotHome: string): Promise<void> {
 
   hint(`No running service found in ${niubotHome}. Start it with: niubot start`);
   console.log();
+}
+
+async function verifyGlobalNpmInstall(
+  packageRoot: string,
+  npmPrefix: string,
+  expectedVersion: string,
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+): Promise<void> {
+  await verifyInstalledPackage({
+    packageRoot,
+    nodePath: process.execPath,
+    packageName: PKG_NAME,
+    expectedVersion,
+    cwd,
+    env,
+  });
+  const command = resolvePrimaryGlobalCommand(npmPrefix, "niubot");
+  const output = (await runCommand(command, ["version"], {
+    timeoutMs: 30_000,
+    cwd,
+    env,
+  })).stdout.trim();
+  const expectedOutput = `niubot v${expectedVersion}`;
+  if (output !== expectedOutput) {
+    throw new Error(`installed command returned ${JSON.stringify(output)}; expected ${JSON.stringify(expectedOutput)}`);
+  }
+}
+
+function resolveNpmUpdateWorkingDirectory(packageRoot: string, npmPrefix: string): string {
+  const cwd = safeCurrentWorkingDirectory();
+  const relative = path.relative(path.resolve(packageRoot), path.resolve(cwd));
+  const cwdIsInsidePackage = relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+  return cwdIsInsidePackage ? npmPrefix : cwd;
 }
 
 // ── Utilities ──────────────────────────────────────────────

@@ -8,7 +8,7 @@ export function assertSupportedNodeRuntime(version = process.versions.node): voi
   const major = Number.parseInt(version.split(".")[0] ?? "", 10);
   if (isSupportedNodeMajor(major)) return;
   throw new Error(
-    `Unsupported Node.js v${version}. Use Node.js ${SUPPORTED_NODE_MAJORS.join(", ")}, `
-    + "or use the Node.js bundled with NiuBotRuntime.",
+    `Unsupported Node.js v${version}. Use Node.js ${SUPPORTED_NODE_MAJORS.join(", ")} `
+    + "and install NiuBot with that Node installation's npm.",
   );
 }

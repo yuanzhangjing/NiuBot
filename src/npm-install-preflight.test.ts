@@ -10,19 +10,19 @@ import type { CommandResult } from "./platform/command.js";
 describe("global npm install preflight", () => {
   it("derives package roots using target-platform npm layouts", () => {
     expect(resolveGlobalPackageRoot(
-      "C:\\Users\\Admin\\AppData\\Local\\NiuBotRuntime\\node-v22",
+      "C:\\Program Files\\nodejs",
       "@yuanzhangjing/niubot",
       "win32",
     )).toBe(
-      "C:\\Users\\Admin\\AppData\\Local\\NiuBotRuntime\\node-v22\\node_modules\\@yuanzhangjing\\niubot",
+      "C:\\Program Files\\nodejs\\node_modules\\@yuanzhangjing\\niubot",
     );
     expect(resolveGlobalPackageRoot("/opt/niubot", "@yuanzhangjing/niubot", "linux"))
       .toBe("/opt/niubot/lib/node_modules/@yuanzhangjing/niubot");
   });
 
-  it("verifies an isolated candidate before returning", () => {
+  it("verifies an isolated candidate before returning", async () => {
     const calls: Array<{ command: string; args: string[]; path?: string }> = [];
-    const run = (command: string, args: string[], options?: { env?: NodeJS.ProcessEnv }): CommandResult => {
+    const run = async (command: string, args: string[], options?: { env?: NodeJS.ProcessEnv }): Promise<CommandResult> => {
       calls.push({ command, args, path: options?.env?.["PATH"] });
       if (command === "/runtime/bin/npm") {
         const prefix = args[args.indexOf("--prefix") + 1]!;
@@ -38,7 +38,7 @@ describe("global npm install preflight", () => {
       return { command, args, stdout, stderr: "", exitCode: 0 };
     };
 
-    preflightGlobalNpmInstall({
+    await preflightGlobalNpmInstall({
       npmCommand: "/runtime/bin/npm",
       nodePath: "/runtime/bin/node",
       packageName: "@yuanzhangjing/niubot",
@@ -57,9 +57,9 @@ describe("global npm install preflight", () => {
     expect(calls.every((call) => call.path === "/runtime/bin:/usr/bin")).toBe(true);
   });
 
-  it("rejects a candidate whose installed version differs", () => {
+  it("rejects a candidate whose installed version differs", async () => {
     let temporaryRoot: string | undefined;
-    const run = (command: string, args: string[]): CommandResult => {
+    const run = async (command: string, args: string[]): Promise<CommandResult> => {
       if (command === "/runtime/bin/npm") {
         const prefix = args[args.indexOf("--prefix") + 1]!;
         temporaryRoot = path.dirname(prefix);
@@ -73,7 +73,7 @@ describe("global npm install preflight", () => {
       return { command, args, stdout: "", stderr: "", exitCode: 0 };
     };
 
-    expect(() => preflightGlobalNpmInstall({
+    await expect(preflightGlobalNpmInstall({
       npmCommand: "/runtime/bin/npm",
       nodePath: "/runtime/bin/node",
       packageName: "@yuanzhangjing/niubot",
@@ -83,7 +83,7 @@ describe("global npm install preflight", () => {
       env: { PATH: "/runtime/bin:/usr/bin" },
       timeoutMs: 60_000,
       run,
-    })).toThrow(/candidate package mismatch/);
+    })).rejects.toThrow(/candidate package mismatch/);
     expect(temporaryRoot).toBeDefined();
     expect(fs.existsSync(temporaryRoot!)).toBe(false);
   });

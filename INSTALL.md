@@ -24,7 +24,7 @@ NiuBot probes the selected backend at startup. An unavailable backend does not p
 
 ## Step 1: Install NiuBot
 
-For a first installation that uses your system Node.js and npm:
+NiuBot uses the Node.js and npm installation selected by your shell:
 
 ```bash
 npm install -g @yuanzhangjing/niubot@latest
@@ -32,16 +32,15 @@ npm install -g @yuanzhangjing/niubot@latest
 
 The installed command is still `niubot`.
 
-If NiuBot is already installed under `NiuBotRuntime`, do not run the system
-`npm install -g` command. The managed Runtime has its own Node.js and npm.
-Use this command for all later upgrades:
+Use the built-in command for later upgrades:
 
 ```text
 niubot update
 ```
 
-NiuBot selects the npm next to its active Node.js runtime and isolates npm
-lifecycle scripts from another Node installation on PATH.
+The update command selects the npm next to the Node.js executable running
+NiuBot. It refuses to update when that npm global prefix does not own the
+active NiuBot package.
 
 Verify:
 ```bash
@@ -437,11 +436,16 @@ Get-Command npm -All
 Get-Command niubot -All
 ```
 
-If `niubot version --verbose` shows a package under `NiuBotRuntime`, use only
-`niubot update`. Do not run the npm from `%APPDATA%\npm` or another system Node
-against that managed package. When no Engine is running, `niubot update`
-installs and verifies the candidate in an isolated directory before changing
-the active global installation.
+The `Node`, `npm`, `npm root`, and `Package` entries shown by
+`niubot version --verbose` must belong to the same Node.js installation. If
+they do not, fix PATH or reinstall NiuBot with the intended npm before
+updating.
+
+When no Engine is running, `niubot update` first installs and verifies the
+candidate in an isolated directory. Before the real global npm install, it
+backs up the active package and npm command shims. An install or post-install
+verification failure restores the previous version. If automatic restore
+itself fails, the command prints the retained recovery directory.
 
 ---
 

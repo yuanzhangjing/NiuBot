@@ -1,13 +1,13 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { runCommandSync, type CommandResult, type RunCommandOptions } from "./platform/command.js";
+import { runCommand, type CommandResult, type RunCommandOptions } from "./platform/command.js";
 
-type SyncCommandRunner = (
+type CommandRunner = (
   command: string,
   args: string[],
   options?: Omit<RunCommandOptions, "onOutput">,
-) => CommandResult;
+) => Promise<CommandResult>;
 
 export interface NpmInstallPreflightOptions {
   npmCommand: string;
@@ -19,20 +19,30 @@ export interface NpmInstallPreflightOptions {
   env: NodeJS.ProcessEnv;
   timeoutMs: number;
   platform?: NodeJS.Platform;
-  run?: SyncCommandRunner;
+  run?: CommandRunner;
+}
+
+export interface VerifyInstalledPackageOptions {
+  packageRoot: string;
+  nodePath: string;
+  packageName: string;
+  expectedVersion: string;
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+  run?: CommandRunner;
 }
 
 /**
  * Install the candidate under a disposable npm prefix and verify both the CLI
  * entry and native dependency before the real global installation is touched.
  */
-export function preflightGlobalNpmInstall(options: NpmInstallPreflightOptions): void {
+export async function preflightGlobalNpmInstall(options: NpmInstallPreflightOptions): Promise<void> {
   const platform = options.platform ?? process.platform;
-  const run = options.run ?? runCommandSync;
+  const run = options.run ?? runCommand;
   const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-update-preflight-"));
   const prefix = path.join(temporaryRoot, "install");
   try {
-    run(options.npmCommand, [
+    await run(options.npmCommand, [
       "install",
       "--global",
       "--prefix",
@@ -46,31 +56,43 @@ export function preflightGlobalNpmInstall(options: NpmInstallPreflightOptions): 
       env: options.env,
     });
 
-    const packageRoot = resolveGlobalPackageRoot(prefix, options.packageName, platform);
-    assertCandidateMetadata(packageRoot, options.packageName, options.expectedVersion);
-    const cliEntry = path.join(packageRoot, "dist", "user-cli.js");
-    const cli = run(options.nodePath, [cliEntry, "version"], {
-      timeoutMs: 30_000,
-      cwd: packageRoot,
+    await verifyInstalledPackage({
+      packageRoot: resolveGlobalPackageRoot(prefix, options.packageName, platform),
+      nodePath: options.nodePath,
+      packageName: options.packageName,
+      expectedVersion: options.expectedVersion,
+      cwd: options.cwd,
       env: options.env,
-    });
-    const expectedOutput = `niubot v${options.expectedVersion}`;
-    if (cli.stdout.trim() !== expectedOutput) {
-      throw new Error(`candidate CLI returned ${JSON.stringify(cli.stdout.trim())}; expected ${JSON.stringify(expectedOutput)}`);
-    }
-
-    run(options.nodePath, [
-      "-e",
-      "const Database=require(process.argv[1]);const db=new Database(':memory:');db.close();",
-      path.join(packageRoot, "node_modules", "better-sqlite3"),
-    ], {
-      timeoutMs: 30_000,
-      cwd: packageRoot,
-      env: options.env,
+      run,
     });
   } finally {
     fs.rmSync(temporaryRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
+}
+
+export async function verifyInstalledPackage(options: VerifyInstalledPackageOptions): Promise<void> {
+  const run = options.run ?? runCommand;
+  assertCandidateMetadata(options.packageRoot, options.packageName, options.expectedVersion);
+  const cliEntry = path.join(options.packageRoot, "dist", "user-cli.js");
+  const cli = await run(options.nodePath, [cliEntry, "version"], {
+    timeoutMs: 30_000,
+    cwd: options.cwd,
+    env: options.env,
+  });
+  const expectedOutput = `niubot v${options.expectedVersion}`;
+  if (cli.stdout.trim() !== expectedOutput) {
+    throw new Error(`installed CLI returned ${JSON.stringify(cli.stdout.trim())}; expected ${JSON.stringify(expectedOutput)}`);
+  }
+
+  await run(options.nodePath, [
+    "-e",
+    "const Database=require(process.argv[1]);const db=new Database(':memory:');db.close();",
+    path.join(options.packageRoot, "node_modules", "better-sqlite3"),
+  ], {
+    timeoutMs: 30_000,
+    cwd: options.cwd,
+    env: options.env,
+  });
 }
 
 export function resolveGlobalPackageRoot(
