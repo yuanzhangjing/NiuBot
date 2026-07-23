@@ -37,7 +37,9 @@ function expectedSessionRange(startUtc: string, endUtc: string): string {
 
 afterEach(() => {
   vi.restoreAllMocks();
-  for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  for (const dir of tempDirs.splice(0)) {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
 });
 
 async function addArchivedCodexSession(
