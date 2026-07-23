@@ -24,6 +24,43 @@ export function resolveNpmExecutableForNode(
   return exists(candidate) ? candidate : undefined;
 }
 
+/**
+ * Build a child environment where lifecycle scripts resolve `node` to the
+ * runtime that owns the selected npm executable. Windows environment keys are
+ * case-insensitive, so remove duplicate Path/PATH entries before setting it.
+ */
+export function withNodeRuntimeOnPath(
+  nodePath: string,
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+): NodeJS.ProcessEnv {
+  const pathApi = platform === "win32" ? path.win32 : path.posix;
+  const delimiter = platform === "win32" ? path.win32.delimiter : path.posix.delimiter;
+  const isPathKey = (key: string) => platform === "win32" ? key.toUpperCase() === "PATH" : key === "PATH";
+  const existingPathKey = Object.keys(env).find(isPathKey);
+  const currentPath = existingPathKey ? env[existingPathKey] ?? "" : "";
+  const output = { ...env };
+  for (const key of Object.keys(output)) {
+    if (isPathKey(key)) delete output[key];
+  }
+
+  const entries = [pathApi.dirname(nodePath), ...currentPath.split(delimiter)];
+  const seen = new Set<string>();
+  const normalizedEntries: string[] = [];
+  for (const entry of entries) {
+    if (!entry) continue;
+    const unquoted = trimWrappingQuotes(entry);
+    const key = platform === "win32"
+      ? pathApi.normalize(unquoted).toLowerCase()
+      : unquoted;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    normalizedEntries.push(unquoted);
+  }
+  output[existingPathKey ?? "PATH"] = normalizedEntries.join(delimiter);
+  return output;
+}
+
 export function deriveNpmPrefixFromPackageRoot(
   packageRoot: string,
   platform: NodeJS.Platform = process.platform,

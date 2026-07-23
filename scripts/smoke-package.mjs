@@ -38,6 +38,15 @@ try {
     : path.join(installPrefix, "bin", "niubot");
   if (!fs.existsSync(cliPath)) throw new Error(`Installed niubot command is missing: ${cliPath}`);
 
+  const installedPackageRoot = process.platform === "win32"
+    ? path.join(installPrefix, "node_modules", "@yuanzhangjing", "niubot")
+    : path.join(installPrefix, "lib", "node_modules", "@yuanzhangjing", "niubot");
+  execFileSync(process.execPath, [
+    "-e",
+    "const Database=require(process.argv[1]);const db=new Database(':memory:');db.close();",
+    path.join(installedPackageRoot, "node_modules", "better-sqlite3"),
+  ], { stdio: "inherit" });
+
   const output = execFileSync(cliPath, ["version"], {
     encoding: "utf8",
     shell: process.platform === "win32",

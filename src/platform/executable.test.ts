@@ -6,6 +6,7 @@ import {
   isPackageRootInsideNpmRoot,
   resolveExecutable,
   resolveNpmExecutableForNode,
+  withNodeRuntimeOnPath,
 } from "./executable.js";
 
 describe("resolveExecutable", () => {
@@ -44,6 +45,35 @@ describe("resolveExecutable", () => {
     expect(resolveNpmExecutableForNode("/opt/homebrew/bin/node", "darwin", () => true)).toBe("/opt/homebrew/bin/npm");
     expect(resolveNpmExecutableForNode("C:\\node\\node.exe", "win32", () => true)).toBe("C:\\node\\npm.cmd");
     expect(resolveNpmExecutableForNode("/missing/bin/node", "darwin", () => false)).toBeUndefined();
+  });
+
+  it("puts the owning Windows Node runtime first without duplicate Path keys", () => {
+    const env = withNodeRuntimeOnPath(
+      "C:\\Users\\Admin\\AppData\\Local\\NiuBotRuntime\\node-v22\\node.exe",
+      {
+        Path: "C:\\Users\\Admin\\AppData\\Roaming\\npm;C:\\Program Files\\nodejs;C:\\USERS\\ADMIN\\APPDATA\\LOCAL\\NIUBOTRUNTIME\\NODE-V22",
+        PATH: "C:\\stale",
+        TEMP: "C:\\Temp",
+      },
+      "win32",
+    );
+
+    expect(env["Path"]).toBe(
+      "C:\\Users\\Admin\\AppData\\Local\\NiuBotRuntime\\node-v22;C:\\Users\\Admin\\AppData\\Roaming\\npm;C:\\Program Files\\nodejs",
+    );
+    expect(env["PATH"]).toBeUndefined();
+    expect(env["TEMP"]).toBe("C:\\Temp");
+  });
+
+  it("puts the owning POSIX Node runtime first", () => {
+    const env = withNodeRuntimeOnPath(
+      "/opt/niubot/node/bin/node",
+      { PATH: "/usr/local/bin:/opt/niubot/node/bin:/usr/bin", Path: "case-sensitive-value" },
+      "linux",
+    );
+
+    expect(env["PATH"]).toBe("/opt/niubot/node/bin:/usr/local/bin:/usr/bin");
+    expect(env["Path"]).toBe("case-sensitive-value");
   });
 
   it("derives npm installation prefixes with target-platform path rules", () => {

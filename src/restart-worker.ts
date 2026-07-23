@@ -11,7 +11,7 @@ import { localApiRequest, waitForLocalApiHealth } from "./local-api/client.js";
 import { waitForEngineIdentity } from "./local-api/engine-client.js";
 import { endpointFromAddress, resolveBotEndpoint } from "./platform/ipc.js";
 import { runCommand } from "./platform/command.js";
-import { resolveNpmExecutableForNode } from "./platform/executable.js";
+import { resolveNpmExecutableForNode, withNodeRuntimeOnPath } from "./platform/executable.js";
 import { inspectRunningEngine, launchDetachedEngine, stopEngine } from "./process-manager.js";
 import { readProcessState } from "./process-state.js";
 import { acquireProcessLock } from "./process-lock.js";
@@ -135,8 +135,9 @@ async function runSourceRestart(context: RestartContext): Promise<void> {
   await ensureBootstrapRelease(context);
   context.state.write("build_candidate");
   const npmCommand = resolveNpmCommandForCurrentNode();
-  await runLogged(context, npmCommand, ["run", "build"], context.sourceDirectory, 180_000);
-  await runLogged(context, npmCommand, ["run", "pack:check"], context.sourceDirectory, 180_000);
+  const npmEnv = npmEnvironmentForCurrentNode();
+  await runLogged(context, npmCommand, ["run", "build"], context.sourceDirectory, 180_000, npmEnv);
+  await runLogged(context, npmCommand, ["run", "pack:check"], context.sourceDirectory, 180_000, npmEnv);
   const pkg = readPackage(path.join(context.sourceDirectory, "package.json"));
   const sha = await readGitSha(context);
   const releaseId = `${compactTimestamp(new Date())}-${pkg.version}-${sha}`;
@@ -446,10 +447,18 @@ async function packRelease(context: RestartContext, options: PackReleaseOptions)
   fs.mkdirSync(packageDirectory, { recursive: true });
   try {
     const npmCommand = resolveNpmCommandForCurrentNode();
+    const npmEnv = npmEnvironmentForCurrentNode();
     const args = ["pack"];
     if (options.packageSpec) args.push(options.packageSpec);
     args.push("--json", "--pack-destination", context.store.packagesDirectory);
-    const packed = await runLogged(context, npmCommand, args, options.cwd, readPositiveMs("NIUBOT_RESTART_PACK_TIMEOUT", 120_000));
+    const packed = await runLogged(
+      context,
+      npmCommand,
+      args,
+      options.cwd,
+      readPositiveMs("NIUBOT_RESTART_PACK_TIMEOUT", 120_000),
+      npmEnv,
+    );
     const filename = parseNpmPackFilename(packed.stdout);
     const archive = path.join(context.store.packagesDirectory, filename);
     if (!fs.existsSync(archive)) throw new Error(`npm pack output not found: ${archive}`);
@@ -466,6 +475,7 @@ async function packRelease(context: RestartContext, options: PackReleaseOptions)
       ["install", "--omit=dev", "--no-audit", "--no-fund"],
       packageDirectory,
       options.installTimeoutMs,
+      npmEnv,
     );
     return options.releaseId;
   } catch (err) {
@@ -689,6 +699,10 @@ function readPackage(file: string): { name: string; version: string } {
 
 function resolveNpmCommandForCurrentNode(): string {
   return resolveNpmExecutableForNode(process.execPath) ?? "npm";
+}
+
+function npmEnvironmentForCurrentNode(): NodeJS.ProcessEnv {
+  return withNodeRuntimeOnPath(process.execPath);
 }
 
 function installTimeout(context: RestartContext, update: boolean): number {

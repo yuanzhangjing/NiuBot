@@ -8,7 +8,7 @@ Human users: run `niubot init` and follow the prompts. You don't need to read th
 
 ## Prerequisites
 
-- Node.js >= 18
+- Node.js 20, 22, or 24 LTS
 - A Feishu (Lark) enterprise account with permission to create apps
 
 ### Windows
@@ -24,11 +24,24 @@ NiuBot probes the selected backend at startup. An unavailable backend does not p
 
 ## Step 1: Install NiuBot
 
+For a first installation that uses your system Node.js and npm:
+
 ```bash
 npm install -g @yuanzhangjing/niubot@latest
 ```
 
 The installed command is still `niubot`.
+
+If NiuBot is already installed under `NiuBotRuntime`, do not run the system
+`npm install -g` command. The managed Runtime has its own Node.js and npm.
+Use this command for all later upgrades:
+
+```text
+niubot update
+```
+
+NiuBot selects the npm next to its active Node.js runtime and isolates npm
+lifecycle scripts from another Node installation on PATH.
 
 Verify:
 ```bash
@@ -408,6 +421,27 @@ The current service remains running when candidate preflight fails. Check
 `$HOME\.niubot\logs\restart-debug.log` for per-stage timings covering the
 database snapshot, backend validation, Bot initialization, temporary API start,
 and total preflight duration.
+
+### Windows uses another Node or npm during install
+
+NiuBot supports Node.js 20, 22, and 24 LTS. It pins the native SQLite dependency
+to a version with Windows x64 prebuilt binaries for all three versions. Update
+commands also put the active Node.js directory first on the child PATH.
+
+To inspect a machine with multiple Node or npm installations:
+
+```powershell
+niubot version --verbose
+Get-Command node -All
+Get-Command npm -All
+Get-Command niubot -All
+```
+
+If `niubot version --verbose` shows a package under `NiuBotRuntime`, use only
+`niubot update`. Do not run the npm from `%APPDATA%\npm` or another system Node
+against that managed package. When no Engine is running, `niubot update`
+installs and verifies the candidate in an isolated directory before changing
+the active global installation.
 
 ---
 

@@ -50,7 +50,11 @@ import {
 import { listCronJobs, deleteCronJobForAccess } from "./cron.js";
 import { createLogger } from "../logger.js";
 import { launchRestartWorker } from "../restart-launcher.js";
-import { resolveExecutable, resolveNpmExecutableForNode } from "../platform/executable.js";
+import {
+  resolveExecutable,
+  resolveNpmExecutableForNode,
+  withNodeRuntimeOnPath,
+} from "../platform/executable.js";
 import { runCommand } from "../platform/command.js";
 import type { BackendCapability } from "../agent/backend-capability.js";
 import { buildResponseFooter } from "./footer.js";
@@ -2463,7 +2467,11 @@ export class Pipeline {
 
   private async runNpmCommand(args: string[], timeout: number): Promise<{ stdout: string; stderr: string }> {
     const npmCommand = resolveNpmExecutableForNode(process.execPath) ?? "npm";
-    return runCommand(npmCommand, args, { timeoutMs: timeout, cwd: resolveUpdateCommandCwd(NIUBOT_HOME) });
+    return runCommand(npmCommand, args, {
+      timeoutMs: timeout,
+      cwd: resolveUpdateCommandCwd(NIUBOT_HOME),
+      env: withNodeRuntimeOnPath(process.execPath),
+    });
   }
 
   private isValidVersion(version: string): boolean {

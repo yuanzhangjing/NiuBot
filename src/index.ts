@@ -36,6 +36,7 @@ import {
   PREFLIGHT_DATABASE_MANIFEST_ENV,
   shouldRunFullPreflight,
 } from "./database/restart-snapshot.js";
+import { assertSupportedNodeRuntime } from "./node-support.js";
 
 const log = createLogger("main");
 
@@ -73,6 +74,7 @@ async function loadBackendClass(
 }
 
 async function main(): Promise<void> {
+  assertSupportedNodeRuntime();
   const preflight = process.argv.includes("--preflight");
   const preflightStartedAt = Date.now();
   const logPreflightStage = (
