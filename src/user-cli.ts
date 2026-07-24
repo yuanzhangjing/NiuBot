@@ -47,7 +47,11 @@ import {
 } from "./platform/process.js";
 import { isNewerPackageVersion } from "./version.js";
 import { preflightGlobalNpmInstall, verifyInstalledPackage } from "./npm-install-preflight.js";
-import { isSupportedNodeMajor, SUPPORTED_NODE_MAJORS } from "./node-support.js";
+import {
+  isSupportedNodeMajor,
+  MINIMUM_NODE_MAJOR,
+  WINDOWS_TESTED_NODE_MAJORS,
+} from "./node-support.js";
 import {
   GlobalInstallError,
   resolvePrimaryGlobalCommand,
@@ -310,12 +314,22 @@ function checkNodeVersion(): CheckResult {
   const major = parseInt(process.versions.node.split(".")[0]!, 10);
   const ver = process.versions.node;
   if (isSupportedNodeMajor(major)) {
-    return { passed: true, label: `Node.js v${ver} (supported LTS: ${SUPPORTED_NODE_MAJORS.join(", ")})` };
+    const support = WINDOWS_TESTED_NODE_MAJORS.includes(
+      major as (typeof WINDOWS_TESTED_NODE_MAJORS)[number],
+    )
+      ? `tested LTS: ${WINDOWS_TESTED_NODE_MAJORS.join(", ")}`
+      : `Node.js ${MINIMUM_NODE_MAJOR}+; native dependencies verified separately`;
+    return { passed: true, label: `Node.js v${ver} (${support})` };
   }
+  const windows = process.platform === "win32";
   return {
     passed: false,
-    label: `Node.js v${ver} (supported LTS: ${SUPPORTED_NODE_MAJORS.join(", ")})`,
-    hint: `Use Node.js ${SUPPORTED_NODE_MAJORS.join(", ")} and install NiuBot with that Node installation's npm.`,
+    label: windows
+      ? `Node.js v${ver} (tested Windows LTS: ${WINDOWS_TESTED_NODE_MAJORS.join(", ")})`
+      : `Node.js v${ver} (minimum: ${MINIMUM_NODE_MAJOR})`,
+    hint: windows
+      ? `Use Node.js ${WINDOWS_TESTED_NODE_MAJORS.join(", ")} and install NiuBot with that Node installation's npm.`
+      : `Use Node.js ${MINIMUM_NODE_MAJOR} or newer and install NiuBot with that Node installation's npm.`,
   };
 }
 

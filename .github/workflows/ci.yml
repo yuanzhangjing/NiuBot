@@ -19,6 +19,9 @@ jobs:
           - os: macos-latest
             node: "22.14.0"
             run-tests: true
+          - os: macos-latest
+            node: "25.9.0"
+            run-tests: true
           - os: windows-latest
             node: "22.14.0"
             run-tests: true

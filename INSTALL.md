@@ -8,7 +8,8 @@ Human users: run `niubot init` and follow the prompts. You don't need to read th
 
 ## Prerequisites
 
-- Node.js 20, 22, or 24 LTS
+- macOS/Linux: Node.js 20 or newer
+- Windows: Node.js 20, 22, or 24 LTS
 - A Feishu (Lark) enterprise account with permission to create apps
 
 ### Windows
@@ -24,7 +25,9 @@ NiuBot probes the selected backend at startup. An unavailable backend does not p
 
 ## Step 1: Install NiuBot
 
-NiuBot uses the Node.js and npm installation selected by your shell:
+NiuBot uses the Node.js and npm installation selected by your shell. On
+macOS/Linux, non-LTS Node versions are accepted only when the native SQLite
+dependency can actually load:
 
 ```bash
 npm install -g @yuanzhangjing/niubot@latest
