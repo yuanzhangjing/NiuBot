@@ -267,8 +267,15 @@ export default class ClaudeBackend extends CliAgentBackend<ClaudeSession> {
         } catch { /* non-JSON line */ }
       },
       isComplete: (line) => {
-        try { return JSON.parse(line).type === "result"; }
-        catch { return false; }
+        try {
+          const event = JSON.parse(line);
+          if (event.type !== "result") return false;
+          // Task notifications from prior background work produce empty
+          // "result" events (num_turns=0, result="").  Skip them so the
+          // real user-message response isn't cut short.
+          if (event.origin?.kind === "task-notification") return false;
+          return true;
+        } catch { return false; }
       },
     };
   }

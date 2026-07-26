@@ -84,11 +84,11 @@ describe("backend capability", () => {
 
   it("reports missing CLIs without running a version probe", () => {
     const runVersion = vi.fn(() => "1.0.0");
-    expect(probeBackendCapability("grok", {
+    expect(probeBackendCapability("traecli", {
       platform: "linux",
       resolveCommand: () => undefined,
       runVersion,
-    })).toMatchObject({ installed: false, selectable: false, reason: "grok CLI not found" });
+    })).toMatchObject({ installed: false, selectable: false, reason: "traecli CLI not found" });
     expect(runVersion).not.toHaveBeenCalled();
   });
 });

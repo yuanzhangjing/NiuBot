@@ -448,7 +448,7 @@ async function cmdInit(niubotHome: string, flags: CliFlags): Promise<void> {
 
   if (availableBackends.length === 0) {
     fail("No agent backend found");
-    hint("Install claude, codex, traecli, opencode, cursor, pi, or grok CLI");
+    hint("Install claude, codex, traecli, opencode, cursor, or pi CLI");
     console.log();
     console.log("Aborted: at least one agent backend is required.");
     console.log();
@@ -653,7 +653,7 @@ async function cmdAddBot(niubotHome: string): Promise<void> {
 
   if (availableBackends.length === 0) {
     fail("No agent backend found");
-    hint("Install claude, codex, traecli, opencode, cursor, pi, or grok CLI");
+    hint("Install claude, codex, traecli, opencode, cursor, or pi CLI");
     console.log();
     process.exit(1);
   }

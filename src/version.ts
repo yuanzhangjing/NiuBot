@@ -36,6 +36,13 @@ export function isNewerPackageVersion(candidate: string, current: string): boole
   return compared === undefined ? candidate !== current : compared > 0;
 }
 
+/** 当前版本是否为预发布版本（含 -dev/-alpha/-beta 等 prerelease 后缀）或无法识别的版本号。 */
+export function isPrereleaseOrUnrecognizedVersion(version: string): boolean {
+  const parsed = parseVersion(version);
+  if (!parsed) return true;
+  return parsed.prerelease.length > 0;
+}
+
 function parseVersion(value: string): ParsedVersion | undefined {
   const match = value.match(/^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/);
   if (!match) return undefined;

@@ -49,7 +49,6 @@ const BUILTIN_BACKEND_PATHS: Record<string, () => Promise<{ default: new (option
   opencode: () => import("./backends/opencode.js"),
   cursor: () => import("./backends/cursor-agent.js"),
   pi: () => import("./backends/pi.js"),
-  grok: () => import("./backends/grok.js"),
 };
 
 const backendClassCache = new Map<string, new (options: Record<string, unknown>) => CliAgentBackend>();
@@ -171,7 +170,9 @@ async function main(): Promise<void> {
   });
   const capabilityCache = new BackendCapabilityCache(
     initialCapabilities,
-    () => probeAllBackendCapabilitiesAsync(),
+    // Refresh only checks executable presence; version probing is deferred
+    // to per-backend recheck() when the user actually switches to one.
+    () => probeAllBackendCapabilitiesAsync({ verifyVersion: false }),
     (backend) => probeBackendCapabilityAsync(backend),
   );
   log.info("backend capabilities", {
@@ -233,14 +234,6 @@ async function main(): Promise<void> {
 
   const getBackendCapabilities = async () => {
     const capabilities = await capabilityCache.refresh();
-    log.info("backend capabilities refreshed", {
-      backends: capabilities.map((capability) => ({
-        backend: capability.backend,
-        selectable: capability.selectable,
-        version: capability.version ?? null,
-        reason: capability.reason ?? null,
-      })),
-    });
     return capabilities;
   };
   const getAvailableBackends = () => capabilityCache.availableBackends();

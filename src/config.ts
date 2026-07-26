@@ -66,12 +66,6 @@ export const AGENT_REGISTRY = {
     versionArgs: ["--version"],
     windowsSupport: "unknown",
   },
-  grok: {
-    aliases: ["grok", "grok-build"],
-    command: "grok",
-    versionArgs: ["--version"],
-    windowsSupport: "native",
-  },
 } as const;
 
 /** 内置 agent backend 类型 */

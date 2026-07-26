@@ -14,7 +14,7 @@ describe("lifecycle timeouts", () => {
     expect(resolveEngineStartTimeoutMs({})).toBe(DEFAULT_ENGINE_START_TIMEOUT_MS);
     expect(DEFAULT_ENGINE_START_TIMEOUT_MS).toBe(120_000);
     expect(resolveBackendProbeTimeoutMs({})).toBe(DEFAULT_BACKEND_PROBE_TIMEOUT_MS);
-    expect(DEFAULT_BACKEND_PROBE_TIMEOUT_MS).toBe(60_000);
+    expect(DEFAULT_BACKEND_PROBE_TIMEOUT_MS).toBe(10_000);
     expect(resolveEngineShutdownTimeoutMs({})).toBe(DEFAULT_ENGINE_SHUTDOWN_TIMEOUT_MS);
     expect(DEFAULT_ENGINE_SHUTDOWN_TIMEOUT_MS).toBe(60_000);
     expect(resolveInFlightShutdownTimeoutMs({})).toBe(45_000);
@@ -25,7 +25,7 @@ describe("lifecycle timeouts", () => {
     expect(resolveBackendProbeTimeoutMs({ NIUBOT_BACKEND_PROBE_TIMEOUT: "90" })).toBe(90_000);
     expect(resolveEngineShutdownTimeoutMs({ NIUBOT_ENGINE_SHUTDOWN_TIMEOUT: "75" })).toBe(75_000);
     expect(resolveEngineStartTimeoutMs({ NIUBOT_ENGINE_START_TIMEOUT: "0" })).toBe(120_000);
-    expect(resolveBackendProbeTimeoutMs({ NIUBOT_BACKEND_PROBE_TIMEOUT: "invalid" })).toBe(60_000);
+    expect(resolveBackendProbeTimeoutMs({ NIUBOT_BACKEND_PROBE_TIMEOUT: "invalid" })).toBe(10_000);
   });
 
   it("keeps the old restart health timeout as a compatibility alias", () => {

@@ -25,7 +25,7 @@ import {
   markUnfinishedRuntimeRunsFailedByRestart,
   recordRuntimeEvent,
 } from "../database/schema.js";
-import { isNewerPackageVersion } from "../version.js";
+import { isNewerPackageVersion, isPrereleaseOrUnrecognizedVersion } from "../version.js";
 import {
   buildActiveTaskContext,
   buildImportantContext,
@@ -2548,6 +2548,10 @@ export class Pipeline {
   }
 
   private async checkForUpdatesAndNotifyAdmins(): Promise<void> {
+    if (isPrereleaseOrUnrecognizedVersion(this.version)) {
+      this.log.info("skipping update check for dev/prerelease version", { version: this.version });
+      return;
+    }
     const platformChatIds = this.getAdminPrivatePlatformChatIds();
     if (platformChatIds.length === 0) return;
 
