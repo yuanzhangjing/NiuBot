@@ -14,6 +14,23 @@ export interface RestartState {
   error?: string;
 }
 
+export function readRestartState(stateFile: string, expectedId?: string): RestartState | undefined {
+  try {
+    const state = JSON.parse(fs.readFileSync(stateFile, "utf-8")) as RestartState;
+    if (
+      typeof state.id !== "string"
+      || typeof state.phase !== "string"
+      || typeof state.startedAt !== "string"
+      || typeof state.updatedAt !== "string"
+    ) {
+      return undefined;
+    }
+    return expectedId === undefined || state.id === expectedId ? state : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export class RestartStateWriter {
   readonly directory: string;
   readonly stateFile: string;
@@ -50,11 +67,6 @@ export class RestartStateWriter {
   }
 
   read(): RestartState | undefined {
-    try {
-      const state = JSON.parse(fs.readFileSync(this.stateFile, "utf-8")) as RestartState;
-      return state.id === this.id ? state : undefined;
-    } catch {
-      return undefined;
-    }
+    return readRestartState(this.stateFile, this.id);
   }
 }

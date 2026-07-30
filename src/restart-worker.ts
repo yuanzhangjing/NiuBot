@@ -68,8 +68,8 @@ export async function runRestartWorker(env: NodeJS.ProcessEnv = process.env): Pr
 
   const workerRuntimePath = path.resolve(fileURLToPath(new URL(".", import.meta.url)), "..");
   const botName = env["NIUBOT_BOT_NAME"] || "NiuBot";
-  const startedAt = new Date().toISOString();
-  const id = `${compactTimestamp(new Date())}-${process.pid}`;
+  const startedAt = env["NIUBOT_RESTART_STARTED_AT"] || new Date().toISOString();
+  const id = env["NIUBOT_RESTART_ID"] || `${compactTimestamp(new Date())}-${process.pid}`;
   const botDirectory = path.join(niubotHome, botName);
   const sourceDirectory = resolveRestartSourceDirectory({
     niubotHome,
@@ -675,6 +675,8 @@ function runtimeEnvironment(context: RestartContext, runtimeMode: string): NodeJ
 function sanitizeOneShotEnvironment(): void {
   for (const name of [
     "NIUBOT_RESTART_MODE",
+    "NIUBOT_RESTART_ID",
+    "NIUBOT_RESTART_STARTED_AT",
     "NIUBOT_UPDATE_VERSION",
     "NIUBOT_RESTART_NOTIFY_CHAT_ID",
     "NIUBOT_CHAT_ID",

@@ -329,12 +329,13 @@ Admin commands (in chat):
 ## Service Management
 
 ```bash
-niubot status           # Check if running
+niubot status           # Show every registered Home, Engine, and Bot
 niubot stop             # Stop the service
 niubot start            # Start the service
 niubot restart          # Preflight and safely restart
-niubot update           # Install, switch, health-check, and roll back on failure
-niubot status --all     # Show registered NIUBOT_HOME instances
+niubot update           # Install, show progress, health-check, and roll back on failure
+niubot update --detach  # With a running Engine, update in the background and return
+niubot status --all     # Explicit compatibility form of the default status view
 ```
 
 Every lifecycle command accepts `--home <path>`. This is the simplest way to run independent instances without repeatedly changing environment variables:
@@ -344,6 +345,11 @@ niubot start  --home D:\NiuBot\work
 niubot status --home D:\NiuBot\work
 niubot stop   --home D:\NiuBot\work
 ```
+
+Without `--home`, `niubot status` lists the current and registered Homes. Each
+Home is shown as an Engine process followed by the health of every configured
+Bot. Use `niubot status --home <path>` to inspect only one Home. `--all` remains
+supported for compatibility.
 
 ## Troubleshooting
 
@@ -423,6 +429,13 @@ The current service remains running when candidate preflight fails. Check
 `$HOME\.niubot\logs\restart-debug.log` for per-stage timings covering the
 database snapshot, backend validation, Bot initialization, temporary API start,
 and total preflight duration.
+
+When an Engine is running, `niubot update` launches an independent update worker
+and waits while printing its stage changes. The command exits successfully only
+after the new Engine passes its health check. Pressing Ctrl-C stops waiting but
+does not cancel the worker. Use `niubot update --detach` to return immediately;
+progress and the final result remain available in
+`$HOME\.niubot\logs\restart-debug.log`.
 
 ### Windows uses another Node or npm during install
 

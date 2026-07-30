@@ -12,6 +12,8 @@ describe("restart launcher", () => {
       runtimeMode: "npm-release",
       notifyChatId: "chat-a",
       updateVersion: "1.2.3",
+      restartId: "restart-a",
+      restartStartedAt: "2026-07-30T00:00:00.000Z",
     }, { NIUBOT_AGENT_SESSION: "session-a", KEEP_ME: "yes" });
 
     expect(env["NIUBOT_AGENT_SESSION"]).toBeUndefined();
@@ -19,5 +21,7 @@ describe("restart launcher", () => {
     expect(env["NIUBOT_HOME"]).toBe(path.resolve("/tmp/home"));
     expect(env["NIUBOT_RESTART_MODE"]).toBe("npm-update");
     expect(env["NIUBOT_UPDATE_VERSION"]).toBe("1.2.3");
+    expect(env["NIUBOT_RESTART_ID"]).toBe("restart-a");
+    expect(env["NIUBOT_RESTART_STARTED_AT"]).toBe("2026-07-30T00:00:00.000Z");
   });
 });

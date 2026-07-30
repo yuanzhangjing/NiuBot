@@ -24,13 +24,18 @@ import { DEFAULT_BOT_PROFILE } from "./bot-profile.js";
 import { AGENT_REGISTRY, expandHome, loadConfig, normalizeBackend, resolveHomePath, type NiuBotConfig } from "./config.js";
 import { INSTALL_GUIDE_COMMAND } from "./install-guide.js";
 import { localToday } from "./tz.js";
-import { waitForLocalApiHealth } from "./local-api/client.js";
-import { resolveBotEndpoint } from "./platform/ipc.js";
+import { localApiRequest, waitForLocalApiHealth } from "./local-api/client.js";
+import { resolveBotEndpoint, type LocalIpcEndpoint } from "./platform/ipc.js";
 import { probeAllBackendCapabilities, probeBackendCapability } from "./agent/backend-capability.js";
 import { waitForEngineIdentity } from "./local-api/engine-client.js";
 import { resolveEngineStartTimeoutMs } from "./lifecycle-timeouts.js";
 import { inspectRunningEngine, launchDetachedEngine, stopEngine } from "./process-manager.js";
 import { launchRestartWorker } from "./restart-launcher.js";
+import {
+  restartCompletion,
+  restartPhaseLabel,
+  waitForRestartCompletion,
+} from "./restart-progress.js";
 import { runCommand, runCommandSync } from "./platform/command.js";
 import {
   commandLookupHint,
@@ -133,6 +138,7 @@ function isRegularFile(filePath: string | undefined): filePath is string {
 
 interface CliFlags {
   check?: boolean;
+  detach?: boolean;
   force?: boolean;
   restart?: boolean;
   verbose?: boolean;
@@ -147,6 +153,7 @@ function parseCliArgs(args: string[]): { command: string | undefined; flags: Cli
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
     if (arg === "--check") flags.check = true;
+    else if (arg === "--detach") flags.detach = true;
     else if (arg === "--force") flags.force = true;
     else if (arg === "--restart") flags.restart = true;
     else if (arg === "--verbose") flags.verbose = true;
@@ -1088,12 +1095,75 @@ async function stopProcess(niubotHome: string): Promise<boolean> {
 
 // ── Status ─────────────────────────────────────────────────
 
+export type EngineAvailability = "running" | "uncertain" | "stopped";
+
+export interface BotRuntimeStatus {
+  id: string;
+  status: "healthy" | "unhealthy" | "unavailable";
+  endpoint: LocalIpcEndpoint;
+}
+
+type BotHealthProbe = (endpoint: LocalIpcEndpoint) => Promise<boolean>;
+
+async function probeBotHealth(endpoint: LocalIpcEndpoint): Promise<boolean> {
+  try {
+    const response = await localApiRequest(endpoint, "/ping", { timeoutMs: 1_000 });
+    return response.statusCode === 200;
+  } catch {
+    return false;
+  }
+}
+
+export async function inspectBotStatuses(
+  niubotHome: string,
+  engineAvailability: EngineAvailability,
+  probe: BotHealthProbe = probeBotHealth,
+): Promise<BotRuntimeStatus[]> {
+  const config = loadConfig(path.join(niubotHome, "config.yaml"));
+  return Promise.all(config.bots.map(async (bot): Promise<BotRuntimeStatus> => {
+    const endpoint = resolveBotEndpoint(niubotHome, bot.id, {
+      unixSocketDirectory: path.dirname(bot.dbPath),
+    });
+    if (engineAvailability === "stopped") {
+      return { id: bot.id, endpoint, status: "unavailable" };
+    }
+    const healthy = await probe(endpoint);
+    return {
+      id: bot.id,
+      endpoint,
+      status: healthy
+        ? "healthy"
+        : engineAvailability === "running" ? "unhealthy" : "unavailable",
+    };
+  }));
+}
+
+async function printBotStatuses(
+  niubotHome: string,
+  engineAvailability: EngineAvailability,
+): Promise<void> {
+  console.log("Bots:");
+  let statuses: BotRuntimeStatus[];
+  try {
+    statuses = await inspectBotStatuses(niubotHome, engineAvailability);
+  } catch (err) {
+    console.log(`  unavailable (config error: ${err instanceof Error ? err.message : String(err)})`);
+    return;
+  }
+
+  for (const { id, endpoint, status } of statuses) {
+    console.log(`  ${id}: ${status}`);
+    console.log(`    API: ${endpoint.address}`);
+  }
+}
+
 async function printStatusForHome(niubotHome: string): Promise<void> {
+  console.log(`Home: ${niubotHome}`);
   const running = await inspectRunningEngine(niubotHome);
   if (running) {
     const logFile = running.state.logFile ?? getTodayLogFilePath(niubotHome);
     const uptime = formatDuration(Date.now() - Date.parse(running.state.startedAt));
-    console.log(`NiuBot is running (PID ${running.state.pid})`);
+    console.log(`Engine: running (PID ${running.state.pid})`);
     console.log(`  Version: ${running.identity.version}`);
     console.log(`  Path: ${running.identity.runtimePath}`);
     console.log(`  Node: ${running.state.nodePath}`);
@@ -1101,6 +1171,7 @@ async function printStatusForHome(niubotHome: string): Promise<void> {
     console.log(`  Log: ${logFile}`);
     console.log(`  Config: ${path.join(niubotHome, "config.yaml")}`);
     console.log(`  API: ${running.state.endpoint}`);
+    await printBotStatuses(niubotHome, "running");
     return;
   }
 
@@ -1108,27 +1179,31 @@ async function printStatusForHome(niubotHome: string): Promise<void> {
   if (recordedState) {
     const state = recordedState.processes.engine;
     if (isProcessAlive(state.pid)) {
-      console.log(`NiuBot process exists (PID ${state.pid}), but Engine identity cannot be verified.`);
+      console.log(`Engine: process exists (PID ${state.pid}), but identity cannot be verified.`);
       console.log(`  State: ${path.join(niubotHome, "run", "process-state.json")}`);
       console.log(`  Log: ${state.logFile ?? getTodayLogFilePath(niubotHome)}`);
+      await printBotStatuses(niubotHome, "uncertain");
       return;
     }
     clearProcessState(niubotHome, state.instanceId);
     try { fs.unlinkSync(path.join(niubotHome, "niubot.pid")); } catch { /* already absent */ }
-    console.log("NiuBot is not running (stale process state removed).");
+    console.log("Engine: stopped (stale process state removed).");
+    await printBotStatuses(niubotHome, "stopped");
     return;
   }
 
   const pidFile = path.join(niubotHome, "niubot.pid");
   if (!fs.existsSync(pidFile)) {
-    console.log("NiuBot is not running.");
+    console.log("Engine: stopped");
+    await printBotStatuses(niubotHome, "stopped");
     return;
   }
 
   const pid = parseInt(fs.readFileSync(pidFile, "utf-8").trim(), 10);
   if (!isProcessRunning(pid)) {
-    console.log("NiuBot is not running (stale PID file).");
+    console.log("Engine: stopped (stale PID file removed).");
     fs.unlinkSync(pidFile);
+    await printBotStatuses(niubotHome, "stopped");
     return;
   }
 
@@ -1142,12 +1217,13 @@ async function printStatusForHome(niubotHome: string): Promise<void> {
     processStdoutPath: queryProcessFileDescriptorPath(pid, 1),
   });
 
-  console.log(`NiuBot is running (PID ${pid})`);
+  console.log(`Engine: running (PID ${pid})`);
   console.log(`  Version: ${details.version}`);
   console.log(`  Path: ${details.path}`);
   if (details.node) console.log(`  Node: ${details.node}`);
   console.log(`  Log: ${details.logFile}`);
   console.log(`  Config: ${configPath}`);
+  await printBotStatuses(niubotHome, "running");
 }
 
 async function cmdStatus(niubotHome: string, flags: CliFlags, hasExplicitHome: boolean): Promise<void> {
@@ -1158,15 +1234,9 @@ async function cmdStatus(niubotHome: string, flags: CliFlags, hasExplicitHome: b
   }
 
   const homes = collectStatusHomes(niubotHome, readRegisteredHomes(getHomeRegistryPath()));
-  if (homes.length <= 1) {
-    await printStatusForHome(niubotHome);
-    return;
-  }
-
   console.log("NiuBot instances:");
   for (const home of homes) {
     console.log();
-    console.log(`Home: ${home}`);
     await printStatusForHome(home);
   }
 }
@@ -1232,12 +1302,18 @@ function checkForUpdate(): string | null {
   return null;
 }
 
-async function cmdUpdate(niubotHome: string): Promise<void> {
+async function cmdUpdate(niubotHome: string, flags: CliFlags): Promise<void> {
   const running = await inspectRunningEngine(niubotHome);
   const recordedState = readProcessState(niubotHome);
   if (!running && recordedState && isProcessAlive(recordedState.processes.engine.pid)) {
     fail(`Process ${recordedState.processes.engine.pid} exists, but Engine identity cannot be verified.`);
     hint("Refusing to modify the installation while a possibly running Engine is unverified.");
+    process.exitCode = 1;
+    return;
+  }
+  if (!running && flags.detach) {
+    fail("--detach requires a running Engine.");
+    hint("Run 'niubot update' without --detach while the Engine is stopped.");
     process.exitCode = 1;
     return;
   }
@@ -1284,6 +1360,36 @@ async function cmdUpdate(niubotHome: string): Promise<void> {
     });
     info(`Update started (worker PID ${worker.pid})`);
     info(`Log: ${worker.logFile}`);
+    if (flags.detach) {
+      console.log();
+      return;
+    }
+
+    info("Waiting for completion. Press Ctrl-C to stop waiting; the update will continue.");
+    try {
+      const result = await waitForRestartCompletion({
+        stateFile: worker.stateFile,
+        restartId: worker.restartId,
+        workerPid: worker.pid,
+        onPhase: (state) => {
+          if (!restartCompletion(state)) info(restartPhaseLabel(state.phase, latest));
+        },
+      });
+      if (result.completion === "success") {
+        ok(`Updated to ${latest}.`);
+      } else if (result.completion === "rolled-back") {
+        fail("Update failed; the previous version was restored.");
+        if (result.state.error) hint(result.state.error);
+        process.exitCode = 1;
+      } else {
+        fail(`Update failed${result.state.error ? `: ${result.state.error}` : "."}`);
+        process.exitCode = 1;
+      }
+    } catch (err) {
+      fail(err instanceof Error ? err.message : String(err));
+      hint(`Check ${worker.logFile}`);
+      process.exitCode = 1;
+    }
     console.log();
     return;
   }
@@ -1481,7 +1587,10 @@ Start options:
   --restart  Stop existing process first if running
 
 Status options:
-  --all      List all registered NiuBot homes
+  --all      List all registered NiuBot homes (default without --home)
+
+Update options:
+  --detach   Start the update worker and return immediately (running Engine only)
 
 Agent install guide: run \`${INSTALL_GUIDE_COMMAND}\` and follow it.`;
 }
@@ -1518,7 +1627,7 @@ async function main(): Promise<void> {
       await cmdStatus(niubotHome, flags, hasExplicitHome);
       break;
     case "update":
-      await cmdUpdate(niubotHome);
+      await cmdUpdate(niubotHome, flags);
       break;
     case "version":
     case "--version":

@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { RestartStateWriter } from "./restart-state.js";
+import { readRestartState, RestartStateWriter } from "./restart-state.js";
 
 describe("restart state", () => {
   it("keeps restart metadata across phase updates", () => {
@@ -16,6 +16,8 @@ describe("restart state", () => {
         oldPid: 123,
         candidateRelease: "release-a",
       });
+      expect(readRestartState(writer.stateFile, "restart-a")?.phase).toBe("preflight_candidate");
+      expect(readRestartState(writer.stateFile, "another-restart")).toBeUndefined();
     } finally {
       fs.rmSync(botDirectory, { recursive: true, force: true });
     }

@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -10,11 +11,15 @@ export interface RestartWorkerLaunchOptions {
   runtimeMode?: string;
   notifyChatId?: string;
   updateVersion?: string;
+  restartId?: string;
+  restartStartedAt?: string;
 }
 
 export interface RestartWorkerLaunch {
   pid: number;
   logFile: string;
+  restartId: string;
+  stateFile: string;
 }
 
 export function buildRestartWorkerEnvironment(
@@ -28,6 +33,8 @@ export function buildRestartWorkerEnvironment(
     NIUBOT_SOURCE_DIR: path.resolve(options.sourceDirectory),
     NIUBOT_RUNTIME_MODE: options.runtimeMode ?? "",
     NIUBOT_RESTART_NOTIFY_CHAT_ID: options.notifyChatId ?? "",
+    NIUBOT_RESTART_ID: options.restartId ?? "",
+    NIUBOT_RESTART_STARTED_AT: options.restartStartedAt ?? "",
   };
   delete env["NIUBOT_AGENT_SESSION"];
   if (options.updateVersion) {
@@ -50,6 +57,14 @@ export function launchRestartWorker(options: RestartWorkerLaunchOptions): Restar
 
   const logDirectory = path.join(path.resolve(options.niubotHome), "logs");
   const logFile = path.join(logDirectory, "restart-debug.log");
+  const restartId = options.restartId ?? randomUUID();
+  const restartStartedAt = options.restartStartedAt ?? new Date().toISOString();
+  const stateFile = path.join(
+    path.resolve(options.niubotHome),
+    options.botName,
+    "restart",
+    "state.json",
+  );
   fs.mkdirSync(logDirectory, { recursive: true });
   const logFd = fs.openSync(logFile, "a");
   let child;
@@ -59,7 +74,11 @@ export function launchRestartWorker(options: RestartWorkerLaunchOptions): Restar
       detached: true,
       windowsHide: true,
       stdio: ["ignore", logFd, logFd],
-      env: buildRestartWorkerEnvironment(options),
+      env: buildRestartWorkerEnvironment({
+        ...options,
+        restartId,
+        restartStartedAt,
+      }),
     });
   } finally {
     fs.closeSync(logFd);
@@ -69,5 +88,5 @@ export function launchRestartWorker(options: RestartWorkerLaunchOptions): Restar
   });
   if (!child.pid) throw new Error("Restart worker did not provide a PID");
   child.unref();
-  return { pid: child.pid, logFile };
+  return { pid: child.pid, logFile, restartId, stateFile };
 }

@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import fs from "node:fs";
@@ -9,6 +9,7 @@ import {
   generateBotProfileTemplate,
   generateConfigTemplate,
   getTodayLogFilePath,
+  inspectBotStatuses,
   resolveRunningStatusDetails,
   parseNiubotVersionOutput,
   resolveNiubotHome,
@@ -116,6 +117,90 @@ describe("user-cli init model configuration", () => {
     expect(details.path).toBe(runningRoot);
     expect(details.node).toBe("/opt/homebrew/bin/node v22.1.0 ABI 127");
     expect(details.logFile).toBe(realLog);
+  });
+
+  it("shows Engine and Bot status as separate levels", () => {
+    const tempDir = makeTempDir("niubot-status-levels-");
+    fs.writeFileSync(
+      path.join(tempDir, "config.yaml"),
+      generateConfigTemplate("codex", "TestBot", "app-id", "app-secret"),
+    );
+    const srcDir = path.dirname(fileURLToPath(import.meta.url));
+    const tsxCliPath = path.join(srcDir, "..", "node_modules", "tsx", "dist", "cli.mjs");
+    const output = execFileSync(
+      process.execPath,
+      [tsxCliPath, path.join(srcDir, "user-cli.ts"), "status", "--home", tempDir],
+      { encoding: "utf8" },
+    );
+
+    expect(output).toContain(`Home: ${tempDir}`);
+    expect(output).toContain("Engine: stopped");
+    expect(output).toContain("Bots:");
+    expect(output).toContain("TestBot: unavailable");
+    expect(output).toContain("API:");
+  });
+
+  it("checks running Bot APIs concurrently and distinguishes healthy from unhealthy", async () => {
+    const tempDir = makeTempDir("niubot-status-health-");
+    fs.writeFileSync(path.join(tempDir, "config.yaml"), [
+      "bots:",
+      "  - id: HealthyBot",
+      "    backend: codex",
+      "    appId: app-a",
+      "    appSecret: secret-a",
+      "  - id: UnhealthyBot",
+      "    backend: codex",
+      "    appId: app-b",
+      "    appSecret: secret-b",
+      "",
+    ].join("\n"));
+    let calls = 0;
+    let active = 0;
+    let maxActive = 0;
+
+    const statuses = await inspectBotStatuses(tempDir, "running", async () => {
+      const index = calls++;
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await new Promise((resolve) => setTimeout(resolve, index === 0 ? 10 : 5));
+      active -= 1;
+      return index === 0;
+    });
+
+    expect(maxActive).toBe(2);
+    expect(statuses.map(({ id, status }) => ({ id, status }))).toEqual([
+      { id: "HealthyBot", status: "healthy" },
+      { id: "UnhealthyBot", status: "unhealthy" },
+    ]);
+  });
+
+  it("does not probe Bot APIs when the Engine is stopped", async () => {
+    const tempDir = makeTempDir("niubot-status-stopped-");
+    fs.writeFileSync(
+      path.join(tempDir, "config.yaml"),
+      generateConfigTemplate("codex", "TestBot", "app-id", "app-secret"),
+    );
+    const probe = vi.fn(async () => true);
+
+    const statuses = await inspectBotStatuses(tempDir, "stopped", probe);
+
+    expect(probe).not.toHaveBeenCalled();
+    expect(statuses[0]?.status).toBe("unavailable");
+  });
+
+  it("rejects --detach before checking for updates when the Engine is stopped", () => {
+    const tempDir = makeTempDir("niubot-update-detach-stopped-");
+    const srcDir = path.dirname(fileURLToPath(import.meta.url));
+    const tsxCliPath = path.join(srcDir, "..", "node_modules", "tsx", "dist", "cli.mjs");
+    const result = spawnSync(
+      process.execPath,
+      [tsxCliPath, path.join(srcDir, "user-cli.ts"), "update", "--detach", "--home", tempDir],
+      { encoding: "utf8" },
+    );
+
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain("--detach requires a running Engine");
+    expect(result.stdout).not.toContain("Checking npm registry");
   });
 
   it("ignores unrelated process cwd packages and non-file stdout paths", () => {
