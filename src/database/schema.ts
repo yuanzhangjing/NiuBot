@@ -348,6 +348,94 @@ const migrations: Migration[] = [
       }
     },
   },
+  {
+    version: 17,
+    description: "Add internal worker works, jobs, events and agent continuations",
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS worker_works (
+          id                  TEXT PRIMARY KEY,
+          bot_id              TEXT NOT NULL,
+          owner_user_id       TEXT NOT NULL,
+          source_chat_id      TEXT NOT NULL,
+          visibility          TEXT NOT NULL DEFAULT 'private'
+                              CHECK(visibility IN ('private', 'public')),
+          request             TEXT NOT NULL,
+          status              TEXT NOT NULL DEFAULT 'active'
+                              CHECK(status IN ('active', 'completing', 'completed', 'failing', 'failed', 'cancelling', 'cancelled')),
+          job_ids_json        TEXT NOT NULL DEFAULT '[]',
+          final_conclusion    TEXT,
+          interrupted_count   INTEGER NOT NULL DEFAULT 0,
+          created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at          TEXT NOT NULL DEFAULT (datetime('now')),
+          version             INTEGER NOT NULL DEFAULT 1
+        );
+        CREATE INDEX IF NOT EXISTS idx_worker_works_bot ON worker_works(bot_id, created_at);
+
+        CREATE TABLE IF NOT EXISTS worker_jobs (
+          id                    TEXT PRIMARY KEY,
+          work_id               TEXT NOT NULL REFERENCES worker_works(id),
+          worker_profile_id     TEXT NOT NULL,
+          profile_snapshot_json TEXT,
+          prompt                TEXT NOT NULL,
+          workdir               TEXT NOT NULL,
+          backend_session_id    TEXT,
+          status                TEXT NOT NULL DEFAULT 'queued'
+                                CHECK(status IN ('queued', 'running', 'completed', 'failed', 'interrupted', 'cancelling', 'cancelled')),
+          response_text         TEXT,
+          exit_code             INTEGER,
+          error                 TEXT,
+          changed_files_json    TEXT NOT NULL DEFAULT '[]',
+          artifacts_json        TEXT NOT NULL DEFAULT '[]',
+          started_at            TEXT,
+          ended_at              TEXT,
+          claim_token           TEXT,
+          claimed_at            TEXT,
+          created_at            TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at            TEXT NOT NULL DEFAULT (datetime('now')),
+          version               INTEGER NOT NULL DEFAULT 1
+        );
+        CREATE INDEX IF NOT EXISTS idx_worker_jobs_work ON worker_jobs(work_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_worker_jobs_status ON worker_jobs(status);
+
+        CREATE TABLE IF NOT EXISTS worker_idempotency_keys (
+          idempotency_key  TEXT PRIMARY KEY,
+          job_id           TEXT NOT NULL,
+          created_at       TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS worker_events (
+          id          INTEGER PRIMARY KEY AUTOINCREMENT,
+          bot_id      TEXT NOT NULL,
+          work_id     TEXT NOT NULL,
+          job_id      TEXT,
+          event       TEXT NOT NULL,
+          detail      TEXT,
+          created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_worker_events_work ON worker_events(work_id, id);
+
+        CREATE TABLE IF NOT EXISTS agent_continuations (
+          id            TEXT PRIMARY KEY,
+          bot_id        TEXT NOT NULL,
+          chat_id       TEXT NOT NULL,
+          dedupe_key    TEXT NOT NULL UNIQUE,
+          kind          TEXT NOT NULL DEFAULT 'job_terminal'
+                        CHECK(kind IN ('job_terminal')),
+          work_id       TEXT NOT NULL,
+          job_ids_json  TEXT NOT NULL DEFAULT '[]',
+          status        TEXT NOT NULL DEFAULT 'pending'
+                        CHECK(status IN ('pending', 'claimed', 'completed', 'failed')),
+          agent_turn_id TEXT,
+          claim_token   TEXT,
+          claimed_at    TEXT,
+          completed_at  TEXT,
+          created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_continuations_chat ON agent_continuations(chat_id, status);
+      `);
+    },
+  },
 ];
 
 const transportMigrations: Migration[] = [
@@ -470,7 +558,7 @@ export const LATEST_SCHEMA_VERSION = migrations[migrations.length - 1]!.version;
 // npm 上所有公开版本（v0.1.12 起）的全局 schema 都在 10..16。
 // 这一区间之后的迁移只有加表、加 nullable 列和加索引，旧版本会忽略，
 // 因此保留原 user_version 后可以安全回到升级前的同一版本。
-export const ROLLBACK_COMPATIBLE_SCHEMA_VERSIONS = [10, 11, 12, 13, 14, 15, 16] as const;
+export const ROLLBACK_COMPATIBLE_SCHEMA_VERSIONS = [10, 11, 12, 13, 14, 15, 16, 17] as const;
 export const LATEST_TRANSPORT_SCHEMA_VERSION = transportMigrations[transportMigrations.length - 1]!.version;
 
 // ── Database initialization ─────────────────────────────────────────
