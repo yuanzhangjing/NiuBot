@@ -15,6 +15,10 @@ import { CliAgentBackend, buildNiubotEnv } from "../agent/cli-base.js";
 import { BUILTIN_BACKEND_LIST, NIUBOT_HOME, normalizeBackend, type AgentBackendType, type RestartConfig } from "../config.js";
 import { ChatManager } from "./chat-manager.js";
 import type { QueuedMessage } from "./queue.js";
+import { WorkerRuntime } from "../worker/runtime.js";
+import { WorkerScheduler } from "../worker/scheduler.js";
+import type { Job, JobService, Work } from "../worker/types.js";
+import type { WorkerProfileRegistry } from "../worker/profiles.js";
 import {
   ensureUser, ensureChat, storeMessage, updateChatName,
   getUserShortLabel, getChatShortLabel, getMessageByPlatformId, updateMessageContent, updateMessagePlatformId,
@@ -170,6 +174,15 @@ interface PendingTransitionMessage {
 
 type SessionEndStatus = "archived" | "archive_failed" | "discarded";
 
+export interface WorkerPipelineConfig {
+  jobService: JobService;
+  registry: WorkerProfileRegistry;
+  /** 全局 Worker 并发上限（内部防失控，默认 4） */
+  maxConcurrent?: number;
+  /** Scheduler 扫描周期（默认 5000ms；测试可调小） */
+  tickMs?: number;
+}
+
 export class Pipeline {
   private db: Database.Database;
   private transport: TransportClient;
@@ -274,6 +287,13 @@ export class Pipeline {
   private stableContextOptions: StableSystemContextOptions;
   private archiveHome: string;
 
+  /** 内部 Worker 配置（Phase 2；未配置时不启用任何 Worker 行为） */
+  private readonly workerConfig?: WorkerPipelineConfig;
+  private workerRuntime?: WorkerRuntime;
+  private workerScheduler?: WorkerScheduler;
+  /** 已投递到主 Agent 队列的 Continuation（内存去重；重启后 pending 重新投递） */
+  private dispatchedContinuations = new Set<string>();
+
   constructor(
     db: Database.Database,
     transport: TransportClient,
@@ -291,6 +311,7 @@ export class Pipeline {
     autoUpdateNotificationsEnabled = true,
     archiveHome?: string,
     getBackendCapabilities?: () => BackendCapability[] | Promise<BackendCapability[]>,
+    workerConfig?: WorkerPipelineConfig,
   ) {
     this.db = db;
     this.transport = transport;
@@ -298,6 +319,7 @@ export class Pipeline {
     this.backendType = backendType;
     this.backendResolver = backendResolver;
     this.getAvailableBackends = getAvailableBackends ?? (() => [...BUILTIN_BACKEND_LIST]);
+    this.workerConfig = workerConfig;
     this.getBackendCapabilities = getBackendCapabilities ?? (() => this.getAvailableBackends().map((backend) => ({
       backend: backend as BackendCapability["backend"],
       platform: process.platform,
@@ -363,6 +385,34 @@ export class Pipeline {
 
     // 启动 watchdog 定时器
     this.watchdogTimer = setInterval(() => this.runIdleWatchdogSafely(), AGENT_WATCHDOG_INTERVAL_MS);
+
+    // 内部 Worker：启动 Scheduler 并恢复非终态 Job
+    if (this.workerConfig) {
+      const { jobService, registry, maxConcurrent, tickMs } = this.workerConfig;
+      this.workerRuntime = new WorkerRuntime({
+        backend: this.agent,
+        jobService,
+        registry,
+        sessionConfig: {
+          dbPath: this.dbPath,
+          botId: this.botIdentity.platformBotId,
+          botName: this.botIdentity.name,
+          platform: this.botIdentity.platform,
+          model: this.botIdentity.model,
+          botProfilePath: this.stableContextOptions.botProfilePath,
+        },
+        buildPrompt: (job, profilePrompt) => this.buildWorkerPrompt(job, profilePrompt),
+      });
+      this.workerScheduler = new WorkerScheduler({
+        runtime: this.workerRuntime,
+        jobService,
+        maxConcurrent: maxConcurrent ?? 4,
+        tickMs,
+        onContinuations: (chatId, ids) => this.enqueueWorkerContinuations(chatId, ids),
+      });
+      this.workerScheduler.start();
+      this.recoverInterruptedWorkerJobs();
+    }
     if (this.autoUpdateNotificationsEnabled) {
       if (this.isUpdateNotificationWindow(new Date())) {
         this.checkForUpdatesAndNotifyAdmins().catch((err) => {
@@ -1665,6 +1715,107 @@ export class Pipeline {
     return this.processIndependentSession(chatId, userId, prompt, description, "cron");
   }
 
+  /** Continuation 投递：入队主 Agent 队列（同 chat 串行），内存去重防止重复投递。 */
+  private enqueueWorkerContinuations(chatId: string, continuationIds: string[]): void {
+    const fresh = continuationIds.filter((id) => !this.dispatchedContinuations.has(id));
+    if (fresh.length === 0) return;
+    // 确保 platformChatIds 已注册（与 injectPrompt 一致：Worker 场景 chat 一定来自真实会话）
+    if (!this.platformChatIds.has(chatId)) {
+      const row = this.db.prepare("SELECT platform_id FROM chats WHERE id = ?").get(chatId) as
+        | { platform_id: string }
+        | undefined;
+      if (row) this.platformChatIds.set(chatId, row.platform_id);
+    }
+    for (const id of fresh) this.dispatchedContinuations.add(id);
+    this.queue.enqueueContinuation(chatId, fresh);
+    this.log.info("worker continuations dispatched", { chatId, continuationIds: fresh });
+  }
+
+  /** 崩溃恢复（§14）：Engine 重启后把 running Job 标记 interrupted（进程已随旧进程消失）。 */
+  private recoverInterruptedWorkerJobs(): void {
+    const jobService = this.workerConfig?.jobService;
+    if (!jobService) return;
+    for (const job of jobService.listJobsByStatus("running")) {
+      jobService.interruptJob(job.id);
+      this.log.warn("worker job interrupted by restart", { jobId: job.id, workId: job.workId });
+    }
+    for (const job of jobService.listJobsByStatus("cancelling")) {
+      jobService.confirmCancelled(job.id, {
+        status: "cancelled",
+        responseText: "",
+        error: "engine restarted while cancelling",
+        changedFiles: [],
+        artifacts: [],
+        startedAt: new Date().toISOString(),
+        endedAt: new Date().toISOString(),
+      });
+      this.log.warn("worker job cancel confirmed during restart", { jobId: job.id });
+    }
+  }
+
+  /**
+   * 组装 Worker 的上下文：稳定系统规则 + Profile 角色说明 + Job 目标。
+   * 第一版不注入主会话 transcript 和用户记忆。
+   */
+  private buildWorkerPrompt(job: Job, profilePrompt: string): string {
+    const stable = this.buildStableSystemContext();
+    const work = this.workerConfig?.jobService.getWork(job.workId);
+    const parts: string[] = [];
+    if (stable) parts.push(stable);
+    if (profilePrompt) parts.push(`<worker-role>\n${profilePrompt}\n</worker-role>`);
+    parts.push(`<job-target>
+Work 目标（用户原始需求）：${work?.request ?? "(未知)"}
+Job 任务：${job.prompt}
+Job 工作目录：${job.workdir}
+完成标准：以自由 Markdown 输出结果：做了什么、发现了什么、未完成内容、风险和测试证据。不要修改代码、不要提交、不要发布、不要对用户直接发送消息。
+</job-target>`);
+    return parts.join("\n\n");
+  }
+
+  /**
+   * 组装主 Agent 验收回合的 <worker-continuation> 内部事件区段。
+   * 内容是受信上下文，不是用户发言；区段标签由 Engine 生成。
+   */
+  private buildWorkerContinuationPrompt(continuationIds: string[]): string {
+    const jobService = this.workerConfig?.jobService;
+    if (!jobService) return "";
+
+    const sections: string[] = [];
+    const works = new Map<string, Work>();
+    for (const id of continuationIds) {
+      const continuation = jobService.getContinuation(id);
+      if (!continuation) continue;
+      const work = jobService.getWork(continuation.workId);
+      if (work) works.set(work.id, work);
+      const jobParts: string[] = [];
+      for (const jobId of continuation.jobIds) {
+        const job = jobService.getJob(jobId);
+        if (!job) continue;
+        const responseText = (job.responseText ?? "").slice(0, 4000);
+        jobParts.push(
+          `- Job ${jobId}（${job.workerProfileId}，状态 ${job.status}）：
+  最终文本：${responseText || "(无文本)"}
+  产物：${job.artifactsJson}
+  错误：${job.error ?? "(无)"}`,
+        );
+      }
+      sections.push(`<worker-result work="${continuation.workId}">
+${jobParts.join("\n\n")}
+</worker-result>`);
+    }
+
+    const workLines = [...works.entries()].map(([id, work]) => `- Work ${id}：${work.request}`).join("\n");
+    const intro =
+      "以下是内部 Worker 的执行结果。你不是在回复用户消息，而是在处理内部续接事件。请：\n" +
+      "1. 对照 Work 目标验收结果是否满足用户需求；\n" +
+      "2. 需要继续时，用 nbt worker 命令创建后续 Job；\n" +
+      "3. 认为需求已完成时，用 nbt worker complete 结束 Work；\n" +
+      "4. 最后给用户一条最终回复（简洁说明结果或需要用户补充什么）。\n" +
+      "如果这些结果需要用户输入才能继续，直接向用户提问，Work 保持进行中。";
+
+    return `<worker-continuation>\n${workLines ? `涉及任务：\n${workLines}\n\n` : ""}${sections.join("\n\n")}\n</worker-continuation>\n\n${intro}`;
+  }
+
   private async processIndependentSession(
     chatId: string, userId: string, prompt: string, description: string,
     source: "cron" | "task",
@@ -2640,6 +2791,17 @@ export class Pipeline {
       await transition;
     }
 
+    // Worker Continuation 分流：内部事件不写成用户发言。
+    // 同批混有用户消息时，Continuation 重新入队到用户消息之后（队列串行保证顺序）。
+    const continuationIds = messages
+      .filter((m) => m.triggerKind === "worker_continuation")
+      .flatMap((m) => m.continuationIds ?? []);
+    const isContinuationTurn = continuationIds.length > 0 && messages.every((m) => m.triggerKind === "worker_continuation");
+    if (continuationIds.length > 0 && !isContinuationTurn) {
+      this.queue.enqueueContinuation(chatId, continuationIds);
+      this.log.info("worker continuation deferred behind user messages", { chatId, continuationIds });
+    }
+
     const platformChatId = this.chatSessions.get(chatId)?.platformChatId
       ?? this.platformChatIds.get(chatId);
 
@@ -2675,51 +2837,59 @@ export class Pipeline {
       const chatTypeRow = this.db.prepare("SELECT type FROM chats WHERE id = ?").get(chatId) as { type: string } | undefined;
       const processChatType = (chatTypeRow?.type ?? "p2p") as "p2p" | "group";
 
-      // 拼接上下文前缀（新 session 的首条消息）
+      // Worker Continuation 回合：上下文 = 内部事件区段（不是用户发言）
       let messageToSend = mergedText;
-      const stableCtx = this.pendingStableContext.get(chatId);
-      const messageCtx = this.pendingMessageContext.get(chatId);
-      const compactRecovery = this.pendingCompactRecovery.has(chatId);
-      const isNewSessionPrompt = this.pendingNewSessionReminder.has(chatId);
-      if (stableCtx || messageCtx || compactRecovery || isNewSessionPrompt) {
-        const parts: string[] = [];
-        if (stableCtx) {
-          parts.push(stableCtx);
+      if (isContinuationTurn) {
+        messageToSend = this.buildWorkerContinuationPrompt(continuationIds);
+        if (!messageToSend) {
+          this.log.warn("worker continuation content unavailable, skipping turn", { chatId, continuationIds });
+          this.markRuntimeRun(runId, "failed");
+          return;
         }
-        if (messageCtx) {
-          parts.push(messageCtx);
-        }
-        if (compactRecovery) {
-          const recoveryParts: string[] = [];
-          if (this.agent.needsCompactRecoveryReminder()) {
-            recoveryParts.push(COMPACT_RECOVERY_REMINDER);
+      } else {
+        const stableCtx = this.pendingStableContext.get(chatId);
+        const messageCtx = this.pendingMessageContext.get(chatId);
+        const compactRecovery = this.pendingCompactRecovery.has(chatId);
+        const isNewSessionPrompt = this.pendingNewSessionReminder.has(chatId);
+        if (stableCtx || messageCtx || compactRecovery || isNewSessionPrompt) {
+          const parts: string[] = [];
+          if (stableCtx) {
+            parts.push(stableCtx);
           }
-          if (this.agent.needsStableUserPrefix()) {
-            recoveryParts.push(this.buildStableSystemContext());
+          if (messageCtx) {
+            parts.push(messageCtx);
           }
-          const recoveryUserId = processChatType === "group" ? undefined : chatSession.userId;
-          recoveryParts.push(this.buildSessionProfile(chatId, processChatType, recoveryUserId));
-          recoveryParts.push(buildSessionArchiveContext(
-            getSessionArchiveDirectory(this.archiveHome, this.botIdentity.name, chatId),
-          ));
-          const taskContext = buildActiveTaskContext(this.workingDirectory, processChatType, recoveryUserId);
-          if (taskContext) {
-            recoveryParts.push(`<session-state>\n${taskContext}\n</session-state>`);
+          if (compactRecovery) {
+            const recoveryParts: string[] = [];
+            if (this.agent.needsCompactRecoveryReminder()) {
+              recoveryParts.push(COMPACT_RECOVERY_REMINDER);
+            }
+            if (this.agent.needsStableUserPrefix()) {
+              recoveryParts.push(this.buildStableSystemContext());
+            }
+            const recoveryUserId = processChatType === "group" ? undefined : chatSession.userId;
+            recoveryParts.push(this.buildSessionProfile(chatId, processChatType, recoveryUserId));
+            recoveryParts.push(buildSessionArchiveContext(
+              getSessionArchiveDirectory(this.archiveHome, this.botIdentity.name, chatId),
+            ));
+            const taskContext = buildActiveTaskContext(this.workingDirectory, processChatType, recoveryUserId);
+            if (taskContext) {
+              recoveryParts.push(`<session-state>\n${taskContext}\n</session-state>`);
+            }
+            parts.push(recoveryParts.join("\n\n"));
           }
-          parts.push(recoveryParts.join("\n\n"));
+          if (isNewSessionPrompt) {
+            parts.push(NEW_SESSION_SEARCH_REMINDER);
+          }
+          this.pendingStableContext.delete(chatId);
+          this.pendingMessageContext.delete(chatId);
+          this.pendingCompactRecovery.delete(chatId);
+          this.pendingNewSessionReminder.delete(chatId);
+          messageToSend = `${parts.join("\n\n")}\n\n${mergedText}`;
         }
-        if (isNewSessionPrompt) {
-          parts.push(NEW_SESSION_SEARCH_REMINDER);
-        }
-        this.pendingStableContext.delete(chatId);
-        this.pendingMessageContext.delete(chatId);
-        this.pendingCompactRecovery.delete(chatId);
-        this.pendingNewSessionReminder.delete(chatId);
-        messageToSend = `${parts.join("\n\n")}\n\n${mergedText}`;
-      }
 
-      // 群聊：消息级 speaker 注入（<current-speaker> / <speakers>）
-      if (processChatType === "group" && messages.length > 0) {
+        // 群聊：消息级 speaker 注入（<current-speaker> / <speakers>）—— Continuation 回合跳过（无 sender）
+        if (processChatType === "group" && messages.length > 0) {
         // 提取去重的 sender 列表
         const senderIds = [...new Set(messages.map((m) => m.senderId).filter((id): id is string => !!id))];
         if (senderIds.length > 0) {
@@ -2738,10 +2908,11 @@ export class Pipeline {
         }
       }
 
-      if (messageToSend === mergedText) {
-        messageToSend = wrapInjectedUserMessage(mergedText);
-      } else if (messageToSend.endsWith(mergedText)) {
-        messageToSend = `${messageToSend.slice(0, messageToSend.length - mergedText.length)}${wrapInjectedUserMessage(mergedText)}`;
+        if (messageToSend === mergedText) {
+          messageToSend = wrapInjectedUserMessage(mergedText);
+        } else if (messageToSend.endsWith(mergedText)) {
+          messageToSend = `${messageToSend.slice(0, messageToSend.length - mergedText.length)}${wrapInjectedUserMessage(mergedText)}`;
+        }
       }
 
       if (signal?.aborted) {
@@ -2925,6 +3096,15 @@ export class Pipeline {
         updateMessagePlatformId(this.db, replyMsgId, sentPlatformMsgId);
       }
 
+      // Worker Continuation 回合结束：标记 Continuation completed（主 Agent 已收到结果）
+      if (isContinuationTurn && sentPlatformMsgId && this.workerConfig) {
+        for (const id of continuationIds) {
+          this.workerConfig.jobService.markContinuationCompleted(id, runId ?? "");
+          this.dispatchedContinuations.delete(id);
+          this.log.info("worker continuation completed", { continuationId: id, runId });
+        }
+      }
+
       if (sentPlatformMsgId) {
         this.log.info("response sent", {
           chatId,
@@ -2941,6 +3121,10 @@ export class Pipeline {
       }
     } catch (err) {
       this.log.error("pipeline error", { chatId, error: String(err) });
+      // Worker Continuation 回合失败：解除派发标记，允许重新投递
+      if (isContinuationTurn) {
+        for (const id of continuationIds) this.dispatchedContinuations.delete(id);
+      }
       this.markRuntimeRun(runId, signal?.aborted ? "stopped" : "failed", String(err));
 
       if (platformChatId) {

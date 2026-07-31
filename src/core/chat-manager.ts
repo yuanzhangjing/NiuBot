@@ -22,11 +22,12 @@ export class ChatManager {
     this.queue = new MessageQueue(bufferMs);
     this.queue.onStateChange((chatId, snapshot) => this.syncRuntimeQueueState(chatId, snapshot));
     this.queue.onProcess((chatId, mergedText, messages, signal) => {
+      const userMessages = messages.filter((m) => m.triggerKind !== "worker_continuation");
       const run = this.runtimeState.createRun({
         chatId,
-        triggerMessageIds: messages.map((m) => m.dbMsgId).filter((id): id is number => id != null),
-        triggerPlatformMsgIds: messages.map((m) => m.platformMsgId).filter((id): id is string => !!id),
-        replyToPlatformMsgId: messages.at(-1)?.platformMsgId,
+        triggerMessageIds: userMessages.map((m) => m.dbMsgId).filter((id): id is number => id != null),
+        triggerPlatformMsgIds: userMessages.map((m) => m.platformMsgId).filter((id): id is string => !!id),
+        replyToPlatformMsgId: userMessages.at(-1)?.platformMsgId,
         mergedText,
       });
       log.info("run created", {
@@ -74,6 +75,29 @@ export class ChatManager {
 
   push(msg: QueuedMessage): boolean {
     return this.enqueue(msg);
+  }
+
+  /**
+   * 入队 Worker Continuation（内部事件，不是用户发言）。
+   * 与用户消息走同一队列，保证单 chat 串行；Continuation 只携带 ID，
+   * 具体结果由 Pipeline 处理时从 JobService 查询。
+   */
+  enqueueContinuation(chatId: string, continuationIds: string[]): boolean {
+    const msg: QueuedMessage = {
+      chatId,
+      text: `[worker continuation: ${continuationIds.join(",")}]`,
+      timestamp: Date.now(),
+      triggerKind: "worker_continuation",
+      continuationIds,
+    };
+    const pending = this.queue.push(msg);
+    log.info("worker continuation enqueued", {
+      chatId,
+      continuationIds,
+      pending,
+      queueState: this.runtimeState.getChatState(chatId).state,
+    });
+    return pending;
   }
 
   stop(): void {

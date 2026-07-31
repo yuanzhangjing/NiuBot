@@ -278,6 +278,12 @@ export function countJobs(db: Database.Database, workId: string): number {
   return row.n;
 }
 
+export function listJobsByStatus(db: Database.Database, status: JobStatus): JobRow[] {
+  return db
+    .prepare("SELECT * FROM worker_jobs WHERE status = ? ORDER BY created_at ASC")
+    .all(status) as JobRow[];
+}
+
 // ---------------------------------------------------------------------------
 // 幂等键（CLI 层派生，相同键返回原 Job）
 // ---------------------------------------------------------------------------
@@ -421,6 +427,12 @@ export function insertContinuation(
 
 export function getContinuationByDedupeKey(db: Database.Database, dedupeKey: string): ContinuationRow | undefined {
   return db.prepare("SELECT * FROM agent_continuations WHERE dedupe_key = ?").get(dedupeKey) as ContinuationRow | undefined;
+}
+
+export function listPendingContinuations(db: Database.Database): ContinuationRow[] {
+  return db
+    .prepare("SELECT * FROM agent_continuations WHERE status = 'pending' ORDER BY created_at ASC")
+    .all() as ContinuationRow[];
 }
 
 /**

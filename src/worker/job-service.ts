@@ -42,6 +42,8 @@ import {
   insertWorkerEvent,
   jobRowToJob,
   listJobs,
+  listJobsByStatus,
+  listPendingContinuations,
   listWorkerEvents,
   listWorks as listWorkRows,
   markContinuationCompleted,
@@ -139,6 +141,10 @@ export class SqliteJobService implements JobService {
 
   listJobs(workId: string): Job[] {
     return listJobs(this.db, workId).map(jobRowToJob);
+  }
+
+  listJobsByStatus(status: Job["status"]): Job[] {
+    return listJobsByStatus(this.db, status).map(jobRowToJob);
   }
 
   claimJob(input: ClaimJobInput): ClaimJobResult {
@@ -302,6 +308,17 @@ export class SqliteJobService implements JobService {
     return this.db.transaction(() => this.createTerminalContinuation(this.db, jobId))();
   }
 
+  getContinuation(id: string): AgentContinuation | undefined {
+    const row = this.db.prepare("SELECT * FROM agent_continuations WHERE id = ?").get(id) as
+      | import("./store.js").ContinuationRow
+      | undefined;
+    return row ? continuationRowToContinuation(row) : undefined;
+  }
+
+  listPendingContinuations(): AgentContinuation[] {
+    return listPendingContinuations(this.db).map(continuationRowToContinuation);
+  }
+
   claimContinuations(chatId: string, claimToken: string): AgentContinuation[] {
     return claimPendingContinuations(this.db, chatId, claimToken).map(continuationRowToContinuation);
   }
@@ -323,7 +340,7 @@ export class SqliteJobService implements JobService {
   // Events
   // -----------------------------------------------------------------------
 
-  recordEvent(input: { workId: string; jobId?: string; event: WorkerEventName; detail?: string }): void {
+  recordEvent(input: Omit<WorkerEvent, "id" | "createdAt" | "botId">): void {
     insertWorkerEvent(this.db, { botId: this.botId, ...input });
   }
 

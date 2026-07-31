@@ -210,6 +210,7 @@ export interface JobService {
   createJob(input: CreateJobInput, idempotencyKey?: string): Job;
   getJob(jobId: string): Job | undefined;
   listJobs(workId: string): Job[];
+  listJobsByStatus(status: JobStatus): Job[];
 
   /** queued → running（CAS），并检查 Work 状态与 Job 上限 */
   claimJob(input: ClaimJobInput): ClaimJobResult;
@@ -233,11 +234,14 @@ export interface JobService {
 
   /** Job 终态后创建去重 Continuation（每 Job 一个去重键） */
   createJobTerminalContinuation(jobId: string): AgentContinuation | undefined;
+  getContinuation(id: string): AgentContinuation | undefined;
+  /** 全部待处理 Continuation（Scheduler 投递扫描用） */
+  listPendingContinuations(): AgentContinuation[];
   /** 批量认领某 chat 的待处理 Continuation（同一 Work 合并成一次验收） */
   claimContinuations(chatId: string, claimToken: string): AgentContinuation[];
   /** 主 Agent 回合事务提交后标记完成 */
   markContinuationCompleted(id: string, agentTurnId: string): void;
 
-  recordEvent(event: Omit<WorkerEvent, "id" | "createdAt">): void;
+  recordEvent(event: Omit<WorkerEvent, "id" | "createdAt" | "botId">): void;
   listEvents(workId: string): WorkerEvent[];
 }
