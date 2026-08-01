@@ -55,7 +55,7 @@ nbt worker job create --work <work-id> --worker <profile> --file /tmp/job.md [--
 nbt worker list                # 当前会话的 Work/Job 状态
 nbt worker get <id>            # 详情（Job 最终文本、错误、产物）
 nbt worker cancel <id>         # 取消 Work 或 Job
-nbt worker config show         # 当前团队配置
+nbt worker config show         # 当前 Worker 配置
 nbt worker config draft --file /tmp/team.yaml   # 生成配置草案（管理员确认后应用）
 ```
 

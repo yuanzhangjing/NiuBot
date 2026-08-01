@@ -304,7 +304,7 @@ export class Pipeline {
   /** Watchdog 定时器 */
   private watchdogTimer: ReturnType<typeof setInterval> | null = null;
 
-  /** 已加载的团队配置版本（watchdog 检测 CLI 侧 apply/rollback 变更用） */
+  /** 已加载的 Worker 配置版本（watchdog 检测 CLI 侧 apply/rollback 变更用） */
   private lastTeamConfigVersion?: string;
 
   /** 更新检查定时器 */
@@ -3247,7 +3247,7 @@ ${jobParts.join("\n\n")}
         model: response.model,
       });
 
-      // 合并消息提示头；出站前强制剥离内部 Worker 标签（保护：不依赖 LLM 自觉）
+      // 合并消息提示头；出站前强制剥离 Worker 标签（保护：不依赖 LLM 自觉）
       let displayText = stripInternalWorkerTags(response.text);
       let deliveredText = displayText;
       if (isMerged) {

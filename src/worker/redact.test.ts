@@ -4,7 +4,7 @@ import { stripInternalWorkerTags } from "./redact.js";
 
 describe("stripInternalWorkerTags", () => {
   test("剥离完整内部区段", () => {
-    const input = `好的，结果如下。\n\n<worker-continuation>\n涉及任务：\n- Work x：调研\n</worker-continuation>\n\n<worker-skill>\n团队模式已开启\n</worker-skill>\n\n调研结论：使用 SQLite。`;
+    const input = `好的，结果如下。\n\n<worker-continuation>\n涉及任务：\n- Work x：调研\n</worker-continuation>\n\n<worker-skill>\nWorker 可用\n</worker-skill>\n\n调研结论：使用 SQLite。`;
     const output = stripInternalWorkerTags(input);
     expect(output).not.toContain("<worker-continuation>");
     expect(output).not.toContain("<worker-skill>");

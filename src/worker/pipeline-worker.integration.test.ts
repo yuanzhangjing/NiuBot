@@ -403,7 +403,7 @@ test("同一 repo 的两个写 Job 互斥：第二个 resource busy", async () =
   expect(service.getJob(jobB.id)?.error).toMatch(/resource busy/);
 }, 15000);
 
-test("团队模式关闭时 queued Job 不调度，开启后执行", async () => {
+test("Worker 暂停时 queued Job 不调度，开启后执行", async () => {
   teamConfig.setEnabled(false);
   await pipeline.start();
 
@@ -470,7 +470,7 @@ test("延续性 Job 自动注入同 Work 前序结果和检索入口", async () 
   expect(jobBPrompt!.text).toContain("nbt sessions search");
 });
 
-test("团队模式开启时注入派工 Skill，暂停时注入停用指令", async () => {
+test("Worker 开启时注入派工 Skill，暂停时注入停用指令", async () => {
   teamConfig.setEnabled(false);
   await pipeline.start();
 

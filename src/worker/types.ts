@@ -1,5 +1,5 @@
 /**
- * NiuBot 内部 Worker — Work / Job / Continuation 类型与状态常量。
+ * NiuBot Worker — Work / Job / Continuation 类型与状态常量。
  *
  * 第一版（最小 Job 模型）：
  * - Work 是用户需求层的薄分组，不做复杂调度；
