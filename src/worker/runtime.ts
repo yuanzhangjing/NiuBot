@@ -78,9 +78,10 @@ export class WorkerRuntime {
     }
 
     // 进程身份：从 backend activity 读取 PID，等待真实退出，超时升级强制终止
-    const activity = (backend as { getActivity?: (id: string) => { pid?: number } | undefined }).getActivity?.(
-      exec.session.id,
-    );
+    const getActivity = (backend as unknown as {
+      getActivity?: (id: string) => { pid?: number } | undefined;
+    }).getActivity;
+    const activity = getActivity?.call(backend, exec.session.id);
     const pid = activity?.pid;
     if (pid) {
       const exited = await waitForProcessExit(pid, 10_000);
@@ -140,9 +141,11 @@ export class WorkerRuntime {
       const prompt = await buildPrompt(job, profile.prompt);
 
       // 活动心跳：watchdog 依据 lastActivity 判断"无输出超时"（backend 不支持时跳过）
+      const getActivity = (backend as unknown as {
+        getActivity?: (id: string) => { lastActiveAt: number } | undefined;
+      }).getActivity;
       const heartbeat = setInterval(() => {
-        const getActivity = (backend as { getActivity?: (id: string) => { lastActiveAt: number } | undefined }).getActivity;
-        const activity = getActivity?.(session!.id);
+        const activity = getActivity?.call(backend, session!.id);
         if (activity) {
           const exec = this.running.get(jobId);
           if (exec) exec.lastActivity = Math.max(exec.lastActivity, activity.lastActiveAt);
