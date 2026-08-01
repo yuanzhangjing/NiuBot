@@ -1,5 +1,5 @@
 /**
- * nbt worker — 主 Agent 派工与验收的内部 Worker CLI（方案 §7.1）。
+ * nbt worker — 主 Agent 派工与验收的 Worker CLI（方案 §7.1）。
  *
  * 第一版说明：
  * - CLI 直接打开 NIUBOT_DB_PATH 使用 SqliteJobService（本地 API 化列入后续阶段）。
@@ -237,7 +237,7 @@ function handleConfig(ctx: WorkerCliContext, args: string[]): void {
 export function handleWorker(db: Database.Database, args: string[]): void {
   const sub = args[0];
   if (sub === "--help" || sub === "help" || sub === undefined) {
-    console.log(`nbt worker — 内部 Worker 派工与验收
+    console.log(`nbt worker — Worker 派工与验收
 
 用法：
   nbt worker work create --file <work.md>       创建 Work（来源自动绑定当前会话）

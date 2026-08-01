@@ -478,7 +478,7 @@ test("团队模式开启时注入派工 Skill，暂停时注入停用指令", as
   pipeline.handleInbound(userDelivery(CHAT_ID, "你好", 1));
   await waitFor(() => backend.messages.some((m) => m.text.includes("你好")));
   const first = backend.messages.find((m) => m.text.includes("你好"))!;
-  expect(first.text).toContain("团队模式当前已暂停");
+  expect(first.text).toContain("Worker 当前已暂停");
   expect(first.text).not.toContain("nbt worker job create");
 
   // 开启：注入派工 Skill

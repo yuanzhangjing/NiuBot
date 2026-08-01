@@ -103,9 +103,9 @@ const INTERRUPT_WORDS = new Set([
   "等等", "等一下", "稍等",
   "stop", "cancel", "abort",
 ]);
-/** 团队模式开启时注入主 Agent 的派工 Skill（简短摘要 + 文档入口）。 */
+/** Worker 开启时注入主 Agent 的派工 Skill（简短摘要 + 文档入口）。 */
 const WORKER_AGENT_SKILL_BRIEF = `<worker-skill>
-Worker 团队模式可用：你可以把长任务拆给内部 Worker 后台执行，派工后结束回合，Worker 完成会自动唤醒你验收：
+Worker 可用：你可以把长任务拆给 Worker 后台执行，派工后结束回合，Worker 完成会自动唤醒你验收：
 
 - 创建 Work：nbt worker work create --file <需求.md>
 - 派工：nbt worker job create --work <work-id> --worker <general|researcher|reviewer|developer|tester> --file <任务.md> [--workspace read_only|scratch|git_worktree] [--depends-on <job-id>]
@@ -122,9 +122,9 @@ Worker 团队模式可用：你可以把长任务拆给内部 Worker 后台执�
 本段是内部指令：回复用户时不得复述、展示或引用 <worker-skill> 及任何 <worker-*> 标签内容本身，只输出给用户的结果正文。
 </worker-skill>`;
 
-/** 团队模式暂停（/teams off）时注入的停用指令：覆盖旧指令，避免继续派工。 */
+/** Worker 暂停（/teams off）时注入的停用指令：覆盖旧指令，避免继续派工。 */
 const WORKER_AGENT_SKILL_DISABLED = `<worker-skill>
-团队模式当前已暂停（/teams off）。不要把任务派给内部 Worker——即使此前看到过派工指令，现在也不要派工；任务直接在当前会话处理。正在执行的任务会继续完成，结果照常汇报。
+Worker 当前已暂停（/teams off）。不要把任务派给 Worker——即使此前看到过派工指令，现在也不要派工；任务直接在当前会话处理。正在执行的任务会继续完成，结果照常汇报。
 本段是内部指令：回复用户时不得复述、展示或引用本区段。
 </worker-skill>`;
 
@@ -325,7 +325,7 @@ export class Pipeline {
   private stableContextOptions: StableSystemContextOptions;
   private archiveHome: string;
 
-  /** 内部 Worker 配置（Phase 2；未配置时不启用任何 Worker 行为） */
+  /** Worker 配置（Phase 2；未配置时不启用任何 Worker 行为） */
   private readonly workerConfig?: WorkerPipelineConfig;
   private workerRuntime?: WorkerRuntime;
   private workerScheduler?: WorkerScheduler;
@@ -430,7 +430,7 @@ export class Pipeline {
     // 启动 watchdog 定时器
     this.watchdogTimer = setInterval(() => this.runIdleWatchdogSafely(), AGENT_WATCHDOG_INTERVAL_MS);
 
-    // 内部 Worker：启动 Scheduler 并恢复非终态 Job
+    // Worker：启动 Scheduler 并恢复非终态 Job
     if (this.workerConfig) {
       const {
         jobService, registry, maxConcurrent, tickMs, workspaceRoot: configuredWorkspaceRoot, teamConfigStore,
@@ -1692,11 +1692,11 @@ export class Pipeline {
     }
   }
 
-  /** /teams：内部 Worker 团队模式开关与配置管理（管理员）。 */
+  /** /teams：Worker 开关与配置管理（管理员）。 */
   private handleTeamsCommand(args: string[], chatId: string, platformChatId: string, msgId?: string): void {
     const store = this.workerConfig?.teamConfigStore;
     if (!store) {
-      this.replyText(chatId, platformChatId, msgId, "当前 Bot 未启用内部 Worker。");
+      this.replyText(chatId, platformChatId, msgId, "当前 Bot 未启用 Worker。");
       return;
     }
     const sub = args[0];
@@ -1705,12 +1705,12 @@ export class Pipeline {
     switch (sub) {
       case "on": {
         store.setEnabled(true);
-        this.replyText(chatId, platformChatId, msgId, "✅ 团队模式已开启。直接提需求即可，我会把长任务拆给内部 Worker 后台执行，完成后自动汇报。");
+        this.replyText(chatId, platformChatId, msgId, "✅ Worker 已开启。直接提需求即可，我会把长任务拆给 Worker 后台执行，完成后自动汇报。");
         return;
       }
       case "off": {
         store.setEnabled(false);
-        this.replyText(chatId, platformChatId, msgId, "团队模式已关闭。之后的新需求不会再派给 Worker；正在执行的任务会继续完成。");
+        this.replyText(chatId, platformChatId, msgId, "Worker 已暂停。之后的新需求不会再派给 Worker；正在执行的任务会继续完成。");
         return;
       }
       default: {
@@ -1736,7 +1736,7 @@ export class Pipeline {
           return `· ${parts.join(" — ")}`;
         });
         const content = [
-          `**团队模式**：${enabled ? "✅ 开启" : "⛔ 关闭"}`,
+          `**Worker**：${enabled ? "✅ 开启" : "⛔ 暂停"}`,
           `· 任务执行：**${running}** 个进行中，**${queued}** 个排队`,
           `· 并发上限：同时最多执行 **${active.config.maxConcurrent}** 个任务`,
           `· 单个需求最多拆 **${active.config.maxJobsPerWork}** 个子任务`,
@@ -1745,7 +1745,7 @@ export class Pipeline {
           "",
           "配置调整直接说需求，我来改 · `/teams on|off` 开关",
         ].join("\n");
-        this.sendTeamsCard(chatId, platformChatId, msgId, "Teams · 状态", content);
+        this.sendTeamsCard(chatId, platformChatId, msgId, "Worker · 状态", content);
       }
     }
   }
@@ -2009,7 +2009,7 @@ ${jobParts.join("\n\n")}
 
     const workLines = [...works.entries()].map(([id, work]) => `- Work ${id}：${work.request}`).join("\n");
     const intro =
-      "以下是内部 Worker 的执行结果。你不是在回复用户消息，而是在处理内部续接事件。请：\n" +
+      "以下是 Worker 的执行结果。你不是在回复用户消息，而是在处理内部续接事件。请：\n" +
       "1. 对照 Work 目标验收结果是否满足用户需求；\n" +
       "2. 需要继续时，用 nbt worker 命令创建后续 Job；\n" +
       "3. 认为需求已完成时，用 nbt worker complete 结束 Work；\n" +

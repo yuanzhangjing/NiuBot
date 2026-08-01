@@ -1,10 +1,10 @@
-# 主 Agent 派工 Skill（内部 Worker）
+# 主 Agent 派工 Skill（Worker）
 
 > 本文档教主 Agent 何时派工、如何操作 `nbt worker` CLI。Worker 功能未启用（`/teams off`）时不要派工。
 
 ## 何时派工
 
-用户需求满足以下特征时，考虑创建 Work 并派给内部 Worker：
+用户需求满足以下特征时，考虑创建 Work 并派给Worker：
 
 - 任务较长或耗时（调研、审查、实现），不需要用户实时确认；
 - 可以拆成独立子任务（如"调研 A"、"审查 B"）；
