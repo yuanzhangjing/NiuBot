@@ -16,10 +16,10 @@ import {
 
 const tempDirs: string[] = [];
 
-function writeTempShim(fileName: string, content: string): string {
+function writeTempShim(fileName: string, content: string, subDir = path.join("node_modules", ".bin")): string {
   const dir = mkdtempSync(path.join(os.tmpdir(), "executable-shim-"));
   tempDirs.push(dir);
-  const shimPath = path.join(dir, "node_modules", ".bin", fileName);
+  const shimPath = path.join(dir, subDir, fileName);
   fs.mkdirSync(path.dirname(shimPath), { recursive: true });
   writeFileSync(shimPath, content, "utf8");
   return shimPath;
@@ -105,23 +105,69 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\\..\\
     expect(invocation.windowsVerbatimArguments).toBeUndefined();
   });
 
-  it("bypasses cmd for npm JS shims in the simplified (no find_dp0) form", () => {
-    const shim = writeTempShim("codex.cmd", `@ECHO off
+  it("bypasses cmd for inline %~dp0 shims (yarn v1 style, no trailing percent)", () => {
+    // cmd 的 %~dp0 语法没有结尾百分号；yarn/老 npm 内联式 shim 直接内联调用行
+    const shim = writeTempShim("yarn.cmd", `@IF EXIST "%~dp0\\node.exe" (
+  "%~dp0\\node.exe" "%~dp0\\..\\yarn\\bin\\yarn.js" %*
+) ELSE (
+  @SETLOCAL
+  @SET PATHEXT=%PATHEXT:;.JS;=;%
+  node "%~dp0\\..\\yarn\\bin\\yarn.js" %*
+)
+`);
+    const invocation = buildExecutableInvocation(shim, ["add", "pkg"], { platform: "win32" });
+    expect(invocation.command).toBe(process.execPath);
+    expect(invocation.args[0]).toBe(path.win32.join(path.win32.dirname(shim), "..", "yarn", "bin", "yarn.js"));
+    expect(invocation.args.slice(1)).toEqual(["add", "pkg"]);
+  });
+
+  it("bypasses cmd for globally installed npm CLIs (no node_modules/.bin prefix)", () => {
+    // npm 全局安装：shim 直接在全局 bin 目录（%APPDATA%\\npm\\claude.cmd）
+    const shim = writeTempShim("claude.cmd", `@ECHO off
 GOTO start
+:find_dp0
+SET dp0=%~dp0
+EXIT /b
 :start
 SETLOCAL
+CALL :find_dp0
+
 IF EXIST "%dp0%\\node.exe" (
   SET "_prog=%dp0%\\node.exe"
 ) ELSE (
   SET "_prog=node"
   SET PATHEXT=%PATHEXT:;.JS;=;%
 )
-"%_prog%" "%dp0%\\..\\codex\\cli.mjs" %*
-`);
-    const invocation = buildExecutableInvocation(shim, ["-m", "gpt-5"], { platform: "win32" });
+
+endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\\..\\@anthropic-ai\\claude-code\\cli.js" %*
+`, "");
+    const invocation = buildExecutableInvocation(shim, ["--append-system-prompt", "a\nb"], { platform: "win32" });
     expect(invocation.command).toBe(process.execPath);
-    expect(invocation.args[0]).toBe(path.win32.join(path.win32.dirname(shim), "..", "codex", "cli.mjs"));
-    expect(invocation.args.slice(1)).toEqual(["-m", "gpt-5"]);
+    expect(invocation.args[0]).toBe(path.win32.join(path.win32.dirname(shim), "..", "@anthropic-ai", "claude-code", "cli.js"));
+    expect(invocation.args.slice(1)).toEqual(["--append-system-prompt", "a\nb"]);
+  });
+
+  it("ignores comment and loader references (only call lines with %* are entries)", () => {
+    const shim = writeTempShim("claude.cmd", `@ECHO off
+REM "%dp0%\\..\\pkg\\cleanup.js"
+SETLOCAL
+"%_prog%" "%dp0%\\..\\claude\\cli.js" --require "%dp0%\\..\\claude\\preload.js" %*
+`);
+    const invocation = buildExecutableInvocation(shim, ["--flag"], { platform: "win32" });
+    expect(invocation.command).toBe(process.execPath);
+    // 注释行和 --require 加载器不被当入口
+    expect(invocation.args[0]).toBe(path.win32.join(path.win32.dirname(shim), "..", "claude", "cli.js"));
+    expect(invocation.args.slice(1)).toEqual(["--flag"]);
+  });
+
+  it("handles double backslashes in shim entries (no drive-root mis-resolution)", () => {
+    const shim = writeTempShim("claude.cmd", `@ECHO off
+SETLOCAL
+"%_prog%" "%dp0%\\\\..\\\\claude\\\\cli.js" %*
+`);
+    const invocation = buildExecutableInvocation(shim, ["--flag"], { platform: "win32" });
+    expect(invocation.command).toBe(process.execPath);
+    expect(invocation.args[0]).toBe(path.win32.join(path.win32.dirname(shim), "..", "claude", "cli.js"));
   });
 
   it("bypasses cmd for native .exe npm shims (spawns the exe directly)", () => {
