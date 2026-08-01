@@ -1718,7 +1718,17 @@ export class Pipeline {
         const running = jobService?.listJobsByStatus("running").length ?? 0;
         const queued = jobService?.listJobsByStatus("queued").length ?? 0;
         const profiles = this.workerConfig?.registry.list() ?? [];
-        const profileLines = profiles.map((p) => `· ${p.displayName}${p.description ? `（${p.description}）` : ""}`);
+        const accessNames: Record<string, string> = {
+          read_only: "只读",
+          scratch: "临时目录",
+          git_worktree: "隔离开发",
+        };
+        const profileLines = profiles.map((p) => {
+          const parts = [`**${p.displayName}**`];
+          if (p.description) parts.push(p.description);
+          parts.push(`${accessNames[p.access] ?? p.access}${p.maxConcurrent ? ` · 并发 ${p.maxConcurrent}` : ""}`);
+          return `· ${parts.join(" — ")}`;
+        });
         const content = [
           `**团队模式**：${enabled ? "✅ 开启" : "⛔ 关闭"}`,
           `· 任务执行：**${running}** 个进行中，**${queued}** 个排队`,
