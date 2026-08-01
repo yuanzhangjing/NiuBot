@@ -131,6 +131,15 @@ export function buildExecutableInvocation(
     return { command: executable, args };
   }
 
+  // npm 二进制 shim（node_modules\.bin\*.cmd）：解析出真实入口直跑（JS 入口用 node、
+  // 原生 .exe 直跑），绕过 cmd.exe。cmd 的命令行解析把换行当命令分隔，
+  // 多行参数（如 --append-system-prompt 的多行 system rules）会在第一个换行处截断，
+  // 截断点之后的参数（--resume 等）静默丢失。node/exe 的参数传递不经 cmd 解析，换行安全。
+  const shimTarget = resolveNpmShimTarget(executable, args);
+  if (shimTarget) {
+    return shimTarget;
+  }
+
   const env = options.env ?? process.env;
   const commandInterpreter = readEnv(env, "COMSPEC") || "cmd.exe";
   const doubleEscapeMetaCharacters = /node_modules[\\/]\.bin[\\/][^\\/]+\.cmd$/i.test(executable);
@@ -145,6 +154,44 @@ export function buildExecutableInvocation(
     args: ["/d", "/s", "/c", `"${commandLine}"`],
     windowsVerbatimArguments: true,
   };
+}
+
+/**
+ * 解析 npm 安装的 .cmd shim 指向的真实入口。
+ * npm shim 形如 `"%_prog%" "%dp0%\..\pkg\cli.js" %*`（老式 find_dp0 与新式简化版
+ * 结构相同，仅有无 find_dp0 子过程之分）：提取 `%dp0%` 之后的 JS 入口用当前 node
+ * 直跑；纯原生 .exe shim 则解析 exe 路径直跑。解析失败（非 npm shim / 内容异常）
+ * 返回 undefined，调用方保持原 cmd 包装路径。
+ */
+function resolveNpmShimTarget(shimPath: string, args: string[]): ExecutableInvocation | undefined {
+  if (!/node_modules[\\/]\.bin[\\/][^\\/]+\.cmd$/i.test(shimPath)) return undefined;
+  let content: string;
+  try {
+    content = fs.readFileSync(shimPath, "utf8");
+  } catch {
+    return undefined;
+  }
+  const dp0 = path.win32.dirname(shimPath);
+
+  // JS 入口（cli.js）：取最后一个 .js/.cjs/.mjs 引用（排除 node.exe 判断行）
+  const jsRefs = [...content.matchAll(/"%(?:~)?dp0%\\?([^"\r\n]+?\.(?:js|cjs|mjs))"/gi)];
+  if (jsRefs.length > 0) {
+    const raw = jsRefs[jsRefs.length - 1]![1];
+    return {
+      command: process.execPath,
+      args: [path.win32.resolve(dp0, raw), ...args],
+    };
+  }
+
+  // 纯原生 .exe shim：取最后一个非 node.exe 的 exe 引用
+  const exeRefs = [...content.matchAll(/"%(?:~)?dp0%\\?([^"\r\n]+?\.exe)"/gi)].filter(
+    (m) => !/node\.exe$/i.test(m[1]!),
+  );
+  if (exeRefs.length > 0) {
+    const raw = exeRefs[exeRefs.length - 1]![1];
+    return { command: path.win32.resolve(dp0, raw), args };
+  }
+  return undefined;
 }
 
 function firstExecutable(
