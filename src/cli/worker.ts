@@ -179,7 +179,7 @@ function handleComplete(ctx: WorkerCliContext, service: SqliteJobService, args: 
   console.log(`Work ${workId} 已完成`);
 }
 
-/** nbt worker config：主 Agent 生成配置草案（管理员 /teams config 确认应用）。 */
+/** nbt worker config：主 Agent 生成配置草案（管理员 /worker config 确认应用）。 */
 function handleConfig(ctx: WorkerCliContext, args: string[]): void {
   const sub = args[0];
   const store = new TeamConfigStore(ctx.db, ctx.botId);

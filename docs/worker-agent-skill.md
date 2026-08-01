@@ -1,6 +1,6 @@
 # 主 Agent 派工 Skill（Worker）
 
-> 本文档教主 Agent 何时派工、如何操作 `nbt worker` CLI。Worker 功能未启用（`/teams off`）时不要派工。
+> 本文档教主 Agent 何时派工、如何操作 `nbt worker` CLI。Worker 功能未启用（`/worker off`）时不要派工。
 
 ## 何时派工
 
@@ -76,7 +76,7 @@ profiles:
       include: [code-review]
 ```
 
-流程：`nbt worker config draft --file <yaml>` → 输出 draft ID → 请管理员执行 `/teams config draft <id>` 查看、`/teams config apply <id>` 确认应用。**主 Agent 不能直接应用配置**。
+流程：`nbt worker config draft --file <yaml>` → 输出 draft ID → 请管理员执行 `/worker config draft <id>` 查看、`/worker config apply <id>` 确认应用。**主 Agent 不能直接应用配置**。
 
 ## 边界
 

@@ -1,9 +1,13 @@
 /**
- * TeamConfigStore：/teams 配置体系（Phase 5）。
+ * TeamConfigStore：/worker 配置体系（Phase 5）。
  *
  * 配置流程（方案 §15）：Agent 生成草案（yaml）→ 确定性校验 →
  * 管理员确认后 apply 生成不可变版本 → 历史版本可回滚（回滚也是新版本）。
  * 新版本只影响新 Job（运行中 Job 使用创建时的 profile 快照）。
+ *
+ * 命名说明：Team* 类名与 team_* 表名沿袭早期「Teams」叫法（对应命令已统一为
+ * /worker）；改名需同步迁移表结构（team_settings / team_config_versions /
+ * team_config_drafts），当前保留以降低迁移成本。
  */
 
 import { createHash, randomUUID } from "node:crypto";
@@ -165,7 +169,7 @@ export class TeamConfigStore {
     const row = this.db.prepare("SELECT enabled FROM team_settings WHERE bot_id = ?").get(this.botId) as
       | { enabled: number }
       | undefined;
-    // 默认开启（全开放方向）：未显式关闭时团队模式可用，/teams off 为临时暂停
+    // 默认开启（全开放方向）：未显式关闭时团队模式可用，/worker off 为临时暂停
     return row ? row.enabled === 1 : true;
   }
 

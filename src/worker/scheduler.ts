@@ -30,7 +30,7 @@ export interface WorkerSchedulerOptions {
   onContinuations?: (chatId: string, continuationIds: string[]) => void;
   /** 写任务租约管理（存在时定期清理过期租约） */
   leaseManager?: ResourceLeaseManager;
-  /** 是否允许调度新 Job（/teams off 时返回 false；watchdog 和投递继续） */
+  /** 是否允许调度新 Job（/worker off 时返回 false；watchdog 和投递继续） */
   isSchedulingEnabled?: () => boolean;
 }
 
@@ -138,7 +138,7 @@ export class WorkerScheduler {
       }
     }
 
-    // 2. 调度：/teams off 时不认领新 Job（running 继续，watchdog 和投递不受影响）
+    // 2. 调度：/worker off 时不认领新 Job（running 继续，watchdog 和投递不受影响）
     const schedulingEnabled = this.options.isSchedulingEnabled?.() ?? true;
     if (!schedulingEnabled) return;
     const freeSlots = Math.max(0, maxConcurrent - runtime.runningCount());

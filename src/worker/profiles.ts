@@ -1,7 +1,7 @@
 /**
  * 最小 WorkerProfileRegistry（Phase 2 静态版 + Phase 5 配置驱动）。
  *
- * 内置默认 Profile 供开箱即用；/teams config 应用后由配置覆盖（热更新只影响新 Job）。
+ * 内置默认 Profile 供开箱即用；/worker config 应用后由配置覆盖（热更新只影响新 Job）。
  */
 
 import type { TeamProfileSkills } from "./team-config.js";
