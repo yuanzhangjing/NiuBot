@@ -174,11 +174,14 @@ export class WorkerRuntime {
         }
       }
 
+      // 分层注入：工作原则 + 职责进 system prompt（常驻）；工作流进 user prompt（随任务带）
+      const importantContext = [profile.principles, profile.prompt].filter(Boolean).join("\n\n");
+      const rolePrompt = [profile.prompt, profile.workflow].filter(Boolean).join("\n\n");
       session = await backend.createSession({
         ...sessionConfig,
         chatId: work?.sourceChatId,
         workingDirectory: prepared.execDir,
-        importantContext: profile.prompt,
+        importantContext,
       });
       this.running.set(jobId, {
         jobId,
@@ -188,7 +191,7 @@ export class WorkerRuntime {
         controller,
       });
 
-      const prompt = await buildPrompt(job, profile.prompt, prepared.execDir);
+      const prompt = await buildPrompt(job, rolePrompt, prepared.execDir);
 
       // 活动心跳：watchdog 依据 lastActivity 判断"无输出超时"（backend 不支持时跳过）
       const getActivity = (backend as unknown as {
