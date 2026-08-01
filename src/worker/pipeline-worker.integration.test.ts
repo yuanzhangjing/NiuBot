@@ -444,6 +444,32 @@ function userDelivery(chatId: string, text: string, seq: number): InboundDeliver
   };
 }
 
+test("延续性 Job 自动注入同 Work 前序结果和检索入口", async () => {
+  await pipeline.start();
+
+  const work = service.createWork({
+    botId: BOT_ID,
+    ownerUserId: OWNER,
+    sourceChatId: CHAT_ID,
+    visibility: "private",
+    request: "延续任务",
+  });
+  const jobA = service.createJob({ workId: work.id, workerProfileId: "researcher", prompt: "第一步调研", workdir: tempRoot });
+  await waitFor(() => service.getJob(jobA.id)?.status === "completed");
+
+  const workerMessagesBefore = backend.messages.length;
+  const jobB = service.createJob({ workId: work.id, workerProfileId: "researcher", prompt: "基于第一步继续", workdir: tempRoot });
+  await waitFor(() => service.getJob(jobB.id)?.status === "completed");
+
+  const jobBPrompt = backend.messages.slice(workerMessagesBefore).find((m) => m.text.includes("基于第一步继续"));
+  expect(jobBPrompt).toBeTruthy();
+  expect(jobBPrompt!.text).toContain("<previous-work>");
+  expect(jobBPrompt!.text).toContain(jobA.id);
+  expect(jobBPrompt!.text).toContain(backend.resultText);
+  expect(jobBPrompt!.text).toContain("<history-access>");
+  expect(jobBPrompt!.text).toContain("nbt sessions search");
+});
+
 test("团队模式开启时主 Agent 回合注入派工 Skill，关闭时不注入", async () => {
   teamConfig.setEnabled(false);
   await pipeline.start();

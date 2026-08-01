@@ -2026,6 +2026,32 @@ Job 任务：${job.prompt}
 ${writeRule}
 完成标准：以自由 Markdown 输出结果：做了什么、发现了什么、未完成内容、风险和测试证据。
 </job-target>`);
+
+    // 延续上下文：同 Work 前序 Job 的结果（按创建顺序在前且已终态）
+    const jobService = this.workerConfig?.jobService;
+    const prevJobs = jobService
+      ?.listJobs(job.workId)
+      .filter((j) => j.id !== job.id && (j.status === "completed" || j.status === "failed"))
+      .slice(0, 3);
+    if (prevJobs && prevJobs.length > 0) {
+      const prevSections = prevJobs.map((j) => {
+        const task = j.prompt.slice(0, 200);
+        const result = (j.responseText ?? j.error ?? "").slice(0, 1500);
+        return `- Job ${j.id}（${j.workerProfileId}，${j.status}）\n  任务：${task}\n  结果：${result || "(无文本)"}`;
+      });
+      parts.push(`<previous-work>
+本 Work 之前的执行记录（供延续参考，可能与本 Job 相关或无关）：
+${prevSections.join("\n\n")}
+</previous-work>`);
+    }
+
+    // 历史检索入口：延续性工作可用 nbt 命令查阅历史，无需恢复 Session
+    parts.push(`<history-access>
+需要更多历史信息时：
+- 本任务历史执行记录：nbt worker get <job-id>（job id 见 <previous-work>）
+- 来源会话的历史讨论：nbt sessions search <关键词>（仅检索当前会话所在 chat 的历史）
+- 不要假设历史结果一定正确，关键结论以实际代码/文件为准。
+</history-access>`);
     return parts.join("\n\n");
   }
 
