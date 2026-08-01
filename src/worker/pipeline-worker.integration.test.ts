@@ -4,7 +4,8 @@
  * Job 终态 → Continuation 入队 → Pipeline 唤醒主 Agent 验收 → 最终回复。
  */
 
-import { mkdtempSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -26,23 +27,30 @@ const CHAT_ID = "chat-1";
 class FakeWorkerBackend implements AgentBackend {
   readonly sessions: string[] = [];
   readonly messages: Array<{ sessionId: string; text: string }> = [];
+  readonly sessionDirs = new Map<string, string>();
   /** 每个 worker session 返回的结果文本 */
   resultText = "审查结论：发现 2 个并发问题，详见报告。";
   /** worker session 的 sendMessage 次数（0 时挂起，用于并发测试） */
   delayMs = 0;
+  /** 非空时 sendMessage 在工作目录写入该文件（模拟写任务） */
+  writeFileOnSend?: string;
 
   async start(): Promise<void> {}
   async stop(): Promise<void> {}
 
-  async createSession(_config: SessionConfig): Promise<AgentSession> {
+  async createSession(config: SessionConfig): Promise<AgentSession> {
     const id = `agent_${this.sessions.length + 1}`;
     this.sessions.push(id);
+    this.sessionDirs.set(id, config.workingDirectory ?? process.cwd());
     return { id };
   }
 
   async sendMessage(session: AgentSession, message: string): Promise<AgentResponse> {
     if (this.delayMs > 0) {
       await new Promise((resolve) => setTimeout(resolve, this.delayMs));
+    }
+    if (this.writeFileOnSend) {
+      writeFileSync(path.join(this.sessionDirs.get(session.id)!, this.writeFileOnSend), "changed by worker\n");
     }
     this.messages.push({ sessionId: session.id, text: message });
     return { text: this.resultText };
@@ -130,6 +138,7 @@ beforeEach(() => {
       registry,
       maxConcurrent: 2,
       tickMs: 50,
+      workspaceRoot: path.join(tempRoot, "ws"),
     },
   );
 });
@@ -288,7 +297,7 @@ test("重启恢复：running Job 标记 interrupted，claimed Continuation 重�
     false,
     undefined,
     undefined,
-    { jobService: service, registry, maxConcurrent: 2, tickMs: 50 },
+    { jobService: service, registry, maxConcurrent: 2, tickMs: 50, workspaceRoot: path.join(tempRoot, "ws") },
   );
   await pipeline2.start();
 
@@ -310,3 +319,80 @@ test("重启恢复：running Job 标记 interrupted，claimed Continuation 重�
     pipeline2.stop();
   }
 }, 20000);
+
+function makeGitRepo(): string {
+  mkdirSync(path.join(tempRoot, "repo"), { recursive: true });
+  const repo = realpathSync(path.join(tempRoot, "repo"));
+  execFileSync("git", ["init", "-q"], { cwd: repo });
+  execFileSync("git", ["config", "user.email", "test@test"], { cwd: repo });
+  execFileSync("git", ["config", "user.name", "test"], { cwd: repo });
+  writeFileSync(path.join(repo, "a.txt"), "hello\n");
+  execFileSync("git", ["add", "."], { cwd: repo });
+  execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: repo });
+  return repo;
+}
+
+test("写任务：developer 在独立 worktree 修改代码，不污染目标仓库", async () => {
+  const repo = makeGitRepo();
+  backend.writeFileOnSend = "b.txt";
+  await pipeline.start();
+
+  const work = service.createWork({
+    botId: BOT_ID,
+    ownerUserId: OWNER,
+    sourceChatId: CHAT_ID,
+    visibility: "private",
+    request: "在 repo 里新增 b.txt",
+  });
+  const job = service.createJob({
+    workId: work.id,
+    workerProfileId: "developer",
+    prompt: "新增 b.txt 文件",
+    workdir: repo,
+    workspacePolicy: "git_worktree",
+  });
+
+  await waitFor(() => service.getJob(job.id)?.status === "completed");
+  expect(service.getJob(job.id)?.responseText).toBeTruthy();
+
+  // 目标仓库主工作区没有 b.txt（写入发生在 worktree）
+  expect(existsSync(path.join(repo, "b.txt"))).toBe(false);
+
+  // worktree 目录保留且包含写入的文件 + marker
+  const worktreeDir = path.join(tempRoot, "ws", `worktree-${job.id}`);
+  expect(existsSync(path.join(worktreeDir, "b.txt"))).toBe(true);
+  expect(existsSync(path.join(worktreeDir, ".niubot-worker"))).toBe(true);
+}, 15000);
+
+test("同一 repo 的两个写 Job 互斥：第二个 resource busy", async () => {
+  const repo = makeGitRepo();
+  backend.delayMs = 3000;
+  await pipeline.start();
+
+  const work = service.createWork({
+    botId: BOT_ID,
+    ownerUserId: OWNER,
+    sourceChatId: CHAT_ID,
+    visibility: "private",
+    request: "两个写任务",
+  });
+  const jobA = service.createJob({
+    workId: work.id,
+    workerProfileId: "developer",
+    prompt: "任务 A",
+    workdir: repo,
+    workspacePolicy: "git_worktree",
+  });
+  const jobB = service.createJob({
+    workId: work.id,
+    workerProfileId: "developer",
+    prompt: "任务 B",
+    workdir: repo,
+    workspacePolicy: "git_worktree",
+  });
+
+  await waitFor(() => service.getJob(jobA.id)?.status === "running");
+  // jobB 应因租约冲突失败（不并行写同一 repo）
+  await waitFor(() => service.getJob(jobB.id)?.status === "failed");
+  expect(service.getJob(jobB.id)?.error).toMatch(/resource busy/);
+}, 15000);

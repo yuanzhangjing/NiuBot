@@ -19,6 +19,7 @@ import type {
   WorkerEvent,
   WorkerEventName,
   WorkVisibility,
+  WorkspacePolicy,
 } from "./types.js";
 
 export type { ArtifactEntry };
@@ -57,6 +58,7 @@ export interface JobRow {
   ended_at: string | null;
   claim_token: string | null;
   claimed_at: string | null;
+  workspace_policy: WorkspacePolicy;
   created_at: string;
   updated_at: string;
   version: number;
@@ -75,6 +77,16 @@ export interface ContinuationRow {
   claim_token: string | null;
   claimed_at: string | null;
   completed_at: string | null;
+  created_at: string;
+}
+
+export interface ResourceLeaseRow {
+  id: number;
+  bot_id: string;
+  resource_key: string;
+  job_id: string;
+  token: string;
+  expires_at: string | null;
   created_at: string;
 }
 
@@ -134,6 +146,7 @@ export function jobRowToJob(row: JobRow): Job {
     endedAt: row.ended_at ?? undefined,
     claimToken: row.claim_token ?? undefined,
     claimedAt: row.claimed_at ?? undefined,
+    workspacePolicy: row.workspace_policy,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     version: row.version,
@@ -255,13 +268,13 @@ export function appendWorkJobId(db: Database.Database, workId: string, jobId: st
 
 export function insertJob(
   db: Database.Database,
-  input: { workId: string; workerProfileId: string; prompt: string; workdir: string },
+  input: { workId: string; workerProfileId: string; prompt: string; workdir: string; workspacePolicy: WorkspacePolicy },
 ): JobRow {
   const id = `job_${randomUUID()}`;
   db.prepare(`
-    INSERT INTO worker_jobs (id, work_id, worker_profile_id, prompt, workdir)
-    VALUES (?, ?, ?, ?, ?)
-  `).run(id, input.workId, input.workerProfileId, input.prompt, input.workdir);
+    INSERT INTO worker_jobs (id, work_id, worker_profile_id, prompt, workdir, workspace_policy)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(id, input.workId, input.workerProfileId, input.prompt, input.workdir, input.workspacePolicy);
   return getJob(db, id)!;
 }
 
@@ -482,7 +495,48 @@ export function markContinuationCompleted(
   return result.changes === 1;
 }
 
-/** 重启恢复：主 Agent 回合中断的 claimed Continuation 重置为 pending，允许重新投递（§7.5）。 */
+// ---------------------------------------------------------------------------
+// 资源租约（§12 写任务互斥：同 repo/目录的冲突写操作不得并行）
+// ---------------------------------------------------------------------------
+
+export type AcquireLeaseResult =
+  | { ok: true; token: string }
+  | { ok: false; reason: "held"; holderJobId: string };
+
+/** 尝试获取租约；resource_key UNIQUE 保证并发安全。 */
+export function acquireLease(
+  db: Database.Database,
+  input: { botId: string; resourceKey: string; jobId: string; token: string; expiresAt?: string },
+): AcquireLeaseResult {
+  const existing = db.prepare("SELECT * FROM worker_resource_leases WHERE resource_key = ?").get(input.resourceKey) as
+    | ResourceLeaseRow
+    | undefined;
+  if (existing) {
+    return { ok: false, reason: "held", holderJobId: existing.job_id };
+  }
+  db.prepare(`
+    INSERT INTO worker_resource_leases (bot_id, resource_key, job_id, token, expires_at)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(input.botId, input.resourceKey, input.jobId, input.token, input.expiresAt ?? null);
+  return { ok: true, token: input.token };
+}
+
+export function releaseLeaseByJob(db: Database.Database, jobId: string): boolean {
+  const result = db.prepare("DELETE FROM worker_resource_leases WHERE job_id = ?").run(jobId);
+  return result.changes > 0;
+}
+
+export function getLeaseByJob(db: Database.Database, jobId: string): ResourceLeaseRow | undefined {
+  return db.prepare("SELECT * FROM worker_resource_leases WHERE job_id = ?").get(jobId) as ResourceLeaseRow | undefined;
+}
+
+/** 清理过期租约（Scheduler tick 调用；返回清理数量）。 */
+export function cleanupExpiredLeases(db: Database.Database, nowIso: string): number {
+  const result = db.prepare("DELETE FROM worker_resource_leases WHERE expires_at IS NOT NULL AND expires_at < ?").run(nowIso);
+  return result.changes;
+}
+
+/** 重启恢复：claimed Continuation 重置为 pending，允许重新投递（§7.5）。 */
 export function resetClaimedContinuations(db: Database.Database): number {
   const result = db.prepare(`
     UPDATE agent_continuations

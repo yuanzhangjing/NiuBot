@@ -13,6 +13,8 @@ import { createLogger } from "../logger.js";
 import { terminateSpawnedProcessTree, waitForProcessExit } from "../platform/process.js";
 import type { Job, JobExecutionRecord, JobService } from "./types.js";
 import { WorkerProfileRegistry } from "./profiles.js";
+import { WorkspaceProvider, type PreparedWorkspace } from "./workspace.js";
+import { ResourceLeaseManager } from "./lease.js";
 
 const log = createLogger("worker-runtime");
 
@@ -34,8 +36,12 @@ export interface WorkerRuntimeOptions {
    * workingDirectory 按 Job 动态填充，来自 Work 的来源会话）
    */
   sessionConfig: Omit<SessionConfig, "workingDirectory" | "chatId">;
-  /** Job 上下文组装（由 Pipeline 注入：stable context + profile + job prompt） */
-  buildPrompt: (job: Job, profilePrompt: string) => string | Promise<string>;
+  /** Job 上下文组装（由 Pipeline 注入：stable context + profile + job prompt + 实际执行目录） */
+  buildPrompt: (job: Job, profilePrompt: string, execDir: string) => string | Promise<string>;
+  /** 工作区准备（read_only Job 可不提供） */
+  workspaceProvider?: WorkspaceProvider;
+  /** 写任务资源互斥（git_worktree Job 必须提供） */
+  leaseManager?: ResourceLeaseManager;
 }
 
 export class WorkerRuntime {
@@ -120,14 +126,41 @@ export class WorkerRuntime {
     }
 
     let session: AgentSession | undefined;
+    let prepared: PreparedWorkspace | undefined;
+    let leaseHeld = false;
     const controller = new AbortController();
     const startedAt = Date.now();
     const work = jobService.getWork(job.workId);
     try {
+      // 工作区准备（§12）：read_only 直接用目标目录；scratch/git_worktree 由 Runtime 管理
+      const { workspaceProvider, leaseManager } = this.options;
+      if (job.workspacePolicy === "read_only" || !workspaceProvider) {
+        prepared = await workspaceProvider?.prepare(job.id, job.workspacePolicy, job.workdir)
+          ?? { execDir: job.workdir, managed: false };
+      } else {
+        prepared = await workspaceProvider.prepare(job.id, job.workspacePolicy, job.workdir);
+        if (prepared.repoPath && leaseManager) {
+          const lease = leaseManager.acquire(`repo-write:${prepared.repoPath}`, job.id);
+          if (!lease.ok) {
+            jobService.failJob(jobId, {
+              status: "failed",
+              responseText: "",
+              error: `resource busy: repo ${prepared.repoPath} held by job ${lease.holderJobId}`,
+              changedFiles: [],
+              artifacts: [],
+              startedAt: new Date(startedAt).toISOString(),
+              endedAt: new Date().toISOString(),
+            });
+            return;
+          }
+          leaseHeld = true;
+        }
+      }
+
       session = await backend.createSession({
         ...sessionConfig,
         chatId: work?.sourceChatId,
-        workingDirectory: job.workdir,
+        workingDirectory: prepared.execDir,
         importantContext: profile.prompt,
       });
       this.running.set(jobId, {
@@ -138,7 +171,7 @@ export class WorkerRuntime {
         controller,
       });
 
-      const prompt = await buildPrompt(job, profile.prompt);
+      const prompt = await buildPrompt(job, profile.prompt, prepared.execDir);
 
       // 活动心跳：watchdog 依据 lastActivity 判断"无输出超时"（backend 不支持时跳过）
       const getActivity = (backend as unknown as {
@@ -194,6 +227,10 @@ export class WorkerRuntime {
         } catch {
           // session 清理失败不阻断主流程
         }
+      }
+      // 释放写租约（工作区保留，marker 标记来源，不自动删除）
+      if (leaseHeld) {
+        this.options.leaseManager?.release(jobId);
       }
     }
   }

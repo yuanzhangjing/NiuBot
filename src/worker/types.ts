@@ -38,6 +38,9 @@ export const JOB_TERMINAL_STATUSES: readonly JobStatus[] = [
 
 export type WorkVisibility = "private" | "public";
 
+/** 工作空间策略（§12）：read_only 直接访问目标目录；scratch 独立临时目录；git_worktree 独立 worktree。 */
+export type WorkspacePolicy = "read_only" | "scratch" | "git_worktree";
+
 export interface ArtifactEntry {
   kind: string;
   relativePath: string;
@@ -91,6 +94,7 @@ export interface Job {
   /** 调度认领令牌（fencing），Phase 2 起用于确认结果提交者是最新持有者 */
   claimToken?: string;
   claimedAt?: string;
+  workspacePolicy: WorkspacePolicy;
   createdAt: string;
   updatedAt: string;
   version: number;
@@ -180,7 +184,9 @@ export interface CreateJobInput {
   workId: string;
   workerProfileId: string;
   prompt: string;
+  /** 目标目录（git_worktree 时为目标 repo 路径；scratch 时忽略） */
   workdir: string;
+  workspacePolicy?: WorkspacePolicy;
 }
 
 export interface ClaimJobInput {

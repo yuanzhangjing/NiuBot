@@ -17,6 +17,8 @@ import { ChatManager } from "./chat-manager.js";
 import type { QueuedMessage } from "./queue.js";
 import { WorkerRuntime } from "../worker/runtime.js";
 import { WorkerScheduler } from "../worker/scheduler.js";
+import { WorkspaceProvider } from "../worker/workspace.js";
+import { ResourceLeaseManager } from "../worker/lease.js";
 import type { Job, JobService, Work } from "../worker/types.js";
 import type { WorkerProfileRegistry } from "../worker/profiles.js";
 import {
@@ -181,6 +183,8 @@ export interface WorkerPipelineConfig {
   maxConcurrent?: number;
   /** Scheduler 扫描周期（默认 5000ms；测试可调小） */
   tickMs?: number;
+  /** scratch/worktree 根目录（默认 $NIUBOT_HOME/worker-workspaces） */
+  workspaceRoot?: string;
 }
 
 export class Pipeline {
@@ -291,6 +295,7 @@ export class Pipeline {
   private readonly workerConfig?: WorkerPipelineConfig;
   private workerRuntime?: WorkerRuntime;
   private workerScheduler?: WorkerScheduler;
+  private workerLeaseManager?: ResourceLeaseManager;
   /** 已投递到主 Agent 队列的 Continuation（内存去重；重启后 pending 重新投递） */
   private dispatchedContinuations = new Set<string>();
 
@@ -388,7 +393,9 @@ export class Pipeline {
 
     // 内部 Worker：启动 Scheduler 并恢复非终态 Job
     if (this.workerConfig) {
-      const { jobService, registry, maxConcurrent, tickMs } = this.workerConfig;
+      const { jobService, registry, maxConcurrent, tickMs, workspaceRoot: configuredWorkspaceRoot } = this.workerConfig;
+      const workspaceRoot = configuredWorkspaceRoot ?? path.join(NIUBOT_HOME, "worker-workspaces");
+      this.workerLeaseManager = new ResourceLeaseManager(this.db, this.botIdentity.platformBotId ?? "bot");
       this.workerRuntime = new WorkerRuntime({
         backend: this.agent,
         jobService,
@@ -401,7 +408,9 @@ export class Pipeline {
           model: this.botIdentity.model,
           botProfilePath: this.stableContextOptions.botProfilePath,
         },
-        buildPrompt: (job, profilePrompt) => this.buildWorkerPrompt(job, profilePrompt),
+        buildPrompt: (job, profilePrompt, execDir) => this.buildWorkerPrompt(job, profilePrompt, execDir),
+        workspaceProvider: new WorkspaceProvider({ rootDir: workspaceRoot }),
+        leaseManager: this.workerLeaseManager,
       });
       this.workerScheduler = new WorkerScheduler({
         runtime: this.workerRuntime,
@@ -409,6 +418,7 @@ export class Pipeline {
         maxConcurrent: maxConcurrent ?? 4,
         tickMs,
         onContinuations: (chatId, ids) => this.enqueueWorkerContinuations(chatId, ids),
+        leaseManager: this.workerLeaseManager,
       });
       this.workerScheduler.start();
       this.recoverInterruptedWorkerJobs();
@@ -1742,6 +1752,7 @@ export class Pipeline {
     }
     for (const job of jobService.listJobsByStatus("running")) {
       jobService.interruptJob(job.id);
+      this.workerLeaseManager?.release(job.id);
       this.log.warn("worker job interrupted by restart", { jobId: job.id, workId: job.workId });
     }
     for (const job of jobService.listJobsByStatus("cancelling")) {
@@ -1754,6 +1765,7 @@ export class Pipeline {
         startedAt: new Date().toISOString(),
         endedAt: new Date().toISOString(),
       });
+      this.workerLeaseManager?.release(job.id);
       this.log.warn("worker job cancel confirmed during restart", { jobId: job.id });
     }
   }
@@ -1761,18 +1773,25 @@ export class Pipeline {
   /**
    * 组装 Worker 的上下文：稳定系统规则 + Profile 角色说明 + Job 目标。
    * 第一版不注入主会话 transcript 和用户记忆。
+   * git_worktree Job 的 execDir 是独立 worktree，提示 Worker 只能在该目录写入。
    */
-  private buildWorkerPrompt(job: Job, profilePrompt: string): string {
+  private buildWorkerPrompt(job: Job, profilePrompt: string, execDir: string): string {
     const stable = this.buildStableSystemContext();
     const work = this.workerConfig?.jobService.getWork(job.workId);
     const parts: string[] = [];
     if (stable) parts.push(stable);
     if (profilePrompt) parts.push(`<worker-role>\n${profilePrompt}\n</worker-role>`);
+    const writeRule =
+      job.workspacePolicy === "git_worktree"
+        ? `当前目录是独立 Git worktree（目标仓库：${job.workdir}）。只能修改当前目录内的文件；不要提交、不要 push、不要发布、不要碰目标仓库主工作区。`
+        : `不要修改代码、不要提交、不要发布、不要对用户直接发送消息。`;
     parts.push(`<job-target>
 Work 目标（用户原始需求）：${work?.request ?? "(未知)"}
 Job 任务：${job.prompt}
-Job 工作目录：${job.workdir}
-完成标准：以自由 Markdown 输出结果：做了什么、发现了什么、未完成内容、风险和测试证据。不要修改代码、不要提交、不要发布、不要对用户直接发送消息。
+工作目录：${execDir}
+工作区策略：${job.workspacePolicy}
+${writeRule}
+完成标准：以自由 Markdown 输出结果：做了什么、发现了什么、未完成内容、风险和测试证据。
 </job-target>`);
     return parts.join("\n\n");
   }

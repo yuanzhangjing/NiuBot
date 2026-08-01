@@ -13,8 +13,8 @@ export interface WorkerProfile {
   prompt: string;
   /** profile 级并发上限；未设置时只受全局 maxConcurrent 约束 */
   maxConcurrent?: number;
-  /** 工作区访问方式；第一版只允许只读/scratch（写任务 Phase 4 开放） */
-  access: "read_only" | "scratch";
+  /** 工作区访问方式；git_worktree 允许在目标仓库的独立 worktree 中写入 */
+  access: "read_only" | "scratch" | "git_worktree";
 }
 
 export const STATIC_WORKER_PROFILES: Record<string, WorkerProfile> = {
@@ -54,6 +54,18 @@ export const STATIC_WORKER_PROFILES: Record<string, WorkerProfile> = {
       "- 输出 Markdown：按严重程度列问题，每个问题包含位置、影响、原因和修复方向；\n" +
       "- 没有发现时明确写「未发现问题」和仍未覆盖的风险。",
     access: "read_only",
+  },
+  developer: {
+    id: "developer",
+    displayName: "Developer",
+    description: "在隔离 worktree 中实现和修改代码",
+    prompt:
+      "你是当前 Bot 内部的开发 Worker。你的职责：\n" +
+      "- 只在当前 Job 的工作目录（独立 Git worktree）内修改代码；\n" +
+      "- 不 push、不发布、不操作生产环境；\n" +
+      "- 修改前先阅读相关文件，修改后给出变更摘要和测试建议；\n" +
+      "- 输出 Markdown：改了什么、为什么、如何验证、风险。",
+    access: "git_worktree",
   },
 };
 

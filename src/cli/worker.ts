@@ -81,6 +81,11 @@ function handleJobCreate(ctx: WorkerCliContext, service: SqliteJobService, args:
   const prompt = readFileOrFail(fileIndex >= 0 ? args[fileIndex + 1] : undefined, "job 文件");
   const workdirIndex = args.indexOf("--workdir");
   const workdir = workdirIndex >= 0 ? args[workdirIndex + 1]! : ctx.workDir;
+  const workspaceIndex = args.indexOf("--workspace");
+  const workspacePolicy = workspaceIndex >= 0 ? args[workspaceIndex + 1] : undefined;
+  if (workspacePolicy && !["read_only", "scratch", "git_worktree"].includes(workspacePolicy)) {
+    fail(`--workspace 必须是 read_only / scratch / git_worktree，收到: ${workspacePolicy}`);
+  }
 
   const registry = new WorkerProfileRegistry();
   if (!registry.get(workerId)) {
@@ -88,7 +93,13 @@ function handleJobCreate(ctx: WorkerCliContext, service: SqliteJobService, args:
   }
 
   const job = service.createJob(
-    { workId, workerProfileId: workerId, prompt: prompt.trim(), workdir },
+    {
+      workId,
+      workerProfileId: workerId,
+      prompt: prompt.trim(),
+      workdir,
+      workspacePolicy: workspacePolicy as never,
+    },
     idempotencyKey("job", prompt, ctx.chatId),
   );
   console.log(job.id);
@@ -165,7 +176,7 @@ export function handleWorker(db: Database.Database, args: string[]): void {
 
 用法：
   nbt worker work create --file <work.md>       创建 Work（来源自动绑定当前会话）
-  nbt worker job create --work <id> --worker <profile> --file <job.md> [--workdir <dir>]
+  nbt worker job create --work <id> --worker <profile> --file <job.md> [--workdir <dir>] [--workspace read_only|scratch|git_worktree]
   nbt worker list [--status <status>]           列出当前会话的 Work 和 Job
   nbt worker get <work-or-job-id>               查看详情
   nbt worker cancel <work-or-job-id>            取消 Work 或 Job

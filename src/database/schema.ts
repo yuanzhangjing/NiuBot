@@ -391,6 +391,8 @@ const migrations: Migration[] = [
           ended_at              TEXT,
           claim_token           TEXT,
           claimed_at            TEXT,
+          workspace_policy      TEXT NOT NULL DEFAULT 'read_only'
+                                CHECK(workspace_policy IN ('read_only', 'scratch', 'git_worktree')),
           created_at            TEXT NOT NULL DEFAULT (datetime('now')),
           updated_at            TEXT NOT NULL DEFAULT (datetime('now')),
           version               INTEGER NOT NULL DEFAULT 1
@@ -403,6 +405,17 @@ const migrations: Migration[] = [
           job_id           TEXT NOT NULL,
           created_at       TEXT NOT NULL DEFAULT (datetime('now'))
         );
+
+        CREATE TABLE IF NOT EXISTS worker_resource_leases (
+          id           INTEGER PRIMARY KEY AUTOINCREMENT,
+          bot_id       TEXT NOT NULL,
+          resource_key TEXT NOT NULL UNIQUE,
+          job_id       TEXT NOT NULL,
+          token        TEXT NOT NULL,
+          expires_at   TEXT,
+          created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_worker_leases_job ON worker_resource_leases(job_id);
 
         CREATE TABLE IF NOT EXISTS worker_events (
           id          INTEGER PRIMARY KEY AUTOINCREMENT,

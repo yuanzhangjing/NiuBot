@@ -9,6 +9,7 @@
 import { createLogger } from "../logger.js";
 import type { JobService } from "./types.js";
 import { WorkerRuntime } from "./runtime.js";
+import { ResourceLeaseManager } from "./lease.js";
 
 const log = createLogger("worker-scheduler");
 
@@ -25,6 +26,8 @@ export interface WorkerSchedulerOptions {
   tickMs?: number;
   /** pending Continuation 投递回调（Pipeline 提供：入队主 Agent 队列，内存去重） */
   onContinuations?: (chatId: string, continuationIds: string[]) => void;
+  /** 写任务租约管理（存在时定期清理过期租约） */
+  leaseManager?: ResourceLeaseManager;
 }
 
 export class WorkerScheduler {
@@ -66,6 +69,12 @@ export class WorkerScheduler {
 
   private async tick(): Promise<void> {
     const { runtime, jobService, maxConcurrent } = this.options;
+
+    // 0. 清理过期写租约（进程残留不会永久占住资源）
+    const expired = this.options.leaseManager?.cleanupExpired() ?? 0;
+    if (expired > 0) {
+      log.info("expired worker leases cleaned", { count: expired });
+    }
 
     // 1. watchdog：超时运行中 Job 强制取消
     const now = Date.now();
