@@ -481,6 +481,16 @@ const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 18,
+    description: "Add attempt_count to agent_continuations (loop protection)",
+    up: (db) => {
+      const columns = db.prepare("PRAGMA table_info(agent_continuations)").all() as Array<{ name: string }>;
+      if (!columns.some((column) => column.name === "attempt_count")) {
+        db.exec("ALTER TABLE agent_continuations ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0");
+      }
+    },
+  },
 ];
 
 const transportMigrations: Migration[] = [
@@ -603,7 +613,7 @@ export const LATEST_SCHEMA_VERSION = migrations[migrations.length - 1]!.version;
 // npm 上所有公开版本（v0.1.12 起）的全局 schema 都在 10..16。
 // 这一区间之后的迁移只有加表、加 nullable 列和加索引，旧版本会忽略，
 // 因此保留原 user_version 后可以安全回到升级前的同一版本。
-export const ROLLBACK_COMPATIBLE_SCHEMA_VERSIONS = [10, 11, 12, 13, 14, 15, 16, 17] as const;
+export const ROLLBACK_COMPATIBLE_SCHEMA_VERSIONS = [10, 11, 12, 13, 14, 15, 16, 17, 18] as const;
 export const LATEST_TRANSPORT_SCHEMA_VERSION = transportMigrations[transportMigrations.length - 1]!.version;
 
 // ── Database initialization ─────────────────────────────────────────
