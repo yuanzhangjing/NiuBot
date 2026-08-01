@@ -505,8 +505,8 @@ profiles:
   const applied = teamConfig.applyDraft(draft.ok ? draft.draftId : "", "u1");
   expect(applied.ok).toBe(true);
 
-  // 命令路径触发热更新（等价于 /teams config apply）
-  pipeline.applyActiveTeamConfigToRegistry();
+  // 配置版本变化后热更新（等价于 watchdog 轮询感知 CLI apply）
+  pipeline.reloadTeamConfigIfChanged();
   expect(registry.list().some((p) => p.id === "custom-reviewer")).toBe(true);
   expect(registry.get("custom-reviewer")?.access).toBe("read_only");
 });

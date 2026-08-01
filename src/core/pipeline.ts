@@ -298,6 +298,9 @@ export class Pipeline {
   /** Watchdog 定时器 */
   private watchdogTimer: ReturnType<typeof setInterval> | null = null;
 
+  /** 已加载的团队配置版本（watchdog 检测 CLI 侧 apply/rollback 变更用） */
+  private lastTeamConfigVersion?: string;
+
   /** 更新检查定时器 */
   private updateCheckTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -1670,11 +1673,16 @@ export class Pipeline {
 
   // ── /cron command ─────────────────────────────────────────────
 
-  /** 应用当前生效配置到运行中的 registry（配置变更后调用；只影响新 Job）。 */
-  applyActiveTeamConfigToRegistry(): void {
-    const active = this.workerConfig?.teamConfigStore?.getActiveConfig();
-    if (active && active.config.profiles.length > 0) {
-      this.workerConfig?.registry.setProfiles(active.config.profiles.map(teamProfileToWorkerProfile));
+  /** 检测配置版本变化并热更新 registry（只影响新 Job）。Watchdog 轮询调用；CLI 侧 apply/rollback 后自动生效。 */
+  reloadTeamConfigIfChanged(): void {
+    if (!this.workerConfig?.teamConfigStore) return;
+    const active = this.workerConfig.teamConfigStore.getActiveConfig();
+    const version = active.version;
+    if (version === this.lastTeamConfigVersion) return;
+    this.lastTeamConfigVersion = version;
+    if (active.config.profiles.length > 0) {
+      this.workerConfig.registry.setProfiles(active.config.profiles.map(teamProfileToWorkerProfile));
+      this.log.info("team config reloaded from db", { version: version ?? null });
     }
   }
 
@@ -1699,12 +1707,12 @@ export class Pipeline {
         this.replyText(chatId, platformChatId, msgId, "团队模式已关闭。之后的新需求不会再派给 Worker；正在执行的任务会继续完成。");
         return;
       }
-      case "config": {
-        this.handleTeamsConfigCommand(args.slice(1), chatId, platformChatId, msgId);
-        return;
-      }
       default: {
-        // 直接显示状态（无子命令）
+        // 直接显示状态（无子命令）；配置调整走对话（由我执行 nbt worker config）
+        if (sub === "config") {
+          this.replyText(chatId, platformChatId, msgId, "配置不用命令改，直接说要调整什么（并发、角色、目录权限等），我来生成并应用。");
+          return;
+        }
         const enabled = store.isEnabled();
         const active = store.getActiveConfig();
         const running = jobService?.listJobsByStatus("running").length ?? 0;
@@ -1719,7 +1727,7 @@ export class Pipeline {
           `· 配置：${active.version ? `版本 **${active.version}**` : "默认（未自定义）"}`,
           ...(profileLines.length > 0 ? ["", "**可用角色**", ...profileLines] : []),
           "",
-          "`/teams config` 查看/修改配置 · `/teams on|off` 开关",
+          "配置调整直接说需求，我来改 · `/teams on|off` 开关",
         ].join("\n");
         this.sendTeamsCard(chatId, platformChatId, msgId, "Teams · 状态", content);
       }
@@ -1731,64 +1739,6 @@ export class Pipeline {
     this.transport.sendCard(platformChatId, header, content, undefined, msgId)
       .then((pmid) => { this.storeBotResponse(chatId, content, pmid); })
       .catch((err) => this.log.error("teams card send failed", { chatId, error: String(err) }));
-  }
-
-  private handleTeamsConfigCommand(args: string[], chatId: string, platformChatId: string, msgId?: string): void {
-    const store = this.workerConfig?.teamConfigStore;
-    if (!store) return;
-    const sub = args[0];
-
-    if (sub === "apply") {
-      const draftId = args[1];
-      if (!draftId) {
-        this.replyText(chatId, platformChatId, msgId, "用法：/teams config apply <draft-id>");
-        return;
-      }
-      const result = store.applyDraft(draftId, this.botUserId ?? undefined);
-      if (!result.ok) {
-        this.replyText(chatId, platformChatId, msgId, `应用失败：${result.error}`);
-        return;
-      }
-      // 热更新运行配置（只影响新 Job）
-      this.applyActiveTeamConfigToRegistry();
-      this.replyText(chatId, platformChatId, msgId, `配置已应用：${result.version}（新版本只影响新 Job）`);
-      return;
-    }
-
-    if (sub === "rollback") {
-      const version = args[1];
-      if (!version) {
-        this.replyText(chatId, platformChatId, msgId, "用法：/teams config rollback <version>");
-        return;
-      }
-      const result = store.rollback(version, this.botUserId ?? undefined);
-      if (!result.ok) {
-        this.replyText(chatId, platformChatId, msgId, `回滚失败：${result.error}`);
-        return;
-      }
-      this.applyActiveTeamConfigToRegistry();
-      this.replyText(chatId, platformChatId, msgId, `已回滚到 ${version}，新版本：${result.version}`);
-      return;
-    }
-
-    // 无参数：显示当前配置（apply/rollback 由主 Agent 汇报草案/版本时引导）
-    const active = store.getActiveConfig();
-    const accessNames: Record<string, string> = {
-      read_only: "只读",
-      scratch: "临时目录",
-      git_worktree: "隔离开发",
-    };
-    const lines = [
-      `**当前配置**（${active.version ? `版本 **${active.version}**` : "默认"}）`,
-      `· 并发上限：**${active.config.maxConcurrent}**，单需求最多 **${active.config.maxJobsPerWork}** 个子任务`,
-      "",
-      "**角色**",
-    ];
-    for (const p of active.config.profiles) {
-      lines.push(`· **${p.displayName ?? p.id}**：${p.description ?? "—"}（${accessNames[p.access] ?? p.access}${p.maxConcurrent ? `，并发 ${p.maxConcurrent}` : ""}）`);
-    }
-    lines.push("", "`/teams config apply <draft-id>` 应用草案 · `rollback <版本>` 回滚");
-    this.sendTeamsCard(chatId, platformChatId, msgId, "Teams · 配置", lines.join("\n"));
   }
 
   private handleCronCommand(
@@ -3704,6 +3654,7 @@ ${jobParts.join("\n\n")}
   }
 
   private runIdleWatchdog(): void {
+    this.reloadTeamConfigIfChanged();
     const cliAgent = this.agent instanceof CliAgentBackend ? this.agent : undefined;
 
     const now = Date.now();

@@ -215,7 +215,23 @@ function handleConfig(ctx: WorkerCliContext, args: string[]): void {
     }
     return;
   }
-  fail("config 子命令仅支持 draft --file <yaml> | show | drafts");
+  if (sub === "apply") {
+    const draftId = args[1];
+    if (!draftId) fail("config apply 需要 <draft-id>");
+    const result = store.applyDraft(draftId, ctx.userId);
+    if (!result.ok) fail(result.error);
+    console.log(`applied: ${result.version}`);
+    return;
+  }
+  if (sub === "rollback") {
+    const version = args[1];
+    if (!version) fail("config rollback 需要 <version>");
+    const result = store.rollback(version, ctx.userId);
+    if (!result.ok) fail(result.error);
+    console.log(`rolled back to ${version}; active: ${result.version}`);
+    return;
+  }
+  fail("config 子命令仅支持 draft --file <yaml> | show | drafts | apply <draft-id> | rollback <version>");
 }
 
 export function handleWorker(db: Database.Database, args: string[]): void {
@@ -230,6 +246,11 @@ export function handleWorker(db: Database.Database, args: string[]): void {
   nbt worker get <work-or-job-id>               查看详情
   nbt worker cancel <work-or-job-id>            取消 Work 或 Job
   nbt worker complete --work <id> --file <result.md>   主 Agent 验收完成
+  nbt worker config draft --file <yaml> [--base <v>]   生成配置草案（主 Agent 用）
+  nbt worker config drafts                            列出待确认草案
+  nbt worker config show                              查看当前配置
+  nbt worker config apply <draft-id>                  应用草案（用户确认后）
+  nbt worker config rollback <version>                回滚到指定版本
 
 内置 Worker Profile：general / researcher / reviewer
 Work/Job 内容使用自由 Markdown 文件；CLI 不接受 --user/--chat 参数。`);
