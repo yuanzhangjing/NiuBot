@@ -3108,6 +3108,18 @@ ${jobParts.join("\n\n")}
       }
     }
     this.triggerMsgIds.delete(chatId);
+    // 兜底：合成回合（如 injectPrompt，消息无平台 ID）引用本 chat 最近一条用户消息，
+    // 保证回复关联到真实的原始问题，而不是无引用。
+    if (!triggerMsgId) {
+      const latestUserMsg = this.db
+        .prepare(
+          "SELECT platform_msg_id FROM messages WHERE chat_id = ? AND role = 'user' AND platform_msg_id IS NOT NULL ORDER BY id DESC LIMIT 1",
+        )
+        .get(chatId) as { platform_msg_id: string } | undefined;
+      if (latestUserMsg?.platform_msg_id) {
+        triggerMsgId = latestUserMsg.platform_msg_id;
+      }
+    }
 
     const isMerged = messages.length > 1;
     const reactionMsgIds = messages
