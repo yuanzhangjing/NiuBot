@@ -28,7 +28,7 @@ import {
   updateUserMemory,
   deleteUserMemory,
 } from "./memory/user-memory.js";
-import { getUserShortLabel, getChatShortLabel } from "./database/schema.js";
+import { getUserShortLabel, getChatShortLabel, initDatabase } from "./database/schema.js";
 import { buildImportantContext, type SceneInfo } from "./memory/inject.js";
 import { SYSTEM_RULES } from "./system-rules.js";
 import { handleMessages } from "./cli/messages.js";
@@ -123,9 +123,8 @@ function requireUserId(): string {
 
 function openDb(): Database.Database {
   try {
-    const db = new Database(DB_PATH);
-    db.pragma("busy_timeout = 5000");
-    return db;
+    // 走 initDatabase：跑 schema 迁移，避免新 CLI 在旧库（未升级列）上直接报 no such column
+    return initDatabase(DB_PATH);
   } catch {
     console.error(`Error: cannot open database at ${DB_PATH}`);
     process.exit(1);

@@ -49,6 +49,27 @@ const MESSAGE_COLUMNS = `
   u.name as sender_name
 `;
 
+/**
+ * 本 chat 最近一条真实用户消息的平台侧 ID。
+ * 用于触发消息捕获（Worker 验收回合回复引用）和引用兜底。
+ * senderId 传入时限定发送者（群聊场景避免选到其他成员的消息）。
+ */
+export function findLatestUserPlatformMsgId(
+  db: Database.Database,
+  chatId: string,
+  senderId?: string,
+): string | undefined {
+  const row = db
+    .prepare(
+      `SELECT platform_msg_id FROM messages
+       WHERE chat_id = ? AND role = 'user' AND platform_msg_id IS NOT NULL AND platform_msg_id != ''
+       ${senderId ? "AND sender_id = ?" : ""}
+       ORDER BY id DESC LIMIT 1`,
+    )
+    .get(senderId ? [chatId, senderId] : [chatId]) as { platform_msg_id: string } | undefined;
+  return row?.platform_msg_id;
+}
+
 export function listMessages(
   db: Database.Database,
   options: ChatAccessContext & MessageFilter & {

@@ -63,8 +63,8 @@ test("work create → job create → list → get → complete 完整链路", ()
   // 当前 chat 最近一条用户消息（有平台侧 ID）应被记为 Work 的触发消息
   db.prepare(
     `INSERT INTO messages (chat_id, sender_id, role, content_text, platform, platform_msg_id, created_at)
-     VALUES (?, 'u1', 'user', '审查登录模块的并发问题', 'feishu', 'om_trigger_1', datetime('now'))`,
-  ).run(CHAT_ID);
+     VALUES (?, ?, 'user', '审查登录模块的并发问题', 'feishu', 'om_trigger_1', datetime('now'))`,
+  ).run(CHAT_ID, USER_ID);
 
   const workFile = writeDoc("work.md", "审查登录模块的并发问题");
   const out1 = capture(() => handleWorker(db, ["work", "create", "--file", workFile]));
@@ -97,6 +97,27 @@ test("work create → job create → list → get → complete 完整链路", ()
   const resultFile = writeDoc("result.md", "已完成审查，无阻塞问题");
   const doneOut = capture(() => handleWorker(db, ["complete", "--work", workId, "--file", resultFile]));
   expect(doneOut.join("\n")).toContain("已完成");
+});
+
+test("群聊中触发消息限定发送者：其他成员的最新消息不被选中", () => {
+  env({ NIUBOT_CHAT_TYPE: "group" });
+  // 其他成员的最新消息（id 更大）不应被选为触发消息
+  db.prepare(
+    `INSERT INTO messages (chat_id, sender_id, role, content_text, platform, platform_msg_id, created_at)
+     VALUES (?, 'member-b', 'user', '我先说一句', 'feishu', 'om_other_1', datetime('now'))`,
+  ).run(CHAT_ID);
+  db.prepare(
+    `INSERT INTO messages (chat_id, sender_id, role, content_text, platform, platform_msg_id, created_at)
+     VALUES (?, ?, 'user', '帮我审查', 'feishu', 'om_mine_1', datetime('now'))`,
+  ).run(CHAT_ID, USER_ID);
+
+  const workFile = writeDoc("work.md", "审查任务");
+  const workId = capture(() => handleWorker(db, ["work", "create", "--file", workFile]))[0]!;
+  const workRow = db.prepare("SELECT trigger_msg_platform_id FROM worker_works WHERE id = ?").get(workId) as
+    | { trigger_msg_platform_id: string | null }
+    | undefined;
+  // 选中自己最近的消息（即使时间上不是 chat 最近）
+  expect(workRow?.trigger_msg_platform_id).toBe("om_mine_1");
 });
 
 test("未知 worker profile 拒绝创建 Job", () => {

@@ -14,6 +14,7 @@ import { readFileSync } from "node:fs";
 
 import type Database from "better-sqlite3";
 
+import { findLatestUserPlatformMsgId } from "../messages/store.js";
 import { SqliteJobService } from "../worker/job-service.js";
 import { WorkerProfileRegistry } from "../worker/profiles.js";
 import { TeamConfigStore } from "../worker/team-config.js";
@@ -63,21 +64,15 @@ function handleWorkCreate(ctx: WorkerCliContext, service: SqliteJobService, args
   const fileIndex = args.indexOf("--file");
   const content = readFileOrFail(fileIndex >= 0 ? args[fileIndex + 1] : undefined, "work 文件");
   const visibility: WorkVisibility = ctx.chatType === "group" ? "public" : "private";
-  // 触发消息：当前 chat 最近一条用户消息的平台侧 ID，验收回合回复时引用它（关联原始问题）
-  const triggerRow = ctx.db
-    .prepare(
-      `SELECT platform_msg_id FROM messages
-       WHERE chat_id = ? AND role = 'user' AND platform_msg_id IS NOT NULL
-       ORDER BY id DESC LIMIT 1`,
-    )
-    .get(ctx.chatId) as { platform_msg_id: string } | undefined;
+  // 触发消息：当前 chat 最近一条用户消息的平台侧 ID，验收回合回复时引用它（关联原始问题）。
+  // 限定发送者 = 触发派工的用户（群聊中避免选到其他成员的消息）。
   const work = service.createWork({
     botId: ctx.botId,
     ownerUserId: ctx.userId,
     sourceChatId: ctx.chatId,
     visibility,
     request: content.trim(),
-    triggerMsgPlatformId: triggerRow?.platform_msg_id,
+    triggerMsgPlatformId: findLatestUserPlatformMsgId(ctx.db, ctx.chatId, ctx.userId),
   });
   console.log(work.id);
 }

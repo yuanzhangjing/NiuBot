@@ -168,7 +168,7 @@ describe("restart database snapshot", () => {
       ROLLBACK_COMPATIBLE_SCHEMA_VERSIONS,
       LATEST_SCHEMA_VERSION + 1,
     ))
-      .toThrow(/candidate schema \d+/);
+      .toThrow(new RegExp(`candidate schema ${LATEST_SCHEMA_VERSION + 1}`));
   });
 
   test("preserves the snapshot directory when restore cannot proceed", async () => {

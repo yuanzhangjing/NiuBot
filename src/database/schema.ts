@@ -503,6 +503,30 @@ const migrations: Migration[] = [
       if (!continuationColumns.some((column) => column.name === "trigger_msg_platform_id")) {
         db.exec("ALTER TABLE agent_continuations ADD COLUMN trigger_msg_platform_id TEXT");
       }
+      // 回填既有数据：Work 取本 chat 最近一条真实用户消息（与 CLI 捕获同一启发式）；
+      // Continuation 从所属 Work 拷贝。避免升级后旧 Work/Continuation 验收时链路断裂落兜底。
+      // messages 表可能不存在（精简/测试库），需先确认再回填。
+      const hasMessages = db
+        .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'messages'")
+        .get();
+      if (hasMessages) {
+        db.exec(`
+          UPDATE worker_works
+          SET trigger_msg_platform_id = (
+            SELECT platform_msg_id FROM messages
+            WHERE chat_id = worker_works.source_chat_id AND role = 'user'
+              AND platform_msg_id IS NOT NULL AND platform_msg_id != ''
+            ORDER BY id DESC LIMIT 1
+          )
+          WHERE trigger_msg_platform_id IS NULL;
+          UPDATE agent_continuations
+          SET trigger_msg_platform_id = (
+            SELECT trigger_msg_platform_id FROM worker_works WHERE id = agent_continuations.work_id
+          )
+          WHERE trigger_msg_platform_id IS NULL;
+          CREATE INDEX IF NOT EXISTS idx_messages_chat_role_id ON messages(chat_id, role, id);
+        `);
+      }
     },
   },
 ];

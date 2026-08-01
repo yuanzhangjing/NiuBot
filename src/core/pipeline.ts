@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import type Database from "better-sqlite3";
 import { escapeYamlContent, renderMessageNodes } from "../im/render.js";
+import { findLatestUserPlatformMsgId } from "../messages/store.js";
 import { isDeliveryUncertainError } from "../transport/errors.js";
 import type { InboundDelivery, NormalizedMessage, TransportClient } from "../transport/types.js";
 import { ERROR_DISPLAY_MAX_LEN } from "../agent/types.js";
@@ -3100,28 +3101,27 @@ ${jobParts.join("\n\n")}
     // 从消息列表中取最后一条的 platformMsgId 作为 reply 目标。
     // Worker Continuation 回合：优先引用触发消息（创建 Work 的那条用户消息，链路传递），
     // 而不是 triggerMsgIds（最近用户消息，回合开始时消费删除，可能为空或已被后续消息覆盖）。
+    // 合并验收多个不同 Work（触发消息不同）时不引用——避免结果错挂到其中一个 Work 的消息下。
     const lastMsg = messages.length > 0 ? messages[messages.length - 1] : undefined;
     let triggerMsgId = lastMsg?.platformMsgId ?? this.triggerMsgIds.get(chatId);
+    let continuationDisallowFallback = false;
     if (isContinuationTurn && this.workerConfig) {
       const continuationTriggerIds = continuationIds
         .map((id) => this.workerConfig?.jobService.getContinuation(id)?.triggerMsgPlatformId)
         .filter((id): id is string => !!id);
-      if (continuationTriggerIds.length > 0) {
+      const unique = new Set(continuationTriggerIds);
+      if (unique.size === 1) {
         triggerMsgId = continuationTriggerIds[0];
+      } else if (unique.size > 1) {
+        triggerMsgId = undefined;
+        continuationDisallowFallback = true;
       }
     }
     this.triggerMsgIds.delete(chatId);
-    // 兜底：合成回合（如 injectPrompt，消息无平台 ID）引用本 chat 最近一条用户消息，
-    // 保证回复关联到真实的原始问题，而不是无引用。
-    if (!triggerMsgId) {
-      const latestUserMsg = this.db
-        .prepare(
-          "SELECT platform_msg_id FROM messages WHERE chat_id = ? AND role = 'user' AND platform_msg_id IS NOT NULL ORDER BY id DESC LIMIT 1",
-        )
-        .get(chatId) as { platform_msg_id: string } | undefined;
-      if (latestUserMsg?.platform_msg_id) {
-        triggerMsgId = latestUserMsg.platform_msg_id;
-      }
+    // 兜底（仅 Worker 验收回合链路断裂时，如旧数据）：引用本 chat 最近一条用户消息。
+    // 普通回合/合成回合不做兜底——避免回复引用无关消息。
+    if (!triggerMsgId && isContinuationTurn && this.workerConfig && !continuationDisallowFallback) {
+      triggerMsgId = findLatestUserPlatformMsgId(this.db, chatId);
     }
 
     const isMerged = messages.length > 1;
