@@ -116,6 +116,18 @@ export class WorkerScheduler {
       }
     }
 
+    // 1c. 依赖失败传播：queued Job 的任一依赖已失败/中断/取消 → 本 Job 自动失败
+    for (const job of jobService.listJobsByStatus("queued")) {
+      const failedDep = job.dependsOn.find((depId) => {
+        const dep = jobService.getJob(depId);
+        return dep && dep.status !== "completed" && dep.status !== "queued";
+      });
+      if (failedDep) {
+        jobService.failQueuedJob(job.id, `dependency ${failedDep} not completed`);
+        log.warn("worker job failed due to dependency", { jobId: job.id, failedDep });
+      }
+    }
+
     // 2. 调度：/teams off 时不认领新 Job（running 继续，watchdog 和投递不受影响）
     const schedulingEnabled = this.options.isSchedulingEnabled?.() ?? true;
     if (!schedulingEnabled) return;

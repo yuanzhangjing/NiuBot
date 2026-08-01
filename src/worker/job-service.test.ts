@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, test } from "vitest";
 
 import { initDatabase } from "../database/schema.js";
 import { SqliteJobService } from "./job-service.js";
+import { WorkerScheduler } from "./scheduler.js";
 import { MAX_JOBS_PER_WORK, MAX_WORK_INTERRUPTED_COUNT } from "./types.js";
 import type { JobExecutionRecord } from "./types.js";
 
@@ -224,6 +225,105 @@ describe("interruptJob 与防循环上限", () => {
     expect(service.getWork(work.id)?.status).toBe("failed");
     expect(service.getWork(work.id)?.interruptedCount).toBe(MAX_WORK_INTERRUPTED_COUNT);
     expect(service.getWork(work.id)?.finalConclusion).toMatch(/中断/);
+  });
+});
+
+describe("Job 依赖", () => {
+  test("依赖未完成时 claim 返回 dependencies_pending", () => {
+    const work = makeWork();
+    const jobA = makeJob(work.id);
+    const jobB = service.createJob({
+      workId: work.id,
+      workerProfileId: "w",
+      prompt: "B",
+      workdir: "/tmp",
+      dependsOn: [jobA.id],
+    });
+
+    const claimB = service.claimJob({ jobId: jobB.id, claimToken: "l" });
+    expect(claimB.ok).toBe(false);
+    if (!claimB.ok) expect(claimB.reason).toBe("dependencies_pending");
+
+    // A 完成后 B 可认领
+    service.claimJob({ jobId: jobA.id, claimToken: "l1" });
+    service.completeJob(jobA.id, record());
+    const claimB2 = service.claimJob({ jobId: jobB.id, claimToken: "l2" });
+    expect(claimB2.ok).toBe(true);
+  });
+
+  test("依赖必须属于同一 Work，否则创建拒绝", () => {
+    const work1 = makeWork();
+    const work2 = makeWork();
+    const jobA = makeJob(work1.id);
+    expect(() =>
+      service.createJob({
+        workId: work2.id,
+        workerProfileId: "w",
+        prompt: "B",
+        workdir: "/tmp",
+        dependsOn: [jobA.id],
+      }),
+    ).toThrow(/不属于 Work/);
+  });
+
+  test("依赖失败后本 Job 自动失败（Scheduler 传播）", async () => {
+    const work = makeWork();
+    const jobA = makeJob(work.id);
+    const jobB = service.createJob({
+      workId: work.id,
+      workerProfileId: "w",
+      prompt: "B",
+      workdir: "/tmp",
+      dependsOn: [jobA.id],
+    });
+    service.claimJob({ jobId: jobA.id, claimToken: "l" });
+    service.failJob(jobA.id, record("failed"));
+
+    // 等价于 Scheduler tick 1c 步骤（依赖失败传播）
+    const stubRuntime = {
+      runningCount: () => 0,
+      inspectAll: () => [],
+      inspect: () => undefined,
+      cancel: async () => true,
+      runJob: async () => {},
+    };
+    const scheduler = new WorkerScheduler({
+      runtime: stubRuntime as never,
+      jobService: service,
+      maxConcurrent: 2,
+      tickMs: 20,
+    });
+    scheduler.start();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    scheduler.stop();
+    expect(service.getJob(jobB.id)?.status).toBe("failed");
+    expect(service.getJob(jobB.id)?.error).toMatch(/dependency/);
+  });
+});
+
+describe("连续失败上限", () => {
+  test("连续失败 3 次后 Work 直接 failed", () => {
+    const work = makeWork();
+    for (let i = 0; i < 3; i++) {
+      const job = makeJob(work.id);
+      service.claimJob({ jobId: job.id, claimToken: `l${i}` });
+      service.failJob(job.id, record("failed"));
+    }
+    expect(service.getWork(work.id)?.status).toBe("failed");
+    expect(service.getWork(work.id)?.finalConclusion).toMatch(/连续失败/);
+  });
+
+  test("中途成功清零连续失败计数", () => {
+    const work = makeWork();
+    const job1 = makeJob(work.id);
+    service.claimJob({ jobId: job1.id, claimToken: "l1" });
+    service.failJob(job1.id, record("failed"));
+    expect(service.getWork(work.id)?.consecutiveFailures).toBe(1);
+
+    const job2 = makeJob(work.id);
+    service.claimJob({ jobId: job2.id, claimToken: "l2" });
+    service.completeJob(job2.id, record());
+    expect(service.getWork(work.id)?.consecutiveFailures).toBe(0);
   });
 });
 

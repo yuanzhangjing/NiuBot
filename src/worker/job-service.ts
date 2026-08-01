@@ -10,6 +10,9 @@
 import type Database from "better-sqlite3";
 
 import { MAX_JOBS_PER_WORK, MAX_WORK_INTERRUPTED_COUNT } from "./types.js";
+
+/** 同一 Work 连续失败达到该次数后 Work 直接 failed（§6 maxConsecutiveFailures 内部上限） */
+export const MAX_CONSECUTIVE_FAILURES = 3;
 import type {
   AgentContinuation,
   ClaimJobInput,
@@ -34,6 +37,7 @@ import {
   getJob,
   getJobByJobIdempotencyKey,
   getWork,
+  incrementWorkConsecutiveFailures,
   incrementWorkInterruptedCount,
   insertContinuation,
   insertJob,
@@ -48,6 +52,7 @@ import {
   listWorks as listWorkRows,
   markContinuationCompleted,
   resetClaimedContinuations,
+  resetWorkConsecutiveFailures,
   updateJobStatus,
   updateWorkConclusion,
   updateWorkStatus,
@@ -120,12 +125,22 @@ export class SqliteJobService implements JobService {
       if (countJobs(this.db, input.workId) >= MAX_JOBS_PER_WORK) {
         throw new Error(`Work ${input.workId} reached job limit ${MAX_JOBS_PER_WORK}`);
       }
+      // 依赖必须属于同一 Work
+      if (input.dependsOn) {
+        for (const depId of input.dependsOn) {
+          const dep = getJob(this.db, depId);
+          if (!dep || dep.work_id !== input.workId) {
+            throw new Error(`依赖 Job ${depId} 不存在或不属于 Work ${input.workId}`);
+          }
+        }
+      }
       const row = insertJob(this.db, {
         workId: input.workId,
         workerProfileId: input.workerProfileId,
         prompt: input.prompt,
         workdir: input.workdir,
         workspacePolicy: input.workspacePolicy ?? "read_only",
+        dependsOn: input.dependsOn,
       });
       appendWorkJobId(this.db, input.workId, row.id);
       if (idempotencyKey) {
@@ -157,6 +172,13 @@ export class SqliteJobService implements JobService {
       const work = this.getWorkDomain(job.workId);
       if (!work || work.status !== "active") {
         return { ok: false, reason: "work_not_active" } satisfies ClaimJobResult;
+      }
+      // 依赖检查：全部依赖必须已 completed
+      for (const depId of job.dependsOn) {
+        const dep = this.getJobDomain(depId);
+        if (!dep || dep.status !== "completed") {
+          return { ok: false, reason: "dependencies_pending" } satisfies ClaimJobResult;
+        }
       }
       const updated = updateJobStatus(this.db, input.jobId, {
         from: "queued",
@@ -243,6 +265,25 @@ export class SqliteJobService implements JobService {
 
   confirmCancelled(jobId: string, record: JobExecutionRecord): Job | undefined {
     return this.finishJob(jobId, record, "cancelled");
+  }
+
+  /** queued Job 因依赖失败直接终态（不经过执行；连续失败预算照常累计）。 */
+  failQueuedJob(jobId: string, error: string): Job | undefined {
+    return this.db.transaction(() => {
+      const job = this.getJobDomain(jobId);
+      if (!job || job.status !== "queued") return undefined;
+      const updated = updateJobStatus(this.db, jobId, {
+        from: "queued",
+        to: "failed",
+        version: job.version,
+        fields: { error, endedAt: new Date().toISOString() },
+      });
+      if (!updated) return undefined;
+      this.recordEvent({ workId: job.workId, jobId, event: "job_failed", detail: error });
+      this.applyFailureBudget(job.workId);
+      this.createTerminalContinuation(this.db, jobId);
+      return this.getJobDomain(jobId);
+    })();
   }
 
   cancelWork(workId: string): Work | undefined {
@@ -382,9 +423,30 @@ export class SqliteJobService implements JobService {
         jobId,
         event: to === "completed" ? "job_completed" : to === "failed" ? "job_failed" : "job_cancelled",
       });
+      // 连续失败预算：completed 清零；failed 计数并检查上限
+      if (to === "completed") {
+        resetWorkConsecutiveFailures(this.db, job.workId);
+      } else if (to === "failed") {
+        this.applyFailureBudget(job.workId);
+      }
       this.createTerminalContinuation(this.db, jobId);
       return this.getJobDomain(jobId);
     })();
+  }
+
+  /** 连续失败计数 + 上限检查（达到上限 Work 直接 failed）。 */
+  private applyFailureBudget(workId: string): void {
+    incrementWorkConsecutiveFailures(this.db, workId);
+    const workAfter = getWork(this.db, workId);
+    if (workAfter && workAfter.consecutive_failures >= MAX_CONSECUTIVE_FAILURES && workAfter.status === "active") {
+      updateWorkStatus(this.db, workId, { from: "active", to: "failed", version: workAfter.version });
+      updateWorkConclusion(
+        this.db,
+        workId,
+        `该任务已连续失败 ${workAfter.consecutive_failures} 次，达到上限，需用户重新发起。`,
+      );
+      this.recordEvent({ workId, event: "work_failed", detail: `consecutive_failures=${workAfter.consecutive_failures}` });
+    }
   }
 
   private createTerminalContinuation(db: Database.Database, jobId: string): AgentContinuation | undefined {

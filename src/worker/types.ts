@@ -61,6 +61,8 @@ export interface Work {
   finalConclusion?: string;
   /** 因重启/崩溃产生 interrupted 的累计次数，达到上限后 Work 直接 failed（防静默循环） */
   interruptedCount: number;
+  /** 连续失败次数（Job failed 时 +1，completed 时清零；达到上限 Work 直接 failed） */
+  consecutiveFailures: number;
   createdAt: string;
   updatedAt: string;
   /** CAS 乐观锁版本号 */
@@ -95,6 +97,8 @@ export interface Job {
   claimToken?: string;
   claimedAt?: string;
   workspacePolicy: WorkspacePolicy;
+  /** 依赖的 Job ID（全部 completed 后才能被认领；任一依赖 failed 则本 Job 自动 failed） */
+  dependsOn: string[];
   createdAt: string;
   updatedAt: string;
   version: number;
@@ -187,6 +191,8 @@ export interface CreateJobInput {
   /** 目标目录（git_worktree 时为目标 repo 路径；scratch 时忽略） */
   workdir: string;
   workspacePolicy?: WorkspacePolicy;
+  /** 依赖的 Job ID（同一 Work 内；全部完成后本 Job 才能执行） */
+  dependsOn?: string[];
 }
 
 export interface ClaimJobInput {
@@ -197,7 +203,7 @@ export interface ClaimJobInput {
 
 export type ClaimJobResult =
   | { ok: true; job: Job }
-  | { ok: false; reason: "not_queued" | "work_not_active" | "job_limit_reached" };
+  | { ok: false; reason: "not_queued" | "work_not_active" | "job_limit_reached" | "dependencies_pending" };
 
 export interface CompleteWorkInput {
   conclusion: string;
@@ -226,6 +232,8 @@ export interface JobService {
   failJob(jobId: string, record: JobExecutionRecord): Job | undefined;
   /** running → interrupted（崩溃恢复专用） */
   interruptJob(jobId: string): Job | undefined;
+  /** queued Job 因依赖失败直接终态（不经过执行；连续失败预算照常累计） */
+  failQueuedJob(jobId: string, error: string): Job | undefined;
   /** queued/running → cancelling */
   requestCancel(jobId: string): Job | undefined;
   /** cancelling → cancelled（确认进程真实退出后） */

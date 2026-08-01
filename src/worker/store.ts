@@ -35,6 +35,7 @@ export interface WorkRow {
   job_ids_json: string;
   final_conclusion: string | null;
   interrupted_count: number;
+  consecutive_failures: number;
   created_at: string;
   updated_at: string;
   version: number;
@@ -59,6 +60,7 @@ export interface JobRow {
   claim_token: string | null;
   claimed_at: string | null;
   workspace_policy: WorkspacePolicy;
+  depends_on_json: string;
   created_at: string;
   updated_at: string;
   version: number;
@@ -121,6 +123,7 @@ export function workRowToWork(row: WorkRow): Work {
     jobIds: parseJsonArray(row.job_ids_json),
     finalConclusion: row.final_conclusion ?? undefined,
     interruptedCount: row.interrupted_count,
+    consecutiveFailures: row.consecutive_failures,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     version: row.version,
@@ -147,6 +150,7 @@ export function jobRowToJob(row: JobRow): Job {
     claimToken: row.claim_token ?? undefined,
     claimedAt: row.claimed_at ?? undefined,
     workspacePolicy: row.workspace_policy,
+    dependsOn: parseJsonArray(row.depends_on_json),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     version: row.version,
@@ -268,13 +272,28 @@ export function appendWorkJobId(db: Database.Database, workId: string, jobId: st
 
 export function insertJob(
   db: Database.Database,
-  input: { workId: string; workerProfileId: string; prompt: string; workdir: string; workspacePolicy: WorkspacePolicy },
+  input: {
+    workId: string;
+    workerProfileId: string;
+    prompt: string;
+    workdir: string;
+    workspacePolicy: WorkspacePolicy;
+    dependsOn?: string[];
+  },
 ): JobRow {
   const id = `job_${randomUUID()}`;
   db.prepare(`
-    INSERT INTO worker_jobs (id, work_id, worker_profile_id, prompt, workdir, workspace_policy)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `).run(id, input.workId, input.workerProfileId, input.prompt, input.workdir, input.workspacePolicy);
+    INSERT INTO worker_jobs (id, work_id, worker_profile_id, prompt, workdir, workspace_policy, depends_on_json)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    id,
+    input.workId,
+    input.workerProfileId,
+    input.prompt,
+    input.workdir,
+    input.workspacePolicy,
+    JSON.stringify(input.dependsOn ?? []),
+  );
   return getJob(db, id)!;
 }
 
@@ -324,6 +343,23 @@ export function incrementWorkInterruptedCount(db: Database.Database, workId: str
   db.prepare(`
     UPDATE worker_works
     SET interrupted_count = interrupted_count + 1, updated_at = datetime('now')
+    WHERE id = ?
+  `).run(workId);
+}
+
+/** 连续失败计数（防失控上限，§6 maxConsecutiveFailures） */
+export function incrementWorkConsecutiveFailures(db: Database.Database, workId: string): void {
+  db.prepare(`
+    UPDATE worker_works
+    SET consecutive_failures = consecutive_failures + 1, updated_at = datetime('now')
+    WHERE id = ?
+  `).run(workId);
+}
+
+export function resetWorkConsecutiveFailures(db: Database.Database, workId: string): void {
+  db.prepare(`
+    UPDATE worker_works
+    SET consecutive_failures = 0, updated_at = datetime('now')
     WHERE id = ?
   `).run(workId);
 }

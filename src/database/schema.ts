@@ -366,6 +366,7 @@ const migrations: Migration[] = [
           job_ids_json        TEXT NOT NULL DEFAULT '[]',
           final_conclusion    TEXT,
           interrupted_count   INTEGER NOT NULL DEFAULT 0,
+          consecutive_failures INTEGER NOT NULL DEFAULT 0,
           created_at          TEXT NOT NULL DEFAULT (datetime('now')),
           updated_at          TEXT NOT NULL DEFAULT (datetime('now')),
           version             INTEGER NOT NULL DEFAULT 1
@@ -393,6 +394,7 @@ const migrations: Migration[] = [
           claimed_at            TEXT,
           workspace_policy      TEXT NOT NULL DEFAULT 'read_only'
                                 CHECK(workspace_policy IN ('read_only', 'scratch', 'git_worktree')),
+          depends_on_json       TEXT NOT NULL DEFAULT '[]',
           created_at            TEXT NOT NULL DEFAULT (datetime('now')),
           updated_at            TEXT NOT NULL DEFAULT (datetime('now')),
           version               INTEGER NOT NULL DEFAULT 1
