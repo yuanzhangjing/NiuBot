@@ -17,6 +17,7 @@ import { ChatManager } from "./chat-manager.js";
 import type { QueuedMessage } from "./queue.js";
 import { WorkerRuntime } from "../worker/runtime.js";
 import { WorkerScheduler } from "../worker/scheduler.js";
+import { stripInternalWorkerTags } from "../worker/redact.js";
 import { WorkspaceProvider } from "../worker/workspace.js";
 import { ResourceLeaseManager } from "../worker/lease.js";
 import type { Job, JobService, Work } from "../worker/types.js";
@@ -3243,9 +3244,9 @@ ${jobParts.join("\n\n")}
         model: response.model,
       });
 
-      // 合并消息提示头
-      let displayText = response.text;
-      let deliveredText = response.text;
+      // 合并消息提示头；出站前强制剥离内部 Worker 标签（保护：不依赖 LLM 自觉）
+      let displayText = stripInternalWorkerTags(response.text);
+      let deliveredText = displayText;
       if (isMerged) {
         const lines = messages.map((m) => {
           const brief = m.text.length > 10 ? m.text.slice(0, 10) + "…" : m.text;
