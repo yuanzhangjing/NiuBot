@@ -453,7 +453,7 @@ export class Pipeline {
           model: this.botIdentity.model,
           botProfilePath: this.stableContextOptions.botProfilePath,
         },
-        buildPrompt: (job, profilePrompt, execDir) => this.buildWorkerPrompt(job, profilePrompt, execDir),
+        buildPrompt: (job, execDir) => this.buildWorkerPrompt(job, execDir),
         workspaceProvider: new WorkspaceProvider({ rootDir: workspaceRoot }),
         leaseManager: this.workerLeaseManager,
       });
@@ -1917,12 +1917,12 @@ export class Pipeline {
    * 第一版不注入主会话 transcript 和用户记忆。
    * git_worktree Job 的 execDir 是独立 worktree，提示 Worker 只能在该目录写入。
    */
-  private buildWorkerPrompt(job: Job, profilePrompt: string, execDir: string): string {
+  private buildWorkerPrompt(job: Job, execDir: string): string {
+    // 角色内容（定义/原则/工作流）已在 system prompt 注入；这里只组装任务详情
     const stable = this.buildStableSystemContext();
     const work = this.workerConfig?.jobService.getWork(job.workId);
     const parts: string[] = [];
     if (stable) parts.push(stable);
-    if (profilePrompt) parts.push(`<worker-role>\n${profilePrompt}\n</worker-role>`);
     const writeRule =
       job.workspacePolicy === "git_worktree"
         ? `当前目录是独立 Git worktree（目标仓库：${job.workdir}）。只能修改当前目录内的文件；不要提交、不要 push、不要发布、不要碰目标仓库主工作区。`

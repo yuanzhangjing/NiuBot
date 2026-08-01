@@ -37,8 +37,8 @@ export interface WorkerRuntimeOptions {
    * workingDirectory 按 Job 动态填充，来自 Work 的来源会话）
    */
   sessionConfig: Omit<SessionConfig, "workingDirectory" | "chatId">;
-  /** Job 上下文组装（由 Pipeline 注入：stable context + profile + job prompt + 实际执行目录） */
-  buildPrompt: (job: Job, profilePrompt: string, execDir: string) => string | Promise<string>;
+  /** Job 上下文组装（由 Pipeline 注入：stable context + job prompt + 实际执行目录；角色内容已在 system prompt） */
+  buildPrompt: (job: Job, execDir: string) => string | Promise<string>;
   /** 工作区准备（read_only Job 可不提供） */
   workspaceProvider?: WorkspaceProvider;
   /** 写任务资源互斥（git_worktree Job 必须提供） */
@@ -174,9 +174,9 @@ export class WorkerRuntime {
         }
       }
 
-      // 分层注入：工作原则 + 职责进 system prompt（常驻）；工作流进 user prompt（随任务带）
-      const importantContext = [profile.principles, profile.prompt].filter(Boolean).join("\n\n");
-      const rolePrompt = [profile.prompt, profile.workflow].filter(Boolean).join("\n\n");
+      // 角色完整内容（定义 + 原则 + 工作流）作为 system prompt 注入，静态固定；
+      // user prompt 只装任务详情（由 buildPrompt 组装）
+      const importantContext = [profile.prompt, profile.principles, profile.workflow].filter(Boolean).join("\n\n");
       session = await backend.createSession({
         ...sessionConfig,
         chatId: work?.sourceChatId,
@@ -191,7 +191,7 @@ export class WorkerRuntime {
         controller,
       });
 
-      const prompt = await buildPrompt(job, rolePrompt, prepared.execDir);
+      const prompt = await buildPrompt(job, prepared.execDir);
 
       // 活动心跳：watchdog 依据 lastActivity 判断"无输出超时"（backend 不支持时跳过）
       const getActivity = (backend as unknown as {
