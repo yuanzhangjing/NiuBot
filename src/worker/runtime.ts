@@ -234,6 +234,7 @@ export class WorkerRuntime {
         chatId: work?.sourceChatId,
         workingDirectory: prepared.execDir,
         importantContext,
+        model: profile.model ?? sessionConfig.model,
       });
       this.running.set(jobId, {
         jobId,

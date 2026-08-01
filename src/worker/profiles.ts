@@ -24,6 +24,8 @@ export interface WorkerProfile {
   skills?: TeamProfileSkills;
   /** 专属 backend 类型（如 "claude"）；未设置时复用主 Agent 的 backend */
   backend?: string;
+  /** 专属模型（backend 支持时生效）；未设置时使用 Bot 全局模型 */
+  model?: string;
 }
 
 /** Team 配置的 profile → 运行时 WorkerProfile（Phase 5 配置驱动）。 */
@@ -38,6 +40,7 @@ export function teamProfileToWorkerProfile(p: {
   maxConcurrent?: number;
   skills?: TeamProfileSkills;
   backend?: string;
+  model?: string;
 }): WorkerProfile {
   return {
     id: p.id,
@@ -50,6 +53,7 @@ export function teamProfileToWorkerProfile(p: {
     maxConcurrent: p.maxConcurrent,
     skills: p.skills,
     backend: p.backend,
+    model: p.model,
   };
 }
 

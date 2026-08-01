@@ -28,6 +28,7 @@ const CHAT_ID = "chat-1";
 
 class FakeWorkerBackend implements AgentBackend {
   readonly sessions: string[] = [];
+  readonly sessionModels: string[] = [];
   readonly messages: Array<{ sessionId: string; text: string }> = [];
   readonly sessionDirs = new Map<string, string>();
   /** 每个 worker session 返回的结果文本 */
@@ -43,6 +44,7 @@ class FakeWorkerBackend implements AgentBackend {
   async createSession(config: SessionConfig): Promise<AgentSession> {
     const id = `agent_${this.sessions.length + 1}`;
     this.sessions.push(id);
+    this.sessionModels.push(config.model ?? "");
     this.sessionDirs.set(id, config.workingDirectory ?? process.cwd());
     return { id };
   }
@@ -544,7 +546,7 @@ test("角色配置 backend 时使用专属 backend，否则复用主 Agent backe
       resolveBackend: async (type) => (type === "special" ? specialBackend : backend),
     },
   );
-  // 注册一个配置了 backend 的自定义角色
+  // 注册一个配置了 backend + model 的自定义角色
   registry.setProfiles([
     ...registry.list(),
     {
@@ -554,6 +556,7 @@ test("角色配置 backend 时使用专属 backend，否则复用主 Agent backe
       prompt: "你是专用后端角色",
       access: "read_only",
       backend: "special",
+      model: "special-model",
     },
   ]);
   await pipeline.start();
@@ -584,6 +587,7 @@ test("角色配置 backend 时使用专属 backend，否则复用主 Agent backe
 
   expect(service.getJob(specialJob.id)?.responseText).toBe("专属后端结果");
   expect(service.getJob(normalJob.id)?.responseText).toBe(backend.resultText);
-  // 专属 backend 确实被使用（session 被创建）
+  // 专属 backend 确实被使用（session 被创建），且收到角色配置的 model
   expect(specialBackend.sessions).toHaveLength(1);
+  expect(specialBackend.sessionModels).toEqual(["special-model"]);
 }, 15000);

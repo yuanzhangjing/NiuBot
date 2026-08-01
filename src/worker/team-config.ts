@@ -38,6 +38,8 @@ export interface TeamProfileConfig {
   skills?: TeamProfileSkills;
   /** 专属 backend 类型（如 "claude"）；未设置时复用主 Agent 的 backend */
   backend?: string;
+  /** 专属模型（backend 支持时生效）；未设置时使用 Bot 全局模型 */
+  model?: string;
 }
 
 export interface TeamConfig {
@@ -140,6 +142,7 @@ export function parseTeamConfig(yamlText: string): TeamConfig {
       maxConcurrent,
       skills,
       backend: typeof p["backend"] === "string" ? p["backend"] : undefined,
+      model: typeof p["model"] === "string" ? p["model"] : undefined,
     });
   }
   return config;
