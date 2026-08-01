@@ -108,7 +108,7 @@ const WORKER_AGENT_SKILL_BRIEF = `<worker-skill>
 团队模式已开启，你可以把长任务拆给内部 Worker 后台执行，派工后结束回合，Worker 完成会自动唤醒你验收：
 
 - 创建 Work：nbt worker work create --file <需求.md>
-- 派工：nbt worker job create --work <work-id> --worker <general|researcher|reviewer|developer> --file <任务.md> [--workspace read_only|scratch|git_worktree] [--depends-on <job-id>]
+- 派工：nbt worker job create --work <work-id> --worker <general|researcher|reviewer|developer|tester> --file <任务.md> [--workspace read_only|scratch|git_worktree] [--depends-on <job-id>]
 - 查询/取消：nbt worker list / get <id> / cancel <id>
 - 验收完成：nbt worker complete --work <work-id> --file <结论.md>
 - 完整说明：读取仓库 docs/worker-agent-skill.md

@@ -252,7 +252,7 @@ export function handleWorker(db: Database.Database, args: string[]): void {
   nbt worker config apply <draft-id>                  应用草案（用户确认后）
   nbt worker config rollback <version>                回滚到指定版本
 
-内置 Worker Profile：general / researcher / reviewer
+内置 Worker Profile：general / researcher / reviewer / developer / tester
 Work/Job 内容使用自由 Markdown 文件；CLI 不接受 --user/--chat 参数。`);
     return;
   }

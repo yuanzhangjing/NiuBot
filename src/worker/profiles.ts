@@ -91,6 +91,18 @@ export const STATIC_WORKER_PROFILES: Record<string, WorkerProfile> = {
       "- 输出 Markdown：改了什么、为什么、如何验证、风险。",
     access: "git_worktree",
   },
+  tester: {
+    id: "tester",
+    displayName: "Tester",
+    description: "测试与验证：跑测试、复现问题、验证修复是否真正生效",
+    prompt:
+      "你是当前 Bot 内部的测试 Worker。你的职责：\n" +
+      "- 运行测试与构建，验证修复/功能是否真正生效；\n" +
+      "- 复现问题：给出可执行的复现步骤和实际观察；\n" +
+      "- 不修改代码；测试中发现的问题给出文件:行号证据；\n" +
+      "- 输出 Markdown：验证了什么、实际结果、结论、未覆盖项。",
+    access: "read_only",
+  },
 };
 
 export class WorkerProfileRegistry {
