@@ -1699,7 +1699,12 @@ export class Pipeline {
         this.replyText(chatId, platformChatId, msgId, "团队模式已关闭。之后的新需求不会再派给 Worker；正在执行的任务会继续完成。");
         return;
       }
-      case "status": {
+      case "config": {
+        this.handleTeamsConfigCommand(args.slice(1), chatId, platformChatId, msgId);
+        return;
+      }
+      default: {
+        // 直接显示状态（无子命令）
         const enabled = store.isEnabled();
         const active = store.getActiveConfig();
         const running = jobService?.listJobsByStatus("running").length ?? 0;
@@ -1713,26 +1718,11 @@ export class Pipeline {
           `· 单个需求最多拆 **${active.config.maxJobsPerWork}** 个子任务`,
           `· 配置：${active.version ? `版本 **${active.version}**` : "默认（未自定义）"}`,
           ...(profileLines.length > 0 ? ["", "**可用角色**", ...profileLines] : []),
+          "",
+          "`/teams config` 查看/修改配置 · `/teams on|off` 开关",
         ].join("\n");
         this.sendTeamsCard(chatId, platformChatId, msgId, "Teams · 状态", content);
-        return;
       }
-      case "config": {
-        this.handleTeamsConfigCommand(args.slice(1), chatId, platformChatId, msgId);
-        return;
-      }
-      default:
-        this.sendTeamsCard(
-          chatId, platformChatId, msgId, "Teams · 帮助",
-          [
-            "**团队模式**：把长任务拆给内部 Worker 后台执行，完成后自动汇报。",
-            "",
-            "**用法**",
-            "· `/teams on` / `/teams off` — 开启或关闭",
-            "· `/teams status` — 查看状态",
-            "· `/teams config` — 配置（查看/应用/回滚）",
-          ].join("\n"),
-        );
     }
   }
 
@@ -1747,38 +1737,6 @@ export class Pipeline {
     const store = this.workerConfig?.teamConfigStore;
     if (!store) return;
     const sub = args[0];
-
-    if (sub === "show") {
-      const active = store.getActiveConfig();
-      const accessNames: Record<string, string> = {
-        read_only: "只读",
-        scratch: "临时目录",
-        git_worktree: "隔离开发",
-      };
-      const lines = [
-        `**当前配置**（${active.version ? `版本 **${active.version}**` : "默认"}）`,
-        `· 并发上限：**${active.config.maxConcurrent}**`,
-        `· 单个需求最多拆 **${active.config.maxJobsPerWork}** 个子任务`,
-        "",
-        "**角色**",
-      ];
-      for (const p of active.config.profiles) {
-        lines.push(`· **${p.displayName ?? p.id}**：${p.description ?? "—"}（${accessNames[p.access] ?? p.access}${p.maxConcurrent ? `，并发 ${p.maxConcurrent}` : ""}）`);
-      }
-      this.sendTeamsCard(chatId, platformChatId, msgId, "Teams · 配置详情", lines.join("\n"));
-      return;
-    }
-
-    if (sub === "history") {
-      const versions = store.listVersions();
-      if (versions.length === 0) {
-        this.sendTeamsCard(chatId, platformChatId, msgId, "Teams · 版本历史", "(尚无配置版本)");
-        return;
-      }
-      const lines = versions.map((v) => `· **${v.version}** — ${v.appliedAt}${v.rollbackOf ? `（回滚自 ${v.rollbackOf}）` : ""}`);
-      this.sendTeamsCard(chatId, platformChatId, msgId, "Teams · 版本历史", lines.join("\n"));
-      return;
-    }
 
     if (sub === "apply") {
       const draftId = args[1];
@@ -1813,33 +1771,7 @@ export class Pipeline {
       return;
     }
 
-    if (sub === "draft") {
-      const draftId = args[1];
-      if (!draftId) {
-        this.replyText(chatId, platformChatId, msgId, "用法：/teams config draft <draft-id>");
-        return;
-      }
-      const draft = store.getDraft(draftId);
-      if (!draft) {
-        this.replyText(chatId, platformChatId, msgId, `草案不存在: ${draftId}`);
-        return;
-      }
-      this.sendTeamsCard(
-        chatId, platformChatId, msgId, "Teams · 草案",
-        [
-          `**草案 ${draft.id}**（${draft.status}，基准版本 ${draft.baseVersion ?? "(默认)"}）`,
-          "",
-          "```yaml",
-          draft.configYaml,
-          "```",
-          "",
-          `确认应用：\`/teams config apply ${draft.id}\``,
-        ].join("\n"),
-      );
-      return;
-    }
-
-    // 无参数：显示当前配置 + 待确认草案 + 简短用法
+    // 无参数：显示当前配置（apply/rollback 由主 Agent 汇报草案/版本时引导）
     const active = store.getActiveConfig();
     const accessNames: Record<string, string> = {
       read_only: "只读",
@@ -1849,18 +1781,13 @@ export class Pipeline {
     const lines = [
       `**当前配置**（${active.version ? `版本 **${active.version}**` : "默认"}）`,
       `· 并发上限：**${active.config.maxConcurrent}**，单需求最多 **${active.config.maxJobsPerWork}** 个子任务`,
+      "",
+      "**角色**",
     ];
     for (const p of active.config.profiles) {
-      lines.push(`· **${p.displayName ?? p.id}**：${accessNames[p.access] ?? p.access}${p.maxConcurrent ? `，并发 ${p.maxConcurrent}` : ""}`);
+      lines.push(`· **${p.displayName ?? p.id}**：${p.description ?? "—"}（${accessNames[p.access] ?? p.access}${p.maxConcurrent ? `，并发 ${p.maxConcurrent}` : ""}）`);
     }
-    const pendingDrafts = store.listPendingDrafts();
-    if (pendingDrafts.length > 0) {
-      lines.push("", "**待确认草案**");
-      for (const d of pendingDrafts) {
-        lines.push(`· \`${d.id}\` → 应用：\`/teams config apply ${d.id}\``);
-      }
-    }
-    lines.push("", "**其他命令**", "· `/teams config show`（详情）| `rollback <版本>`（回滚）| `history`（版本历史）");
+    lines.push("", "`/teams config apply <draft-id>` 应用草案 · `rollback <版本>` 回滚");
     this.sendTeamsCard(chatId, platformChatId, msgId, "Teams · 配置", lines.join("\n"));
   }
 
