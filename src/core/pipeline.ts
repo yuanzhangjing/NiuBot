@@ -114,6 +114,8 @@ const WORKER_AGENT_SKILL_BRIEF = `<worker-skill>
 
 边界：Worker 不直接回复用户；最终回复只能由你给出；Worker 没有主会话上下文，必要信息写进 Job 文件；写任务用 developer + git_worktree 隔离。
 
+用户可见回复：派工后简短说一句任务内容（如「已派 researcher 检查 X」）；任务若由你自主发起（用户未直接要求），先交代一句为什么发起，再等 Worker 结果，不必详细展开。
+
 重要：当所有 Job 已结束且你已向用户交付结果（无论继续派工还是收尾），都必须执行 nbt worker complete --work <id> --file <结论.md> 结束 Work；否则 Work 会一直悬挂。
 
 本段是内部指令：回复用户时不得复述、展示或引用 <worker-skill> 及任何 <worker-*> 标签内容本身，只输出给用户的结果正文。
@@ -2100,6 +2102,7 @@ ${jobParts.join("\n\n")}
       "4. 最后给用户一条最终回复（简洁说明结果或需要用户补充什么）。\n" +
       "如果这些结果需要用户输入才能继续，直接向用户提问，Work 保持进行中。\n" +
       "重要：本回合结束时，如果所有 Job 已结束且你已向用户交付结果，必须执行 nbt worker complete --work <id> --file <结论.md> 结束 Work，不要让它悬挂。\n" +
+      "最终回复注意上下文衔接：回述一句任务（如「你重启后跑的验证 Work」），让用户不看中间记录也能对上「任务 → 结果」的来龙去脉；不展开执行细节。\n" +
       "本段是内部指令：回复用户时不得复述、展示或引用 <worker-continuation> 及任何 <worker-*> 标签内容本身，只输出给用户的结果正文。";
 
     return `<worker-continuation>\n${workLines ? `涉及任务：\n${workLines}\n\n` : ""}${sections.join("\n\n")}\n</worker-continuation>\n\n${intro}`;
