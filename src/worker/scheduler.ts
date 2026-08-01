@@ -14,6 +14,8 @@ const log = createLogger("worker-scheduler");
 
 export const JOB_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 export const JOB_WALL_TIMEOUT_MS = 2 * 60 * 60 * 1000;
+/** cancelling 状态无进展（进程未确认退出）超过该时间后强制终态 */
+export const JOB_CANCEL_CONFIRM_TIMEOUT_MS = 10 * 60 * 1000;
 
 export interface WorkerSchedulerOptions {
   runtime: WorkerRuntime;
@@ -78,7 +80,28 @@ export class WorkerScheduler {
           idleMs,
           wallMs,
         });
-        runtime.cancel(jobId, idleMs > JOB_IDLE_TIMEOUT_MS ? "idle_timeout" : "wall_timeout");
+        await runtime.cancel(jobId, idleMs > JOB_IDLE_TIMEOUT_MS ? "idle_timeout" : "wall_timeout");
+      }
+    }
+
+    // 1b. cancelling 超时兜底：进程确认退出超时后强制终态（不再无限等待）
+    const cancelDeadline = new Date(Date.now() - JOB_CANCEL_CONFIRM_TIMEOUT_MS).toISOString();
+    for (const job of jobService.listJobsByStatus("cancelling")) {
+      const updatedAt = job.updatedAt.replace(" ", "T") + "Z";
+      if (updatedAt < cancelDeadline) {
+        log.warn("worker job cancel confirmation timed out, forcing terminal state", { jobId: job.id });
+        if (runtime.inspect(job.id)) {
+          await runtime.cancel(job.id, "cancel_confirm_timeout");
+        }
+        jobService.confirmCancelled(job.id, {
+          status: "cancelled",
+          responseText: "",
+          error: "cancel confirmation timed out",
+          changedFiles: [],
+          artifacts: [],
+          startedAt: job.startedAt ?? new Date().toISOString(),
+          endedAt: new Date().toISOString(),
+        });
       }
     }
 

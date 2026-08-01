@@ -9,8 +9,12 @@
 import { randomUUID } from "node:crypto";
 
 import type { AgentBackend, AgentSession, SessionConfig } from "../agent/types.js";
+import { createLogger } from "../logger.js";
+import { terminateSpawnedProcessTree, waitForProcessExit } from "../platform/process.js";
 import type { Job, JobExecutionRecord, JobService } from "./types.js";
 import { WorkerProfileRegistry } from "./profiles.js";
+
+const log = createLogger("worker-runtime");
 
 export interface RunningJobExecution {
   jobId: string;
@@ -53,22 +57,39 @@ export class WorkerRuntime {
     return this.running.get(jobId);
   }
 
-  /** 取消：请求 backend 终止进程树；真实退出由 sendMessage 的 cancelled 结果确认。 */
-  cancel(jobId: string, reason: string): boolean {
+  /**
+   * 取消：温和终止进程树 → 等待退出确认 → 超时后强制 SIGKILL。
+   * 真实退出由 sendMessage 的 cancelled 结果最终确认（终态由确认后提交）。
+   */
+  async cancel(jobId: string, reason: string): Promise<boolean> {
     const exec = this.running.get(jobId);
     if (!exec) return false;
-    const job = this.options.jobService.getJob(jobId);
+    const { jobService, backend } = this.options;
+    const job = jobService.getJob(jobId);
     const workId = job?.workId ?? "";
-    this.options.jobService.recordEvent({ workId, jobId, event: "job_cancel_requested", detail: reason });
+    jobService.recordEvent({ workId, jobId, event: "job_cancel_requested", detail: reason });
     exec.controller.abort();
-    void this.options.backend.cancelSession(exec.session).catch((err) => {
-      this.options.jobService.recordEvent({
-        workId,
-        jobId,
-        event: "job_failed",
-        detail: `cancel failed: ${String(err)}`,
-      });
-    });
+
+    try {
+      await backend.cancelSession(exec.session);
+    } catch (err) {
+      jobService.recordEvent({ workId, jobId, event: "job_failed", detail: `cancel failed: ${String(err)}` });
+      return false;
+    }
+
+    // 进程身份：从 backend activity 读取 PID，等待真实退出，超时升级强制终止
+    const activity = (backend as { getActivity?: (id: string) => { pid?: number } | undefined }).getActivity?.(
+      exec.session.id,
+    );
+    const pid = activity?.pid;
+    if (pid) {
+      const exited = await waitForProcessExit(pid, 10_000);
+      if (!exited) {
+        log.warn("worker job did not exit after graceful cancel, forcing kill", { jobId, pid });
+        terminateSpawnedProcessTree(pid, true);
+        jobService.recordEvent({ workId, jobId, event: "job_cancel_requested", detail: `force kill pid=${pid}` });
+      }
+    }
     return true;
   }
 

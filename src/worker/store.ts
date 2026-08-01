@@ -481,3 +481,13 @@ export function markContinuationCompleted(
   `).run(agentTurnId, id);
   return result.changes === 1;
 }
+
+/** 重启恢复：主 Agent 回合中断的 claimed Continuation 重置为 pending，允许重新投递（§7.5）。 */
+export function resetClaimedContinuations(db: Database.Database): number {
+  const result = db.prepare(`
+    UPDATE agent_continuations
+    SET status = 'pending', claim_token = NULL, claimed_at = NULL, agent_turn_id = NULL
+    WHERE status = 'claimed'
+  `).run();
+  return result.changes;
+}

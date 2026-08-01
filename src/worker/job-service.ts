@@ -47,6 +47,7 @@ import {
   listWorkerEvents,
   listWorks as listWorkRows,
   markContinuationCompleted,
+  resetClaimedContinuations,
   updateJobStatus,
   updateWorkConclusion,
   updateWorkStatus,
@@ -321,6 +322,10 @@ export class SqliteJobService implements JobService {
 
   claimContinuations(chatId: string, claimToken: string): AgentContinuation[] {
     return claimPendingContinuations(this.db, chatId, claimToken).map(continuationRowToContinuation);
+  }
+
+  resetClaimedContinuations(): number {
+    return resetClaimedContinuations(this.db);
   }
 
   markContinuationCompleted(id: string, agentTurnId: string): void {

@@ -243,3 +243,70 @@ test("Work 完成后不再调度新 Job", async () => {
     service.createJob({ workId: work.id, workerProfileId: "general", prompt: "再来一次", workdir: tempRoot }),
   ).toThrow(/not active/);
 });
+
+test("重启恢复：running Job 标记 interrupted，claimed Continuation 重新投递", async () => {
+  backend.delayMs = 5000;
+  await pipeline.start();
+
+  const work = service.createWork({
+    botId: BOT_ID,
+    ownerUserId: OWNER,
+    sourceChatId: CHAT_ID,
+    visibility: "private",
+    request: "重启恢复任务",
+  });
+  const job = service.createJob({ workId: work.id, workerProfileId: "general", prompt: "慢任务", workdir: tempRoot });
+
+  // 等 Job 进入 running（Fake 挂起 5s，保证 Engine "重启" 时仍 running）
+  await waitFor(() => service.getJob(job.id)?.status === "running");
+  // 模拟主 Agent 回合被中断：伪造一条 claimed 状态的 Continuation
+  db.prepare(`
+    INSERT INTO agent_continuations (id, bot_id, chat_id, dedupe_key, kind, work_id, job_ids_json, status, created_at)
+    VALUES (?, ?, ?, ?, 'job_terminal', ?, ?, 'claimed', datetime('now'))
+  `).run("ctn_interrupted", BOT_ID, CHAT_ID, `work:${work.id}:job:${job.id}:terminal`, work.id, JSON.stringify([job.id]));
+  const messagesBefore = backend.messages.length;
+
+  // 模拟重启：停掉第一个 Pipeline（挂着的 worker 回合仍会完成，但终态已被 recover 接管）
+  pipeline.stop();
+  backend.delayMs = 0;
+
+  // 新 Pipeline 实例（同一数据库）→ 启动恢复
+  const pipeline2 = new Pipeline(
+    db,
+    transport as unknown as TransportClient,
+    backend as unknown as AgentBackend,
+    { name: "NiuBot", platform: "feishu", platformBotId: "bot" },
+    tempRoot,
+    path.join(tempRoot, "niubot.db"),
+    10,
+    "test",
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    false,
+    undefined,
+    undefined,
+    { jobService: service, registry, maxConcurrent: 2, tickMs: 50 },
+  );
+  await pipeline2.start();
+
+  try {
+    // running Job → interrupted，Work 计数 +1
+    await waitFor(() => service.getJob(job.id)?.status === "interrupted");
+    expect(service.getWork(work.id)?.interruptedCount).toBe(1);
+
+    // claimed Continuation → pending → 重新投递 → 主 Agent 验收回合
+    await waitFor(() => backend.messages.length > messagesBefore);
+    const redelivered = backend.messages
+      .slice(messagesBefore)
+      .some((m) => m.text.includes("<worker-continuation>"));
+    expect(redelivered).toBe(true);
+
+    // 验收完成后 Continuation 被标记完成
+    await waitFor(() => service.claimContinuations(CHAT_ID, "final").length === 0);
+  } finally {
+    pipeline2.stop();
+  }
+}, 20000);

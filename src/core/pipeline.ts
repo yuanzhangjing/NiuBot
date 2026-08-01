@@ -1735,6 +1735,11 @@ export class Pipeline {
   private recoverInterruptedWorkerJobs(): void {
     const jobService = this.workerConfig?.jobService;
     if (!jobService) return;
+    // claimed 但未完成的 Continuation（主 Agent 回合中断）重置为 pending 重新投递
+    const resetCount = jobService.resetClaimedContinuations();
+    if (resetCount > 0) {
+      this.log.info("worker continuations reset for redelivery after restart", { count: resetCount });
+    }
     for (const job of jobService.listJobsByStatus("running")) {
       jobService.interruptJob(job.id);
       this.log.warn("worker job interrupted by restart", { jobId: job.id, workId: job.workId });

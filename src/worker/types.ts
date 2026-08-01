@@ -241,6 +241,8 @@ export interface JobService {
   claimContinuations(chatId: string, claimToken: string): AgentContinuation[];
   /** 主 Agent 回合事务提交后标记完成 */
   markContinuationCompleted(id: string, agentTurnId: string): void;
+  /** 重启恢复：claimed Continuation 重置为 pending（§7.5 重新投递） */
+  resetClaimedContinuations(): number;
 
   recordEvent(event: Omit<WorkerEvent, "id" | "createdAt" | "botId">): void;
   listEvents(workId: string): WorkerEvent[];
