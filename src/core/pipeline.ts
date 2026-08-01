@@ -112,6 +112,8 @@ const WORKER_AGENT_SKILL_BRIEF = `<worker-skill>
 - 完整说明：读取仓库 docs/worker-agent-skill.md
 
 边界：Worker 不直接回复用户；最终回复只能由你给出；Worker 没有主会话上下文，必要信息写进 Job 文件；写任务用 developer + git_worktree 隔离。
+
+重要：当所有 Job 已结束且你已向用户交付结果（无论继续派工还是收尾），都必须执行 nbt worker complete --work <id> --file <结论.md> 结束 Work；否则 Work 会一直悬挂。
 </worker-skill>`;
 
 const BUILTIN_COMMANDS = new Set([
@@ -2021,7 +2023,8 @@ ${jobParts.join("\n\n")}
       "2. 需要继续时，用 nbt worker 命令创建后续 Job；\n" +
       "3. 认为需求已完成时，用 nbt worker complete 结束 Work；\n" +
       "4. 最后给用户一条最终回复（简洁说明结果或需要用户补充什么）。\n" +
-      "如果这些结果需要用户输入才能继续，直接向用户提问，Work 保持进行中。";
+      "如果这些结果需要用户输入才能继续，直接向用户提问，Work 保持进行中。\n" +
+      "重要：本回合结束时，如果所有 Job 已结束且你已向用户交付结果，必须执行 nbt worker complete --work <id> --file <结论.md> 结束 Work，不要让它悬挂。";
 
     return `<worker-continuation>\n${workLines ? `涉及任务：\n${workLines}\n\n` : ""}${sections.join("\n\n")}\n</worker-continuation>\n\n${intro}`;
   }
