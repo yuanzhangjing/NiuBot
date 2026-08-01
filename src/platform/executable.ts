@@ -175,19 +175,31 @@ function resolveNpmShimTarget(shimPath: string, args: string[]): ExecutableInvoc
   }
   const dp0 = path.win32.dirname(shimPath);
 
-  // 调用行特征：以 `%*` 结尾（透传全部参数），排除 REM 注释行；
-  // 取该行第一个非 node.exe 的 dp0 引用作为入口（prog 可能是 %dp0%\node.exe，
-  // 且 --require 等加载器参数可能在入口之后）。匹配 %dp0%（find_dp0 赋值后引用）
-  // 与 %~dp0（内联式，无结尾 %）；\\* 吞掉转义产生的多个反斜杠，避免盘符根相对解析。
+  // npm shim 调用行特征（排除普通批处理误判）：
+  // - 行以 `%*` 结尾（透传全部参数），且不是 REM/:: 注释行
+  // - 入口引用必须含 `..\` 段（npm shim 的 cli.js 在 .bin 上跳一级的包目录；
+  //   排除 `call tool.cmd "%dp0%\config.js" %*` 这类传配置文件的普通脚本）
+  // - 取该行第一个非 node.exe 的 dp0 引用作为入口（prog 可能是 %dp0%\node.exe）
+  // 匹配 %dp0%（find_dp0 赋值后引用）与 %~dp0（内联式，无结尾 %）；
+  // [\\/]* 吞掉转义/正斜杠，避免盘符根相对解析。
   let raw: string | undefined;
   for (const line of content.split(/\r?\n/)) {
+    const trimmed = line.trim();
     if (!/\s+%\*/.test(line)) continue;
-    const refs = [...line.matchAll(/"%(?:~)?dp0(?:%)?\\*([^"\r\n]+?\.(?:js|cjs|mjs|exe))"/gi)];
+    if (/^(?:rem|::)\b/i.test(trimmed)) continue;
+    const refs = [...line.matchAll(/"%(?:~)?dp0(?:%)?[\\/]*(\.\.[\\/][^"\r\n]+?\.(?:js|cjs|mjs|exe))"/gi)];
     const candidate = refs.find((m) => !/node\.exe$/i.test(m[1]!));
     if (candidate) raw = candidate[1];
   }
   if (!raw) return undefined;
   const target = path.win32.resolve(dp0, raw);
+  // 解析出的入口必须真实存在，否则回退 cmd（避免误判/损坏 shim 直跑错误路径）。
+  // Windows API 接受正斜杠分隔符，统一转正斜杠做存在性检查（与平台无关）。
+  try {
+    if (!fs.statSync(target.replace(/\\/g, "/")).isFile()) return undefined;
+  } catch {
+    return undefined;
+  }
   if (/\.(?:js|cjs|mjs)$/i.test(raw)) {
     return { command: process.execPath, args: [target, ...args] };
   }

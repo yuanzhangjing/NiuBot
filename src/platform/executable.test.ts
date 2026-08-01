@@ -25,6 +25,13 @@ function writeTempShim(fileName: string, content: string, subDir = path.join("no
   return shimPath;
 }
 
+/** 创建 shim 指向的入口文件（win32 风格相对路径，如 ..\\claude\\cli.js）。 */
+function touchShimEntry(shimPath: string, winRelative: string): void {
+  const posix = path.win32.join(path.win32.dirname(shimPath), winRelative).replace(/\\/g, "/");
+  fs.mkdirSync(path.dirname(posix), { recursive: true });
+  writeFileSync(posix, "");
+}
+
 afterEach(() => {
   for (const dir of tempDirs.splice(0)) {
     try {
@@ -93,6 +100,7 @@ IF EXIST "%dp0%\\node.exe" (
 
 endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\\..\\claude\\cli.js" %*
 `);
+    touchShimEntry(shim, "..\\claude\\cli.js");
     const multiline = "line1\nline2\nline3";
     const invocation = buildExecutableInvocation(shim, ["--append-system-prompt", multiline, "--resume", "abc"], {
       platform: "win32",
@@ -115,6 +123,7 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\\..\\
   node "%~dp0\\..\\yarn\\bin\\yarn.js" %*
 )
 `);
+    touchShimEntry(shim, "..\\yarn\\bin\\yarn.js");
     const invocation = buildExecutableInvocation(shim, ["add", "pkg"], { platform: "win32" });
     expect(invocation.command).toBe(process.execPath);
     expect(invocation.args[0]).toBe(path.win32.join(path.win32.dirname(shim), "..", "yarn", "bin", "yarn.js"));
@@ -141,6 +150,7 @@ IF EXIST "%dp0%\\node.exe" (
 
 endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\\..\\@anthropic-ai\\claude-code\\cli.js" %*
 `, "");
+    touchShimEntry(shim, "..\\@anthropic-ai\\claude-code\\cli.js");
     const invocation = buildExecutableInvocation(shim, ["--append-system-prompt", "a\nb"], { platform: "win32" });
     expect(invocation.command).toBe(process.execPath);
     expect(invocation.args[0]).toBe(path.win32.join(path.win32.dirname(shim), "..", "@anthropic-ai", "claude-code", "cli.js"));
@@ -153,6 +163,7 @@ REM "%dp0%\\..\\pkg\\cleanup.js"
 SETLOCAL
 "%_prog%" "%dp0%\\..\\claude\\cli.js" --require "%dp0%\\..\\claude\\preload.js" %*
 `);
+    touchShimEntry(shim, "..\\claude\\cli.js");
     const invocation = buildExecutableInvocation(shim, ["--flag"], { platform: "win32" });
     expect(invocation.command).toBe(process.execPath);
     // 注释行和 --require 加载器不被当入口
@@ -165,6 +176,7 @@ SETLOCAL
 SETLOCAL
 "%_prog%" "%dp0%\\\\..\\\\claude\\\\cli.js" %*
 `);
+    touchShimEntry(shim, "..\\claude\\cli.js");
     const invocation = buildExecutableInvocation(shim, ["--flag"], { platform: "win32" });
     expect(invocation.command).toBe(process.execPath);
     expect(invocation.args[0]).toBe(path.win32.join(path.win32.dirname(shim), "..", "claude", "cli.js"));
@@ -173,15 +185,16 @@ SETLOCAL
   it("bypasses cmd for native .exe npm shims (spawns the exe directly)", () => {
     const shim = writeTempShim("native-tool.cmd", `@ECHO off
 SETLOCAL
-IF EXIST "%dp0%\\native-tool.exe" (
-  "%dp0%\\native-tool.exe" %*
+IF EXIST "%dp0%\\..\\native-pkg\\native-tool.exe" (
+  "%dp0%\\..\\native-pkg\\native-tool.exe" %*
 ) ELSE (
   ECHO native-tool.exe not found
   EXIT /b 1
 )
 `);
+    touchShimEntry(shim, "..\\native-pkg\\native-tool.exe");
     const invocation = buildExecutableInvocation(shim, ["--flag"], { platform: "win32" });
-    expect(invocation.command).toBe(path.win32.join(path.win32.dirname(shim), "native-tool.exe"));
+    expect(invocation.command).toBe(path.win32.join(path.win32.dirname(shim), "..", "native-pkg", "native-tool.exe"));
     expect(invocation.args).toEqual(["--flag"]);
   });
 
@@ -199,6 +212,45 @@ IF EXIST "%dp0%\\native-tool.exe" (
     const shim = writeTempShim("weird.cmd", "@ECHO off\r\nECHO nothing useful\r\n");
     const invocation = buildExecutableInvocation(shim, ["--flag"], { platform: "win32" });
     expect(invocation.command).toMatch(/cmd\.exe$/i);
+  });
+
+  it("parses CRLF shims (real npm cmd-shim output is CRLF)", () => {
+    // 真实 npm shim 由 cmd-shim 以 \r\n 拼接生成
+    const shim = writeTempShim("claude.cmd", "@ECHO off\r\nGOTO start\r\n:start\r\nSETLOCAL\r\nIF EXIST \"%dp0%\\node.exe\" (\r\n  SET \"_prog=%dp0%\\node.exe\"\r\n) ELSE (\r\n  SET \"_prog=node\"\r\n)\r\n\"%_prog%\" \"%dp0%\\..\\claude\\cli.js\" %*\r\n");
+    touchShimEntry(shim, "..\\claude\\cli.js");
+    const invocation = buildExecutableInvocation(shim, ["--flag"], { platform: "win32" });
+    expect(invocation.command).toBe(process.execPath);
+    expect(invocation.args[0]).toBe(path.win32.join(path.win32.dirname(shim), "..", "claude", "cli.js"));
+  });
+
+  it("handles scoped package shims (node_modules/.bin/@scope/pkg.cmd)", () => {
+    const shim = writeTempShim("cli.cmd", `@ECHO off
+SETLOCAL
+"%_prog%" "%dp0%\\..\\..\\@myorg\\pkg\\cli.js" %*
+`, path.join("node_modules", ".bin", "@myorg"));
+    touchShimEntry(shim, "..\\..\\@myorg\\pkg\\cli.js");
+    const invocation = buildExecutableInvocation(shim, ["--flag"], { platform: "win32" });
+    expect(invocation.command).toBe(process.execPath);
+    expect(invocation.args[0]).toBe(path.win32.join(path.win32.dirname(shim), "..", "..", "@myorg", "pkg", "cli.js"));
+  });
+
+  it("keeps cmd routing for wrapper scripts that pass .js config files (not npm shims)", () => {
+    // eslint 等 wrapper：call eslint.cmd "%dp0%\eslint.config.js" %*——配置文件是 .js 但不含 ..\ 段
+    const shim = writeTempShim("run.cmd", `@ECHO off
+SET NODE_OPTIONS=--max-old-space-size=4096
+call "%dp0%\\node_modules\\.bin\\eslint.cmd" "%dp0%\\eslint.config.js" %*
+`);
+    fs.writeFileSync(path.join(path.dirname(shim), "eslint.config.js"), "module.exports = {};");
+    const invocation = buildExecutableInvocation(shim, ["--fix"], { platform: "win32" });
+    // 不含 ..\ 的 dp0 引用不是 npm shim 入口 → 保持 cmd 包装
+    expect(invocation.command).toMatch(/cmd\.exe$/i);
+  });
+
+  it("keeps cmd routing for empty/single-line stub shims", () => {
+    const empty = writeTempShim("stub.cmd", "");
+    const single = writeTempShim("stub2.cmd", "@ECHO off");
+    expect(buildExecutableInvocation(empty, ["--flag"], { platform: "win32" }).command).toMatch(/cmd\.exe$/i);
+    expect(buildExecutableInvocation(single, ["--flag"], { platform: "win32" }).command).toMatch(/cmd\.exe$/i);
   });
 
   it("puts the owning Windows Node runtime first without duplicate Path keys", () => {
