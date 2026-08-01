@@ -186,7 +186,7 @@ function resolveNpmShimTarget(shimPath: string, args: string[]): ExecutableInvoc
   for (const line of content.split(/\r?\n/)) {
     const trimmed = line.trim();
     if (!/\s+%\*/.test(line)) continue;
-    if (/^(?:rem|::)\b/i.test(trimmed)) continue;
+    if (/^(?:rem\b|::)/i.test(trimmed)) continue;
     const refs = [...line.matchAll(/"%(?:~)?dp0(?:%)?[\\/]*(\.\.[\\/][^"\r\n]+?\.(?:js|cjs|mjs|exe))"/gi)];
     const candidate = refs.find((m) => !/node\.exe$/i.test(m[1]!));
     if (candidate) raw = candidate[1];

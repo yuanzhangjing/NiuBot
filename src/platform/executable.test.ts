@@ -246,6 +246,17 @@ call "%dp0%\\node_modules\\.bin\\eslint.cmd" "%dp0%\\eslint.config.js" %*
     expect(invocation.command).toMatch(/cmd\.exe$/i);
   });
 
+  it("skips :: comment lines (with or without trailing space)", () => {
+    const shim = writeTempShim("claude.cmd", `@ECHO off
+:: "%dp0%\\..\\docs\\example.js" %*
+"%_prog%" "%dp0%\\..\\claude\\cli.js" %*
+`);
+    touchShimEntry(shim, "..\\claude\\cli.js");
+    const invocation = buildExecutableInvocation(shim, ["--flag"], { platform: "win32" });
+    expect(invocation.command).toBe(process.execPath);
+    expect(invocation.args[0]).toBe(path.win32.join(path.win32.dirname(shim), "..", "claude", "cli.js"));
+  });
+
   it("keeps cmd routing for empty/single-line stub shims", () => {
     const empty = writeTempShim("stub.cmd", "");
     const single = writeTempShim("stub2.cmd", "@ECHO off");
