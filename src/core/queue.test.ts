@@ -78,3 +78,45 @@ describe("MessageQueue discard semantics", () => {
     expect(discarded).toEqual([]);
   });
 });
+
+describe("MessageQueue worker continuation preemption", () => {
+  function continuationMsg(ids: string[]): QueuedMessage {
+    return message({
+      text: `[worker continuation: ${ids.join(",")}]`,
+      triggerKind: "worker_continuation",
+      continuationIds: ids,
+    });
+  }
+
+  test("user message push preempts buffered continuations", () => {
+    const queue = new MessageQueue(10_000);
+    queue.push(continuationMsg(["ctn-1"]));
+    expect(queue.preemptWorkerContinuations("c1")).toEqual(["ctn-1"]);
+  });
+
+  test("preempts pending continuations while busy", () => {
+    const queue = new MessageQueue(10);
+    let release: () => void = () => {};
+    queue.onProcess(() => new Promise<void>((resolve) => { release = resolve; }));
+    queue.push(message({ dbMsgId: 1 }));
+    queue.push(continuationMsg(["ctn-2"])); // busy 中入 pending
+    expect(queue.preemptWorkerContinuations("c1")).toEqual(["ctn-2"]);
+    release();
+  });
+
+  test("preempt leaves user messages in place", () => {
+    const queue = new MessageQueue(10_000);
+    queue.push(message({ dbMsgId: 1 }));
+    queue.push(continuationMsg(["ctn-3"]));
+    queue.push(message({ dbMsgId: 2 }));
+    expect(queue.preemptWorkerContinuations("c1")).toEqual(["ctn-3"]);
+    // 用户消息仍在（两条用户消息在 buffer，continuation 被移除）
+    expect(queue.pendingCount("c1")).toBe(2);
+  });
+
+  test("no-op when no continuations", () => {
+    const queue = new MessageQueue(10_000);
+    queue.push(message({ dbMsgId: 1 }));
+    expect(queue.preemptWorkerContinuations("c1")).toEqual([]);
+  });
+});

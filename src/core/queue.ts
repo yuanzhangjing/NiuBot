@@ -98,6 +98,36 @@ export class MessageQueue {
     return false;
   }
 
+  /**
+   * 用户消息优先：移除该 chat 队列中尚未开始处理的 Worker Continuation（buffer/pending 中的），
+   * 返回被移除的 continuationIds。已开始处理（busy）的不受影响。
+   * 调用方负责把返回的 id 释放回 pending（允许后续重新投递）。
+   */
+  preemptWorkerContinuations(chatId: string): string[] {
+    const q = this.queues.get(chatId);
+    if (!q) return [];
+    const collect = (list: QueuedMessage[]): string[] => {
+      const ids: string[] = [];
+      const keep: QueuedMessage[] = [];
+      for (const m of list) {
+        if (m.triggerKind === "worker_continuation") {
+          ids.push(...(m.continuationIds ?? []));
+        } else {
+          keep.push(m);
+        }
+      }
+      list.length = 0;
+      list.push(...keep);
+      return ids;
+    };
+    const preempted = [...collect(q.buffer), ...collect(q.pending)];
+    if (preempted.length > 0) {
+      this.emitState(chatId, q);
+      log.info("worker continuations preempted by user message", { chatId, count: preempted.length });
+    }
+    return preempted;
+  }
+
   /** 停止队列，清除所有计时器 */
   stop(): void {
     this.stopped = true;

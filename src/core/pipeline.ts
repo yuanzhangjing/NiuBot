@@ -378,6 +378,13 @@ export class Pipeline {
     this.queue.onProcess((runId, chatId, mergedText, messages, signal) => (
       this.process(chatId, mergedText, messages, signal, runId)
     ));
+    // 用户消息优先：抢占的 Continuation 释放认领，后续由 Scheduler 重新投递
+    this.queue.onContinuationsPreempted((chatId, ids) => {
+      for (const id of ids) {
+        this.workerConfig?.jobService.releaseContinuationClaim(id);
+      }
+      this.log.info("worker continuations released after user preemption", { chatId, continuationIds: ids });
+    });
     this.queue.onDiscard((messages) => {
       this.transport.discardInboundMessages?.(
         messages.map((message) => message.dbMsgId).filter((id): id is number => id != null),
