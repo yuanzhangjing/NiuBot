@@ -587,7 +587,76 @@ test("角色配置 backend 时使用专属 backend，否则复用主 Agent backe
 
   expect(service.getJob(specialJob.id)?.responseText).toBe("专属后端结果");
   expect(service.getJob(normalJob.id)?.responseText).toBe(backend.resultText);
-  // 专属 backend 确实被使用（session 被创建），且收到角色配置的 model
+  // 专属 backend 确实被使用（session 被创建），且收到角色配置的 model；
+  // 普通角色走主 backend（session 模型为全局 model——本测试 botIdentity 无 model → 空）
   expect(specialBackend.sessions).toHaveLength(1);
   expect(specialBackend.sessionModels).toEqual(["special-model"]);
+  expect(backend.sessions).toContain(service.getJob(normalJob.id)?.backendSessionId);
+}, 15000);
+
+test("未知 backend 类型：Job 失败且错误带角色上下文", async () => {
+  pipeline.stop();
+  pipeline = new Pipeline(
+    db,
+    transport as unknown as TransportClient,
+    backend as unknown as AgentBackend,
+    { name: "NiuBot", platform: "feishu", platformBotId: "bot" },
+    tempRoot,
+    path.join(tempRoot, "niubot.db"),
+    10,
+    "test",
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    false,
+    undefined,
+    undefined,
+    {
+      jobService: service,
+      registry,
+      maxConcurrent: 2,
+      tickMs: 50,
+      workspaceRoot: path.join(tempRoot, "ws"),
+      teamConfigStore: teamConfig,
+      resolveBackend: async (type) => {
+        throw new Error(`Backend '${type}' is unavailable`);
+      },
+    },
+  );
+  registry.setProfiles([
+    ...registry.list(),
+    {
+      id: "broken-role",
+      displayName: "Broken",
+      description: "",
+      prompt: "坏角色",
+      access: "read_only",
+      backend: "nope",
+    },
+  ]);
+  await pipeline.start();
+
+  const work = service.createWork({
+    botId: BOT_ID,
+    ownerUserId: OWNER,
+    sourceChatId: CHAT_ID,
+    visibility: "private",
+    request: "验证 backend 解析失败",
+  });
+  const brokenJob = service.createJob({
+    workId: work.id,
+    workerProfileId: "broken-role",
+    prompt: "不该执行",
+    workdir: tempRoot,
+  });
+
+  await waitFor(() => service.getJob(brokenJob.id)?.status === "failed");
+  const failed = service.getJob(brokenJob.id)!;
+  // 错误信息带 profile id，便于定位配置问题
+  expect(failed.error).toContain("broken-role");
+  expect(failed.error).toContain("nope");
+  // 主 backend 未被执行（session 未被创建）
+  expect(backend.sessions).toHaveLength(0);
 }, 15000);

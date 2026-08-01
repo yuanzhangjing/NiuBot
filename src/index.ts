@@ -198,6 +198,8 @@ async function main(): Promise<void> {
   }
 
   const backends = new Map<string, AgentBackend>();
+  /** in-flight 去重：并发解析同一类型时共享同一个创建 Promise（Worker 角色并发 Job 场景） */
+  const backendInflight = new Map<string, Promise<AgentBackend>>();
 
   async function createBackend(type: string): Promise<AgentBackend> {
     const BackendClass = await loadBackendClass(type);
@@ -212,9 +214,12 @@ async function main(): Promise<void> {
     if (!capability?.selectable) {
       throw new Error(`Backend '${type}' is unavailable: ${capability?.reason ?? "unknown backend"}`);
     }
-    let backend = backends.get(type);
-    if (!backend) {
-      backend = await createBackend(type);
+    const cached = backends.get(type);
+    if (cached) return cached;
+    const inflight = backendInflight.get(type);
+    if (inflight) return inflight;
+    const creating = (async () => {
+      const backend = await createBackend(type);
       const backendStartedAt = Date.now();
       let validated = false;
       try {
@@ -228,8 +233,14 @@ async function main(): Promise<void> {
       }
       backends.set(type, backend);
       log.info("backend started (lazy)", { type });
+      return backend;
+    })();
+    backendInflight.set(type, creating);
+    try {
+      return await creating;
+    } finally {
+      backendInflight.delete(type);
     }
-    return backend;
   }
 
   const getBackendCapabilities = async () => {

@@ -141,8 +141,9 @@ export function parseTeamConfig(yamlText: string): TeamConfig {
       access: access as WorkspacePolicy,
       maxConcurrent,
       skills,
-      backend: typeof p["backend"] === "string" ? p["backend"] : undefined,
-      model: typeof p["model"] === "string" ? p["model"] : undefined,
+      // 空串视为未配置（避免 backend: "" 静默回退主 backend 但 model 仍覆盖生效）
+      backend: typeof p["backend"] === "string" && p["backend"].trim() !== "" ? p["backend"] : undefined,
+      model: typeof p["model"] === "string" && p["model"].trim() !== "" ? p["model"] : undefined,
     });
   }
   return config;

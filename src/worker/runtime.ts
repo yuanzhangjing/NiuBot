@@ -84,8 +84,6 @@ export interface WorkerRuntimeOptions {
 
 export class WorkerRuntime {
   private readonly running = new Map<string, RunningJobExecution>();
-  /** 已解析的专属 backend 实例（按类型缓存） */
-  private readonly workerBackends = new Map<string, AgentBackend>();
 
   constructor(private readonly options: WorkerRuntimeOptions) {}
 
@@ -94,15 +92,13 @@ export class WorkerRuntime {
     return this.running.size;
   }
 
-  /** 解析 Job 使用的 backend：profile 配置了类型时按类型解析（缓存实例），否则复用主 Agent backend。 */
+  /**
+   * 解析 Job 使用的 backend：profile 配置了类型时按类型解析，否则复用主 Agent backend。
+   * 实例缓存/去重由 resolveBackend 实现（index 的 getOrCreateBackend 已按类型单例 + single-flight）。
+   */
   private async resolveJobBackend(backendType?: string): Promise<AgentBackend> {
     if (!backendType || !this.options.resolveBackend) return this.options.backend;
-    let instance = this.workerBackends.get(backendType);
-    if (!instance) {
-      instance = await this.options.resolveBackend(backendType);
-      this.workerBackends.set(backendType, instance);
-    }
-    return instance;
+    return await this.options.resolveBackend(backendType);
   }
 
   /** 当前运行中的 Job ID 列表（watchdog 用） */
@@ -198,6 +194,18 @@ export class WorkerRuntime {
     const startedAt = Date.now();
     const work = jobService.getWork(job.workId);
     try {
+      // 先解析 backend（冷解析可能耗时秒级），再准备工作区——避免解析期间占用 repo 写租约
+      try {
+        jobBackend = await this.resolveJobBackend(profile.backend);
+      } catch (err) {
+        // 错误带角色上下文，便于定位配置问题
+        throw new Error(`profile ${profile.id} 的 backend 解析失败: ${String(err)}`);
+      }
+      // 解析期间用户可能已取消：job 已进入 cancelling 则放弃执行（确认终态由 cancel 流程负责）
+      if (jobService.getJob(jobId)?.status === "cancelling") {
+        return;
+      }
+
       // 工作区准备（§12）：read_only 直接用目标目录；scratch/git_worktree 由 Runtime 管理
       const { workspaceProvider, leaseManager } = this.options;
       if (job.workspacePolicy === "read_only" || !workspaceProvider) {
@@ -222,9 +230,6 @@ export class WorkerRuntime {
           leaseHeld = true;
         }
       }
-
-      // 角色专属 backend：profile.backend 配置了类型时解析（缓存实例），否则复用主 Agent backend
-      jobBackend = await this.resolveJobBackend(profile.backend);
 
       // 角色完整内容（定义 + 原则 + 工作流）作为 system prompt 注入，静态固定；
       // user prompt 只装任务详情（由 buildPrompt 组装）

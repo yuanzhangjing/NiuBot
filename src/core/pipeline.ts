@@ -1691,6 +1691,18 @@ export class Pipeline {
     this.lastTeamConfigVersion = version;
     if (active.config.profiles.length > 0) {
       this.workerConfig.registry.setProfiles(active.config.profiles.map(teamProfileToWorkerProfile));
+      // 校验配置的 backend 类型在可用列表内（尽早暴露拼写错误，避免每个 Job 执行时才失败）
+      const available = new Set(this.getAvailableBackends());
+      for (const profile of active.config.profiles) {
+        if (profile.backend && !available.has(profile.backend)) {
+          this.log.warn("team config profile references unavailable backend", {
+            version: version ?? null,
+            profileId: profile.id,
+            backend: profile.backend,
+            available: [...available],
+          });
+        }
+      }
       this.log.info("team config reloaded from db", { version: version ?? null });
     }
   }
