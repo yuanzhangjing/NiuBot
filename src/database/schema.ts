@@ -417,6 +417,35 @@ const migrations: Migration[] = [
         );
         CREATE INDEX IF NOT EXISTS idx_worker_leases_job ON worker_resource_leases(job_id);
 
+        CREATE TABLE IF NOT EXISTS team_settings (
+          bot_id                TEXT PRIMARY KEY,
+          enabled               INTEGER NOT NULL DEFAULT 0,
+          active_config_version TEXT,
+          updated_at            TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS team_config_versions (
+          version       TEXT PRIMARY KEY,
+          bot_id        TEXT NOT NULL,
+          config_yaml   TEXT NOT NULL,
+          config_hash   TEXT NOT NULL,
+          applied_by    TEXT,
+          applied_at    TEXT NOT NULL DEFAULT (datetime('now')),
+          rollback_of   TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_team_config_bot ON team_config_versions(bot_id, applied_at);
+
+        CREATE TABLE IF NOT EXISTS team_config_drafts (
+          id           TEXT PRIMARY KEY,
+          bot_id       TEXT NOT NULL,
+          config_yaml  TEXT NOT NULL,
+          status       TEXT NOT NULL DEFAULT 'pending'
+                       CHECK(status IN ('pending', 'applied', 'superseded', 'rejected')),
+          base_version TEXT,
+          created_by   TEXT,
+          created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
         CREATE TABLE IF NOT EXISTS worker_events (
           id          INTEGER PRIMARY KEY AUTOINCREMENT,
           bot_id      TEXT NOT NULL,

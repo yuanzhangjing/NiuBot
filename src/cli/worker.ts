@@ -16,6 +16,7 @@ import type Database from "better-sqlite3";
 
 import { SqliteJobService } from "../worker/job-service.js";
 import { WorkerProfileRegistry } from "../worker/profiles.js";
+import { TeamConfigStore } from "../worker/team-config.js";
 import type { WorkVisibility } from "../worker/types.js";
 
 interface WorkerCliContext {
@@ -169,6 +170,45 @@ function handleComplete(ctx: WorkerCliContext, service: SqliteJobService, args: 
   console.log(`Work ${workId} 已完成`);
 }
 
+/** nbt worker config：主 Agent 生成配置草案（管理员 /teams config 确认应用）。 */
+function handleConfig(ctx: WorkerCliContext, args: string[]): void {
+  const sub = args[0];
+  const store = new TeamConfigStore(ctx.db, ctx.botId);
+  if (sub === "draft") {
+    const fileIndex = args.indexOf("--file");
+    const yamlText = readFileOrFail(fileIndex >= 0 ? args[fileIndex + 1] : undefined, "配置 yaml");
+    const baseVersion = args.find((a, i) => args[i - 1] === "--base") ?? store.getActiveConfig().version;
+    const result = store.createDraft(yamlText, ctx.userId, baseVersion);
+    if (!result.ok) {
+      fail(result.error);
+    }
+    console.log(result.draftId);
+    return;
+  }
+  if (sub === "show") {
+    const active = store.getActiveConfig();
+    console.log(`version: ${active.version ?? "(默认)"}`);
+    console.log(`maxConcurrent: ${active.config.maxConcurrent}`);
+    console.log(`maxJobsPerWork: ${active.config.maxJobsPerWork}`);
+    for (const p of active.config.profiles) {
+      console.log(`- ${p.id} (${p.access}) ${p.description ?? ""}`);
+    }
+    return;
+  }
+  if (sub === "drafts") {
+    const drafts = store.listPendingDrafts();
+    if (drafts.length === 0) {
+      console.log("(无待确认草案)");
+      return;
+    }
+    for (const d of drafts) {
+      console.log(`${d.id}（基准 ${d.baseVersion ?? "(默认)"}）: ${d.configYaml.split("\n")[0]}`);
+    }
+    return;
+  }
+  fail("config 子命令仅支持 draft --file <yaml> | show | drafts");
+}
+
 export function handleWorker(db: Database.Database, args: string[]): void {
   const sub = args[0];
   if (sub === "--help" || sub === "help" || sub === undefined) {
@@ -226,6 +266,9 @@ Work/Job 内容使用自由 Markdown 文件；CLI 不接受 --user/--chat 参数
       break;
     case "complete":
       handleComplete(ctx, service, args.slice(1));
+      break;
+    case "config":
+      handleConfig(ctx, args.slice(1));
       break;
     default:
       fail(`未知子命令: ${sub}（用 nbt worker help 查看用法）`);

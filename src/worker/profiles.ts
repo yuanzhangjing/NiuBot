@@ -1,9 +1,10 @@
 /**
- * 最小 WorkerProfileRegistry（Phase 2 静态版）。
+ * 最小 WorkerProfileRegistry（Phase 2 静态版 + Phase 5 配置驱动）。
  *
- * 第一版提供少量内置 Worker Profile，运行时可被主 Agent 选中。
- * 完整配置体系（/teams config、版本化配置包、SkillResolver）是 Phase 5 的内容。
+ * 内置默认 Profile 供开箱即用；/teams config 应用后由配置覆盖（热更新只影响新 Job）。
  */
+
+import type { TeamProfileSkills } from "./team-config.js";
 
 export interface WorkerProfile {
   id: string;
@@ -15,6 +16,29 @@ export interface WorkerProfile {
   maxConcurrent?: number;
   /** 工作区访问方式；git_worktree 允许在目标仓库的独立 worktree 中写入 */
   access: "read_only" | "scratch" | "git_worktree";
+  /** skill 声明（Phase 5；内置 profile 无声明时用默认行为） */
+  skills?: TeamProfileSkills;
+}
+
+/** Team 配置的 profile → 运行时 WorkerProfile（Phase 5 配置驱动）。 */
+export function teamProfileToWorkerProfile(p: {
+  id: string;
+  displayName?: string;
+  description?: string;
+  prompt: string;
+  access: "read_only" | "scratch" | "git_worktree";
+  maxConcurrent?: number;
+  skills?: TeamProfileSkills;
+}): WorkerProfile {
+  return {
+    id: p.id,
+    displayName: p.displayName ?? p.id,
+    description: p.description ?? "",
+    prompt: p.prompt,
+    access: p.access,
+    maxConcurrent: p.maxConcurrent,
+    skills: p.skills,
+  };
 }
 
 export const STATIC_WORKER_PROFILES: Record<string, WorkerProfile> = {
@@ -70,12 +94,19 @@ export const STATIC_WORKER_PROFILES: Record<string, WorkerProfile> = {
 };
 
 export class WorkerProfileRegistry {
-  private readonly profiles = new Map<string, WorkerProfile>();
+  private profiles = new Map<string, WorkerProfile>();
 
   constructor(profiles: WorkerProfile[] = Object.values(STATIC_WORKER_PROFILES)) {
+    this.setProfiles(profiles);
+  }
+
+  /** 配置热更新：替换全部 profile（只影响新 Job，运行中 Job 使用创建时快照）。 */
+  setProfiles(profiles: WorkerProfile[]): void {
+    const next = new Map<string, WorkerProfile>();
     for (const profile of profiles) {
-      this.profiles.set(profile.id, profile);
+      next.set(profile.id, profile);
     }
+    this.profiles = next;
   }
 
   get(profileId: string): WorkerProfile | undefined {

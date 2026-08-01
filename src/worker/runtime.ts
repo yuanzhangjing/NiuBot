@@ -15,6 +15,7 @@ import type { Job, JobExecutionRecord, JobService } from "./types.js";
 import { WorkerProfileRegistry } from "./profiles.js";
 import { WorkspaceProvider, type PreparedWorkspace } from "./workspace.js";
 import { ResourceLeaseManager } from "./lease.js";
+import { SkillResolver } from "./skills.js";
 
 const log = createLogger("worker-runtime");
 
@@ -42,6 +43,8 @@ export interface WorkerRuntimeOptions {
   workspaceProvider?: WorkspaceProvider;
   /** 写任务资源互斥（git_worktree Job 必须提供） */
   leaseManager?: ResourceLeaseManager;
+  /** Skill 校验（Phase 5；默认内置 resolver） */
+  skillResolver?: SkillResolver;
 }
 
 export class WorkerRuntime {
@@ -117,6 +120,20 @@ export class WorkerRuntime {
         status: "failed",
         responseText: "",
         error: `unknown worker profile: ${job.workerProfileId}`,
+        changedFiles: [],
+        artifacts: [],
+        startedAt: job.startedAt ?? new Date().toISOString(),
+        endedAt: new Date().toISOString(),
+      });
+      return;
+    }
+    // Skill 校验（§11）：required skill 缺失或引用未知 skill 时拒绝执行
+    const skillResult = (this.options.skillResolver ?? new SkillResolver()).resolve(profile.id, profile.skills);
+    if (!skillResult.ok) {
+      jobService.failJob(jobId, {
+        status: "failed",
+        responseText: "",
+        error: skillResult.error,
         changedFiles: [],
         artifacts: [],
         startedAt: job.startedAt ?? new Date().toISOString(),

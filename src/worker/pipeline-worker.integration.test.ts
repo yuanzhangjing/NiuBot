@@ -18,6 +18,7 @@ import type { TransportClient } from "../transport/types.js";
 import { Pipeline } from "../core/pipeline.js";
 import { SqliteJobService } from "./job-service.js";
 import { WorkerProfileRegistry } from "./profiles.js";
+import { TeamConfigStore } from "./team-config.js";
 import type { JobService } from "./types.js";
 
 const BOT_ID = "test-bot";
@@ -104,6 +105,7 @@ let backend: FakeWorkerBackend;
 let transport: FakeTransport;
 let pipeline: Pipeline;
 let tempRoot: string;
+let teamConfig: TeamConfigStore;
 
 beforeEach(() => {
   tempRoot = mkdtempSync(path.join(os.tmpdir(), "worker-pipeline-"));
@@ -112,6 +114,8 @@ beforeEach(() => {
   registry = new WorkerProfileRegistry();
   backend = new FakeWorkerBackend();
   transport = new FakeTransport();
+  teamConfig = new TeamConfigStore(db, BOT_ID);
+  teamConfig.setEnabled(true);
 
   // 注册来源 chat（真实场景由用户消息入站时创建）
   db.prepare("INSERT INTO chats (id, platform_id, platform, type) VALUES (?, ?, 'feishu', 'p2p')").run(CHAT_ID, "oc_chat_1");
@@ -139,6 +143,7 @@ beforeEach(() => {
       maxConcurrent: 2,
       tickMs: 50,
       workspaceRoot: path.join(tempRoot, "ws"),
+      teamConfigStore: teamConfig,
     },
   );
 });
@@ -396,3 +401,47 @@ test("同一 repo 的两个写 Job 互斥：第二个 resource busy", async () =
   await waitFor(() => service.getJob(jobB.id)?.status === "failed");
   expect(service.getJob(jobB.id)?.error).toMatch(/resource busy/);
 }, 15000);
+
+test("团队模式关闭时 queued Job 不调度，开启后执行", async () => {
+  teamConfig.setEnabled(false);
+  await pipeline.start();
+
+  const work = service.createWork({
+    botId: BOT_ID,
+    ownerUserId: OWNER,
+    sourceChatId: CHAT_ID,
+    visibility: "private",
+    request: "开关测试",
+  });
+  const job = service.createJob({ workId: work.id, workerProfileId: "general", prompt: "任务", workdir: tempRoot });
+
+  // 关闭状态：等待数个 tick 仍是 queued
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  expect(service.getJob(job.id)?.status).toBe("queued");
+
+  // 开启后调度执行
+  teamConfig.setEnabled(true);
+  await waitFor(() => service.getJob(job.id)?.status === "completed");
+});
+
+test("配置应用后 registry 热更新（新 profile 可用）", async () => {
+  teamConfig.setEnabled(true);
+  await pipeline.start();
+  expect(registry.list().some((p) => p.id === "custom-reviewer")).toBe(false);
+
+  const draft = teamConfig.createDraft(`maxConcurrent: 2
+profiles:
+  - id: custom-reviewer
+    description: 自定义审查
+    access: read_only
+    prompt: 审查。
+`, "u1");
+  expect(draft.ok).toBe(true);
+  const applied = teamConfig.applyDraft(draft.ok ? draft.draftId : "", "u1");
+  expect(applied.ok).toBe(true);
+
+  // 命令路径触发热更新（等价于 /teams config apply）
+  pipeline.applyActiveTeamConfigToRegistry();
+  expect(registry.list().some((p) => p.id === "custom-reviewer")).toBe(true);
+  expect(registry.get("custom-reviewer")?.access).toBe("read_only");
+});

@@ -20,7 +20,8 @@ import { WorkerScheduler } from "../worker/scheduler.js";
 import { WorkspaceProvider } from "../worker/workspace.js";
 import { ResourceLeaseManager } from "../worker/lease.js";
 import type { Job, JobService, Work } from "../worker/types.js";
-import type { WorkerProfileRegistry } from "../worker/profiles.js";
+import { WorkerProfileRegistry, teamProfileToWorkerProfile, type WorkerProfile } from "../worker/profiles.js";
+import { TeamConfigStore, type TeamConfig } from "../worker/team-config.js";
 import {
   ensureUser, ensureChat, storeMessage, updateChatName,
   getUserShortLabel, getChatShortLabel, getMessageByPlatformId, updateMessageContent, updateMessagePlatformId,
@@ -103,6 +104,7 @@ const INTERRUPT_WORDS = new Set([
 const BUILTIN_COMMANDS = new Set([
   "/restart", "/update", "/service", "/new", "/cron", "/agent", "/model",
   "/admin", "/help", "/stop", "/clear", "/flush", "/task", "/status", "/history",
+  "/teams",
 ]);
 // ── Watchdog 常量 ──
 const AGENT_WATCHDOG_INTERVAL_MS = 15_000;     // 15 秒检测间隔
@@ -185,6 +187,8 @@ export interface WorkerPipelineConfig {
   tickMs?: number;
   /** scratch/worktree 根目录（默认 $NIUBOT_HOME/worker-workspaces） */
   workspaceRoot?: string;
+  /** /teams 配置体系（启用开关、配置版本、草案） */
+  teamConfigStore?: TeamConfigStore;
 }
 
 export class Pipeline {
@@ -393,9 +397,21 @@ export class Pipeline {
 
     // 内部 Worker：启动 Scheduler 并恢复非终态 Job
     if (this.workerConfig) {
-      const { jobService, registry, maxConcurrent, tickMs, workspaceRoot: configuredWorkspaceRoot } = this.workerConfig;
+      const {
+        jobService, registry, maxConcurrent, tickMs, workspaceRoot: configuredWorkspaceRoot, teamConfigStore,
+      } = this.workerConfig;
       const workspaceRoot = configuredWorkspaceRoot ?? path.join(NIUBOT_HOME, "worker-workspaces");
       this.workerLeaseManager = new ResourceLeaseManager(this.db, this.botIdentity.platformBotId ?? "bot");
+      // 配置驱动：有生效配置时用配置的 profiles 与并发上限（无则内置默认）
+      const active = teamConfigStore?.getActiveConfig();
+      if (active && active.config.profiles.length > 0) {
+        registry.setProfiles(active.config.profiles.map(teamProfileToWorkerProfile));
+        this.log.info("worker profiles loaded from team config", {
+          version: active.version ?? null,
+          profileCount: active.config.profiles.length,
+        });
+      }
+      const effectiveMaxConcurrent = active?.config.maxConcurrent ?? maxConcurrent ?? 4;
       this.workerRuntime = new WorkerRuntime({
         backend: this.agent,
         jobService,
@@ -415,10 +431,11 @@ export class Pipeline {
       this.workerScheduler = new WorkerScheduler({
         runtime: this.workerRuntime,
         jobService,
-        maxConcurrent: maxConcurrent ?? 4,
+        maxConcurrent: effectiveMaxConcurrent,
         tickMs,
         onContinuations: (chatId, ids) => this.enqueueWorkerContinuations(chatId, ids),
         leaseManager: this.workerLeaseManager,
+        isSchedulingEnabled: () => (this.workerConfig?.teamConfigStore?.isEnabled() ?? true),
       });
       this.workerScheduler.start();
       this.recoverInterruptedWorkerJobs();
@@ -496,6 +513,7 @@ export class Pipeline {
       clearTimeout(this.updateCheckTimer);
       this.updateCheckTimer = null;
     }
+    this.workerScheduler?.stop();
     this.queue.stop();
     this.log.info("pipeline stopped");
   }
@@ -1262,6 +1280,14 @@ export class Pipeline {
         this.startSessionTransition(chatId, () => this.resetSession(chatId, platformChatId, msgId));
         return true;
       }
+      case "/teams": {
+        if (!isAdmin) {
+          this.replyText(chatId, platformChatId, msgId, "/teams 仅管理员可用。");
+          return true;
+        }
+        this.handleTeamsCommand(parts.slice(1), chatId, platformChatId, msgId);
+        return true;
+      }
       case "/cron": {
         this.handleCronCommand(parts.slice(1), userId, chatId, chatType, platformChatId, msgId);
         return true;
@@ -1617,6 +1643,153 @@ export class Pipeline {
   }
 
   // ── /cron command ─────────────────────────────────────────────
+
+  /** 应用当前生效配置到运行中的 registry（配置变更后调用；只影响新 Job）。 */
+  applyActiveTeamConfigToRegistry(): void {
+    const active = this.workerConfig?.teamConfigStore?.getActiveConfig();
+    if (active && active.config.profiles.length > 0) {
+      this.workerConfig?.registry.setProfiles(active.config.profiles.map(teamProfileToWorkerProfile));
+    }
+  }
+
+  /** /teams：内部 Worker 团队模式开关与配置管理（管理员）。 */
+  private handleTeamsCommand(args: string[], chatId: string, platformChatId: string, msgId?: string): void {
+    const store = this.workerConfig?.teamConfigStore;
+    if (!store) {
+      this.replyText(chatId, platformChatId, msgId, "当前 Bot 未启用内部 Worker。");
+      return;
+    }
+    const sub = args[0];
+    const jobService = this.workerConfig?.jobService;
+
+    switch (sub) {
+      case "on": {
+        store.setEnabled(true);
+        this.replyText(chatId, platformChatId, msgId, "团队模式已开启：主 Agent 可以创建 Work 和派工。");
+        return;
+      }
+      case "off": {
+        store.setEnabled(false);
+        this.replyText(chatId, platformChatId, msgId, "团队模式已关闭：不再创建和调度新工作；运行中的 Job 继续完成。");
+        return;
+      }
+      case "status": {
+        const enabled = store.isEnabled();
+        const active = store.getActiveConfig();
+        const running = jobService?.listJobsByStatus("running").length ?? 0;
+        const queued = jobService?.listJobsByStatus("queued").length ?? 0;
+        this.replyText(
+          chatId, platformChatId, msgId,
+          [
+            `团队模式：${enabled ? "开启" : "关闭"}`,
+            `配置版本：${active.version ?? "(默认)"}`,
+            `并发上限：${active.config.maxConcurrent}，Job 上限：${active.config.maxJobsPerWork}`,
+            `运行中 Job：${running}，排队 Job：${queued}`,
+            `Worker Profiles：${this.workerConfig?.registry.list().map((p) => p.id).join(", ") ?? "(无)"}`,
+          ].join("\n"),
+        );
+        return;
+      }
+      case "config": {
+        this.handleTeamsConfigCommand(args.slice(1), chatId, platformChatId, msgId);
+        return;
+      }
+      default:
+        this.replyText(
+          chatId, platformChatId, msgId,
+          [
+            "用法：",
+            "/teams on | off | status",
+            "/teams config show | history | apply <draft-id> | rollback <version> | draft <draft-id>",
+            "配置草案由主 Agent 用 nbt worker config draft 生成后在此确认应用。",
+          ].join("\n"),
+        );
+    }
+  }
+
+  private handleTeamsConfigCommand(args: string[], chatId: string, platformChatId: string, msgId?: string): void {
+    const store = this.workerConfig?.teamConfigStore;
+    if (!store) return;
+    const sub = args[0];
+
+    if (sub === "show") {
+      const active = store.getActiveConfig();
+      const lines = [
+        `配置版本：${active.version ?? "(默认)"}`,
+        `maxConcurrent: ${active.config.maxConcurrent}`,
+        `maxJobsPerWork: ${active.config.maxJobsPerWork}`,
+      ];
+      for (const p of active.config.profiles) {
+        lines.push(`- ${p.id}（${p.access}${p.maxConcurrent ? `, 并发 ${p.maxConcurrent}` : ""}）：${p.description ?? ""}`);
+      }
+      this.replyText(chatId, platformChatId, msgId, lines.join("\n"));
+      return;
+    }
+
+    if (sub === "history") {
+      const versions = store.listVersions();
+      if (versions.length === 0) {
+        this.replyText(chatId, platformChatId, msgId, "(尚无配置版本)");
+        return;
+      }
+      const lines = versions.map((v) => `- ${v.version}（${v.appliedAt}${v.rollbackOf ? `，回滚自 ${v.rollbackOf}` : ""}）`);
+      this.replyText(chatId, platformChatId, msgId, lines.join("\n"));
+      return;
+    }
+
+    if (sub === "apply") {
+      const draftId = args[1];
+      if (!draftId) {
+        this.replyText(chatId, platformChatId, msgId, "用法：/teams config apply <draft-id>");
+        return;
+      }
+      const result = store.applyDraft(draftId, this.botUserId ?? undefined);
+      if (!result.ok) {
+        this.replyText(chatId, platformChatId, msgId, `应用失败：${result.error}`);
+        return;
+      }
+      // 热更新运行配置（只影响新 Job）
+      this.applyActiveTeamConfigToRegistry();
+      this.replyText(chatId, platformChatId, msgId, `配置已应用：${result.version}（新版本只影响新 Job）`);
+      return;
+    }
+
+    if (sub === "rollback") {
+      const version = args[1];
+      if (!version) {
+        this.replyText(chatId, platformChatId, msgId, "用法：/teams config rollback <version>");
+        return;
+      }
+      const result = store.rollback(version, this.botUserId ?? undefined);
+      if (!result.ok) {
+        this.replyText(chatId, platformChatId, msgId, `回滚失败：${result.error}`);
+        return;
+      }
+      this.applyActiveTeamConfigToRegistry();
+      this.replyText(chatId, platformChatId, msgId, `已回滚到 ${version}，新版本：${result.version}`);
+      return;
+    }
+
+    if (sub === "draft") {
+      const draftId = args[1];
+      if (!draftId) {
+        this.replyText(chatId, platformChatId, msgId, "用法：/teams config draft <draft-id>");
+        return;
+      }
+      const draft = store.getDraft(draftId);
+      if (!draft) {
+        this.replyText(chatId, platformChatId, msgId, `草案不存在: ${draftId}`);
+        return;
+      }
+      this.replyText(
+        chatId, platformChatId, msgId,
+        `草案 ${draft.id}（${draft.status}，基准版本 ${draft.baseVersion ?? "(默认)"}）\n\n${draft.configYaml}\n\n确认应用：/teams config apply ${draft.id}`,
+      );
+      return;
+    }
+
+    this.replyText(chatId, platformChatId, msgId, "用法：/teams config show | history | apply <draft-id> | rollback <version> | draft <draft-id>");
+  }
 
   private handleCronCommand(
     args: string[],
