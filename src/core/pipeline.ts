@@ -1913,8 +1913,10 @@ export class Pipeline {
     return this.processIndependentSession(chatId, userId, prompt, description, "cron");
   }
 
-  /** Continuation 投递：入队主 Agent 队列（同 chat 串行），内存去重防止重复投递。 */
+  /** Continuation 投递：认领（pending→claimed）后入队主 Agent 队列（同 chat 串行），内存去重防重复投递。 */
   private enqueueWorkerContinuations(chatId: string, continuationIds: string[]): void {
+    const jobService = this.workerConfig?.jobService;
+    if (!jobService) return;
     const fresh = continuationIds.filter((id) => !this.dispatchedContinuations.has(id));
     if (fresh.length === 0) return;
     // 确保 platformChatIds 已注册（与 injectPrompt 一致：Worker 场景 chat 一定来自真实会话）
@@ -1924,9 +1926,17 @@ export class Pipeline {
         | undefined;
       if (row) this.platformChatIds.set(chatId, row.platform_id);
     }
-    for (const id of fresh) this.dispatchedContinuations.add(id);
-    this.queue.enqueueContinuation(chatId, fresh);
-    this.log.info("worker continuations dispatched", { chatId, continuationIds: fresh });
+    // 认领：markContinuationCompleted 只接受 claimed 状态，投递时必须是 pending→claimed
+    const claimed: string[] = [];
+    for (const id of fresh) {
+      if (jobService.claimContinuation(id, `dispatch-${Date.now()}`)) {
+        claimed.push(id);
+        this.dispatchedContinuations.add(id);
+      }
+    }
+    if (claimed.length === 0) return;
+    this.queue.enqueueContinuation(chatId, claimed);
+    this.log.info("worker continuations dispatched", { chatId, continuationIds: claimed });
   }
 
   /** 崩溃恢复（§14）：Engine 重启后把 running Job 标记 interrupted（进程已随旧进程消失）。 */
@@ -3338,9 +3348,12 @@ ${jobParts.join("\n\n")}
       }
     } catch (err) {
       this.log.error("pipeline error", { chatId, error: String(err) });
-      // Worker Continuation 回合失败：解除派发标记，允许重新投递
+      // Worker Continuation 回合失败：释放认领 + 解除派发标记，允许重新投递
       if (isContinuationTurn) {
-        for (const id of continuationIds) this.dispatchedContinuations.delete(id);
+        for (const id of continuationIds) {
+          this.workerConfig?.jobService.releaseContinuationClaim(id);
+          this.dispatchedContinuations.delete(id);
+        }
       }
       this.markRuntimeRun(runId, signal?.aborted ? "stopped" : "failed", String(err));
 

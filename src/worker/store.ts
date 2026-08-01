@@ -517,6 +517,26 @@ export function claimPendingContinuations(
   })();
 }
 
+/** 投递时认领（pending → claimed + token）；CAS 保证并发安全。 */
+export function claimContinuationById(db: Database.Database, id: string, claimToken: string): boolean {
+  const result = db.prepare(`
+    UPDATE agent_continuations
+    SET status = 'claimed', claim_token = ?, claimed_at = datetime('now')
+    WHERE id = ? AND status = 'pending'
+  `).run(claimToken, id);
+  return result.changes === 1;
+}
+
+/** 主 Agent 回合失败/中断后释放认领（claimed → pending，允许重新投递）。 */
+export function releaseContinuationClaim(db: Database.Database, id: string): boolean {
+  const result = db.prepare(`
+    UPDATE agent_continuations
+    SET status = 'pending', claim_token = NULL, claimed_at = NULL
+    WHERE id = ? AND status = 'claimed'
+  `).run(id);
+  return result.changes === 1;
+}
+
 /** 主 Agent 回合事务提交后标记完成（CAS：只认 claimed 状态）。 */
 export function markContinuationCompleted(
   db: Database.Database,

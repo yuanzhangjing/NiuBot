@@ -29,10 +29,12 @@ import type {
 } from "./types.js";
 import {
   appendWorkJobId,
+  claimContinuationById,
   claimPendingContinuations,
   continuationRowToContinuation,
   countJobs,
   eventRowToEvent,
+  releaseContinuationClaim,
   getContinuationByDedupeKey,
   getJob,
   getJobByJobIdempotencyKey,
@@ -353,6 +355,16 @@ export class SqliteJobService implements JobService {
 
   createJobTerminalContinuation(jobId: string): AgentContinuation | undefined {
     return this.db.transaction(() => this.createTerminalContinuation(this.db, jobId))();
+  }
+
+  /** 投递时认领单个 Continuation（pending → claimed；幂等）。 */
+  claimContinuation(id: string, claimToken: string): boolean {
+    return claimContinuationById(this.db, id, claimToken);
+  }
+
+  /** 主 Agent 回合失败后释放认领（claimed → pending，允许重新投递）。 */
+  releaseContinuationClaim(id: string): boolean {
+    return releaseContinuationClaim(this.db, id);
   }
 
   getContinuation(id: string): AgentContinuation | undefined {
