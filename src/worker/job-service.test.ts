@@ -111,7 +111,14 @@ describe("Work / Job 创建", () => {
 
 describe("Job 状态机", () => {
   test("完整生命周期 queued → running → completed，并生成去重 Continuation", () => {
-    const work = makeWork();
+    const work = service.createWork({
+      botId: BOT_ID,
+      ownerUserId: OWNER,
+      sourceChatId: CHAT_ID,
+      visibility: "private",
+      request: "调研登录模块现状",
+      triggerMsgPlatformId: "om_trigger_123",
+    });
     const job = makeJob(work.id);
 
     const claim = service.claimJob({ jobId: job.id, claimToken: "lease-1" });
@@ -127,6 +134,8 @@ describe("Job 状态机", () => {
     expect(continuations).toHaveLength(1);
     expect(continuations[0].dedupeKey).toBe(`work:${work.id}:job:${job.id}:terminal`);
     expect(continuations[0].jobIds).toEqual([job.id]);
+    // 触发消息平台侧 ID 从 Work 透传到 Continuation（验收回合回复引用用）
+    expect(continuations[0].triggerMsgPlatformId).toBe("om_trigger_123");
 
     // 重复创建 Continuation 去重：同一 Job 不会产生第二个
     service.createJobTerminalContinuation(job.id);

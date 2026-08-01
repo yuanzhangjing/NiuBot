@@ -31,6 +31,7 @@ export interface WorkRow {
   source_chat_id: string;
   visibility: WorkVisibility;
   request: string;
+  trigger_msg_platform_id: string | null;
   status: WorkStatus;
   job_ids_json: string;
   final_conclusion: string | null;
@@ -74,6 +75,7 @@ export interface ContinuationRow {
   kind: "job_terminal";
   work_id: string;
   job_ids_json: string;
+  trigger_msg_platform_id: string | null;
   status: ContinuationStatus;
   agent_turn_id: string | null;
   claim_token: string | null;
@@ -119,6 +121,7 @@ export function workRowToWork(row: WorkRow): Work {
     sourceChatId: row.source_chat_id,
     visibility: row.visibility,
     request: row.request,
+    triggerMsgPlatformId: row.trigger_msg_platform_id ?? undefined,
     status: row.status,
     jobIds: parseJsonArray(row.job_ids_json),
     finalConclusion: row.final_conclusion ?? undefined,
@@ -166,6 +169,7 @@ export function continuationRowToContinuation(row: ContinuationRow): AgentContin
     kind: row.kind,
     workId: row.work_id,
     jobIds: parseJsonArray(row.job_ids_json),
+    triggerMsgPlatformId: row.trigger_msg_platform_id ?? undefined,
     status: row.status,
     agentTurnId: row.agent_turn_id ?? undefined,
     claimToken: row.claim_token ?? undefined,
@@ -193,13 +197,20 @@ export function eventRowToEvent(row: WorkerEventRow): WorkerEvent {
 
 export function insertWork(
   db: Database.Database,
-  input: { botId: string; ownerUserId: string; sourceChatId: string; visibility: WorkVisibility; request: string },
+  input: {
+    botId: string;
+    ownerUserId: string;
+    sourceChatId: string;
+    visibility: WorkVisibility;
+    request: string;
+    triggerMsgPlatformId?: string;
+  },
 ): WorkRow {
   const id = `wrk_${randomUUID()}`;
   db.prepare(`
-    INSERT INTO worker_works (id, bot_id, owner_user_id, source_chat_id, visibility, request)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `).run(id, input.botId, input.ownerUserId, input.sourceChatId, input.visibility, input.request);
+    INSERT INTO worker_works (id, bot_id, owner_user_id, source_chat_id, visibility, request, trigger_msg_platform_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(id, input.botId, input.ownerUserId, input.sourceChatId, input.visibility, input.request, input.triggerMsgPlatformId ?? null);
   return getWork(db, id)!;
 }
 
@@ -464,13 +475,20 @@ export function listWorkerEvents(db: Database.Database, workId: string): WorkerE
 
 export function insertContinuation(
   db: Database.Database,
-  input: { botId: string; chatId: string; dedupeKey: string; workId: string; jobIds: string[] },
+  input: {
+    botId: string;
+    chatId: string;
+    dedupeKey: string;
+    workId: string;
+    jobIds: string[];
+    triggerMsgPlatformId?: string;
+  },
 ): ContinuationRow {
   const id = `ctn_${randomUUID()}`;
   db.prepare(`
-    INSERT INTO agent_continuations (id, bot_id, chat_id, dedupe_key, work_id, job_ids_json)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `).run(id, input.botId, input.chatId, input.dedupeKey, input.workId, JSON.stringify(input.jobIds));
+    INSERT INTO agent_continuations (id, bot_id, chat_id, dedupe_key, work_id, job_ids_json, trigger_msg_platform_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(id, input.botId, input.chatId, input.dedupeKey, input.workId, JSON.stringify(input.jobIds), input.triggerMsgPlatformId ?? null);
   return getContinuationByDedupeKey(db, input.dedupeKey)!;
 }
 

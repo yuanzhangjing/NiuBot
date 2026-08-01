@@ -38,8 +38,8 @@ describe("restart database snapshot", () => {
     const root = temporaryDirectory();
     const database = initDatabase(path.join(root, "bridge.db"));
 
-    expect(LATEST_SCHEMA_VERSION).toBe(18);
-    expect(database.pragma("user_version", { simple: true })).toBe(18);
+    expect(LATEST_SCHEMA_VERSION).toBe(19);
+    expect(database.pragma("user_version", { simple: true })).toBe(19);
     expect(database.prepare(
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('transport_inbox', 'transport_outbox')",
     ).all()).toHaveLength(2);
@@ -168,7 +168,7 @@ describe("restart database snapshot", () => {
       ROLLBACK_COMPATIBLE_SCHEMA_VERSIONS,
       LATEST_SCHEMA_VERSION + 1,
     ))
-      .toThrow(/candidate schema 19/);
+      .toThrow(/candidate schema \d+/);
   });
 
   test("preserves the snapshot directory when restore cannot proceed", async () => {

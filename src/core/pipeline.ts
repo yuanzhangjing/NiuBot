@@ -3094,9 +3094,19 @@ ${jobParts.join("\n\n")}
     const platformChatId = this.chatSessions.get(chatId)?.platformChatId
       ?? this.platformChatIds.get(chatId);
 
-    // 从消息列表中取最后一条的 platformMsgId 作为 reply 目标
+    // 从消息列表中取最后一条的 platformMsgId 作为 reply 目标。
+    // Worker Continuation 回合：优先引用触发消息（创建 Work 的那条用户消息，链路传递），
+    // 而不是 triggerMsgIds（最近用户消息，回合开始时消费删除，可能为空或已被后续消息覆盖）。
     const lastMsg = messages.length > 0 ? messages[messages.length - 1] : undefined;
-    const triggerMsgId = lastMsg?.platformMsgId ?? this.triggerMsgIds.get(chatId);
+    let triggerMsgId = lastMsg?.platformMsgId ?? this.triggerMsgIds.get(chatId);
+    if (isContinuationTurn && this.workerConfig) {
+      const continuationTriggerIds = continuationIds
+        .map((id) => this.workerConfig?.jobService.getContinuation(id)?.triggerMsgPlatformId)
+        .filter((id): id is string => !!id);
+      if (continuationTriggerIds.length > 0) {
+        triggerMsgId = continuationTriggerIds[0];
+      }
+    }
     this.triggerMsgIds.delete(chatId);
 
     const isMerged = messages.length > 1;

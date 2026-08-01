@@ -54,6 +54,8 @@ export interface Work {
   visibility: WorkVisibility;
   /** 用户原始需求 */
   request: string;
+  /** 触发本 Work 的用户消息平台侧 ID（验收回合回复引用原始问题时用） */
+  triggerMsgPlatformId?: string;
   status: WorkStatus;
   /** 关联 Job ID，按创建顺序 */
   jobIds: string[];
@@ -135,6 +137,8 @@ export interface AgentContinuation {
   workId: string;
   /** 本 Continuation 覆盖的 Job（合并验收时多个 Job 共用一个去重键？不——每 Job 一个键，批量认领） */
   jobIds: string[];
+  /** 触发消息平台侧 ID（来自 Work，验收回合回复引用原始问题） */
+  triggerMsgPlatformId?: string;
   status: ContinuationStatus;
   /** 主 Agent 回合标识，重跑时注入已执行动作用于幂等 */
   agentTurnId?: string;
@@ -182,6 +186,8 @@ export interface CreateWorkInput {
   sourceChatId: string;
   visibility: WorkVisibility;
   request: string;
+  /** 触发本 Work 的用户消息平台侧 ID（验收回合回复引用用） */
+  triggerMsgPlatformId?: string;
 }
 
 export interface CreateJobInput {

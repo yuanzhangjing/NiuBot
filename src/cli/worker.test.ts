@@ -60,10 +60,20 @@ function writeDoc(name: string, content: string): string {
 }
 
 test("work create → job create → list → get → complete 完整链路", () => {
+  // 当前 chat 最近一条用户消息（有平台侧 ID）应被记为 Work 的触发消息
+  db.prepare(
+    `INSERT INTO messages (chat_id, sender_id, role, content_text, platform, platform_msg_id, created_at)
+     VALUES (?, 'u1', 'user', '审查登录模块的并发问题', 'feishu', 'om_trigger_1', datetime('now'))`,
+  ).run(CHAT_ID);
+
   const workFile = writeDoc("work.md", "审查登录模块的并发问题");
   const out1 = capture(() => handleWorker(db, ["work", "create", "--file", workFile]));
   const workId = out1[0]!;
   expect(workId).toMatch(/^wrk_/);
+  const workRow = db.prepare("SELECT trigger_msg_platform_id FROM worker_works WHERE id = ?").get(workId) as
+    | { trigger_msg_platform_id: string | null }
+    | undefined;
+  expect(workRow?.trigger_msg_platform_id).toBe("om_trigger_1");
 
   const jobFile = writeDoc("job.md", "检查 handleLogin 的竞态，给出证据");
   const out2 = capture(() => handleWorker(db, ["job", "create", "--work", workId, "--worker", "reviewer", "--file", jobFile]));

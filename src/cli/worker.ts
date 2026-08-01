@@ -63,12 +63,21 @@ function handleWorkCreate(ctx: WorkerCliContext, service: SqliteJobService, args
   const fileIndex = args.indexOf("--file");
   const content = readFileOrFail(fileIndex >= 0 ? args[fileIndex + 1] : undefined, "work 文件");
   const visibility: WorkVisibility = ctx.chatType === "group" ? "public" : "private";
+  // 触发消息：当前 chat 最近一条用户消息的平台侧 ID，验收回合回复时引用它（关联原始问题）
+  const triggerRow = ctx.db
+    .prepare(
+      `SELECT platform_msg_id FROM messages
+       WHERE chat_id = ? AND role = 'user' AND platform_msg_id IS NOT NULL
+       ORDER BY id DESC LIMIT 1`,
+    )
+    .get(ctx.chatId) as { platform_msg_id: string } | undefined;
   const work = service.createWork({
     botId: ctx.botId,
     ownerUserId: ctx.userId,
     sourceChatId: ctx.chatId,
     visibility,
     request: content.trim(),
+    triggerMsgPlatformId: triggerRow?.platform_msg_id,
   });
   console.log(work.id);
 }

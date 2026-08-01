@@ -509,6 +509,7 @@ export class SqliteJobService implements JobService {
         dedupeKey,
         workId: row.work_id,
         jobIds: [jobId],
+        triggerMsgPlatformId: work.trigger_msg_platform_id ?? undefined,
       });
       insertWorkerEvent(db, {
         botId: this.botId,
