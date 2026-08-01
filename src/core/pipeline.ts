@@ -1719,15 +1719,10 @@ export class Pipeline {
         this.replyText(
           chatId, platformChatId, msgId,
           [
-            "团队模式命令：",
-            "/teams on / off            开启或关闭团队模式",
-            "/teams status               查看当前状态",
-            "/teams config show          查看配置",
-            "/teams config history       配置版本历史",
-            "/teams config apply <id>    应用配置草案",
-            "/teams config rollback <版本>  回滚配置",
-            "",
-            "配置草案由主 Agent 用 nbt worker config draft 生成后，在这里确认应用。",
+            "团队模式：",
+            "/teams on / off     开启或关闭",
+            "/teams status       查看状态",
+            "/teams config       配置（查看/应用/回滚）",
           ].join("\n"),
         );
     }
@@ -1819,7 +1814,31 @@ export class Pipeline {
       return;
     }
 
-    this.replyText(chatId, platformChatId, msgId, "用法：/teams config show | history | apply <draft-id> | rollback <version> | draft <draft-id>");
+    // 无参数：显示当前配置 + 待确认草案 + 简短用法
+    const active = store.getActiveConfig();
+    const accessNames: Record<string, string> = {
+      read_only: "只读",
+      scratch: "临时目录",
+      git_worktree: "隔离开发",
+    };
+    const lines = [
+      `📋 当前配置（${active.version ? `版本 ${active.version}` : "默认"}）`,
+      `· 并发上限：${active.config.maxConcurrent}，单需求最多 ${active.config.maxJobsPerWork} 个子任务`,
+    ];
+    for (const p of active.config.profiles) {
+      lines.push(`· ${p.displayName ?? p.id}：${accessNames[p.access] ?? p.access}${p.maxConcurrent ? `，并发 ${p.maxConcurrent}` : ""}`);
+    }
+    const pendingDrafts = store.listPendingDrafts();
+    if (pendingDrafts.length > 0) {
+      lines.push("");
+      lines.push("待确认草案：");
+      for (const d of pendingDrafts) {
+        lines.push(`· ${d.id} → 应用：/teams config apply ${d.id}`);
+      }
+    }
+    lines.push("");
+    lines.push("其他：/teams config show（详情）| rollback <版本>（回滚）| history（版本历史）");
+    this.replyText(chatId, platformChatId, msgId, lines.join("\n"));
   }
 
   private handleCronCommand(
