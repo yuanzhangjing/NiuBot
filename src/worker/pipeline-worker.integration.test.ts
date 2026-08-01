@@ -16,6 +16,7 @@ import type { AgentBackend, AgentResponse, AgentSession, SessionConfig } from ".
 import { initDatabase } from "../database/schema.js";
 import type { TransportClient } from "../transport/types.js";
 import { Pipeline } from "../core/pipeline.js";
+import type { InboundDelivery } from "../transport/types.js";
 import { SqliteJobService } from "./job-service.js";
 import { WorkerProfileRegistry } from "./profiles.js";
 import { TeamConfigStore } from "./team-config.js";
@@ -422,6 +423,44 @@ test("团队模式关闭时 queued Job 不调度，开启后执行", async () =>
   // 开启后调度执行
   teamConfig.setEnabled(true);
   await waitFor(() => service.getJob(job.id)?.status === "completed");
+});
+
+function userDelivery(chatId: string, text: string, seq: number): InboundDelivery {
+  return {
+    inboxId: seq,
+    claimToken: `claim-${seq}`,
+    replayed: false,
+    message: {
+      senderPlatformId: "ou_user",
+      senderName: "User",
+      chatPlatformId: `oc_${chatId}`,
+      chatType: "p2p",
+      contentText: text,
+      contentType: "text",
+      timestamp: new Date(),
+      platformMsgId: `msg-${seq}`,
+      platformTs: Date.now(),
+    },
+  };
+}
+
+test("团队模式开启时主 Agent 回合注入派工 Skill，关闭时不注入", async () => {
+  teamConfig.setEnabled(false);
+  await pipeline.start();
+
+  // 关闭状态：用户消息回合不注入 skill
+  pipeline.handleInbound(userDelivery(CHAT_ID, "你好", 1));
+  await waitFor(() => backend.messages.some((m) => m.text.includes("你好")));
+  const first = backend.messages.find((m) => m.text.includes("你好"))!;
+  expect(first.text).not.toContain("<worker-skill>");
+
+  // 开启：后续用户消息回合注入
+  teamConfig.setEnabled(true);
+  pipeline.handleInbound(userDelivery(CHAT_ID, "帮我调研一下", 2));
+  await waitFor(() => backend.messages.some((m) => m.text.includes("帮我调研一下")));
+  const second = backend.messages.find((m) => m.text.includes("帮我调研一下"))!;
+  expect(second.text).toContain("<worker-skill>");
+  expect(second.text).toContain("nbt worker job create");
 });
 
 test("配置应用后 registry 热更新（新 profile 可用）", async () => {

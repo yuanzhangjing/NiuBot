@@ -101,6 +101,19 @@ const INTERRUPT_WORDS = new Set([
   "等等", "等一下", "稍等",
   "stop", "cancel", "abort",
 ]);
+/** 团队模式开启时注入主 Agent 的派工 Skill（简短摘要 + 文档入口）。 */
+const WORKER_AGENT_SKILL_BRIEF = `<worker-skill>
+团队模式已开启，你可以把长任务拆给内部 Worker 后台执行，派工后结束回合，Worker 完成会自动唤醒你验收：
+
+- 创建 Work：nbt worker work create --file <需求.md>
+- 派工：nbt worker job create --work <work-id> --worker <general|researcher|reviewer|developer> --file <任务.md> [--workspace read_only|scratch|git_worktree] [--depends-on <job-id>]
+- 查询/取消：nbt worker list / get <id> / cancel <id>
+- 验收完成：nbt worker complete --work <work-id> --file <结论.md>
+- 完整说明：读取仓库 docs/worker-agent-skill.md
+
+边界：Worker 不直接回复用户；最终回复只能由你给出；Worker 没有主会话上下文，必要信息写进 Job 文件；写任务用 developer + git_worktree 隔离。
+</worker-skill>`;
+
 const BUILTIN_COMMANDS = new Set([
   "/restart", "/update", "/service", "/new", "/cron", "/agent", "/model",
   "/admin", "/help", "/stop", "/clear", "/flush", "/task", "/status", "/history",
@@ -3109,6 +3122,10 @@ ${jobParts.join("\n\n")}
           messageToSend = wrapInjectedUserMessage(mergedText);
         } else if (messageToSend.endsWith(mergedText)) {
           messageToSend = `${messageToSend.slice(0, messageToSend.length - mergedText.length)}${wrapInjectedUserMessage(mergedText)}`;
+        }
+        // 团队模式：注入派工 Skill（只影响用户消息回合；Continuation 验收回合自带指导）
+        if (this.workerConfig?.teamConfigStore?.isEnabled()) {
+          messageToSend = `${WORKER_AGENT_SKILL_BRIEF}\n\n${messageToSend}`;
         }
       }
 
