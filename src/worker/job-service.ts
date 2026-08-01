@@ -281,6 +281,7 @@ export class SqliteJobService implements JobService {
       if (!updated) return undefined;
       this.recordEvent({ workId: job.workId, jobId, event: "job_failed", detail: error });
       this.applyFailureBudget(job.workId);
+      this.maybeSettleCancellingWork(job.workId);
       this.createTerminalContinuation(this.db, jobId);
       return this.getJobDomain(jobId);
     })();
@@ -313,9 +314,12 @@ export class SqliteJobService implements JobService {
   completeWork(workId: string, input: CompleteWorkInput): Work | undefined {
     return this.db.transaction(() => {
       const work = getWork(this.db, workId);
-      if (!work || work.status !== "active") return undefined;
+      if (!work) return undefined;
+      // 允许 active 完成；cancelling 的 Work 若 Job 已全部终态，主 Agent 验收后也可完成（结果可用）
+      if (work.status !== "active" && work.status !== "cancelling") return undefined;
+      if (work.status === "cancelling" && !this.allJobsTerminal(workId)) return undefined;
       const updated = updateWorkStatus(this.db, workId, {
-        from: "active",
+        from: work.status,
         to: "completed",
         version: work.version,
       });
@@ -429,9 +433,27 @@ export class SqliteJobService implements JobService {
       } else if (to === "failed") {
         this.applyFailureBudget(job.workId);
       }
+      // cancelling 的 Work：所有 Job 终态后自动收敛到 cancelled（不再卡住）
+      this.maybeSettleCancellingWork(job.workId);
       this.createTerminalContinuation(this.db, jobId);
       return this.getJobDomain(jobId);
     })();
+  }
+
+  /** 取消中的 Work 全部 Job 终态后自动 → cancelled（兜底，防止永远 cancelling）。 */
+  private maybeSettleCancellingWork(workId: string): void {
+    const work = getWork(this.db, workId);
+    if (!work || work.status !== "cancelling") return;
+    if (!this.allJobsTerminal(workId)) return;
+    updateWorkStatus(this.db, workId, { from: "cancelling", to: "cancelled", version: work.version });
+    updateWorkConclusion(this.db, workId, "任务已取消（所有 Job 已结束）。");
+    this.recordEvent({ workId, event: "work_cancelled", detail: "all jobs terminal" });
+  }
+
+  private allJobsTerminal(workId: string): boolean {
+    return listJobs(this.db, workId).every((job) =>
+      (JOB_TERMINAL_STATUSES as readonly string[]).includes(job.status),
+    );
   }
 
   /** 连续失败计数 + 上限检查（达到上限 Work 直接 failed）。 */

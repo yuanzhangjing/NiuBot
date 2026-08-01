@@ -11,7 +11,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import { createLogger } from "../logger.js";
@@ -90,7 +90,7 @@ function resolveExistingDir(target: string): string {
   }
   try {
     const real = realpathSync(target);
-    const stat = require("node:fs").statSync(real);
+    const stat = statSync(real);
     if (!stat.isDirectory()) {
       throw new Error(`workdir 不是目录: ${target}`);
     }
