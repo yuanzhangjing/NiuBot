@@ -253,10 +253,12 @@ export interface JobService {
   listPendingContinuations(): AgentContinuation[];
   /** 批量认领某 chat 的待处理 Continuation（同一 Work 合并成一次验收） */
   claimContinuations(chatId: string, claimToken: string): AgentContinuation[];
-  /** 投递时认领单个 Continuation（pending → claimed；幂等） */
+  /** 投递时认领单个 Continuation（pending → claimed；超限时标记 failed 不再投递） */
   claimContinuation(id: string, claimToken: string): boolean;
-  /** 主 Agent 回合失败后释放认领（claimed → pending，允许重新投递） */
+  /** 主 Agent 回合失败/取消后释放认领（claimed → pending，允许重新投递） */
   releaseContinuationClaim(id: string): boolean;
+  /** claimed 超时兜底：超过阈值分钟未完成（进程被杀等）→ 重置 pending */
+  resetStaleClaimedContinuations(staleMinutes: number): number;
   /** 主 Agent 回合事务提交后标记完成 */
   markContinuationCompleted(id: string, agentTurnId: string): void;
   /** 重启恢复：claimed Continuation 重置为 pending（§7.5 重新投递） */

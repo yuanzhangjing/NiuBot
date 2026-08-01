@@ -474,6 +474,7 @@ const migrations: Migration[] = [
           claim_token   TEXT,
           claimed_at    TEXT,
           completed_at  TEXT,
+          attempt_count INTEGER NOT NULL DEFAULT 0,
           created_at    TEXT NOT NULL DEFAULT (datetime('now'))
         );
         CREATE INDEX IF NOT EXISTS idx_agent_continuations_chat ON agent_continuations(chat_id, status);

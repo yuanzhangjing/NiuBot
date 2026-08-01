@@ -327,6 +327,51 @@ describe("连续失败上限", () => {
   });
 });
 
+describe("Continuation 死循环防护", () => {
+  test("认领次数达到上限后标记 failed，不再投递", () => {
+    const work = makeWork();
+    const job = makeJob(work.id);
+    service.claimJob({ jobId: job.id, claimToken: "l" });
+    service.completeJob(job.id, record());
+    const continuation = service.claimContinuations(CHAT_ID, "t")[0]!;
+
+    // 模拟失败重投：release → claim 循环（初始 claim 已算 1 次）
+    for (let i = 1; i < 5; i++) {
+      service.releaseContinuationClaim(continuation.id);
+      expect(service.claimContinuation(continuation.id, `d${i}`)).toBe(true);
+    }
+    // 第 6 次尝试：达到上限 → failed，claim 失败
+    service.releaseContinuationClaim(continuation.id);
+    expect(service.claimContinuation(continuation.id, "d-last")).toBe(false);
+    expect(service.getContinuation(continuation.id)?.status).toBe("failed");
+  });
+
+  test("claimed 超时后重置为 pending（进程被杀兜底）", () => {
+    const work = makeWork();
+    const job = makeJob(work.id);
+    service.claimJob({ jobId: job.id, claimToken: "l" });
+    service.completeJob(job.id, record());
+    const continuation = service.claimContinuations(CHAT_ID, "t")[0]!;
+    expect(continuation.status).toBe("claimed");
+
+    // 把 claimed_at 改到 1 小时前
+    db.prepare("UPDATE agent_continuations SET claimed_at = datetime('now', '-1 hour') WHERE id = ?").run(continuation.id);
+    const reset = service.resetStaleClaimedContinuations(30);
+    expect(reset).toBe(1);
+    expect(service.getContinuation(continuation.id)?.status).toBe("pending");
+  });
+
+  test("未超时的 claimed 不被重置", () => {
+    const work = makeWork();
+    const job = makeJob(work.id);
+    service.claimJob({ jobId: job.id, claimToken: "l" });
+    service.completeJob(job.id, record());
+    service.claimContinuations(CHAT_ID, "t");
+    const reset = service.resetStaleClaimedContinuations(30);
+    expect(reset).toBe(0);
+  });
+});
+
 describe("Continuation 认领与完成", () => {
   test("批量认领同一 chat 的多个 Continuation（合并验收）", () => {
     const work = makeWork();

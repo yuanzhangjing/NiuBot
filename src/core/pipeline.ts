@@ -3180,6 +3180,13 @@ ${jobParts.join("\n\n")}
       });
       if (agentResult.status === "stopped") {
         this.log.info("prompt cancelled, no response to send", { chatId });
+        // 验收回合被取消：释放认领并解除派发标记，允许后续重新投递（否则卡死 claimed）
+        if (isContinuationTurn) {
+          for (const id of continuationIds) {
+            this.workerConfig?.jobService.releaseContinuationClaim(id);
+            this.dispatchedContinuations.delete(id);
+          }
+        }
         return;
       }
       const response = agentResult.response;

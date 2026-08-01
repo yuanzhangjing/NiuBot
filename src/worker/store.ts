@@ -504,7 +504,7 @@ export function claimPendingContinuations(
     if (pending.length === 0) return [];
     const mark = db.prepare(`
       UPDATE agent_continuations
-      SET status = 'claimed', claim_token = ?, claimed_at = datetime('now')
+      SET status = 'claimed', claim_token = ?, claimed_at = datetime('now'), attempt_count = attempt_count + 1
       WHERE id = ? AND status = 'pending'
     `);
     const claimed: ContinuationRow[] = [];
@@ -517,14 +517,34 @@ export function claimPendingContinuations(
   })();
 }
 
-/** 投递时认领（pending → claimed + token）；CAS 保证并发安全。 */
+/** 投递时认领（pending → claimed + token，attempt +1）；CAS 保证并发安全。 */
 export function claimContinuationById(db: Database.Database, id: string, claimToken: string): boolean {
   const result = db.prepare(`
     UPDATE agent_continuations
-    SET status = 'claimed', claim_token = ?, claimed_at = datetime('now')
+    SET status = 'claimed', claim_token = ?, claimed_at = datetime('now'), attempt_count = attempt_count + 1
     WHERE id = ? AND status = 'pending'
   `).run(claimToken, id);
   return result.changes === 1;
+}
+
+/** 认领次数达到上限的 Continuation 标记为 failed（终态，不再投递，防死循环）。 */
+export function failContinuationByAttemptLimit(db: Database.Database, id: string, limit: number): boolean {
+  const result = db.prepare(`
+    UPDATE agent_continuations
+    SET status = 'failed', completed_at = datetime('now')
+    WHERE id = ? AND status = 'pending' AND attempt_count >= ?
+  `).run(id, limit);
+  return result.changes === 1;
+}
+
+/** claimed 超时兜底：认领后超过阈值未完成（进程被杀等）→ 重置 pending 允许重新投递。 */
+export function resetStaleClaimedContinuations(db: Database.Database, staleMinutes: number): number {
+  const result = db.prepare(`
+    UPDATE agent_continuations
+    SET status = 'pending', claim_token = NULL, claimed_at = NULL
+    WHERE status = 'claimed' AND claimed_at IS NOT NULL AND claimed_at < datetime('now', ?)
+  `).run(`-${staleMinutes} minutes`);
+  return result.changes;
 }
 
 /** 主 Agent 回合失败/中断后释放认领（claimed → pending，允许重新投递）。 */

@@ -17,6 +17,8 @@ export const JOB_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 export const JOB_WALL_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 /** cancelling 状态无进展（进程未确认退出）超过该时间后强制终态 */
 export const JOB_CANCEL_CONFIRM_TIMEOUT_MS = 10 * 60 * 1000;
+/** Continuation 认领悬挂超时：主 Agent 回合进程被杀等场景的兜底重投阈值 */
+export const CLAIMED_CONTINUATION_STALE_MS = 30 * 60 * 1000;
 
 export interface WorkerSchedulerOptions {
   runtime: WorkerRuntime;
@@ -76,6 +78,14 @@ export class WorkerScheduler {
     const expired = this.options.leaseManager?.cleanupExpired() ?? 0;
     if (expired > 0) {
       log.info("expired worker leases cleaned", { count: expired });
+    }
+
+    // 0b. claimed 超时兜底：主 Agent 回合进程被杀等导致认领悬挂 → 重置 pending 重新投递
+    const staleClaimed = this.options.jobService.resetStaleClaimedContinuations(
+      Math.floor(CLAIMED_CONTINUATION_STALE_MS / 60_000),
+    );
+    if (staleClaimed > 0) {
+      log.warn("stale claimed continuations reset for redelivery", { count: staleClaimed });
     }
 
     // 1. watchdog：超时运行中 Job 强制取消

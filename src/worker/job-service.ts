@@ -13,6 +13,9 @@ import { MAX_JOBS_PER_WORK, MAX_WORK_INTERRUPTED_COUNT } from "./types.js";
 
 /** 同一 Work 连续失败达到该次数后 Work 直接 failed（§6 maxConsecutiveFailures 内部上限） */
 export const MAX_CONSECUTIVE_FAILURES = 3;
+
+/** Continuation 认领次数上限：超过后标记 failed 不再投递（防失败重投死循环） */
+export const MAX_CONTINUATION_ATTEMPTS = 5;
 import type {
   AgentContinuation,
   ClaimJobInput,
@@ -34,7 +37,9 @@ import {
   continuationRowToContinuation,
   countJobs,
   eventRowToEvent,
+  failContinuationByAttemptLimit,
   releaseContinuationClaim,
+  resetStaleClaimedContinuations,
   getContinuationByDedupeKey,
   getJob,
   getJobByJobIdempotencyKey,
@@ -357,14 +362,20 @@ export class SqliteJobService implements JobService {
     return this.db.transaction(() => this.createTerminalContinuation(this.db, jobId))();
   }
 
-  /** 投递时认领单个 Continuation（pending → claimed；幂等）。 */
+  /** 投递时认领单个 Continuation（pending → claimed；超限时标记 failed 不再投递）。 */
   claimContinuation(id: string, claimToken: string): boolean {
+    failContinuationByAttemptLimit(this.db, id, MAX_CONTINUATION_ATTEMPTS);
     return claimContinuationById(this.db, id, claimToken);
   }
 
-  /** 主 Agent 回合失败后释放认领（claimed → pending，允许重新投递）。 */
+  /** 主 Agent 回合失败/取消后释放认领（claimed → pending，允许重新投递）。 */
   releaseContinuationClaim(id: string): boolean {
     return releaseContinuationClaim(this.db, id);
+  }
+
+  /** claimed 超时兜底：超过阈值未完成（进程被杀等）→ 重置 pending。 */
+  resetStaleClaimedContinuations(staleMinutes: number): number {
+    return resetStaleClaimedContinuations(this.db, staleMinutes);
   }
 
   getContinuation(id: string): AgentContinuation | undefined {
