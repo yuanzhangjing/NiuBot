@@ -1705,18 +1705,16 @@ export class Pipeline {
         const running = jobService?.listJobsByStatus("running").length ?? 0;
         const queued = jobService?.listJobsByStatus("queued").length ?? 0;
         const profiles = this.workerConfig?.registry.list() ?? [];
-        const profileNames = profiles.map((p) => `${p.displayName}${p.description ? `（${p.description}）` : ""}`).join("、");
-        this.replyText(
-          chatId, platformChatId, msgId,
-          [
-            `📋 团队模式：${enabled ? "开启" : "关闭"}`,
-            `· 任务执行：${running} 个进行中，${queued} 个排队`,
-            `· 并发上限：同时最多执行 ${active.config.maxConcurrent} 个任务`,
-            `· 单个需求最多拆 ${active.config.maxJobsPerWork} 个子任务`,
-            `· 配置：${active.version ? `版本 ${active.version}` : "默认（未自定义）"}`,
-            `· 可用角色：${profileNames || "（无）"}`,
-          ].join("\n"),
-        );
+        const profileLines = profiles.map((p) => `· ${p.displayName}${p.description ? `（${p.description}）` : ""}`);
+        const content = [
+          `**团队模式**：${enabled ? "✅ 开启" : "⛔ 关闭"}`,
+          `· 任务执行：**${running}** 个进行中，**${queued}** 个排队`,
+          `· 并发上限：同时最多执行 **${active.config.maxConcurrent}** 个任务`,
+          `· 单个需求最多拆 **${active.config.maxJobsPerWork}** 个子任务`,
+          `· 配置：${active.version ? `版本 **${active.version}**` : "默认（未自定义）"}`,
+          ...(profileLines.length > 0 ? ["", "**可用角色**", ...profileLines] : []),
+        ].join("\n");
+        this.sendTeamsCard(chatId, platformChatId, msgId, "Teams · 状态", content);
         return;
       }
       case "config": {
@@ -1724,16 +1722,25 @@ export class Pipeline {
         return;
       }
       default:
-        this.replyText(
-          chatId, platformChatId, msgId,
+        this.sendTeamsCard(
+          chatId, platformChatId, msgId, "Teams · 帮助",
           [
-            "团队模式：",
-            "/teams on / off     开启或关闭",
-            "/teams status       查看状态",
-            "/teams config       配置（查看/应用/回滚）",
+            "**团队模式**：把长任务拆给内部 Worker 后台执行，完成后自动汇报。",
+            "",
+            "**用法**",
+            "· `/teams on` / `/teams off` — 开启或关闭",
+            "· `/teams status` — 查看状态",
+            "· `/teams config` — 配置（查看/应用/回滚）",
           ].join("\n"),
         );
     }
+  }
+
+  /** /teams 卡片发送：与其他内置命令卡片一致的样式。 */
+  private sendTeamsCard(chatId: string, platformChatId: string, msgId: string | undefined, header: string, content: string): void {
+    this.transport.sendCard(platformChatId, header, content, undefined, msgId)
+      .then((pmid) => { this.storeBotResponse(chatId, content, pmid); })
+      .catch((err) => this.log.error("teams card send failed", { chatId, error: String(err) }));
   }
 
   private handleTeamsConfigCommand(args: string[], chatId: string, platformChatId: string, msgId?: string): void {
@@ -1749,25 +1756,27 @@ export class Pipeline {
         git_worktree: "隔离开发",
       };
       const lines = [
-        `📋 当前配置（${active.version ? `版本 ${active.version}` : "默认"}）`,
-        `· 并发上限：${active.config.maxConcurrent}`,
-        `· 单个需求最多拆 ${active.config.maxJobsPerWork} 个子任务`,
+        `**当前配置**（${active.version ? `版本 **${active.version}**` : "默认"}）`,
+        `· 并发上限：**${active.config.maxConcurrent}**`,
+        `· 单个需求最多拆 **${active.config.maxJobsPerWork}** 个子任务`,
+        "",
+        "**角色**",
       ];
       for (const p of active.config.profiles) {
-        lines.push(`· ${p.displayName ?? p.id}：${p.description ?? ""}（${accessNames[p.access] ?? p.access}${p.maxConcurrent ? `，并发 ${p.maxConcurrent}` : ""}）`);
+        lines.push(`· **${p.displayName ?? p.id}**：${p.description ?? "—"}（${accessNames[p.access] ?? p.access}${p.maxConcurrent ? `，并发 ${p.maxConcurrent}` : ""}）`);
       }
-      this.replyText(chatId, platformChatId, msgId, lines.join("\n"));
+      this.sendTeamsCard(chatId, platformChatId, msgId, "Teams · 配置详情", lines.join("\n"));
       return;
     }
 
     if (sub === "history") {
       const versions = store.listVersions();
       if (versions.length === 0) {
-        this.replyText(chatId, platformChatId, msgId, "(尚无配置版本)");
+        this.sendTeamsCard(chatId, platformChatId, msgId, "Teams · 版本历史", "(尚无配置版本)");
         return;
       }
-      const lines = versions.map((v) => `- ${v.version}（${v.appliedAt}${v.rollbackOf ? `，回滚自 ${v.rollbackOf}` : ""}）`);
-      this.replyText(chatId, platformChatId, msgId, lines.join("\n"));
+      const lines = versions.map((v) => `· **${v.version}** — ${v.appliedAt}${v.rollbackOf ? `（回滚自 ${v.rollbackOf}）` : ""}`);
+      this.sendTeamsCard(chatId, platformChatId, msgId, "Teams · 版本历史", lines.join("\n"));
       return;
     }
 
@@ -1815,9 +1824,17 @@ export class Pipeline {
         this.replyText(chatId, platformChatId, msgId, `草案不存在: ${draftId}`);
         return;
       }
-      this.replyText(
-        chatId, platformChatId, msgId,
-        `草案 ${draft.id}（${draft.status}，基准版本 ${draft.baseVersion ?? "(默认)"}）\n\n${draft.configYaml}\n\n确认应用：/teams config apply ${draft.id}`,
+      this.sendTeamsCard(
+        chatId, platformChatId, msgId, "Teams · 草案",
+        [
+          `**草案 ${draft.id}**（${draft.status}，基准版本 ${draft.baseVersion ?? "(默认)"}）`,
+          "",
+          "```yaml",
+          draft.configYaml,
+          "```",
+          "",
+          `确认应用：\`/teams config apply ${draft.id}\``,
+        ].join("\n"),
       );
       return;
     }
@@ -1830,23 +1847,21 @@ export class Pipeline {
       git_worktree: "隔离开发",
     };
     const lines = [
-      `📋 当前配置（${active.version ? `版本 ${active.version}` : "默认"}）`,
-      `· 并发上限：${active.config.maxConcurrent}，单需求最多 ${active.config.maxJobsPerWork} 个子任务`,
+      `**当前配置**（${active.version ? `版本 **${active.version}**` : "默认"}）`,
+      `· 并发上限：**${active.config.maxConcurrent}**，单需求最多 **${active.config.maxJobsPerWork}** 个子任务`,
     ];
     for (const p of active.config.profiles) {
-      lines.push(`· ${p.displayName ?? p.id}：${accessNames[p.access] ?? p.access}${p.maxConcurrent ? `，并发 ${p.maxConcurrent}` : ""}`);
+      lines.push(`· **${p.displayName ?? p.id}**：${accessNames[p.access] ?? p.access}${p.maxConcurrent ? `，并发 ${p.maxConcurrent}` : ""}`);
     }
     const pendingDrafts = store.listPendingDrafts();
     if (pendingDrafts.length > 0) {
-      lines.push("");
-      lines.push("待确认草案：");
+      lines.push("", "**待确认草案**");
       for (const d of pendingDrafts) {
-        lines.push(`· ${d.id} → 应用：/teams config apply ${d.id}`);
+        lines.push(`· \`${d.id}\` → 应用：\`/teams config apply ${d.id}\``);
       }
     }
-    lines.push("");
-    lines.push("其他：/teams config show（详情）| rollback <版本>（回滚）| history（版本历史）");
-    this.replyText(chatId, platformChatId, msgId, lines.join("\n"));
+    lines.push("", "**其他命令**", "· `/teams config show`（详情）| `rollback <版本>`（回滚）| `history`（版本历史）");
+    this.sendTeamsCard(chatId, platformChatId, msgId, "Teams · 配置", lines.join("\n"));
   }
 
   private handleCronCommand(
