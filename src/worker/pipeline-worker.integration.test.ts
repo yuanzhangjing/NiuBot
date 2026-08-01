@@ -470,17 +470,18 @@ test("延续性 Job 自动注入同 Work 前序结果和检索入口", async () 
   expect(jobBPrompt!.text).toContain("nbt sessions search");
 });
 
-test("团队模式开启时主 Agent 回合注入派工 Skill，关闭时不注入", async () => {
+test("团队模式开启时注入派工 Skill，暂停时注入停用指令", async () => {
   teamConfig.setEnabled(false);
   await pipeline.start();
 
-  // 关闭状态：用户消息回合不注入 skill
+  // 暂停状态：注入停用指令（不包含派工命令）
   pipeline.handleInbound(userDelivery(CHAT_ID, "你好", 1));
   await waitFor(() => backend.messages.some((m) => m.text.includes("你好")));
   const first = backend.messages.find((m) => m.text.includes("你好"))!;
-  expect(first.text).not.toContain("<worker-skill>");
+  expect(first.text).toContain("团队模式当前已暂停");
+  expect(first.text).not.toContain("nbt worker job create");
 
-  // 开启：后续用户消息回合注入
+  // 开启：注入派工 Skill
   teamConfig.setEnabled(true);
   pipeline.handleInbound(userDelivery(CHAT_ID, "帮我调研一下", 2));
   await waitFor(() => backend.messages.some((m) => m.text.includes("帮我调研一下")));

@@ -165,7 +165,8 @@ export class TeamConfigStore {
     const row = this.db.prepare("SELECT enabled FROM team_settings WHERE bot_id = ?").get(this.botId) as
       | { enabled: number }
       | undefined;
-    return row ? row.enabled === 1 : false;
+    // 默认开启（全开放方向）：未显式关闭时团队模式可用，/teams off 为临时暂停
+    return row ? row.enabled === 1 : true;
   }
 
   setEnabled(enabled: boolean): void {

@@ -60,14 +60,14 @@ describe("parseTeamConfig", () => {
 });
 
 describe("TeamConfigStore", () => {
-  test("默认关闭；on/off 持久化", () => {
-    expect(store.isEnabled()).toBe(false);
-    store.setEnabled(true);
+  test("默认开启（全开放）；off 暂停并持久化", () => {
     expect(store.isEnabled()).toBe(true);
-    const fresh = new TeamConfigStore(db, BOT_ID);
-    expect(fresh.isEnabled()).toBe(true);
     store.setEnabled(false);
     expect(store.isEnabled()).toBe(false);
+    const fresh = new TeamConfigStore(db, BOT_ID);
+    expect(fresh.isEnabled()).toBe(false);
+    store.setEnabled(true);
+    expect(store.isEnabled()).toBe(true);
   });
 
   test("无配置版本时返回内置默认", () => {

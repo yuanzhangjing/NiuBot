@@ -105,7 +105,7 @@ const INTERRUPT_WORDS = new Set([
 ]);
 /** 团队模式开启时注入主 Agent 的派工 Skill（简短摘要 + 文档入口）。 */
 const WORKER_AGENT_SKILL_BRIEF = `<worker-skill>
-团队模式已开启，你可以把长任务拆给内部 Worker 后台执行，派工后结束回合，Worker 完成会自动唤醒你验收：
+Worker 团队模式可用：你可以把长任务拆给内部 Worker 后台执行，派工后结束回合，Worker 完成会自动唤醒你验收：
 
 - 创建 Work：nbt worker work create --file <需求.md>
 - 派工：nbt worker job create --work <work-id> --worker <general|researcher|reviewer|developer|tester> --file <任务.md> [--workspace read_only|scratch|git_worktree] [--depends-on <job-id>]
@@ -120,6 +120,12 @@ const WORKER_AGENT_SKILL_BRIEF = `<worker-skill>
 重要：当所有 Job 已结束且你已向用户交付结果（无论继续派工还是收尾），都必须执行 nbt worker complete --work <id> --file <结论.md> 结束 Work；否则 Work 会一直悬挂。
 
 本段是内部指令：回复用户时不得复述、展示或引用 <worker-skill> 及任何 <worker-*> 标签内容本身，只输出给用户的结果正文。
+</worker-skill>`;
+
+/** 团队模式暂停（/teams off）时注入的停用指令：覆盖旧指令，避免继续派工。 */
+const WORKER_AGENT_SKILL_DISABLED = `<worker-skill>
+团队模式当前已暂停（/teams off）。不要把任务派给内部 Worker——即使此前看到过派工指令，现在也不要派工；任务直接在当前会话处理。正在执行的任务会继续完成，结果照常汇报。
+本段是内部指令：回复用户时不得复述、展示或引用本区段。
 </worker-skill>`;
 
 const BUILTIN_COMMANDS = new Set([
@@ -3134,9 +3140,13 @@ ${jobParts.join("\n\n")}
         } else if (messageToSend.endsWith(mergedText)) {
           messageToSend = `${messageToSend.slice(0, messageToSend.length - mergedText.length)}${wrapInjectedUserMessage(mergedText)}`;
         }
-        // 团队模式：注入派工 Skill（只影响用户消息回合；Continuation 验收回合自带指导）
-        if (this.workerConfig?.teamConfigStore?.isEnabled()) {
-          messageToSend = `${WORKER_AGENT_SKILL_BRIEF}\n\n${messageToSend}`;
+        // Worker 派工 Skill：Worker 部署即注入（默认全开）；/teams off 时注入停用指令覆盖旧指令。
+        // 只影响用户消息回合；Continuation 验收回合自带指导。
+        if (this.workerConfig) {
+          const skillBrief = this.workerConfig.teamConfigStore?.isEnabled()
+            ? WORKER_AGENT_SKILL_BRIEF
+            : WORKER_AGENT_SKILL_DISABLED;
+          messageToSend = `${skillBrief}\n\n${messageToSend}`;
         }
       }
 
