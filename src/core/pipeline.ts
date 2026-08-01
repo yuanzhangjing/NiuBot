@@ -318,8 +318,6 @@ export class Pipeline {
   private workerRuntime?: WorkerRuntime;
   private workerScheduler?: WorkerScheduler;
   private workerLeaseManager?: ResourceLeaseManager;
-  /** 已投递到主 Agent 队列的 Continuation（内存去重；重启后 pending 重新投递） */
-  private dispatchedContinuations = new Set<string>();
 
   constructor(
     db: Database.Database,
@@ -1952,8 +1950,6 @@ export class Pipeline {
   private enqueueWorkerContinuations(chatId: string, continuationIds: string[]): void {
     const jobService = this.workerConfig?.jobService;
     if (!jobService) return;
-    const fresh = continuationIds.filter((id) => !this.dispatchedContinuations.has(id));
-    if (fresh.length === 0) return;
     // 确保 platformChatIds 已注册（与 injectPrompt 一致：Worker 场景 chat 一定来自真实会话）
     if (!this.platformChatIds.has(chatId)) {
       const row = this.db.prepare("SELECT platform_id FROM chats WHERE id = ?").get(chatId) as
@@ -1961,12 +1957,13 @@ export class Pipeline {
         | undefined;
       if (row) this.platformChatIds.set(chatId, row.platform_id);
     }
-    // 认领：markContinuationCompleted 只接受 claimed 状态，投递时必须是 pending→claimed
+    // 认领：markContinuationCompleted 只接受 claimed 状态，投递时必须是 pending→claimed。
+    // 重复投递由 DB 状态保证（claimed 不会被扫描到；attempt 上限兜底），
+    // 不使用内存集合——内存集合会在 stale 重置后与 DB 脱节导致永久卡死。
     const claimed: string[] = [];
-    for (const id of fresh) {
+    for (const id of continuationIds) {
       if (jobService.claimContinuation(id, `dispatch-${Date.now()}`)) {
         claimed.push(id);
-        this.dispatchedContinuations.add(id);
       }
     }
     if (claimed.length === 0) return;
@@ -3239,11 +3236,10 @@ ${jobParts.join("\n\n")}
       });
       if (agentResult.status === "stopped") {
         this.log.info("prompt cancelled, no response to send", { chatId });
-        // 验收回合被取消：释放认领并解除派发标记，允许后续重新投递（否则卡死 claimed）
+        // 验收回合被取消：释放认领，允许后续重新投递（否则卡死 claimed）
         if (isContinuationTurn) {
           for (const id of continuationIds) {
             this.workerConfig?.jobService.releaseContinuationClaim(id);
-            this.dispatchedContinuations.delete(id);
           }
         }
         return;
@@ -3396,7 +3392,6 @@ ${jobParts.join("\n\n")}
       if (isContinuationTurn && sentPlatformMsgId && this.workerConfig) {
         for (const id of continuationIds) {
           this.workerConfig.jobService.markContinuationCompleted(id, runId ?? "");
-          this.dispatchedContinuations.delete(id);
           this.log.info("worker continuation completed", { continuationId: id, runId });
         }
       }
@@ -3417,11 +3412,10 @@ ${jobParts.join("\n\n")}
       }
     } catch (err) {
       this.log.error("pipeline error", { chatId, error: String(err) });
-      // Worker Continuation 回合失败：释放认领 + 解除派发标记，允许重新投递
+      // Worker Continuation 回合失败：释放认领，允许重新投递
       if (isContinuationTurn) {
         for (const id of continuationIds) {
           this.workerConfig?.jobService.releaseContinuationClaim(id);
-          this.dispatchedContinuations.delete(id);
         }
       }
       this.markRuntimeRun(runId, signal?.aborted ? "stopped" : "failed", String(err));
