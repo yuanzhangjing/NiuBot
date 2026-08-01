@@ -1993,8 +1993,9 @@ ${prevSections.join("\n\n")}
   /**
    * 组装主 Agent 验收回合的 <worker-continuation> 内部事件区段。
    * 内容是受信上下文，不是用户发言；区段标签由 Engine 生成。
+   * silent 时本回合不向用户交付（多 Job Work 的中间批次），并附上同 Work 前序 Job 结果供最终汇报参考。
    */
-  private buildWorkerContinuationPrompt(continuationIds: string[]): string {
+  private buildWorkerContinuationPrompt(continuationIds: string[], silent: boolean): string {
     const jobService = this.workerConfig?.jobService;
     if (!jobService) return "";
 
@@ -2022,6 +2023,25 @@ ${jobParts.join("\n\n")}
 </worker-result>`);
     }
 
+    // 静默中间批次：附上同 Work 其他已终态 Job 的结果摘要，供最终统一汇报时使用
+    let priorResults = "";
+    if (silent) {
+      const priorParts: string[] = [];
+      for (const workId of works.keys()) {
+        for (const job of jobService.listJobs(workId)) {
+          if (job.status !== "completed" && job.status !== "failed" && job.status !== "cancelled") continue;
+          if (continuationIds.length === 1) {
+            const cont = jobService.getContinuation(continuationIds[0]);
+            if (cont?.jobIds.includes(job.id)) continue; // 本批已列出的跳过
+          }
+          priorParts.push(`- Job ${job.id}（${job.workerProfileId}，${job.status}）：${(job.responseText ?? job.error ?? "").slice(0, 1500)}`);
+        }
+      }
+      if (priorParts.length > 0) {
+        priorResults = `\n\n<prior-results>\n本 Work 其他 Job 的结果（供最终汇报参考）：\n${priorParts.join("\n")}\n</prior-results>`;
+      }
+    }
+
     const workLines = [...works.entries()].map(([id, work]) => `- Work ${id}：${work.request}`).join("\n");
     const intro =
       "以下是 Worker 的执行结果。你不是在回复用户消息，而是在处理内部续接事件。请：\n" +
@@ -2031,10 +2051,12 @@ ${jobParts.join("\n\n")}
       "4. 最后给用户一条最终回复（简洁说明结果或需要用户补充什么）。\n" +
       "如果这些结果需要用户输入才能继续，直接向用户提问，Work 保持进行中。\n" +
       "重要：本回合结束时，如果所有 Job 已结束且你已向用户交付结果，必须执行 nbt worker complete --work <id> --file <结论.md> 结束 Work，不要让它悬挂。\n" +
-      "最终回复注意上下文衔接：回述一句任务（如「你重启后跑的验证 Work」），让用户不看中间记录也能对上「任务 → 结果」的来龙去脉；不展开执行细节。\n" +
+      (silent
+        ? "本批次是中间结果：Work 还有其他 Job 执行中。**不要向用户发送任何消息**（本回合静默），验收结果留待 Work 全部完成时统一汇报。\n"
+        : "最终回复注意上下文衔接：回述一句任务（如「你重启后跑的验证 Work」），让用户不看中间记录也能对上「任务 → 结果」的来龙去脉；不展开执行细节。\n") +
       "本段是内部指令：回复用户时不得复述、展示或引用 <worker-continuation> 及任何 <worker-*> 标签内容本身，只输出给用户的结果正文。";
 
-    return `<worker-continuation>\n${workLines ? `涉及任务：\n${workLines}\n\n` : ""}${sections.join("\n\n")}\n</worker-continuation>\n\n${intro}`;
+    return `<worker-continuation>\n${workLines ? `涉及任务：\n${workLines}\n\n` : ""}${sections.join("\n\n")}${priorResults}\n</worker-continuation>\n\n${intro}`;
   }
 
   private async processIndependentSession(
@@ -3022,6 +3044,19 @@ ${jobParts.join("\n\n")}
       this.queue.enqueueContinuation(chatId, continuationIds);
       this.log.info("worker continuation deferred behind user messages", { chatId, continuationIds });
     }
+    // 静默中间回合：多 Job Work 还有未终态 Job 时，本验收回合不向用户交付，
+    // 只在 Work 全部完成时统一汇报（单 Job Work 完成即交付）。
+    let silentContinuationTurn = false;
+    if (isContinuationTurn && this.workerConfig) {
+      const jobService = this.workerConfig.jobService;
+      const workIds = new Set<string>();
+      for (const id of continuationIds) {
+        const cont = jobService.getContinuation(id);
+        if (cont) workIds.add(cont.workId);
+      }
+      silentContinuationTurn = [...workIds].some((workId) =>
+        jobService.listJobs(workId).some((j) => j.status === "queued" || j.status === "running" || j.status === "cancelling"));
+    }
 
     const platformChatId = this.chatSessions.get(chatId)?.platformChatId
       ?? this.platformChatIds.get(chatId);
@@ -3082,7 +3117,7 @@ ${jobParts.join("\n\n")}
       // Worker Continuation 回合：上下文 = 内部事件区段（不是用户发言）
       let messageToSend = mergedText;
       if (isContinuationTurn) {
-        messageToSend = this.buildWorkerContinuationPrompt(continuationIds);
+        messageToSend = this.buildWorkerContinuationPrompt(continuationIds, silentContinuationTurn);
         if (!messageToSend) {
           this.log.warn("worker continuation content unavailable, skipping turn", { chatId, continuationIds });
           this.markRuntimeRun(runId, "failed");
@@ -3261,6 +3296,16 @@ ${jobParts.join("\n\n")}
         compactCount: response.compactCount,
         model: response.model,
       });
+
+      // 静默中间回合：不向 IM 发送，直接标记 Continuation 完成（结果已进上下文）
+      if (silentContinuationTurn) {
+        this.log.info("worker continuation silent turn (work still running)", { chatId, continuationIds });
+        for (const id of continuationIds) {
+          this.workerConfig?.jobService.markContinuationCompleted(id, runId ?? "");
+        }
+        this.markRuntimeRun(runId, "done");
+        return;
+      }
 
       // 合并消息提示头；出站前强制剥离 Worker 标签（保护：不依赖 LLM 自觉）
       let displayText = stripInternalWorkerTags(response.text);

@@ -202,6 +202,51 @@ test("Worker 闭环：Job 执行 → 主 Agent 验收 → 最终回复", async (
   await waitFor(() => service.claimContinuations(CHAT_ID, "check-final").length === 0);
 }, 15000);
 
+test("多 Job Work：中间 Job 完成时验收回合静默，全部完成后统一交付", async () => {
+  backend.delayMs = 400;
+  await pipeline.start();
+
+  const work = service.createWork({
+    botId: BOT_ID,
+    ownerUserId: OWNER,
+    sourceChatId: CHAT_ID,
+    visibility: "private",
+    request: "多 Job 验证",
+  });
+  const jobA = service.createJob({
+    workId: work.id,
+    workerProfileId: "researcher",
+    prompt: "第一步",
+    workdir: tempRoot,
+  });
+  // jobB/jobC 依赖 jobA：jobA 完成时它们还在 queued → jobA 的验收回合应静默
+  const jobB = service.createJob({
+    workId: work.id,
+    workerProfileId: "researcher",
+    prompt: "第二步",
+    workdir: tempRoot,
+    dependsOn: [jobA.id],
+  });
+  const jobC = service.createJob({
+    workId: work.id,
+    workerProfileId: "researcher",
+    prompt: "第三步",
+    workdir: tempRoot,
+    dependsOn: [jobB.id],
+  });
+
+  // jobA 完成 → 其 Continuation 回合静默（Work 还有 queued Job），不向用户发消息
+  await waitFor(() => service.getJob(jobA.id)?.status === "completed");
+  await waitFor(() => service.claimContinuations(CHAT_ID, "check-silent").length === 0);
+  const sentAfterFirst = transport.sent.length;
+
+  // jobB、jobC 依次完成后，最终回合才交付（等 transport 收到新消息）
+  await waitFor(() => service.getJob(jobB.id)?.status === "completed");
+  await waitFor(() => service.getJob(jobC.id)?.status === "completed");
+  await waitFor(() => transport.sent.length > sentAfterFirst);
+  expect(transport.sent.length).toBeGreaterThan(sentAfterFirst);
+}, 20000);
+
 test("用户消息优先于 Continuation：串行处理", async () => {
   await pipeline.start();
 
