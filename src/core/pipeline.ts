@@ -1683,12 +1683,12 @@ export class Pipeline {
     switch (sub) {
       case "on": {
         store.setEnabled(true);
-        this.replyText(chatId, platformChatId, msgId, "团队模式已开启：主 Agent 可以创建 Work 和派工。");
+        this.replyText(chatId, platformChatId, msgId, "✅ 团队模式已开启。直接提需求即可，我会把长任务拆给内部 Worker 后台执行，完成后自动汇报。");
         return;
       }
       case "off": {
         store.setEnabled(false);
-        this.replyText(chatId, platformChatId, msgId, "团队模式已关闭：不再创建和调度新工作；运行中的 Job 继续完成。");
+        this.replyText(chatId, platformChatId, msgId, "团队模式已关闭。之后的新需求不会再派给 Worker；正在执行的任务会继续完成。");
         return;
       }
       case "status": {
@@ -1696,14 +1696,17 @@ export class Pipeline {
         const active = store.getActiveConfig();
         const running = jobService?.listJobsByStatus("running").length ?? 0;
         const queued = jobService?.listJobsByStatus("queued").length ?? 0;
+        const profiles = this.workerConfig?.registry.list() ?? [];
+        const profileNames = profiles.map((p) => `${p.displayName}${p.description ? `（${p.description}）` : ""}`).join("、");
         this.replyText(
           chatId, platformChatId, msgId,
           [
-            `团队模式：${enabled ? "开启" : "关闭"}`,
-            `配置版本：${active.version ?? "(默认)"}`,
-            `并发上限：${active.config.maxConcurrent}，Job 上限：${active.config.maxJobsPerWork}`,
-            `运行中 Job：${running}，排队 Job：${queued}`,
-            `Worker Profiles：${this.workerConfig?.registry.list().map((p) => p.id).join(", ") ?? "(无)"}`,
+            `📋 团队模式：${enabled ? "开启" : "关闭"}`,
+            `· 任务执行：${running} 个进行中，${queued} 个排队`,
+            `· 并发上限：同时最多执行 ${active.config.maxConcurrent} 个任务`,
+            `· 单个需求最多拆 ${active.config.maxJobsPerWork} 个子任务`,
+            `· 配置：${active.version ? `版本 ${active.version}` : "默认（未自定义）"}`,
+            `· 可用角色：${profileNames || "（无）"}`,
           ].join("\n"),
         );
         return;
@@ -1716,10 +1719,15 @@ export class Pipeline {
         this.replyText(
           chatId, platformChatId, msgId,
           [
-            "用法：",
-            "/teams on | off | status",
-            "/teams config show | history | apply <draft-id> | rollback <version> | draft <draft-id>",
-            "配置草案由主 Agent 用 nbt worker config draft 生成后在此确认应用。",
+            "团队模式命令：",
+            "/teams on / off            开启或关闭团队模式",
+            "/teams status               查看当前状态",
+            "/teams config show          查看配置",
+            "/teams config history       配置版本历史",
+            "/teams config apply <id>    应用配置草案",
+            "/teams config rollback <版本>  回滚配置",
+            "",
+            "配置草案由主 Agent 用 nbt worker config draft 生成后，在这里确认应用。",
           ].join("\n"),
         );
     }
@@ -1732,13 +1740,18 @@ export class Pipeline {
 
     if (sub === "show") {
       const active = store.getActiveConfig();
+      const accessNames: Record<string, string> = {
+        read_only: "只读",
+        scratch: "临时目录",
+        git_worktree: "隔离开发",
+      };
       const lines = [
-        `配置版本：${active.version ?? "(默认)"}`,
-        `maxConcurrent: ${active.config.maxConcurrent}`,
-        `maxJobsPerWork: ${active.config.maxJobsPerWork}`,
+        `📋 当前配置（${active.version ? `版本 ${active.version}` : "默认"}）`,
+        `· 并发上限：${active.config.maxConcurrent}`,
+        `· 单个需求最多拆 ${active.config.maxJobsPerWork} 个子任务`,
       ];
       for (const p of active.config.profiles) {
-        lines.push(`- ${p.id}（${p.access}${p.maxConcurrent ? `, 并发 ${p.maxConcurrent}` : ""}）：${p.description ?? ""}`);
+        lines.push(`· ${p.displayName ?? p.id}：${p.description ?? ""}（${accessNames[p.access] ?? p.access}${p.maxConcurrent ? `，并发 ${p.maxConcurrent}` : ""}）`);
       }
       this.replyText(chatId, platformChatId, msgId, lines.join("\n"));
       return;
