@@ -30,6 +30,8 @@ export function teamProfileToWorkerProfile(p: {
   displayName?: string;
   description?: string;
   prompt: string;
+  principles?: string;
+  workflow?: string;
   access: "read_only" | "scratch" | "git_worktree";
   maxConcurrent?: number;
   skills?: TeamProfileSkills;
@@ -39,6 +41,8 @@ export function teamProfileToWorkerProfile(p: {
     displayName: p.displayName ?? p.id,
     description: p.description ?? "",
     prompt: p.prompt,
+    principles: p.principles,
+    workflow: p.workflow,
     access: p.access,
     maxConcurrent: p.maxConcurrent,
     skills: p.skills,

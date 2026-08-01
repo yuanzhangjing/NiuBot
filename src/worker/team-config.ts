@@ -25,6 +25,10 @@ export interface TeamProfileConfig {
   displayName?: string;
   description?: string;
   prompt: string;
+  /** 工作原则（system prompt；与内置角色一致的分层注入） */
+  principles?: string;
+  /** 典型工作流（system prompt；与内置角色一致的分层注入） */
+  workflow?: string;
   access: WorkspacePolicy;
   maxConcurrent?: number;
   skills?: TeamProfileSkills;
@@ -124,6 +128,8 @@ export function parseTeamConfig(yamlText: string): TeamConfig {
       displayName: typeof p["displayName"] === "string" ? p["displayName"] : undefined,
       description: typeof p["description"] === "string" ? p["description"] : undefined,
       prompt,
+      principles: typeof p["principles"] === "string" ? p["principles"] : undefined,
+      workflow: typeof p["workflow"] === "string" ? p["workflow"] : undefined,
       access: access as WorkspacePolicy,
       maxConcurrent,
       skills,
