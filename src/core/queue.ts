@@ -14,6 +14,10 @@ export interface QueuedMessage {
   senderId?: string;
   /** 消息在 DB 中的 ID，用于 runtime 事件关联 */
   dbMsgId?: number;
+  /** 触发来源：用户消息（默认）或 Worker Continuation */
+  triggerKind?: "user" | "worker_continuation";
+  /** triggerKind 为 worker_continuation 时携带的 Continuation ID 列表（内部事件，不写库） */
+  continuationIds?: string[];
 }
 
 interface ChatQueue {

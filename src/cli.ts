@@ -37,6 +37,7 @@ import { handleSend } from "./cli/send.js";
 import { handleCron } from "./cli/cron.js";
 import { handleTask } from "./cli/task.js";
 import { handleSessions } from "./cli/session.js";
+import { handleWorker } from "./cli/worker.js";
 import { parseArgs } from "./cli/args.js";
 import { formatLocalDateTimeWithTZ } from "./tz.js";
 
@@ -53,6 +54,7 @@ const sessionCommands = new Set([
   "send",
   "cron",
   "task",
+  "worker",
   "whoami",
 ]);
 const publicCommands = new Set([
@@ -157,6 +159,9 @@ async function main(): Promise<void> {
       break;
     case "task":
       handleTask(args.slice(1), WORK_DIR, CHAT_ID, CHAT_TYPE, USER_ID, parseArgs);
+      break;
+    case "worker":
+      handleWorker(openDb(), args.slice(1));
       break;
     case "system-rules":
       handleSystemRules(args.slice(1));
