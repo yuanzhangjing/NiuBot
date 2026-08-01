@@ -7,17 +7,48 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { readdirSync, statSync } from "node:fs";
+import path from "node:path";
 
 import type { AgentBackend, AgentSession, SessionConfig } from "../agent/types.js";
 import { createLogger } from "../logger.js";
 import { terminateSpawnedProcessTree, waitForProcessExit } from "../platform/process.js";
-import type { Job, JobExecutionRecord, JobService } from "./types.js";
+import type { ArtifactEntry, Job, JobExecutionRecord, JobService } from "./types.js";
 import { WorkerProfileRegistry } from "./profiles.js";
-import { WorkspaceProvider, type PreparedWorkspace } from "./workspace.js";
+import { WORKER_MARKER_FILENAME, WorkspaceProvider, type PreparedWorkspace } from "./workspace.js";
 import { ResourceLeaseManager } from "./lease.js";
 import { SkillResolver } from "./skills.js";
 
 const log = createLogger("worker-runtime");
+
+/** 收集产物目录下的文件列表（排除 marker，递归收集相对路径）。 */
+function collectArtifacts(artifactDir?: string): ArtifactEntry[] {
+  if (!artifactDir) return [];
+  const entries: ArtifactEntry[] = [];
+  const walk = (dir: string, prefix: string): void => {
+    let names: string[];
+    try {
+      names = readdirSync(dir);
+    } catch {
+      return;
+    }
+    for (const name of names) {
+      if (name === WORKER_MARKER_FILENAME) continue;
+      const full = path.join(dir, name);
+      const rel = prefix ? `${prefix}/${name}` : name;
+      let isDir = false;
+      try {
+        isDir = statSync(full).isDirectory();
+      } catch {
+        continue;
+      }
+      if (isDir) walk(full, rel);
+      else entries.push({ kind: "file", relativePath: rel });
+    }
+  };
+  walk(artifactDir, "");
+  return entries;
+}
 
 export interface RunningJobExecution {
   jobId: string;
@@ -37,8 +68,8 @@ export interface WorkerRuntimeOptions {
    * workingDirectory 按 Job 动态填充，来自 Work 的来源会话）
    */
   sessionConfig: Omit<SessionConfig, "workingDirectory" | "chatId">;
-  /** Job 上下文组装（由 Pipeline 注入：stable context + job prompt + 实际执行目录；角色内容已在 system prompt） */
-  buildPrompt: (job: Job, execDir: string) => string | Promise<string>;
+  /** Job 上下文组装（由 Pipeline 注入：stable context + job prompt + 实际执行目录 + 产物目录；角色内容已在 system prompt） */
+  buildPrompt: (job: Job, execDir: string, artifactDir?: string) => string | Promise<string>;
   /** 工作区准备（read_only Job 可不提供） */
   workspaceProvider?: WorkspaceProvider;
   /** 写任务资源互斥（git_worktree Job 必须提供） */
@@ -191,7 +222,7 @@ export class WorkerRuntime {
         controller,
       });
 
-      const prompt = await buildPrompt(job, prepared.execDir);
+      const prompt = await buildPrompt(job, prepared.execDir, prepared.artifactDir);
 
       // 活动心跳：watchdog 依据 lastActivity 判断"无输出超时"（backend 不支持时跳过）
       const getActivity = (backend as unknown as {
@@ -217,7 +248,7 @@ export class WorkerRuntime {
         responseText: response.text,
         backendSessionId: backend.getAgentSessionId?.(session.id),
         changedFiles: response.filesChanged ?? [],
-        artifacts: [],
+        artifacts: collectArtifacts(prepared.artifactDir),
         startedAt: new Date(startedAt).toISOString(),
         endedAt: new Date().toISOString(),
       };

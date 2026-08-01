@@ -39,11 +39,14 @@ function makeGitRepo(): string {
 describe("WorkspaceProvider", () => {
   const provider = () => new WorkspaceProvider({ rootDir: path.join(tempRoot, "ws") });
 
-  test("read_only：直接使用目标目录（realpath）", async () => {
+  test("read_only：直接使用目标目录（realpath），并提供独立产物目录", async () => {
     const dir = realpathSync(mkdtempSync(path.join(tempRoot, "target-")));
     const prepared = await provider().prepare("job-1", "read_only", dir);
     expect(prepared.execDir).toBe(dir);
     expect(prepared.managed).toBe(false);
+    expect(prepared.artifactDir).toBeTruthy();
+    expect(prepared.artifactDir).not.toBe(dir);
+    expect(existsSync(prepared.artifactDir!)).toBe(true);
   });
 
   test("read_only：不存在或非绝对路径拒绝", async () => {

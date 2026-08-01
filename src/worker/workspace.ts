@@ -32,6 +32,8 @@ export interface PreparedWorkspace {
   repoPath?: string;
   /** git_worktree 时的分支名 */
   branch?: string;
+  /** 产物目录（read_only 策略：工作目录只读，落盘内容写这里） */
+  artifactDir?: string;
 }
 
 export interface WorkspaceProviderOptions {
@@ -50,7 +52,11 @@ export class WorkspaceProvider {
     switch (policy) {
       case "read_only": {
         const real = resolveExistingDir(targetDir);
-        return { execDir: real, managed: false };
+        // 只读：工作目录直接使用目标目录，另给独立产物目录用于落盘（报告/生成文件）
+        const artifactDir = path.join(this.options.rootDir, `job-${jobId}-artifacts`);
+        mkdirSync(artifactDir, { recursive: true });
+        writeMarker(artifactDir, { jobId, policy, createdAt: new Date().toISOString() });
+        return { execDir: real, artifactDir, managed: false };
       }
       case "scratch": {
         const dir = path.join(this.options.rootDir, `job-${jobId}`);

@@ -453,7 +453,7 @@ export class Pipeline {
           model: this.botIdentity.model,
           botProfilePath: this.stableContextOptions.botProfilePath,
         },
-        buildPrompt: (job, execDir) => this.buildWorkerPrompt(job, execDir),
+        buildPrompt: (job, execDir, artifactDir) => this.buildWorkerPrompt(job, execDir, artifactDir),
         workspaceProvider: new WorkspaceProvider({ rootDir: workspaceRoot }),
         leaseManager: this.workerLeaseManager,
       });
@@ -1917,16 +1917,21 @@ export class Pipeline {
    * 第一版不注入主会话 transcript 和用户记忆。
    * git_worktree Job 的 execDir 是独立 worktree，提示 Worker 只能在该目录写入。
    */
-  private buildWorkerPrompt(job: Job, execDir: string): string {
+  private buildWorkerPrompt(job: Job, execDir: string, artifactDir?: string): string {
     // 角色内容（定义/原则/工作流）已在 system prompt 注入；这里只组装任务详情
     const stable = this.buildStableSystemContext();
     const work = this.workerConfig?.jobService.getWork(job.workId);
     const parts: string[] = [];
     if (stable) parts.push(stable);
-    const writeRule =
-      job.workspacePolicy === "git_worktree"
-        ? `当前目录是独立 Git worktree（目标仓库：${job.workdir}）。只能修改当前目录内的文件；不要提交、不要 push、不要发布、不要碰目标仓库主工作区。`
-        : `不要修改代码、不要提交、不要发布、不要对用户直接发送消息。`;
+    let writeRule: string;
+    if (job.workspacePolicy === "git_worktree") {
+      writeRule = `当前目录是独立 Git worktree（目标仓库：${job.workdir}）。只能修改当前目录内的文件；不要提交、不要 push、不要发布、不要碰目标仓库主工作区。`;
+    } else if (artifactDir) {
+      // 只读 + 产物目录：工作目录只读，落盘内容（报告/生成文件）写产物目录
+      writeRule = `工作目录（${execDir}）是只读的：不要修改其中的任何文件。如需落盘（报告、生成的文件等），写到产物目录：${artifactDir}。不要提交、不要发布、不要对用户直接发送消息。`;
+    } else {
+      writeRule = `不要修改代码、不要提交、不要发布、不要对用户直接发送消息。`;
+    }
     parts.push(`<job-target>
 Work 目标（用户原始需求）：${work?.request ?? "(未知)"}
 Job 任务：${job.prompt}
