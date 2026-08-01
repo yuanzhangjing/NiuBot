@@ -53,6 +53,8 @@ function collectArtifacts(artifactDir?: string): ArtifactEntry[] {
 export interface RunningJobExecution {
   jobId: string;
   session: AgentSession;
+  /** 本 Job 实际使用的 backend（角色可配置专属 backend） */
+  backend: AgentBackend;
   startedAt: number;
   lastActivity: number;
   /** 用于取消的信号；取消后等待 backend 进程树真实退出 */
@@ -76,16 +78,31 @@ export interface WorkerRuntimeOptions {
   leaseManager?: ResourceLeaseManager;
   /** Skill 校验（Phase 5；默认内置 resolver） */
   skillResolver?: SkillResolver;
+  /** 按类型解析专属 backend（角色配置 backend 时使用；未配置则用 options.backend） */
+  resolveBackend?: (type: string) => Promise<AgentBackend> | AgentBackend;
 }
 
 export class WorkerRuntime {
   private readonly running = new Map<string, RunningJobExecution>();
+  /** 已解析的专属 backend 实例（按类型缓存） */
+  private readonly workerBackends = new Map<string, AgentBackend>();
 
   constructor(private readonly options: WorkerRuntimeOptions) {}
 
   /** 当前运行中的 Job 数 */
   runningCount(): number {
     return this.running.size;
+  }
+
+  /** 解析 Job 使用的 backend：profile 配置了类型时按类型解析（缓存实例），否则复用主 Agent backend。 */
+  private async resolveJobBackend(backendType?: string): Promise<AgentBackend> {
+    if (!backendType || !this.options.resolveBackend) return this.options.backend;
+    let instance = this.workerBackends.get(backendType);
+    if (!instance) {
+      instance = await this.options.resolveBackend(backendType);
+      this.workerBackends.set(backendType, instance);
+    }
+    return instance;
   }
 
   /** 当前运行中的 Job ID 列表（watchdog 用） */
@@ -104,24 +121,24 @@ export class WorkerRuntime {
   async cancel(jobId: string, reason: string): Promise<boolean> {
     const exec = this.running.get(jobId);
     if (!exec) return false;
-    const { jobService, backend } = this.options;
+    const { jobService } = this.options;
     const job = jobService.getJob(jobId);
     const workId = job?.workId ?? "";
     jobService.recordEvent({ workId, jobId, event: "job_cancel_requested", detail: reason });
     exec.controller.abort();
 
     try {
-      await backend.cancelSession(exec.session);
+      await exec.backend.cancelSession(exec.session);
     } catch (err) {
       jobService.recordEvent({ workId, jobId, event: "job_failed", detail: `cancel failed: ${String(err)}` });
       return false;
     }
 
     // 进程身份：从 backend activity 读取 PID，等待真实退出，超时升级强制终止
-    const getActivity = (backend as unknown as {
+    const getActivity = (exec.backend as unknown as {
       getActivity?: (id: string) => { pid?: number } | undefined;
     }).getActivity;
-    const activity = getActivity?.call(backend, exec.session.id);
+    const activity = getActivity?.call(exec.backend, exec.session.id);
     const pid = activity?.pid;
     if (pid) {
       const exited = await waitForProcessExit(pid, 10_000);
@@ -174,6 +191,7 @@ export class WorkerRuntime {
     }
 
     let session: AgentSession | undefined;
+    let jobBackend: AgentBackend | undefined;
     let prepared: PreparedWorkspace | undefined;
     let leaseHeld = false;
     const controller = new AbortController();
@@ -205,10 +223,13 @@ export class WorkerRuntime {
         }
       }
 
+      // 角色专属 backend：profile.backend 配置了类型时解析（缓存实例），否则复用主 Agent backend
+      jobBackend = await this.resolveJobBackend(profile.backend);
+
       // 角色完整内容（定义 + 原则 + 工作流）作为 system prompt 注入，静态固定；
       // user prompt 只装任务详情（由 buildPrompt 组装）
       const importantContext = [profile.prompt, profile.principles, profile.workflow].filter(Boolean).join("\n\n");
-      session = await backend.createSession({
+      session = await jobBackend.createSession({
         ...sessionConfig,
         chatId: work?.sourceChatId,
         workingDirectory: prepared.execDir,
@@ -217,6 +238,7 @@ export class WorkerRuntime {
       this.running.set(jobId, {
         jobId,
         session,
+        backend: jobBackend,
         startedAt,
         lastActivity: startedAt,
         controller,
@@ -225,11 +247,11 @@ export class WorkerRuntime {
       const prompt = await buildPrompt(job, prepared.execDir, prepared.artifactDir);
 
       // 活动心跳：watchdog 依据 lastActivity 判断"无输出超时"（backend 不支持时跳过）
-      const getActivity = (backend as unknown as {
+      const getActivity = (jobBackend as unknown as {
         getActivity?: (id: string) => { lastActiveAt: number } | undefined;
       }).getActivity;
       const heartbeat = setInterval(() => {
-        const activity = getActivity?.call(backend, session!.id);
+        const activity = getActivity?.call(jobBackend, session!.id);
         if (activity) {
           const exec = this.running.get(jobId);
           if (exec) exec.lastActivity = Math.max(exec.lastActivity, activity.lastActiveAt);
@@ -238,7 +260,7 @@ export class WorkerRuntime {
 
       let response;
       try {
-        response = await backend.sendMessage(session, prompt);
+        response = await jobBackend.sendMessage(session, prompt);
       } finally {
         clearInterval(heartbeat);
       }
@@ -246,7 +268,7 @@ export class WorkerRuntime {
       const record: JobExecutionRecord = {
         status: response.cancelled ? "cancelled" : "completed",
         responseText: response.text,
-        backendSessionId: backend.getAgentSessionId?.(session.id),
+        backendSessionId: jobBackend.getAgentSessionId?.(session.id),
         changedFiles: response.filesChanged ?? [],
         artifacts: collectArtifacts(prepared.artifactDir),
         startedAt: new Date(startedAt).toISOString(),
@@ -272,9 +294,9 @@ export class WorkerRuntime {
       jobService.failJob(jobId, record);
     } finally {
       this.running.delete(jobId);
-      if (session) {
+      if (session && jobBackend) {
         try {
-          backend.closeSession?.(session);
+          jobBackend.closeSession?.(session);
         } catch {
           // session 清理失败不阻断主流程
         }

@@ -22,6 +22,8 @@ export interface WorkerProfile {
   access: "read_only" | "scratch" | "git_worktree";
   /** skill 声明（Phase 5；内置 profile 无声明时用默认行为） */
   skills?: TeamProfileSkills;
+  /** 专属 backend 类型（如 "claude"）；未设置时复用主 Agent 的 backend */
+  backend?: string;
 }
 
 /** Team 配置的 profile → 运行时 WorkerProfile（Phase 5 配置驱动）。 */
@@ -35,6 +37,7 @@ export function teamProfileToWorkerProfile(p: {
   access: "read_only" | "scratch" | "git_worktree";
   maxConcurrent?: number;
   skills?: TeamProfileSkills;
+  backend?: string;
 }): WorkerProfile {
   return {
     id: p.id,
@@ -46,6 +49,7 @@ export function teamProfileToWorkerProfile(p: {
     access: p.access,
     maxConcurrent: p.maxConcurrent,
     skills: p.skills,
+    backend: p.backend,
   };
 }
 

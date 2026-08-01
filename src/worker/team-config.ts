@@ -36,6 +36,8 @@ export interface TeamProfileConfig {
   access: WorkspacePolicy;
   maxConcurrent?: number;
   skills?: TeamProfileSkills;
+  /** 专属 backend 类型（如 "claude"）；未设置时复用主 Agent 的 backend */
+  backend?: string;
 }
 
 export interface TeamConfig {
@@ -137,6 +139,7 @@ export function parseTeamConfig(yamlText: string): TeamConfig {
       access: access as WorkspacePolicy,
       maxConcurrent,
       skills,
+      backend: typeof p["backend"] === "string" ? p["backend"] : undefined,
     });
   }
   return config;

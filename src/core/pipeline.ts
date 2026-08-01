@@ -216,6 +216,8 @@ export interface WorkerPipelineConfig {
   workspaceRoot?: string;
   /** /worker 配置体系（启用开关、配置版本、草案） */
   teamConfigStore?: TeamConfigStore;
+  /** 按类型解析专属 backend（角色配置 backend 时使用；未配置则复用主 Agent backend） */
+  resolveBackend?: (type: string) => Promise<AgentBackend> | AgentBackend;
 }
 
 export class Pipeline {
@@ -462,6 +464,7 @@ export class Pipeline {
         buildPrompt: (job, execDir, artifactDir) => this.buildWorkerPrompt(job, execDir, artifactDir),
         workspaceProvider: new WorkspaceProvider({ rootDir: workspaceRoot }),
         leaseManager: this.workerLeaseManager,
+        resolveBackend: this.workerConfig.resolveBackend,
       });
       this.workerScheduler = new WorkerScheduler({
         runtime: this.workerRuntime,

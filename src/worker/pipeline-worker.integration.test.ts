@@ -511,3 +511,79 @@ profiles:
   expect(registry.list().some((p) => p.id === "custom-reviewer")).toBe(true);
   expect(registry.get("custom-reviewer")?.access).toBe("read_only");
 });
+
+test("角色配置 backend 时使用专属 backend，否则复用主 Agent backend", async () => {
+  // 专属 backend：独立的 FakeWorkerBackend 实例
+  const specialBackend = new FakeWorkerBackend();
+  specialBackend.resultText = "专属后端结果";
+  pipeline.stop();
+  pipeline = new Pipeline(
+    db,
+    transport as unknown as TransportClient,
+    backend as unknown as AgentBackend,
+    { name: "NiuBot", platform: "feishu", platformBotId: "bot" },
+    tempRoot,
+    path.join(tempRoot, "niubot.db"),
+    10,
+    "test",
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    false,
+    undefined,
+    undefined,
+    {
+      jobService: service,
+      registry,
+      maxConcurrent: 2,
+      tickMs: 50,
+      workspaceRoot: path.join(tempRoot, "ws"),
+      teamConfigStore: teamConfig,
+      resolveBackend: async (type) => (type === "special" ? specialBackend : backend),
+    },
+  );
+  // 注册一个配置了 backend 的自定义角色
+  registry.setProfiles([
+    ...registry.list(),
+    {
+      id: "special-role",
+      displayName: "Special",
+      description: "",
+      prompt: "你是专用后端角色",
+      access: "read_only",
+      backend: "special",
+    },
+  ]);
+  await pipeline.start();
+
+  const work = service.createWork({
+    botId: BOT_ID,
+    ownerUserId: OWNER,
+    sourceChatId: CHAT_ID,
+    visibility: "private",
+    request: "验证 backend 解析",
+  });
+  // 专属角色 Job → specialBackend；普通角色 Job → 主 backend
+  const specialJob = service.createJob({
+    workId: work.id,
+    workerProfileId: "special-role",
+    prompt: "用专属后端执行",
+    workdir: tempRoot,
+  });
+  const normalJob = service.createJob({
+    workId: work.id,
+    workerProfileId: "researcher",
+    prompt: "用主后端执行",
+    workdir: tempRoot,
+  });
+
+  await waitFor(() => service.getJob(specialJob.id)?.status === "completed");
+  await waitFor(() => service.getJob(normalJob.id)?.status === "completed");
+
+  expect(service.getJob(specialJob.id)?.responseText).toBe("专属后端结果");
+  expect(service.getJob(normalJob.id)?.responseText).toBe(backend.resultText);
+  // 专属 backend 确实被使用（session 被创建）
+  expect(specialBackend.sessions).toHaveLength(1);
+}, 15000);

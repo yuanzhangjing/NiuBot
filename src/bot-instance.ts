@@ -143,6 +143,7 @@ export async function createBotInstance(
       jobService: new SqliteJobService(db, botConfig.id),
       registry: new WorkerProfileRegistry(),
       teamConfigStore: new TeamConfigStore(db, botConfig.id),
+      resolveBackend: backendResolver,
     },
   );
   transport.onInbound((delivery) => pipeline.handleInbound(delivery));
