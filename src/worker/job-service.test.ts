@@ -275,6 +275,38 @@ describe("Job 依赖", () => {
     ).toThrow(/不属于 Work/);
   });
 
+  test("依赖 running 时本 Job 保持 queued 等待（不误判失败）", async () => {
+    const work = makeWork();
+    const jobA = makeJob(work.id);
+    const jobB = service.createJob({
+      workId: work.id,
+      workerProfileId: "w",
+      prompt: "B",
+      workdir: "/tmp",
+      dependsOn: [jobA.id],
+    });
+    service.claimJob({ jobId: jobA.id, claimToken: "l" }); // jobA → running
+
+    const stubRuntime = {
+      runningCount: () => 1,
+      inspectAll: () => [],
+      inspect: () => undefined,
+      cancel: async () => true,
+      runJob: async () => {},
+    };
+    const scheduler = new WorkerScheduler({
+      runtime: stubRuntime as never,
+      jobService: service,
+      maxConcurrent: 2,
+      tickMs: 20,
+    });
+    scheduler.start();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    scheduler.stop();
+    // 依赖 running 是正常中间态：jobB 保持 queued，不被判失败
+    expect(service.getJob(jobB.id)?.status).toBe("queued");
+  });
+
   test("依赖失败后本 Job 自动失败（Scheduler 传播）", async () => {
     const work = makeWork();
     const jobA = makeJob(work.id);

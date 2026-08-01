@@ -126,11 +126,12 @@ export class WorkerScheduler {
       }
     }
 
-    // 1c. 依赖失败传播：queued Job 的任一依赖已失败/中断/取消 → 本 Job 自动失败
+    // 1c. 依赖失败传播：queued Job 的任一依赖已失败/中断/取消 → 本 Job 自动失败。
+    // 依赖 queued/running 是正常等待态，不判失败（running 是调度中常见中间态）。
     for (const job of jobService.listJobsByStatus("queued")) {
       const failedDep = job.dependsOn.find((depId) => {
         const dep = jobService.getJob(depId);
-        return dep && dep.status !== "completed" && dep.status !== "queued";
+        return dep && dep.status !== "completed" && dep.status !== "queued" && dep.status !== "running";
       });
       if (failedDep) {
         jobService.failQueuedJob(job.id, `dependency ${failedDep} not completed`);
