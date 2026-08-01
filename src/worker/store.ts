@@ -478,9 +478,26 @@ export function getContinuationByDedupeKey(db: Database.Database, dedupeKey: str
   return db.prepare("SELECT * FROM agent_continuations WHERE dedupe_key = ?").get(dedupeKey) as ContinuationRow | undefined;
 }
 
+/** Work 已终态的 Continuation 直接收敛为 completed（已验收过，不再投递打扰主 Agent）。 */
+export function settleTerminalWorkContinuations(db: Database.Database): number {
+  const result = db.prepare(`
+    UPDATE agent_continuations
+    SET status = 'completed', completed_at = COALESCE(completed_at, datetime('now'))
+    WHERE status IN ('pending', 'claimed')
+      AND work_id IN (SELECT id FROM worker_works WHERE status IN ('completed', 'failed', 'cancelled'))
+  `).run();
+  return result.changes;
+}
+
 export function listPendingContinuations(db: Database.Database): ContinuationRow[] {
+  settleTerminalWorkContinuations(db);
   return db
-    .prepare("SELECT * FROM agent_continuations WHERE status = 'pending' ORDER BY created_at ASC")
+    .prepare(`
+      SELECT c.* FROM agent_continuations c
+      JOIN worker_works w ON w.id = c.work_id
+      WHERE c.status = 'pending'
+      ORDER BY c.created_at ASC
+    `)
     .all() as ContinuationRow[];
 }
 
@@ -537,8 +554,9 @@ export function failContinuationByAttemptLimit(db: Database.Database, id: string
   return result.changes === 1;
 }
 
-/** claimed 超时兜底：认领后超过阈值未完成（进程被杀等）→ 重置 pending 允许重新投递。 */
+/** claimed 超时兜底：认领后超过阈值未完成（进程被杀等）→ 重置 pending 允许重新投递（Work 已终态的直接收敛）。 */
 export function resetStaleClaimedContinuations(db: Database.Database, staleMinutes: number): number {
+  settleTerminalWorkContinuations(db);
   const result = db.prepare(`
     UPDATE agent_continuations
     SET status = 'pending', claim_token = NULL, claimed_at = NULL
@@ -612,8 +630,12 @@ export function cleanupExpiredLeases(db: Database.Database, nowIso: string): num
   return result.changes;
 }
 
-/** 重启恢复：claimed Continuation 重置为 pending，允许重新投递（§7.5）。 */
+/**
+ * 重启恢复：claimed Continuation 重置为 pending，允许重新投递（§7.5）。
+ * Work 已终态的 claimed 直接收敛为 completed——验收已发生过，重投只会重复打扰主 Agent 并堵住队列。
+ */
 export function resetClaimedContinuations(db: Database.Database): number {
+  settleTerminalWorkContinuations(db);
   const result = db.prepare(`
     UPDATE agent_continuations
     SET status = 'pending', claim_token = NULL, claimed_at = NULL, agent_turn_id = NULL

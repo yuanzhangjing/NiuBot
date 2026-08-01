@@ -372,6 +372,42 @@ describe("Continuation 死循环防护", () => {
   });
 });
 
+describe("Work 终态后 Continuation 不再投递", () => {
+  test("Work 已终态：claimed continuation 重启恢复时直接收敛，不重置重投", () => {
+    const work = makeWork();
+    const job = makeJob(work.id);
+    service.claimJob({ jobId: job.id, claimToken: "l" });
+    service.completeJob(job.id, record());
+    const continuation = service.claimContinuations(CHAT_ID, "t")[0]!;
+    expect(continuation.status).toBe("claimed");
+
+    // 主 Agent 验收完成 Work
+    service.completeWork(work.id, { conclusion: "完成" });
+
+    // 重启恢复：Work 已终态 → 不重置，直接收敛 completed
+    const reset = service.resetClaimedContinuations();
+    expect(service.getContinuation(continuation.id)?.status).toBe("completed");
+    expect(reset).toBe(0);
+    // 不再出现在待投递列表
+    expect(service.listPendingContinuations()).toHaveLength(0);
+  });
+
+  test("Work 终态后 pending continuation 不再被投递（Scheduler 扫描跳过）", () => {
+    const work = makeWork();
+    const job = makeJob(work.id);
+    service.claimJob({ jobId: job.id, claimToken: "l" });
+    service.completeJob(job.id, record());
+    // 不认领（保持 pending），主 Agent 直接完成 Work
+    service.completeWork(work.id, { conclusion: "完成" });
+
+    const pending = service.listPendingContinuations();
+    expect(pending).toHaveLength(0);
+    // 原 continuation 已收敛
+    const continuations = service.claimContinuations(CHAT_ID, "t");
+    expect(continuations).toHaveLength(0);
+  });
+});
+
 describe("Continuation 认领与完成", () => {
   test("批量认领同一 chat 的多个 Continuation（合并验收）", () => {
     const work = makeWork();
