@@ -12,6 +12,9 @@ import {
 import { FeishuAdapter } from "./im/feishu/adapter.js";
 import { PersistentTransport } from "./transport/persistent-transport.js";
 import { Pipeline, type BotIdentity } from "./core/pipeline.js";
+import { SqliteJobService } from "./worker/job-service.js";
+import { WorkerProfileRegistry } from "./worker/profiles.js";
+import { TeamConfigStore } from "./worker/team-config.js";
 import { ApiServer, type ApiHandler } from "./core/api.js";
 import { CronScheduler } from "./core/cron.js";
 import { ensureBotProfileFile } from "./bot-profile.js";
@@ -136,6 +139,11 @@ export async function createBotInstance(
     autoUpdateNotificationsEnabled,
     undefined,
     getBackendCapabilities,
+    {
+      jobService: new SqliteJobService(db, botConfig.id),
+      registry: new WorkerProfileRegistry(),
+      teamConfigStore: new TeamConfigStore(db, botConfig.id),
+    },
   );
   transport.onInbound((delivery) => pipeline.handleInbound(delivery));
 
