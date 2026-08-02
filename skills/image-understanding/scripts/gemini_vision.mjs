@@ -57,8 +57,9 @@ try {
       body: JSON.stringify({
         contents: [{ parts: [{ text: prompt }, { inline_data: { mime_type: mime, data: b64 } }] }],
       }),
-      // 网络黑洞保护：30s 超时（连接静默丢弃时避免永久挂起）
-      signal: AbortSignal.timeout(30_000),
+      // 网络黑洞保护：60s 超时（连接静默丢弃时避免永久挂起；
+      // 预留 12MB 图片 base64 上传 + 生成的时间）
+      signal: AbortSignal.timeout(60_000),
     },
   );
 } catch (err) {
