@@ -16,7 +16,7 @@
  * （不阻塞启动），输出写入日志。
  */
 
-import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, rmSync, statSync, type Dirent } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, renameSync, rmSync, statSync, type Dirent } from "node:fs";
 import { execFile } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -44,30 +44,38 @@ function mirrorTree(sourceDir: string, targetDir: string): void {
   mkdirSync(targetDir, { recursive: true });
   // 删除目标里源没有的条目（installer 产物保留；符号链接只删链接本身，不跟随）。
   // 源条目存在性用 lstatSync（不跟随链接）：broken symlink 的 lstat 仍成功
-  // （链接本身存在）→ 保留目标不删；只有 lstat 也失败（真缺失）才删。
+  // （链接本身存在）→ 保留目标不删；只有 ENOENT（真缺失）才删——其他错误
+  // （EACCES/EPERM 等）按"无法确认"fail-safe 保留，避免权限问题误删整个目标树。
   for (const entry of readdirSync(targetDir, { withFileTypes: true })) {
     if (INSTALLER_ARTIFACT_PATTERN.test(entry.name)) continue;
-    let sourceExists = false;
+    // 隔离区（含产物被移动来的目录）不自动清理，人工处理
+    if (entry.name.startsWith(".removed-")) continue;
+    let sourceExists = true;
     try {
       lstatSync(path.join(sourceDir, entry.name));
-      sourceExists = true;
-    } catch {
-      sourceExists = false;
+    } catch (err) {
+      sourceExists = (err as NodeJS.ErrnoException)?.code !== "ENOENT";
     }
     if (!sourceExists) {
-      // 整目录删除会带走嵌套的 installer 产物（.env）——显式告警，不静默
       const targetPath = path.join(targetDir, entry.name);
+      // 整目录删除会带走嵌套的 installer 产物（.env）——含产物的目录
+      // 隔离移动到 .removed-<ts>/（数据不销毁，人工处理），无产物的直接删
       const nestedArtifacts = findInstallerArtifacts(targetPath);
       if (nestedArtifacts.length > 0) {
-        log.warn("skill entry removal will remove installer artifacts", {
-          targetPath,
-          artifacts: nestedArtifacts,
-        });
-      }
-      try {
-        rmSync(targetPath, { recursive: true, force: true });
-      } catch (err) {
-        log.warn("skill target entry removal failed, skipping", { target: entry.name, error: String(err) });
+        const quarantineDir = path.join(targetDir, `.removed-${Date.now()}`);
+        try {
+          mkdirSync(quarantineDir, { recursive: true });
+          renameSync(targetPath, path.join(quarantineDir, entry.name));
+          log.warn("skill entry with installer artifacts quarantined", { targetPath, quarantineDir });
+        } catch (err) {
+          log.warn("skill entry quarantine failed, keeping entry", { targetPath, error: String(err) });
+        }
+      } else {
+        try {
+          rmSync(targetPath, { recursive: true, force: true });
+        } catch (err) {
+          log.warn("skill target entry removal failed, skipping", { target: entry.name, error: String(err) });
+        }
       }
     }
   }
@@ -186,7 +194,7 @@ function findInstallerArtifacts(dir: string, depth = 0): string[] {
 function runSkillInstaller(skillDir: string): void {
   const installer = path.join(skillDir, "install.mjs");
   if (!existsSync(installer)) return;
-  execFile(process.execPath, [installer], { cwd: skillDir, timeout: 30_000 }, (err, stdout, stderr) => {
+  execFile(process.execPath, [installer], { cwd: skillDir, timeout: 30_000, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
     if (err) {
       log.warn("skill installer failed", { skillDir, error: String(err) });
       return;
