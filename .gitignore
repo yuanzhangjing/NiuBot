@@ -6,3 +6,4 @@ dist.bak/
 *.db-shm
 .env
 *.tgz
+skills/*/scripts/.env
