@@ -121,21 +121,30 @@ export function resolveExecutable(
   return undefined;
 }
 
+export interface ExecutableInvocationOptions {
+  platform?: NodeJS.Platform;
+  env?: NodeJS.ProcessEnv;
+  /** shim 内容读取（测试可注入；默认 fs.readFileSync utf8） */
+  readFile?: (filePath: string) => string;
+  /** 入口存在性检查（测试可注入；默认 statSync isFile） */
+  fileExists?: (filePath: string) => boolean;
+}
+
 export function buildExecutableInvocation(
   executable: string,
   args: string[],
-  options: { platform?: NodeJS.Platform; env?: NodeJS.ProcessEnv } = {},
+  options: ExecutableInvocationOptions = {},
 ): ExecutableInvocation {
   const platform = options.platform ?? process.platform;
   if (platform !== "win32" || !/\.(?:cmd|bat)$/i.test(executable)) {
     return { command: executable, args };
   }
 
-  // npm 二进制 shim（node_modules\.bin\*.cmd）：解析出真实入口直跑（JS 入口用 node、
+  // npm 二进制 shim（claude.CMD / codex.CMD 等）：解析出真实入口直跑（JS 入口用 node、
   // 原生 .exe 直跑），绕过 cmd.exe。cmd 的命令行解析把换行当命令分隔，
   // 多行参数（如 --append-system-prompt 的多行 system rules）会在第一个换行处截断，
   // 截断点之后的参数（--resume 等）静默丢失。node/exe 的参数传递不经 cmd 解析，换行安全。
-  const shimTarget = resolveNpmShimTarget(executable, args);
+  const shimTarget = resolveCmdShimTarget(executable, args, options);
   if (shimTarget) {
     return shimTarget;
   }
@@ -160,20 +169,34 @@ export function buildExecutableInvocation(
  * 解析 npm 安装的 .cmd shim 指向的真实入口（任意位置：本地 node_modules/.bin、
  * npm 全局 %APPDATA%\npm、yarn 等）。
  * npm shim 的调用行形如 `"%_prog%" "%dp0%\..\pkg\cli.js" %*`（find_dp0 变量赋值后
- * 引用）或 `node "%~dp0\..\pkg\cli.js" %*`（内联式；cmd 的 %~dp0 语法没有结尾百分号）。
+ * 引用）、`node "%~dp0\..\pkg\cli.js" %*`（内联式；cmd 的 %~dp0 语法没有结尾百分号）
+ * 或 `"%_prog%" "%dp0%\node_modules\@scope\pkg\bin\tool.exe" %*`（全局原生 exe）。
  * 提取真实入口用当前 node 直跑（JS 入口）/ exe 直跑，绕过 cmd.exe——cmd 的命令行解析
  * 把换行当命令分隔，多行参数（--append-system-prompt）会在第一个换行处截断，
  * 截断点之后的参数静默丢失。
  * 解析失败（非 npm shim / 内容异常）返回 undefined，调用方保持原 cmd 包装路径。
  */
-function resolveNpmShimTarget(shimPath: string, args: string[]): ExecutableInvocation | undefined {
+function resolveCmdShimTarget(
+  executable: string,
+  args: string[],
+  options: ExecutableInvocationOptions,
+): ExecutableInvocation | undefined {
+  const readFile = options.readFile ?? ((filePath: string) => fs.readFileSync(filePath, "utf8"));
+  const fileExists = options.fileExists ?? ((filePath: string) => {
+    try {
+      return fs.statSync(filePath.replace(/\\/g, "/")).isFile();
+    } catch {
+      return false;
+    }
+  });
+
   let content: string;
   try {
-    content = fs.readFileSync(shimPath, "utf8");
+    content = readFile(executable);
   } catch {
     return undefined;
   }
-  const dp0 = path.win32.dirname(shimPath);
+  const dp0 = path.win32.dirname(executable);
 
   // npm shim 调用行特征（排除普通批处理误判）：
   // - 行以 `%*` 结尾（透传全部参数），且不是 REM/:: 注释行
@@ -194,13 +217,8 @@ function resolveNpmShimTarget(shimPath: string, args: string[]): ExecutableInvoc
   }
   if (!raw) return undefined;
   const target = path.win32.resolve(dp0, raw);
-  // 解析出的入口必须真实存在，否则回退 cmd（避免误判/损坏 shim 直跑错误路径）。
-  // Windows API 接受正斜杠分隔符，统一转正斜杠做存在性检查（与平台无关）。
-  try {
-    if (!fs.statSync(target.replace(/\\/g, "/")).isFile()) return undefined;
-  } catch {
-    return undefined;
-  }
+  // 解析出的入口必须真实存在，否则回退 cmd（避免误判/损坏 shim 直跑错误路径）
+  if (!fileExists(target)) return undefined;
   if (/\.(?:js|cjs|mjs)$/i.test(raw)) {
     return { command: process.execPath, args: [target, ...args] };
   }
