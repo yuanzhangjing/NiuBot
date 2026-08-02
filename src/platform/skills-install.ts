@@ -66,7 +66,11 @@ function mirrorTree(sourceDir: string, targetDir: string): void {
         try {
           mkdirSync(quarantineDir, { recursive: true });
           renameSync(targetPath, path.join(quarantineDir, entry.name));
-          log.warn("skill entry with installer artifacts quarantined", { targetPath, quarantineDir });
+          log.warn("skill entry with installer artifacts quarantined", {
+            targetPath,
+            quarantineDir,
+            note: "隔离区保留待人工处理（含用户配置数据，不自动清理）",
+          });
         } catch (err) {
           log.warn("skill entry quarantine failed, keeping entry", { targetPath, error: String(err) });
         }
@@ -119,15 +123,26 @@ function mirrorTree(sourceDir: string, targetDir: string): void {
       targetStat = undefined;
     }
     if (targetStat && (targetStat.isSymbolicLink() || targetStat.isDirectory() !== sourceIsDir)) {
-      // 类型冲突清理会整目录删除：若目标目录里存在 installer 产物（.env），
-      // 父路径被替换为文件时无法保留——显式告警（installer 会重建并重新引导配置）
+      // 类型冲突清理：目标目录里存在 installer 产物（.env）时与删除分支一致
+      // 隔离移动（.removed-<ts>/，数据不销毁），无产物或目标是 symlink 直接删
       if (targetStat.isDirectory() && !sourceIsDir) {
         const artifactsInTarget = findInstallerArtifacts(targetPath);
         if (artifactsInTarget.length > 0) {
-          log.warn("skill type conflict will remove installer artifacts", {
-            targetPath,
-            artifacts: artifactsInTarget,
-          });
+          const quarantineDir = path.join(targetDir, `.removed-${Date.now()}`);
+          try {
+            mkdirSync(quarantineDir, { recursive: true });
+            renameSync(targetPath, path.join(quarantineDir, entry.name));
+            log.warn("skill type-conflict entry with installer artifacts quarantined", {
+              targetPath,
+              quarantineDir,
+              artifacts: artifactsInTarget,
+            });
+            targetStat = undefined;
+            continue;
+          } catch (err) {
+            log.warn("skill type-conflict quarantine failed, keeping entry", { targetPath, error: String(err) });
+            continue;
+          }
         }
       }
       try {
