@@ -33,9 +33,18 @@ const MIME_BY_EXT = {
   ".webp": "image/webp",
   ".gif": "image/gif",
   ".bmp": "image/bmp",
+  ".heic": "image/heic",
+  ".heif": "image/heif",
+  ".tif": "image/tiff",
+  ".tiff": "image/tiff",
+  ".svg": "image/svg+xml",
   ".pdf": "application/pdf",
 };
-const mime = MIME_BY_EXT[path.extname(img).toLowerCase()] ?? "image/png";
+const mime = MIME_BY_EXT[path.extname(img).toLowerCase()];
+if (!mime) {
+  console.error(`错误: 不支持的图片格式: ${img}（支持 png/jpg/webp/gif/bmp/heic/tif/svg/pdf）`);
+  process.exit(1);
+}
 const b64 = readFileSync(img).toString("base64");
 
 let res;
