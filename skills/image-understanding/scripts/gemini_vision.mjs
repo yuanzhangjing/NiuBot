@@ -57,10 +57,12 @@ try {
       body: JSON.stringify({
         contents: [{ parts: [{ text: prompt }, { inline_data: { mime_type: mime, data: b64 } }] }],
       }),
+      // 网络黑洞保护：30s 超时（连接静默丢弃时避免永久挂起）
+      signal: AbortSignal.timeout(30_000),
     },
   );
 } catch (err) {
-  console.error(`错误: 请求失败（网络问题）: ${err.message ?? err}`);
+  console.error(`错误: 请求失败（网络问题或超时）: ${err.message ?? err}`);
   process.exit(1);
 }
 const data = await res.json().catch(() => null);

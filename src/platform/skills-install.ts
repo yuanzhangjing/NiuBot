@@ -57,8 +57,15 @@ function mirrorTree(sourceDir: string, targetDir: string): void {
     // 避免包内模板每次启动覆盖用户配置
     if (INSTALLER_ARTIFACT_PATTERN.test(entry.name)) continue;
     // 源实体类型用 statSync（跟随 symlink——Dirent.isDirectory 对 symlink 恒 false，
-    // 避免把指向目录的源 symlink 误判为文件）
-    const sourceIsDir = statSync(sourcePath).isDirectory();
+    // 避免把指向目录的源 symlink 误判为文件）。broken symlink / 读取失败时跳过
+    // 该条目（条目级隔离，不让单个坏条目中断整个同步）。
+    let sourceIsDir: boolean;
+    try {
+      sourceIsDir = statSync(sourcePath).isDirectory();
+    } catch {
+      log.warn("skill source entry unreadable, skipping", { sourcePath });
+      continue;
+    }
     // 目标同名但类型不一致（文件 vs 目录）或目标是符号链接时，先清掉再复制
     // （防 ERR_FS_CP_NON_DIR_TO_DIR；符号链接只删链接本身，不跟随避免删到工作区外）
     let targetStat: ReturnType<typeof lstatSync> | undefined;

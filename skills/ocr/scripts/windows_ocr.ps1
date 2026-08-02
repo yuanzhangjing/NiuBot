@@ -4,6 +4,8 @@
 param([Parameter(Mandatory=$true)][string]$ImagePath)
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
+# WinRT 的 GetFileFromPathAsync 要求绝对路径
+$ImagePath = (Resolve-Path -LiteralPath $ImagePath).Path
 if (-not (Test-Path $ImagePath)) {
     Write-Error "Image not found: $ImagePath"
     exit 1
