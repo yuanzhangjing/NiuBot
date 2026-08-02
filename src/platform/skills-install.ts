@@ -42,10 +42,20 @@ function builtinSkillsDir(): string {
 /** 镜像复制：包内文件覆盖同名；删除目标里源没有的文件（保留 installer 产物）。 */
 function mirrorTree(sourceDir: string, targetDir: string): void {
   mkdirSync(targetDir, { recursive: true });
-  // 删除目标里源没有的条目（installer 产物保留；符号链接只删链接本身，不跟随）
+  // 删除目标里源没有的条目（installer 产物保留；符号链接只删链接本身，不跟随）。
+  // 源条目存在性用 statSync 判断（与复制循环的条目级隔离一致）：
+  // broken symlink / 临时不可读的源条目视为"不可判定"，保留目标不删，
+  // 避免先删后跳过的破坏性不对称。
   for (const entry of readdirSync(targetDir, { withFileTypes: true })) {
     if (INSTALLER_ARTIFACT_PATTERN.test(entry.name)) continue;
-    if (!existsSync(path.join(sourceDir, entry.name))) {
+    let sourceExists = false;
+    try {
+      statSync(path.join(sourceDir, entry.name));
+      sourceExists = true;
+    } catch {
+      sourceExists = false;
+    }
+    if (!sourceExists) {
       rmSync(path.join(targetDir, entry.name), { recursive: true, force: true });
     }
   }
