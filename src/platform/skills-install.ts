@@ -151,13 +151,12 @@ function mirrorTree(sourceDir: string, targetDir: string): void {
 }
 
 /**
- * 递归查找目录里的 installer 产物（.env 命名），用于删除前的告警。
- * 目录判断用 statSync 跟随 symlink（Dirent.isDirectory 对 symlink 恒 false，
- * 会漏报链接子目录里的产物）；深度限制防 symlink 环。
+ * 递归查找目录里的 installer 产物（.env 命名），用于删除前的隔离判定。
+ * 不跟随 symlink（删除循环对 symlink 只删链接本身，与产物无关；跟随会
+ * 误判链接指向的外部目录）；不跟随 → 无环风险，无需深度限制。
  */
-function findInstallerArtifacts(dir: string, depth = 0): string[] {
+function findInstallerArtifacts(dir: string): string[] {
   const found: string[] = [];
-  if (depth > 20) return found;
   let entries: Dirent[];
   try {
     entries = readdirSync(dir, { withFileTypes: true });
@@ -167,19 +166,8 @@ function findInstallerArtifacts(dir: string, depth = 0): string[] {
   for (const entry of entries) {
     if (INSTALLER_ARTIFACT_PATTERN.test(entry.name)) {
       found.push(path.join(dir, entry.name));
-      continue;
-    }
-    if (entry.isDirectory()) {
-      found.push(...findInstallerArtifacts(path.join(dir, entry.name), depth + 1));
-      continue;
-    }
-    // symlink 子目录：statSync 跟随判断，防漏报
-    try {
-      if (statSync(path.join(dir, entry.name)).isDirectory()) {
-        found.push(...findInstallerArtifacts(path.join(dir, entry.name), depth + 1));
-      }
-    } catch {
-      // broken symlink：忽略
+    } else if (entry.isDirectory()) {
+      found.push(...findInstallerArtifacts(path.join(dir, entry.name)));
     }
   }
   return found;

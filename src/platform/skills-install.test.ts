@@ -90,6 +90,28 @@ describe("installBuiltinSkills", () => {
     expect(readFileSync(sk, "utf8")).toContain("name: ocr");
   });
 
+  test("含 installer 产物的残留目录被隔离移动（.removed-），二次启动跳过隔离区", () => {
+    const dir = tempDir();
+    installBuiltinSkills(dir);
+    const target = path.join(dir, ".claude", "skills");
+    // 模拟残留技能目录（含 .env 产物）
+    const staleSkill = path.join(target, "stale-skill");
+    mkdirSync(path.join(staleSkill, "scripts"), { recursive: true });
+    writeFileSync(path.join(staleSkill, "scripts", ".env"), "GEMINI_API_KEY=secret");
+    writeFileSync(path.join(staleSkill, "SKILL.md"), "stale");
+
+    installBuiltinSkills(dir);
+
+    // 含产物的残留目录被隔离而非删除：数据保留
+    expect(existsSync(staleSkill)).toBe(false);
+    const removedDirs = readdirSync(target).filter((n) => n.startsWith(".removed-"));
+    expect(removedDirs.length).toBe(1);
+    // 二次启动：隔离区被跳过（不再移动/删除，不累积）
+    const secondMark = readdirSync(target).filter((n) => n.startsWith(".removed-")).length;
+    installBuiltinSkills(dir);
+    expect(readdirSync(target).filter((n) => n.startsWith(".removed-")).length).toBe(secondMark);
+  });
+
   test("broken symlink 源条目：目标同名条目保留不删（lstat 判定，非 statSync）", () => {
     const dir = tempDir();
     installBuiltinSkills(dir);
