@@ -25,7 +25,11 @@ import { createLogger } from "../logger.js";
 
 const log = createLogger("skills");
 
-/** installer 产物白名单：同步删除时保留的文件名（技能自管配置）。 */
+/**
+ * installer 产物白名单：同步删除时保留的文件名（技能自管配置）。
+ * 契约：installer 的持久化配置统一以 .env 命名（如 scripts/.env）；
+ * 其他非 .env 命名的技能内文件会被同步清理（视为包内文件的残留）。
+ */
 const INSTALLER_ARTIFACT_PATTERN = /\.env(?:\.local)?$/;
 
 /** 包内内置技能目录（开发与发布一致：包根/skills）。 */

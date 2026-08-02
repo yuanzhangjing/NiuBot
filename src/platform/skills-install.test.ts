@@ -58,4 +58,23 @@ describe("installBuiltinSkills", () => {
     // 内置技能仍在
     expect(readdirSync(target)).toContain("ocr");
   });
+
+  test("文件级镜像：技能子目录内被删的旧文件被清理（升级不残留）", () => {
+    const dir = tempDir();
+    installBuiltinSkills(dir);
+    const target = path.join(dir, ".claude", "skills");
+    // 模拟旧版本残留：技能 scripts 子目录里一个包内不存在的旧脚本
+    const staleFile = path.join(target, "image-understanding", "scripts", "gemini_vision_old.sh");
+    writeFileSync(staleFile, "old version");
+    // 非 .env 命名 → 应被清理
+    const nonEnvArtifact = path.join(target, "ocr", "scripts", "config.json");
+    writeFileSync(nonEnvArtifact, "{}");
+
+    installBuiltinSkills(dir);
+
+    expect(existsSync(staleFile)).toBe(false);
+    expect(existsSync(nonEnvArtifact)).toBe(false);
+    // 包内文件仍在
+    expect(existsSync(path.join(target, "image-understanding", "scripts", "gemini_vision.mjs"))).toBe(true);
+  });
 });

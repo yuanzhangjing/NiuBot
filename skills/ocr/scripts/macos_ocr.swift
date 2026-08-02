@@ -17,11 +17,15 @@ guard let image = CIImage(contentsOf: URL(fileURLWithPath: imagePath)) else {
 
 let request = VNRecognizeTextRequest()
 request.recognitionLevel = .accurate
-// 与系统可用语言求交，避免硬编码语言在未下载识别数据的系统上抛错
+// 与系统可用语言求交，避免硬编码语言在未下载识别数据的系统上抛错。
+// 查询失败或交集为空时不设置该属性（Vision 用系统默认语言），
+// 不传空数组（空语言数组非法会抛错）。
 let desired = ["zh-Hans", "en"]
 let supported = Set((try? VNRecognizeTextRequest.supportedRecognitionLanguages(for: .accurate, revision: VNRecognizeTextRequest.currentRevision)) ?? [])
 let available = desired.filter { supported.contains($0) }
-request.recognitionLanguages = available.isEmpty ? Array(supported) : available
+if !available.isEmpty {
+  request.recognitionLanguages = available
+}
 
 let handler = VNImageRequestHandler(ciImage: image)
 do {
