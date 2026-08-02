@@ -62,18 +62,7 @@ function mirrorTree(sourceDir: string, targetDir: string): void {
       // 隔离移动到 .removed-<ts>/（数据不销毁，人工处理），无产物的直接删
       const nestedArtifacts = findInstallerArtifacts(targetPath);
       if (nestedArtifacts.length > 0) {
-        const quarantineDir = path.join(targetDir, `.removed-${Date.now()}`);
-        try {
-          mkdirSync(quarantineDir, { recursive: true });
-          renameSync(targetPath, path.join(quarantineDir, entry.name));
-          log.warn("skill entry with installer artifacts quarantined", {
-            targetPath,
-            quarantineDir,
-            note: "隔离区保留待人工处理（含用户配置数据，不自动清理）",
-          });
-        } catch (err) {
-          log.warn("skill entry quarantine failed, keeping entry", { targetPath, error: String(err) });
-        }
+        quarantineEntry(targetDir, entry.name);
       } else {
         try {
           rmSync(targetPath, { recursive: true, force: true });
@@ -124,32 +113,27 @@ function mirrorTree(sourceDir: string, targetDir: string): void {
     }
     if (targetStat && (targetStat.isSymbolicLink() || targetStat.isDirectory() !== sourceIsDir)) {
       // 类型冲突清理：目标目录里存在 installer 产物（.env）时与删除分支一致
-      // 隔离移动（.removed-<ts>/，数据不销毁），无产物或目标是 symlink 直接删
+      // 隔离移动（.removed-<ts>/，数据不销毁）；隔离/删除后继续复制源条目
+      // （不 continue——源文件本运行就要装上，缺失会拖一个运行周期）
       if (targetStat.isDirectory() && !sourceIsDir) {
         const artifactsInTarget = findInstallerArtifacts(targetPath);
         if (artifactsInTarget.length > 0) {
-          const quarantineDir = path.join(targetDir, `.removed-${Date.now()}`);
+          quarantineEntry(targetDir, entry.name, { reason: "type-conflict", artifacts: artifactsInTarget });
+        } else {
           try {
-            mkdirSync(quarantineDir, { recursive: true });
-            renameSync(targetPath, path.join(quarantineDir, entry.name));
-            log.warn("skill type-conflict entry with installer artifacts quarantined", {
-              targetPath,
-              quarantineDir,
-              artifacts: artifactsInTarget,
-            });
-            targetStat = undefined;
-            continue;
+            rmSync(targetPath, { recursive: true, force: true });
           } catch (err) {
-            log.warn("skill type-conflict quarantine failed, keeping entry", { targetPath, error: String(err) });
+            log.warn("skill target type-conflict removal failed, skipping", { targetPath, error: String(err) });
             continue;
           }
         }
-      }
-      try {
-        rmSync(targetPath, { recursive: true, force: true });
-      } catch (err) {
-        log.warn("skill target type-conflict removal failed, skipping", { targetPath, error: String(err) });
-        continue;
+      } else {
+        try {
+          rmSync(targetPath, { recursive: true, force: true });
+        } catch (err) {
+          log.warn("skill target type-conflict removal failed, skipping", { targetPath, error: String(err) });
+          continue;
+        }
       }
       targetStat = undefined;
     }
@@ -162,6 +146,35 @@ function mirrorTree(sourceDir: string, targetDir: string): void {
     } catch (err) {
       log.warn("skill entry sync failed, skipping", { sourcePath, error: String(err) });
     }
+  }
+}
+
+/**
+ * 隔离移动：把目标条目（含 installer 产物，如 .env 用户配置）移到
+ * .removed-<ts>/ 隔离区——数据不销毁，待人工处理，不自动清理。
+ * 成功返回 true；失败返回 false（调用方决定保留/继续）。
+ */
+function quarantineEntry(
+  targetDir: string,
+  entryName: string,
+  extra: { reason?: string; artifacts?: string[] } = {},
+): boolean {
+  const targetPath = path.join(targetDir, entryName);
+  const quarantineDir = path.join(targetDir, `.removed-${Date.now()}`);
+  try {
+    mkdirSync(quarantineDir, { recursive: true });
+    renameSync(targetPath, path.join(quarantineDir, entryName));
+    log.warn("skill entry with installer artifacts quarantined", {
+      targetPath,
+      quarantineDir,
+      reason: extra.reason,
+      artifacts: extra.artifacts,
+      note: "隔离区保留待人工处理（含用户配置数据，不自动清理）",
+    });
+    return true;
+  } catch (err) {
+    log.warn("skill entry quarantine failed, keeping entry", { targetPath, error: String(err) });
+    return false;
   }
 }
 
