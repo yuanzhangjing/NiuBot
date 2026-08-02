@@ -16,7 +16,7 @@
  * （不阻塞启动），输出写入日志。
  */
 
-import { cpSync, existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import { execFile } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -42,7 +42,7 @@ function builtinSkillsDir(): string {
 /** 镜像复制：包内文件覆盖同名；删除目标里源没有的文件（保留 installer 产物）。 */
 function mirrorTree(sourceDir: string, targetDir: string): void {
   mkdirSync(targetDir, { recursive: true });
-  // 删除目标里源没有的条目（installer 产物保留）
+  // 删除目标里源没有的条目（installer 产物保留；符号链接只删链接本身，不跟随）
   for (const entry of readdirSync(targetDir, { withFileTypes: true })) {
     if (INSTALLER_ARTIFACT_PATTERN.test(entry.name)) continue;
     if (!existsSync(path.join(sourceDir, entry.name))) {
@@ -53,6 +53,21 @@ function mirrorTree(sourceDir: string, targetDir: string): void {
   for (const entry of readdirSync(sourceDir, { withFileTypes: true })) {
     const sourcePath = path.join(sourceDir, entry.name);
     const targetPath = path.join(targetDir, entry.name);
+    // 源里的 installer 产物命名（.env）不复制——配置由 install.mjs 管理，
+    // 避免包内模板每次启动覆盖用户配置
+    if (INSTALLER_ARTIFACT_PATTERN.test(entry.name)) continue;
+    // 目标同名但类型不一致（文件 vs 目录）或目标是符号链接时，先清掉再复制
+    // （防 ERR_FS_CP_NON_DIR_TO_DIR；符号链接不跟随，避免删到工作区外）
+    let targetStat: ReturnType<typeof lstatSync> | undefined;
+    try {
+      targetStat = lstatSync(targetPath);
+    } catch {
+      targetStat = undefined;
+    }
+    if (targetStat && (targetStat.isSymbolicLink() || targetStat.isDirectory() !== entry.isDirectory())) {
+      rmSync(targetPath, { recursive: true, force: true });
+      targetStat = undefined;
+    }
     if (entry.isDirectory()) {
       mirrorTree(sourcePath, targetPath);
     } else {

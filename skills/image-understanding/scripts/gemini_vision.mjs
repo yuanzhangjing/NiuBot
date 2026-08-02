@@ -7,7 +7,8 @@ import { fileURLToPath } from "node:url";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const [img, ...rest] = process.argv.slice(2);
-const prompt = rest[0] ?? "请详细描述这张图片的内容，包括所有文字、数字和视觉元素";
+// 提示词 = 剩余参数 join（多词不用引号也完整），空则用默认
+const prompt = (rest.join(" ") || "请详细描述这张图片的内容，包括所有文字、数字和视觉元素").trim();
 
 if (!img || !existsSync(img)) {
   console.error(`错误: 图片不存在: ${img}`);
@@ -15,12 +16,11 @@ if (!img || !existsSync(img)) {
 }
 
 // API Key 不内置：优先技能目录 scripts/.env，其次环境变量 GEMINI_API_KEY
-let key = process.env.GEMINI_API_KEY;
 const envFile = path.join(scriptDir, ".env");
-if (existsSync(envFile)) {
-  const match = readFileSync(envFile, "utf8").match(/^GEMINI_API_KEY=(.+)$/m);
-  if (match) key = match[1].trim();
-}
+let key = existsSync(envFile)
+  ? readFileSync(envFile, "utf8").match(/^GEMINI_API_KEY=(.+)$/m)?.[1]?.trim()
+  : undefined;
+key = key ?? process.env.GEMINI_API_KEY;
 if (!key) {
   console.error(`错误: 未配置 GEMINI_API_KEY（写入 ${envFile} 或设置环境变量）`);
   process.exit(1);

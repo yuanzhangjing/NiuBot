@@ -9,8 +9,9 @@ import { fileURLToPath } from "node:url";
 const skillDir = path.dirname(fileURLToPath(import.meta.url));
 const envFile = path.join(skillDir, "scripts", ".env");
 
-const key = process.env.GEMINI_API_KEY
-  ?? (existsSync(envFile) ? readFileSync(envFile, "utf8").match(/^GEMINI_API_KEY=(.+)$/m)?.[1] : undefined);
+// 与 gemini_vision.mjs 一致：优先 .env，其次环境变量
+const key = (existsSync(envFile) ? readFileSync(envFile, "utf8").match(/^GEMINI_API_KEY=(.+)$/m)?.[1]?.trim() : undefined)
+  ?? process.env.GEMINI_API_KEY;
 
 if (!key) {
   console.log(`[image-understanding] GEMINI_API_KEY 未配置。请写入：${envFile}`);
