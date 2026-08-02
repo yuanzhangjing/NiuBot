@@ -1,5 +1,5 @@
 ---
-name: review-fix-loop
+name: cr-fix-loop
 description: 代码审查 + 自动修复循环——审查 → 修复 → 验证 → 再审查，直到没有新增问题。代码改动类需求的默认工作流。
 ---
 

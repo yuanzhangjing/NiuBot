@@ -31,10 +31,10 @@ describe("installBuiltinSkills", () => {
     const target = path.join(dir, ".claude", "skills");
     expect(existsSync(target)).toBe(true);
     const skills = readdirSync(target);
-    // 第一版内置技能：ocr / image-understanding / review-fix-loop
+    // 第一版内置技能：ocr / image-understanding / cr-fix-loop
     expect(skills).toContain("ocr");
     expect(skills).toContain("image-understanding");
-    expect(skills).toContain("review-fix-loop");
+    expect(skills).toContain("cr-fix-loop");
     expect(existsSync(path.join(target, "ocr", "SKILL.md"))).toBe(true);
   });
 
