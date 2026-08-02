@@ -16,7 +16,7 @@
  * （不阻塞启动），输出写入日志。
  */
 
-import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, rmSync, statSync, type Dirent } from "node:fs";
 import { execFile } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -55,7 +55,11 @@ function mirrorTree(sourceDir: string, targetDir: string): void {
       sourceExists = false;
     }
     if (!sourceExists) {
-      rmSync(path.join(targetDir, entry.name), { recursive: true, force: true });
+      try {
+        rmSync(path.join(targetDir, entry.name), { recursive: true, force: true });
+      } catch (err) {
+        log.warn("skill target entry removal failed, skipping", { target: entry.name, error: String(err) });
+      }
     }
   }
   // 复制/覆盖源条目
@@ -98,15 +102,54 @@ function mirrorTree(sourceDir: string, targetDir: string): void {
       targetStat = undefined;
     }
     if (targetStat && (targetStat.isSymbolicLink() || targetStat.isDirectory() !== sourceIsDir)) {
-      rmSync(targetPath, { recursive: true, force: true });
+      // 类型冲突清理会整目录删除：若目标目录里存在 installer 产物（.env），
+      // 父路径被替换为文件时无法保留——显式告警（installer 会重建并重新引导配置）
+      if (targetStat.isDirectory() && !sourceIsDir) {
+        const artifactsInTarget = findInstallerArtifacts(targetPath);
+        if (artifactsInTarget.length > 0) {
+          log.warn("skill type conflict will remove installer artifacts", {
+            targetPath,
+            artifacts: artifactsInTarget,
+          });
+        }
+      }
+      try {
+        rmSync(targetPath, { recursive: true, force: true });
+      } catch (err) {
+        log.warn("skill target type-conflict removal failed, skipping", { targetPath, error: String(err) });
+        continue;
+      }
       targetStat = undefined;
     }
-    if (sourceIsDir) {
-      mirrorTree(sourcePath, targetPath);
-    } else {
-      cpSync(sourcePath, targetPath, { force: true, dereference: true });
+    try {
+      if (sourceIsDir) {
+        mirrorTree(sourcePath, targetPath);
+      } else {
+        cpSync(sourcePath, targetPath, { force: true, dereference: true });
+      }
+    } catch (err) {
+      log.warn("skill entry sync failed, skipping", { sourcePath, error: String(err) });
     }
   }
+}
+
+/** 递归查找目录里的 installer 产物（.env 命名），用于类型冲突前的告警。 */
+function findInstallerArtifacts(dir: string): string[] {
+  const found: string[] = [];
+  let entries: Dirent[];
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return found;
+  }
+  for (const entry of entries) {
+    if (INSTALLER_ARTIFACT_PATTERN.test(entry.name)) {
+      found.push(path.join(dir, entry.name));
+    } else if (entry.isDirectory()) {
+      found.push(...findInstallerArtifacts(path.join(dir, entry.name)));
+    }
+  }
+  return found;
 }
 
 /**
