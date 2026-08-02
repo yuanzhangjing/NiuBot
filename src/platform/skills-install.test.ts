@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -38,15 +38,24 @@ describe("installBuiltinSkills", () => {
     expect(existsSync(path.join(target, "ocr", "SKILL.md"))).toBe(true);
   });
 
-  test("重复调用幂等（全量重建）", () => {
+  test("技能内额外文件保留（installer 产物如 .env 不被清），被移除技能目录删除", () => {
     const dir = tempDir();
     installBuiltinSkills(dir);
     const target = path.join(dir, ".claude", "skills");
-    // 模拟残留：往工作副本塞一个不属于内置的文件
-    writeFileSync(path.join(target, "stale-extra.txt"), "stale");
+    // 模拟 installer 产物：技能目录内的 .env（包内没有）
+    const envPath = path.join(target, "image-understanding", "scripts", ".env");
+    writeFileSync(envPath, "GEMINI_API_KEY=test");
+    // 模拟残留技能目录（包内没有）
+    const staleDir = path.join(target, "stale-skill");
+    mkdirSync(staleDir, { recursive: true });
+    writeFileSync(path.join(staleDir, "SKILL.md"), "stale");
+
     installBuiltinSkills(dir);
-    // 重建后残留消失，与包内一致
-    expect(existsSync(path.join(target, "stale-extra.txt"))).toBe(false);
-    expect(readdirSync(target).sort()).toEqual(readdirSync(target).sort());
+
+    // installer 产物保留，残留技能目录被删
+    expect(existsSync(envPath)).toBe(true);
+    expect(existsSync(staleDir)).toBe(false);
+    // 内置技能仍在
+    expect(readdirSync(target)).toContain("ocr");
   });
 });

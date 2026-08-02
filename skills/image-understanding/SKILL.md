@@ -34,8 +34,9 @@ Gemini 返回的文本（可能包含 Markdown 表格）。失败时输出错误
 
 ## 配置
 
-- **API Key 走环境变量**：在 `~/.niubot/.env` 写 `GEMINI_API_KEY=xxx`（NiuBot 启动时 dotenv 加载，Agent 会话子进程自动继承）
-- 技能目录是纯只读的（每次启动从包内重建），**不要把 key 放技能目录里**
+- **API Key 放技能目录**：`scripts/.env` 写 `GEMINI_API_KEY=xxx`（`install.sh` 会幂等检查，缺失时提示）
+- 技能目录里的额外文件（如 `.env`）在同步时**保留**，不会被重建清掉——installer 管理本技能的安装状态
+- 也支持环境变量 `GEMINI_API_KEY`（优先 .env，其次环境变量）
 - 免费额度有限，调用频繁时注意限流
 - 模型：`gemini-flash-latest`（免费层）
 
