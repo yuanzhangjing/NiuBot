@@ -130,9 +130,9 @@ endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\\..\\
     expect(invocation.args.slice(1)).toEqual(["add", "pkg"]);
   });
 
-  it("bypasses cmd for globally installed npm CLIs (no node_modules/.bin prefix)", () => {
-    // npm 全局安装：shim 直接在全局 bin 目录（%APPDATA%\\npm\\claude.cmd）
-    const shim = writeTempShim("claude.cmd", `@ECHO off
+  it("bypasses cmd for globally installed native-exe CLIs (entry under %dp0%\\node_modules\\)", () => {
+    // npm 全局安装：shim 在 %APPDATA%\\npm\\claude.CMD，入口是 dp0 下的 node_modules 包
+    const shim = writeTempShim("claude.CMD", `@ECHO off
 GOTO start
 :find_dp0
 SET dp0=%~dp0
@@ -148,13 +148,24 @@ IF EXIST "%dp0%\\node.exe" (
   SET PATHEXT=%PATHEXT:;.JS;=;%
 )
 
-endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\\..\\@anthropic-ai\\claude-code\\cli.js" %*
+endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe" %*
 `, "");
-    touchShimEntry(shim, "..\\@anthropic-ai\\claude-code\\cli.js");
+    touchShimEntry(shim, "node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe");
     const invocation = buildExecutableInvocation(shim, ["--append-system-prompt", "a\nb"], { platform: "win32" });
+    expect(invocation.command).toBe(path.win32.join(path.win32.dirname(shim), "node_modules", "@anthropic-ai", "claude-code", "bin", "claude.exe"));
+    expect(invocation.args).toEqual(["--append-system-prompt", "a\nb"]);
+  });
+
+  it("bypasses cmd for globally installed JS CLIs (entry under %dp0%\\node_modules\\)", () => {
+    const shim = writeTempShim("cli.cmd", `@ECHO off
+SETLOCAL
+"%_prog%" "%dp0%\\node_modules\\@myorg\\pkg\\cli.js" %*
+`, "");
+    touchShimEntry(shim, "node_modules\\@myorg\\pkg\\cli.js");
+    const invocation = buildExecutableInvocation(shim, ["--flag"], { platform: "win32" });
     expect(invocation.command).toBe(process.execPath);
-    expect(invocation.args[0]).toBe(path.win32.join(path.win32.dirname(shim), "..", "@anthropic-ai", "claude-code", "cli.js"));
-    expect(invocation.args.slice(1)).toEqual(["--append-system-prompt", "a\nb"]);
+    expect(invocation.args[0]).toBe(path.win32.join(path.win32.dirname(shim), "node_modules", "@myorg", "pkg", "cli.js"));
+    expect(invocation.args.slice(1)).toEqual(["--flag"]);
   });
 
   it("ignores comment and loader references (only call lines with %* are entries)", () => {
