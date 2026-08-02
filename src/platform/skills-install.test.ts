@@ -112,6 +112,28 @@ describe("installBuiltinSkills", () => {
     expect(readdirSync(target).filter((n) => n.startsWith(".removed-")).length).toBe(secondMark);
   });
 
+  test("类型冲突含产物目录：隔离移动后源文件本运行装上（fall-through 复制）", () => {
+    const dir = tempDir();
+    installBuiltinSkills(dir);
+    const target = path.join(dir, ".claude", "skills");
+    // 目标侧：与包内文件同名的目录，内含 .env 产物
+    const conflictDir = path.join(target, "image-understanding", "scripts", "gemini_vision.mjs");
+    rmSync(conflictDir, { force: true });
+    mkdirSync(conflictDir, { recursive: true });
+    writeFileSync(path.join(conflictDir, ".env"), "GEMINI_API_KEY=secret");
+
+    installBuiltinSkills(dir);
+
+    // 隔离：产物目录被移到 .removed-*（数据不销毁）
+    const removedDirs = readdirSync(path.join(target, "image-understanding", "scripts"))
+      .filter((n) => n.startsWith(".removed-"));
+    expect(removedDirs.length).toBe(1);
+    expect(existsSync(path.join(path.join(target, "image-understanding", "scripts"), removedDirs[0]!, "gemini_vision.mjs", ".env"))).toBe(true);
+    // fall-through：源文件本运行装上（不再缺失一个运行周期）
+    expect(statSync(conflictDir).isFile()).toBe(true);
+    expect(readFileSync(conflictDir, "utf8")).toContain("GEMINI_API_KEY");
+  });
+
   test("broken symlink 源条目：目标同名条目保留不删（lstat 判定，非 statSync）", () => {
     const dir = tempDir();
     installBuiltinSkills(dir);

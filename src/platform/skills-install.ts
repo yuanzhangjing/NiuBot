@@ -163,7 +163,17 @@ function quarantineEntry(
   const quarantineDir = path.join(targetDir, `.removed-${Date.now()}`);
   try {
     mkdirSync(quarantineDir, { recursive: true });
-    renameSync(targetPath, path.join(quarantineDir, entryName));
+    try {
+      renameSync(targetPath, path.join(quarantineDir, entryName));
+    } catch (err) {
+      // rename 失败：清理刚建的空隔离目录，避免每次启动累积
+      try {
+        rmSync(quarantineDir, { recursive: true, force: true });
+      } catch {
+        // best effort
+      }
+      throw err;
+    }
     log.warn("skill entry with installer artifacts quarantined", {
       targetPath,
       quarantineDir,
