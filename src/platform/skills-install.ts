@@ -44,12 +44,17 @@ function copyTreePreservingExtra(sourceDir: string, targetDir: string): void {
   }
 }
 
-/** 执行技能的 install.sh（可选）：幂等安装自己的配置/依赖。失败不阻断启动。 */
+/**
+ * 执行技能的 install.mjs（可选）：幂等安装自己的配置/依赖。
+ * installer 用 Node 脚本（NiuBot 运行时有 Node，跨平台零额外依赖）；
+ * 没有 install.mjs 的技能走默认行为（无操作——不需要维护安装状态的技能不用自带）。
+ * 失败不阻断启动。
+ */
 function runSkillInstaller(skillDir: string): void {
-  const installer = path.join(skillDir, "install.sh");
+  const installer = path.join(skillDir, "install.mjs");
   if (!existsSync(installer)) return;
   try {
-    execFileSync("bash", [installer], { cwd: skillDir, stdio: "ignore", timeout: 30_000 });
+    execFileSync(process.execPath, [installer], { cwd: skillDir, stdio: "ignore", timeout: 30_000 });
     log.debug("skill installer ran", { skillDir });
   } catch (err) {
     log.warn("skill installer failed", { skillDir, error: String(err) });
