@@ -58,9 +58,10 @@ export async function createBotInstance(
   fs.mkdirSync(path.dirname(botConfig.dbPath), { recursive: true });
   if (!options.preflight) {
     fs.mkdirSync(botConfig.workingDirectory, { recursive: true });
-    // 内置技能安装：包内 skills/ → workingDirectory/.claude/skills/（全量重建，
-    // claude CLI 自动发现；升级删减自动跟随版本）
-    installBuiltinSkills(botConfig.workingDirectory);
+    // 内置技能安装：包内 skills/ → 备份源 $NIUBOT_HOME/skills/（镜像同步），
+    // 并在 workingDirectory/.claude/skills/ 与 .agents/skills/ 建软链接
+    // （claude / codex 自动发现；升级删减自动跟随；用户自装技能不被动）
+    installBuiltinSkills(botConfig.workingDirectory, path.join(NIUBOT_HOME, "skills"));
     ensureBotProfileFile(botConfig.botProfilePath, {
       personaPath: botConfig.personaPath,
       instructionsPath: botConfig.instructionsPath,

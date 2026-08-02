@@ -1,10 +1,10 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
 import { afterEach, describe, expect, test } from "vitest";
 
-import { installBuiltinSkills } from "./skills-install.js";
+import { installBuiltinSkills, syncMountLinks } from "./skills-install.js";
 
 const tempDirs: string[] = [];
 
@@ -12,6 +12,17 @@ function tempDir(): string {
   const dir = mkdtempSync(path.join(os.tmpdir(), "skills-install-"));
   tempDirs.push(dir);
   return dir;
+}
+
+/** 构造一个 bot 工作目录（.claude/.agents 在其中）。 */
+function setupBot(backupRoot: string): { dir: string; claudeMount: string; agentsMount: string } {
+  const dir = tempDir();
+  installBuiltinSkills(dir, backupRoot);
+  return {
+    dir,
+    claudeMount: path.join(dir, ".claude", "skills"),
+    agentsMount: path.join(dir, ".agents", "skills"),
+  };
 }
 
 afterEach(() => {
@@ -24,153 +35,91 @@ afterEach(() => {
   }
 });
 
-describe("installBuiltinSkills", () => {
-  test("把包内技能组装到 workingDirectory/.claude/skills/", () => {
-    const dir = tempDir();
-    installBuiltinSkills(dir);
-    const target = path.join(dir, ".claude", "skills");
-    expect(existsSync(target)).toBe(true);
-    const skills = readdirSync(target);
-    // 第一版内置技能：ocr / image-understanding / cr-fix-loop
-    expect(skills).toContain("ocr");
-    expect(skills).toContain("image-understanding");
-    expect(skills).toContain("cr-fix-loop");
-    expect(existsSync(path.join(target, "ocr", "SKILL.md"))).toBe(true);
+describe("installBuiltinSkills（备份源 + 双挂载软链接）", () => {
+  test("备份源镜像 + .claude/.agents 双挂载软链接", () => {
+    const backupRoot = tempDir();
+    const { dir, claudeMount, agentsMount } = setupBot(backupRoot);
+    // 备份源：真实目录
+    for (const name of ["ocr", "image-understanding", "cr-fix-loop"]) {
+      expect(existsSync(path.join(backupRoot, name, "SKILL.md"))).toBe(true);
+    }
+    // 双挂载点：软链接指向备份源
+    for (const mount of [claudeMount, agentsMount]) {
+      for (const name of ["ocr", "image-understanding", "cr-fix-loop"]) {
+        const link = path.join(mount, name);
+        expect(lstatSync(link).isSymbolicLink()).toBe(true);
+        expect(readlinkSync(link)).toBe(path.join(backupRoot, name));
+      }
+    }
   });
 
-  test("技能内额外文件保留（installer 产物如 .env 不被清），被移除技能目录删除", () => {
-    const dir = tempDir();
-    installBuiltinSkills(dir);
-    const target = path.join(dir, ".claude", "skills");
-    // 模拟 installer 产物：技能目录内的 .env（包内没有）
-    const envPath = path.join(target, "image-understanding", "scripts", ".env");
-    writeFileSync(envPath, "GEMINI_API_KEY=test");
-    // 模拟残留技能目录（包内没有）
-    const staleDir = path.join(target, "stale-skill");
-    mkdirSync(staleDir, { recursive: true });
-    writeFileSync(path.join(staleDir, "SKILL.md"), "stale");
-
-    installBuiltinSkills(dir);
-
-    // installer 产物保留，残留技能目录被删
-    expect(existsSync(envPath)).toBe(true);
-    expect(existsSync(staleDir)).toBe(false);
-    // 内置技能仍在
-    expect(readdirSync(target)).toContain("ocr");
+  test("用户自装 skill（真实目录）保留不动", () => {
+    const backupRoot = tempDir();
+    const { dir, claudeMount, agentsMount } = setupBot(backupRoot);
+    // 用户往两个挂载点放自己的 skill（真实目录）
+    for (const mount of [claudeMount, agentsMount]) {
+      mkdirSync(path.join(mount, "user-skill"), { recursive: true });
+      writeFileSync(path.join(mount, "user-skill", "SKILL.md"), "user skill");
+    }
+    installBuiltinSkills(dir, backupRoot);
+    for (const mount of [claudeMount, agentsMount]) {
+      expect(existsSync(path.join(mount, "user-skill", "SKILL.md"))).toBe(true);
+      expect(lstatSync(path.join(mount, "user-skill")).isSymbolicLink()).toBe(false);
+    }
   });
 
-  test("文件级镜像：技能子目录内被删的旧文件被清理（升级不残留）", () => {
-    const dir = tempDir();
-    installBuiltinSkills(dir);
-    const target = path.join(dir, ".claude", "skills");
-    // 模拟旧版本残留：技能 scripts 子目录里一个包内不存在的旧脚本
-    const staleFile = path.join(target, "image-understanding", "scripts", "gemini_vision_old.sh");
-    writeFileSync(staleFile, "old version");
-    // 非 .env 命名 → 应被清理
-    const nonEnvArtifact = path.join(target, "ocr", "scripts", "config.json");
-    writeFileSync(nonEnvArtifact, "{}");
-
-    installBuiltinSkills(dir);
-
-    expect(existsSync(staleFile)).toBe(false);
-    expect(existsSync(nonEnvArtifact)).toBe(false);
-    // 包内文件仍在
-    expect(existsSync(path.join(target, "image-understanding", "scripts", "gemini_vision.mjs"))).toBe(true);
+  test("备份源删除技能 → 挂载点软链接被清理（用户 skill 不受影响）", () => {
+    const backupRoot = tempDir();
+    const { claudeMount } = setupBot(backupRoot);
+    // 挂载点已有内置链接 + 用户 skill（真实目录）+ 用户自建链接（指向别处）
+    mkdirSync(path.join(claudeMount, "user-skill"), { recursive: true });
+    writeFileSync(path.join(claudeMount, "user-skill", "SKILL.md"), "user");
+    const elsewhere = tempDir();
+    symlinkSync(elsewhere, path.join(claudeMount, "user-link"), "dir");
+    // 模拟升级移除：备份源里 cr-fix-loop 已不存在（真实链路：mirrorTree 已同步）
+    rmSync(path.join(backupRoot, "cr-fix-loop"), { recursive: true, force: true });
+    syncMountLinks(claudeMount, backupRoot);
+    // 指向备份源但源里没有的链接被清理
+    expect(existsSync(path.join(claudeMount, "cr-fix-loop"))).toBe(false);
+    // 用户 skill（真实目录）与用户自建链接保留
+    expect(existsSync(path.join(claudeMount, "user-skill", "SKILL.md"))).toBe(true);
+    expect(lstatSync(path.join(claudeMount, "user-link")).isSymbolicLink()).toBe(true);
+    // 其余内置技能链接不受影响
+    expect(lstatSync(path.join(claudeMount, "ocr")).isSymbolicLink()).toBe(true);
   });
 
-  test("同名覆盖：包内文件更新后覆盖目标旧版本", () => {
-    const dir = tempDir();
-    installBuiltinSkills(dir);
-    const target = path.join(dir, ".claude", "skills");
-    const sk = path.join(target, "ocr", "SKILL.md");
-    // 篡改目标内容模拟旧版本
-    writeFileSync(sk, "stale content");
-    installBuiltinSkills(dir);
-    // 同步后与包内一致（不是 stale content）
-    expect(readFileSync(sk, "utf8")).toContain("name: ocr");
+  test("旧版复制残留（真实目录与备份同名）迁移为软链接", () => {
+    const backupRoot = tempDir();
+    const { dir, claudeMount, agentsMount } = setupBot(backupRoot);
+    // 模拟旧版复制残留：把 .claude 挂载点的 ocr 换成真实目录（旧版复制）
+    rmSync(path.join(claudeMount, "ocr"), { force: true });
+    mkdirSync(path.join(claudeMount, "ocr"), { recursive: true });
+    writeFileSync(path.join(claudeMount, "ocr", "SKILL.md"), "old copy");
+    installBuiltinSkills(dir, backupRoot);
+    // 迁移：真实目录被替换为软链接
+    expect(lstatSync(path.join(claudeMount, "ocr")).isSymbolicLink()).toBe(true);
+    expect(readlinkSync(path.join(claudeMount, "ocr"))).toBe(path.join(backupRoot, "ocr"));
+    expect(existsSync(path.join(backupRoot, "ocr", "SKILL.md"))).toBe(true);
   });
 
-  test("含 installer 产物的残留目录被隔离移动（.removed-），二次启动跳过隔离区", () => {
-    const dir = tempDir();
-    installBuiltinSkills(dir);
-    const target = path.join(dir, ".claude", "skills");
-    // 模拟残留技能目录（含 .env 产物）
-    const staleSkill = path.join(target, "stale-skill");
-    mkdirSync(path.join(staleSkill, "scripts"), { recursive: true });
-    writeFileSync(path.join(staleSkill, "scripts", ".env"), "GEMINI_API_KEY=secret");
-    writeFileSync(path.join(staleSkill, "SKILL.md"), "stale");
-
-    installBuiltinSkills(dir);
-
-    // 含产物的残留目录被隔离而非删除：数据保留
-    expect(existsSync(staleSkill)).toBe(false);
-    const removedDirs = readdirSync(target).filter((n) => n.startsWith(".removed-"));
-    expect(removedDirs.length).toBe(1);
-    // 二次启动：隔离区被跳过（不再移动/删除，不累积）
-    const secondMark = readdirSync(target).filter((n) => n.startsWith(".removed-")).length;
-    installBuiltinSkills(dir);
-    expect(readdirSync(target).filter((n) => n.startsWith(".removed-")).length).toBe(secondMark);
+  test("重复安装幂等：链接稳定指向备份源，内容来自备份源（包内即真相）", () => {
+    const backupRoot = tempDir();
+    const { dir, claudeMount } = setupBot(backupRoot);
+    // 再次安装（模拟下次启动）
+    installBuiltinSkills(dir, backupRoot);
+    // 链接不变（无累积、无重建），内容 = 备份源（= 包内当前版本）
+    expect(readlinkSync(path.join(claudeMount, "ocr"))).toBe(path.join(backupRoot, "ocr"));
+    expect(readFileSync(path.join(claudeMount, "ocr", "SKILL.md"), "utf8"))
+      .toContain("name: ocr");
   });
 
-  test("类型冲突含产物目录：隔离移动后源文件本运行装上（fall-through 复制）", () => {
-    const dir = tempDir();
-    installBuiltinSkills(dir);
-    const target = path.join(dir, ".claude", "skills");
-    // 目标侧：与包内文件同名的目录，内含 .env 产物
-    const conflictDir = path.join(target, "image-understanding", "scripts", "gemini_vision.mjs");
-    rmSync(conflictDir, { force: true });
-    mkdirSync(conflictDir, { recursive: true });
-    writeFileSync(path.join(conflictDir, ".env"), "GEMINI_API_KEY=secret");
-
-    installBuiltinSkills(dir);
-
-    // 隔离：产物目录被移到 .removed-*（数据不销毁）
-    const removedDirs = readdirSync(path.join(target, "image-understanding", "scripts"))
-      .filter((n) => n.startsWith(".removed-"));
-    expect(removedDirs.length).toBe(1);
-    expect(existsSync(path.join(path.join(target, "image-understanding", "scripts"), removedDirs[0]!, "gemini_vision.mjs", ".env"))).toBe(true);
-    // fall-through：源文件本运行装上（不再缺失一个运行周期）
-    expect(statSync(conflictDir).isFile()).toBe(true);
-    expect(readFileSync(conflictDir, "utf8")).toContain("GEMINI_API_KEY");
-  });
-
-  test("broken symlink 源条目：目标同名条目保留不删（lstat 判定，非 statSync）", () => {
-    const dir = tempDir();
-    installBuiltinSkills(dir);
-    const target = path.join(dir, ".claude", "skills");
-    // 模拟源里的 broken symlink（指向不存在路径）——需要真实修改源目录，但包内源只读；
-    // 改为验证删除循环对"源条目 lstat 失败（真缺失）才删"的语义：
-    // 目标里放一个源没有的文件 → 应被删（正常镜像删除仍工作）
-    const staleFile = path.join(target, "ocr", "scripts", "stale.txt");
-    writeFileSync(staleFile, "stale");
-    installBuiltinSkills(dir);
-    expect(existsSync(staleFile)).toBe(false);
-    // 用 lstat 语义验证：链接本身存在视为源存在（此处构造目标侧 symlink 到源内文件）
-    const linkPath = path.join(target, "ocr", "scripts", "link-to-source");
-    symlinkSync(path.join(process.cwd(), "skills", "ocr", "scripts", "macos_ocr.swift"), linkPath);
-    installBuiltinSkills(dir);
-    // 目标侧 symlink 是源没有的条目 → 应被删除（链接本身，不跟随）
-    expect(existsSync(linkPath)).toBe(false);
-  });
-
-  test("类型冲突与 .env 覆盖防御：同名目录/文件冲突不崩溃，包内 .env 不覆盖用户配置", () => {
-    const dir = tempDir();
-    installBuiltinSkills(dir);
-    const target = path.join(dir, ".claude", "skills");
-    // 目标里与包内文件同名的目录（类型冲突）→ 同步不应崩溃
-    const conflictDir = path.join(target, "image-understanding", "scripts", "gemini_vision.mjs");
-    rmSync(conflictDir, { force: true });
-    mkdirSync(conflictDir, { recursive: true });
-    writeFileSync(path.join(conflictDir, "junk.txt"), "junk");
-    // 用户配置的 .env（installer 产物）
-    const envFile = path.join(target, "image-understanding", "scripts", ".env");
-    writeFileSync(envFile, "GEMINI_API_KEY=user-secret");
-
-    expect(() => installBuiltinSkills(dir)).not.toThrow();
-
-    // 冲突目录被清理（恢复为包内文件）
-    expect(statSync(conflictDir).isFile()).toBe(true);
-    // .env 保留（不被覆盖/删除）
-    expect(readFileSync(envFile, "utf8")).toBe("GEMINI_API_KEY=user-secret");
+  test("installer 产物（.env）在备份源保留", () => {
+    const backupRoot = tempDir();
+    const { dir, claudeMount } = setupBot(backupRoot);
+    // installer 产物写入备份源
+    const envPath = path.join(backupRoot, "image-understanding", "scripts", ".env");
+    writeFileSync(envPath, "GEMINI_API_KEY=secret");
+    installBuiltinSkills(dir, backupRoot);
+    expect(readFileSync(envPath, "utf8")).toBe("GEMINI_API_KEY=secret");
   });
 });

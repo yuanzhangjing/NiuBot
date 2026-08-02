@@ -16,7 +16,7 @@
  * （不阻塞启动），输出写入日志。
  */
 
-import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, renameSync, rmSync, statSync, type Dirent } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readlinkSync, renameSync, rmSync, statSync, symlinkSync, type Dirent } from "node:fs";
 import { execFile } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -231,27 +231,103 @@ function runSkillInstaller(skillDir: string): void {
 }
 
 /**
- * 把内置技能同步到 bot 工作目录的 .claude/skills/。
+ * 把内置技能同步到备份源（$NIUBOT_HOME/skills/），并在 bot 工作目录的
+ * .claude/skills/ 和 .agents/skills/（claude / codex 的发现位置）建软链接。
+ *
+ * 软链接方案：备份源是 NiuBot 独占目录（镜像同步，无用户冲突）；
+ * 挂载点下 NiuBot 只创建/删除"指向备份源的软链接"——用户自己装的
+ * 真实 skill 目录（无论 claude 还是 codex 位置）永不被动。
+ * 升级增删 = 备份源镜像 + 挂载点按"链接指向备份源"识别清理。
  * 失败不阻断启动（技能缺失只影响能力，不影响 Bot 运行）。
  */
-export function installBuiltinSkills(workingDirectory: string): void {
+export function installBuiltinSkills(workingDirectory: string, backupRoot: string): void {
   try {
     const source = builtinSkillsDir();
     if (!existsSync(source)) {
       log.debug("no builtin skills to install", { source });
       return;
     }
-    const target = path.join(workingDirectory, ".claude", "skills");
-    mirrorTree(source, target);
-
-    // 每个技能跑自己的 installer（幂等，异步）
+    // 1. 备份源镜像同步（NiuBot 独占目录：目录级镜像 + .env 保留 + 隔离防御）
+    mirrorTree(source, backupRoot);
+    // 2. 双挂载点软链接（claude 与 codex 的发现位置）
+    for (const mountRel of [".claude/skills", ".agents/skills"]) {
+      syncMountLinks(path.join(workingDirectory, mountRel), backupRoot);
+    }
+    // 3. installer 在备份源跑（真实目录）
     for (const entry of readdirSync(source, { withFileTypes: true })) {
       if (entry.isDirectory()) {
-        runSkillInstaller(path.join(target, entry.name));
+        runSkillInstaller(path.join(backupRoot, entry.name));
       }
     }
-    log.info("builtin skills synced", { source, target });
+    log.info("builtin skills synced", { source, backupRoot });
   } catch (err) {
     log.warn("builtin skills install failed", { error: String(err) });
+  }
+}
+
+/**
+ * 挂载点同步：为备份源里的每个技能建软链接。
+ * 清理：指向备份源但源里已无的软链接（升级移除的技能）→ 删；
+ * 与备份源同名的真实目录（旧版复制残留）→ 删后改链接；
+ * 其他（用户真实 skill / 用户自建链接）→ 保留不动。
+ * 导出供测试（内部函数）。
+ */
+export function syncMountLinks(mountDir: string, backupRoot: string): void {
+  mkdirSync(mountDir, { recursive: true });
+  // 以备份源为真相：备份源里的技能决定挂载链接（mirrorTree 已把包内同步到备份源）
+  const backupNames = new Set(
+    readdirSync(backupRoot, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name),
+  );
+  for (const entry of readdirSync(mountDir, { withFileTypes: true })) {
+    const mountPath = path.join(mountDir, entry.name);
+    let isLink = false;
+    let linkTarget: string | undefined;
+    try {
+      const st = lstatSync(mountPath);
+      isLink = st.isSymbolicLink();
+      if (isLink) linkTarget = readlinkSync(mountPath);
+    } catch {
+      continue;
+    }
+    if (isLink) {
+      // 软链接指向备份源：源里没有 → 删（升级移除）；源里有 → 保留
+      if (linkTarget && path.resolve(linkTarget) === path.resolve(path.join(backupRoot, entry.name))) {
+        if (!backupNames.has(entry.name)) {
+          try {
+            rmSync(mountPath, { force: true });
+          } catch (err) {
+            log.warn("skill mount link removal failed", { mountPath, error: String(err) });
+          }
+        }
+      }
+      // 指向别处的链接（用户自建）→ 不碰
+    } else if (entry.isDirectory() && backupNames.has(entry.name)) {
+      // 旧版复制残留（真实目录与备份源同名）→ 迁移删除，改软链接
+      try {
+        rmSync(mountPath, { recursive: true, force: true });
+        log.info("skill legacy copy replaced with symlink", { mountPath });
+      } catch (err) {
+        log.warn("skill legacy copy removal failed", { mountPath, error: String(err) });
+      }
+    }
+    // 其他（用户真实 skill，非备份同名）→ 保留
+  }
+  // 建链：备份源里有、挂载点没有 → 软链接
+  for (const name of backupNames) {
+    const mountPath = path.join(mountDir, name);
+    let exists = false;
+    try {
+      lstatSync(mountPath);
+      exists = true;
+    } catch {
+      exists = false;
+    }
+    if (!exists) {
+      try {
+        symlinkSync(path.join(backupRoot, name), mountPath, "dir");
+      } catch (err) {
+        log.warn("skill symlink creation failed", { mountPath, error: String(err) });
+      }
+    }
   }
 }
