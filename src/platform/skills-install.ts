@@ -43,14 +43,13 @@ function builtinSkillsDir(): string {
 function mirrorTree(sourceDir: string, targetDir: string): void {
   mkdirSync(targetDir, { recursive: true });
   // 删除目标里源没有的条目（installer 产物保留；符号链接只删链接本身，不跟随）。
-  // 源条目存在性用 statSync 判断（与复制循环的条目级隔离一致）：
-  // broken symlink / 临时不可读的源条目视为"不可判定"，保留目标不删，
-  // 避免先删后跳过的破坏性不对称。
+  // 源条目存在性用 lstatSync（不跟随链接）：broken symlink 的 lstat 仍成功
+  // （链接本身存在）→ 保留目标不删；只有 lstat 也失败（真缺失）才删。
   for (const entry of readdirSync(targetDir, { withFileTypes: true })) {
     if (INSTALLER_ARTIFACT_PATTERN.test(entry.name)) continue;
     let sourceExists = false;
     try {
-      statSync(path.join(sourceDir, entry.name));
+      lstatSync(path.join(sourceDir, entry.name));
       sourceExists = true;
     } catch {
       sourceExists = false;
@@ -75,6 +74,20 @@ function mirrorTree(sourceDir: string, targetDir: string): void {
     } catch {
       log.warn("skill source entry unreadable, skipping", { sourcePath });
       continue;
+    }
+    // 指向目录的源 symlink：跳过（防镜像递归环/无限嵌套复制）；
+    // 指向文件的 symlink 走下方 cpSync dereference 复制实体内容
+    if (sourceIsDir) {
+      let sourceLstat: ReturnType<typeof lstatSync>;
+      try {
+        sourceLstat = lstatSync(sourcePath);
+      } catch {
+        continue;
+      }
+      if (sourceLstat.isSymbolicLink()) {
+        log.warn("skill source directory symlink skipped (cycle guard)", { sourcePath });
+        continue;
+      }
     }
     // 目标同名但类型不一致（文件 vs 目录）或目标是符号链接时，先清掉再复制
     // （防 ERR_FS_CP_NON_DIR_TO_DIR；符号链接只删链接本身，不跟随避免删到工作区外）

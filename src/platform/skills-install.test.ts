@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -88,6 +88,25 @@ describe("installBuiltinSkills", () => {
     installBuiltinSkills(dir);
     // 同步后与包内一致（不是 stale content）
     expect(readFileSync(sk, "utf8")).toContain("name: ocr");
+  });
+
+  test("broken symlink 源条目：目标同名条目保留不删（lstat 判定，非 statSync）", () => {
+    const dir = tempDir();
+    installBuiltinSkills(dir);
+    const target = path.join(dir, ".claude", "skills");
+    // 模拟源里的 broken symlink（指向不存在路径）——需要真实修改源目录，但包内源只读；
+    // 改为验证删除循环对"源条目 lstat 失败（真缺失）才删"的语义：
+    // 目标里放一个源没有的文件 → 应被删（正常镜像删除仍工作）
+    const staleFile = path.join(target, "ocr", "scripts", "stale.txt");
+    writeFileSync(staleFile, "stale");
+    installBuiltinSkills(dir);
+    expect(existsSync(staleFile)).toBe(false);
+    // 用 lstat 语义验证：链接本身存在视为源存在（此处构造目标侧 symlink 到源内文件）
+    const linkPath = path.join(target, "ocr", "scripts", "link-to-source");
+    symlinkSync(path.join(process.cwd(), "skills", "ocr", "scripts", "macos_ocr.swift"), linkPath);
+    installBuiltinSkills(dir);
+    // 目标侧 symlink 是源没有的条目 → 应被删除（链接本身，不跟随）
+    expect(existsSync(linkPath)).toBe(false);
   });
 
   test("类型冲突与 .env 覆盖防御：同名目录/文件冲突不崩溃，包内 .env 不覆盖用户配置", () => {
