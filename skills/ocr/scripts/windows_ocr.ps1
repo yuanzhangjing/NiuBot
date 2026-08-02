@@ -1,8 +1,8 @@
 # Windows 系统自带 OCR（Windows.Media.Ocr）
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 # 用法: powershell -ExecutionPolicy Bypass -File windows_ocr.ps1 <图片路径>
 # 依赖: Windows 10/11 内置引擎，零安装。中文支持需系统已安装中文语言包（中文版系统自带）。
 param([Parameter(Mandatory=$true)][string]$ImagePath)
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 if (-not (Test-Path $ImagePath)) {
     Write-Error "Image not found: $ImagePath"

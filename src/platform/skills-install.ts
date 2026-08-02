@@ -16,7 +16,7 @@
  * （不阻塞启动），输出写入日志。
  */
 
-import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, rmSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { execFile } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -56,22 +56,25 @@ function mirrorTree(sourceDir: string, targetDir: string): void {
     // 源里的 installer 产物命名（.env）不复制——配置由 install.mjs 管理，
     // 避免包内模板每次启动覆盖用户配置
     if (INSTALLER_ARTIFACT_PATTERN.test(entry.name)) continue;
+    // 源实体类型用 statSync（跟随 symlink——Dirent.isDirectory 对 symlink 恒 false，
+    // 避免把指向目录的源 symlink 误判为文件）
+    const sourceIsDir = statSync(sourcePath).isDirectory();
     // 目标同名但类型不一致（文件 vs 目录）或目标是符号链接时，先清掉再复制
-    // （防 ERR_FS_CP_NON_DIR_TO_DIR；符号链接不跟随，避免删到工作区外）
+    // （防 ERR_FS_CP_NON_DIR_TO_DIR；符号链接只删链接本身，不跟随避免删到工作区外）
     let targetStat: ReturnType<typeof lstatSync> | undefined;
     try {
       targetStat = lstatSync(targetPath);
     } catch {
       targetStat = undefined;
     }
-    if (targetStat && (targetStat.isSymbolicLink() || targetStat.isDirectory() !== entry.isDirectory())) {
+    if (targetStat && (targetStat.isSymbolicLink() || targetStat.isDirectory() !== sourceIsDir)) {
       rmSync(targetPath, { recursive: true, force: true });
       targetStat = undefined;
     }
-    if (entry.isDirectory()) {
+    if (sourceIsDir) {
       mirrorTree(sourcePath, targetPath);
     } else {
-      cpSync(sourcePath, targetPath, { force: true });
+      cpSync(sourcePath, targetPath, { force: true, dereference: true });
     }
   }
 }
