@@ -34,8 +34,8 @@ Gemini 返回的文本（可能包含 Markdown 表格）。失败时输出错误
 
 ## 配置
 
-- **API Key 不内置**：在 `skills/image-understanding/scripts/.env` 写 `GEMINI_API_KEY=xxx`（权限 600，已被 .gitignore 排除）
-- 也支持环境变量 `GEMINI_API_KEY`（脚本优先读 .env，其次环境变量）
+- **API Key 走环境变量**：在 `~/.niubot/.env` 写 `GEMINI_API_KEY=xxx`（NiuBot 启动时 dotenv 加载，Agent 会话子进程自动继承）
+- 技能目录是纯只读的（每次启动从包内重建），**不要把 key 放技能目录里**
 - 免费额度有限，调用频繁时注意限流
 - 模型：`gemini-flash-latest`（免费层）
 

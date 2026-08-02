@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { AgentBackend } from "./agent/types.js";
+import { installBuiltinSkills } from "./platform/skills-install.js";
 import { NIUBOT_HOME, type BotConfig, type AgentBackendType, type RestartConfig } from "./config.js";
 import {
   initDatabase,
@@ -57,6 +58,9 @@ export async function createBotInstance(
   fs.mkdirSync(path.dirname(botConfig.dbPath), { recursive: true });
   if (!options.preflight) {
     fs.mkdirSync(botConfig.workingDirectory, { recursive: true });
+    // 内置技能安装：包内 skills/ → workingDirectory/.claude/skills/（全量重建，
+    // claude CLI 自动发现；升级删减自动跟随版本）
+    installBuiltinSkills(botConfig.workingDirectory);
     ensureBotProfileFile(botConfig.botProfilePath, {
       personaPath: botConfig.personaPath,
       instructionsPath: botConfig.instructionsPath,
