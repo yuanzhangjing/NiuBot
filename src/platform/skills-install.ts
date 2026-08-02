@@ -55,8 +55,17 @@ function mirrorTree(sourceDir: string, targetDir: string): void {
       sourceExists = false;
     }
     if (!sourceExists) {
+      // 整目录删除会带走嵌套的 installer 产物（.env）——显式告警，不静默
+      const targetPath = path.join(targetDir, entry.name);
+      const nestedArtifacts = findInstallerArtifacts(targetPath);
+      if (nestedArtifacts.length > 0) {
+        log.warn("skill entry removal will remove installer artifacts", {
+          targetPath,
+          artifacts: nestedArtifacts,
+        });
+      }
       try {
-        rmSync(path.join(targetDir, entry.name), { recursive: true, force: true });
+        rmSync(targetPath, { recursive: true, force: true });
       } catch (err) {
         log.warn("skill target entry removal failed, skipping", { target: entry.name, error: String(err) });
       }
@@ -133,9 +142,14 @@ function mirrorTree(sourceDir: string, targetDir: string): void {
   }
 }
 
-/** 递归查找目录里的 installer 产物（.env 命名），用于类型冲突前的告警。 */
-function findInstallerArtifacts(dir: string): string[] {
+/**
+ * 递归查找目录里的 installer 产物（.env 命名），用于删除前的告警。
+ * 目录判断用 statSync 跟随 symlink（Dirent.isDirectory 对 symlink 恒 false，
+ * 会漏报链接子目录里的产物）；深度限制防 symlink 环。
+ */
+function findInstallerArtifacts(dir: string, depth = 0): string[] {
   const found: string[] = [];
+  if (depth > 20) return found;
   let entries: Dirent[];
   try {
     entries = readdirSync(dir, { withFileTypes: true });
@@ -145,8 +159,19 @@ function findInstallerArtifacts(dir: string): string[] {
   for (const entry of entries) {
     if (INSTALLER_ARTIFACT_PATTERN.test(entry.name)) {
       found.push(path.join(dir, entry.name));
-    } else if (entry.isDirectory()) {
-      found.push(...findInstallerArtifacts(path.join(dir, entry.name)));
+      continue;
+    }
+    if (entry.isDirectory()) {
+      found.push(...findInstallerArtifacts(path.join(dir, entry.name), depth + 1));
+      continue;
+    }
+    // symlink 子目录：statSync 跟随判断，防漏报
+    try {
+      if (statSync(path.join(dir, entry.name)).isDirectory()) {
+        found.push(...findInstallerArtifacts(path.join(dir, entry.name), depth + 1));
+      }
+    } catch {
+      // broken symlink：忽略
     }
   }
   return found;
