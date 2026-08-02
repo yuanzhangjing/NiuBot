@@ -18,14 +18,11 @@ description: 图片视觉理解（Gemini API）。后端不支持多模态时补
 
 ```bash
 # 基本用法（默认提示词：详细描述图片）
-node skills/image-understanding/scripts/gemini_vision.mjs <图片路径>
+node .claude/skills/image-understanding/scripts/gemini_vision.mjs <图片路径>
 
 # 指定提示词（提示词决定注意力，问什么答什么）
-node skills/image-understanding/scripts/gemini_vision.mjs <图片路径> "请提取图中所有文字"
-node skills/image-understanding/scripts/gemini_vision.mjs <图片路径> "图里有几个指示牌？各自写了什么"
-
-# 一次看多张图
-node skills/image-understanding/scripts/gemini_vision.mjs <图片路径1> "描述这张图" <图片路径2> "描述这张图"
+node .claude/skills/image-understanding/scripts/gemini_vision.mjs <图片路径> "请提取图中所有文字"
+node .claude/skills/image-understanding/scripts/gemini_vision.mjs <图片路径> "图里有几个指示牌？各自写了什么"
 ```
 
 脚本是 Node（跨平台，不依赖 bash/curl），NiuBot 运行时有 Node 保证。

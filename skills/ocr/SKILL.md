@@ -18,7 +18,7 @@ description: 系统原生 OCR（macOS Vision / Windows.Media.Ocr）。零依赖�
 ### macOS（Vision 框架）
 
 ```bash
-xcrun swift skills/ocr/scripts/macos_ocr.swift <图片路径>
+xcrun swift .claude/skills/ocr/scripts/macos_ocr.swift <图片路径>
 ```
 
 输出格式：`[置信度] 文字`，每行一个识别结果。支持中英文。
@@ -26,7 +26,7 @@ xcrun swift skills/ocr/scripts/macos_ocr.swift <图片路径>
 ### Windows（Windows.Media.Ocr）
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File skills/ocr/scripts/windows_ocr.ps1 <图片路径>
+powershell -ExecutionPolicy Bypass -File .claude/skills/ocr/scripts/windows_ocr.ps1 <图片路径>
 ```
 
 输出格式：`[行号] 文字`。需要系统装有对应语言包（中文版系统自带）。

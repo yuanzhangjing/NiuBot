@@ -38,15 +38,26 @@ const MIME_BY_EXT = {
 const mime = MIME_BY_EXT[path.extname(img).toLowerCase()] ?? "image/png";
 const b64 = readFileSync(img).toString("base64");
 
-const res = await fetch(
-  "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent",
-  {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "X-goog-api-key": key },
-    body: JSON.stringify({
-      contents: [{ parts: [{ text: prompt }, { inline_data: { mime_type: mime, data: b64 } }] }],
-    }),
-  },
-);
-const data = await res.json();
+let res;
+try {
+  res = await fetch(
+    "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-goog-api-key": key },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }, { inline_data: { mime_type: mime, data: b64 } }] }],
+      }),
+    },
+  );
+} catch (err) {
+  console.error(`错误: 请求失败（网络问题）: ${err.message ?? err}`);
+  process.exit(1);
+}
+const data = await res.json().catch(() => null);
+if (!res.ok || !data) {
+  const apiError = data?.error?.message ?? `HTTP ${res.status}`;
+  console.error(`错误: Gemini API 调用失败: ${apiError}`);
+  process.exit(1);
+}
 console.log(data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "(无结果)");

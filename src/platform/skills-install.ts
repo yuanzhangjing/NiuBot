@@ -7,21 +7,26 @@
  *
  * 同步策略（update 策略）：
  * - 目录级镜像：包内没有的技能目录 → 目标里整个删除（技能被移除时自动消失）
- * - 文件级覆盖：包内文件 → 目标里同名覆盖（技能更新自动生效）
- * - 额外文件保留：目标里包内没有的文件（如技能 installer 生成的 .env 配置）
- *   保留不动——技能是自包含单元，install.sh 管理自己的安装状态。
+ * - 文件级镜像：目标里源没有的文件 → 删除（技能内被删文件不残留），
+ *   但保留 installer 产物（scripts/.env 等 .env 文件）
+ * - 包内文件 → 同名覆盖（技能更新自动生效）
  *
- * 每个技能可带 install.sh（可选）：幂等安装自己的依赖/配置，启动同步后执行。
+ * 每个技能可带 install.mjs（可选，Node 跨平台）：幂等安装自己的依赖/配置；
+ * 没有 install.mjs 的技能走默认通用行为（无操作）。installer 异步执行
+ * （不阻塞启动），输出写入日志。
  */
 
 import { cpSync, existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { createLogger } from "../logger.js";
 
 const log = createLogger("skills");
+
+/** installer 产物白名单：同步删除时保留的文件名（技能自管配置）。 */
+const INSTALLER_ARTIFACT_PATTERN = /\.env(?:\.local)?$/;
 
 /** 包内内置技能目录（开发与发布一致：包根/skills）。 */
 function builtinSkillsDir(): string {
@@ -30,14 +35,22 @@ function builtinSkillsDir(): string {
   return path.resolve(moduleDir, "..", "..", "skills");
 }
 
-/** 复制目录树：文件同名覆盖，保留目标里额外的文件（installer 产物）。 */
-function copyTreePreservingExtra(sourceDir: string, targetDir: string): void {
+/** 镜像复制：包内文件覆盖同名；删除目标里源没有的文件（保留 installer 产物）。 */
+function mirrorTree(sourceDir: string, targetDir: string): void {
   mkdirSync(targetDir, { recursive: true });
+  // 删除目标里源没有的条目（installer 产物保留）
+  for (const entry of readdirSync(targetDir, { withFileTypes: true })) {
+    if (INSTALLER_ARTIFACT_PATTERN.test(entry.name)) continue;
+    if (!existsSync(path.join(sourceDir, entry.name))) {
+      rmSync(path.join(targetDir, entry.name), { recursive: true, force: true });
+    }
+  }
+  // 复制/覆盖源条目
   for (const entry of readdirSync(sourceDir, { withFileTypes: true })) {
     const sourcePath = path.join(sourceDir, entry.name);
     const targetPath = path.join(targetDir, entry.name);
     if (entry.isDirectory()) {
-      copyTreePreservingExtra(sourcePath, targetPath);
+      mirrorTree(sourcePath, targetPath);
     } else {
       cpSync(sourcePath, targetPath, { force: true });
     }
@@ -45,20 +58,22 @@ function copyTreePreservingExtra(sourceDir: string, targetDir: string): void {
 }
 
 /**
- * 执行技能的 install.mjs（可选）：幂等安装自己的配置/依赖。
+ * 执行技能的 install.mjs（可选，异步不阻塞启动）：幂等安装自己的配置/依赖。
  * installer 用 Node 脚本（NiuBot 运行时有 Node，跨平台零额外依赖）；
- * 没有 install.mjs 的技能走默认行为（无操作——不需要维护安装状态的技能不用自带）。
- * 失败不阻断启动。
+ * 没有 install.mjs 的技能走默认行为（无操作）。
+ * 输出捕获后写入日志（installer 的提示用户要能看到）。
  */
 function runSkillInstaller(skillDir: string): void {
   const installer = path.join(skillDir, "install.mjs");
   if (!existsSync(installer)) return;
-  try {
-    execFileSync(process.execPath, [installer], { cwd: skillDir, stdio: "ignore", timeout: 30_000 });
-    log.debug("skill installer ran", { skillDir });
-  } catch (err) {
-    log.warn("skill installer failed", { skillDir, error: String(err) });
-  }
+  execFile(process.execPath, [installer], { cwd: skillDir, timeout: 30_000 }, (err, stdout, stderr) => {
+    if (err) {
+      log.warn("skill installer failed", { skillDir, error: String(err) });
+      return;
+    }
+    const output = `${stdout}${stderr}`.trim();
+    if (output) log.info(`skill installer: ${path.basename(skillDir)}`, { output });
+  });
 }
 
 /**
@@ -73,20 +88,9 @@ export function installBuiltinSkills(workingDirectory: string): void {
       return;
     }
     const target = path.join(workingDirectory, ".claude", "skills");
-    mkdirSync(target, { recursive: true });
+    mirrorTree(source, target);
 
-    // 目录级镜像：移除包内已不存在的技能目录
-    for (const entry of readdirSync(target, { withFileTypes: true })) {
-      if (!entry.isDirectory()) continue;
-      if (!existsSync(path.join(source, entry.name))) {
-        rmSync(path.join(target, entry.name), { recursive: true, force: true });
-        log.info("builtin skill removed", { skill: entry.name });
-      }
-    }
-    // 文件级覆盖 + 保留额外（installer 产物如 .env）
-    copyTreePreservingExtra(source, target);
-
-    // 每个技能跑自己的 installer（幂等）
+    // 每个技能跑自己的 installer（幂等，异步）
     for (const entry of readdirSync(source, { withFileTypes: true })) {
       if (entry.isDirectory()) {
         runSkillInstaller(path.join(target, entry.name));

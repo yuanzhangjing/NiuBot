@@ -4,7 +4,7 @@
 param([Parameter(Mandatory=$true)][string]$ImagePath)
 
 if (-not (Test-Path $ImagePath)) {
-    Write-Error "图片不存在: $ImagePath"
+    Write-Error "Image not found: $ImagePath"
     exit 1
 }
 
@@ -37,7 +37,7 @@ $bitmap = Await ($decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.S
 [Windows.Media.Ocr.OcrEngine, Windows.Media.Ocr, ContentType=WindowsRuntime] | Out-Null
 $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()
 if ($null -eq $engine) {
-    Write-Error "无法创建 OCR 引擎（可能缺少语言包）"
+    Write-Error "Failed to create OCR engine (language pack may be missing)"
     exit 1
 }
 $result = Await ($engine.RecognizeAsync($bitmap)) ([Windows.Media.Ocr.OcrResult])
