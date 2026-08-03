@@ -59,6 +59,8 @@ export interface RunningJobExecution {
   lastActivity: number;
   /** 用于取消的信号；取消后等待 backend 进程树真实退出 */
   controller: AbortController;
+  /** 正在进行的 cancel 流程（幂等：同一 Job 的重复取消复用同一个 Promise） */
+  cancelPromise?: Promise<boolean>;
 }
 
 export interface WorkerRuntimeOptions {
@@ -84,12 +86,14 @@ export interface WorkerRuntimeOptions {
 
 export class WorkerRuntime {
   private readonly running = new Map<string, RunningJobExecution>();
+  /** 已认领但可能仍在 backend/workspace/session 准备阶段的完整执行集合。 */
+  private readonly inFlight = new Set<string>();
 
   constructor(private readonly options: WorkerRuntimeOptions) {}
 
   /** 当前运行中的 Job 数 */
   runningCount(): number {
-    return this.running.size;
+    return this.inFlight.size;
   }
 
   /**
@@ -112,21 +116,40 @@ export class WorkerRuntime {
 
   /**
    * 取消：温和终止进程树 → 等待退出确认 → 超时后强制 SIGKILL。
+   * 幂等：同一 Job 的重复取消复用同一个 Promise，避免并发重复 kill。
    * 真实退出由 sendMessage 的 cancelled 结果最终确认（终态由确认后提交）。
    */
   async cancel(jobId: string, reason: string): Promise<boolean> {
     const exec = this.running.get(jobId);
     if (!exec) return false;
+    if (exec.cancelPromise) {
+      log.info("worker cancel already in flight, reusing", { jobId, reason });
+      return exec.cancelPromise;
+    }
+
+    // 幂等：并发期间的重复取消复用同一个 Promise；完成后清引用，
+    // 允许后续（如进程仍未退出时）重新发起取消。
+    const cancelPromise = this.doCancel(exec, reason);
+    exec.cancelPromise = cancelPromise;
+    void cancelPromise.finally(() => {
+      if (this.running.get(jobId)?.cancelPromise === cancelPromise) {
+        delete exec.cancelPromise;
+      }
+    });
+    return cancelPromise;
+  }
+
+  private async doCancel(exec: RunningJobExecution, reason: string): Promise<boolean> {
     const { jobService } = this.options;
-    const job = jobService.getJob(jobId);
+    const job = jobService.getJob(exec.jobId);
     const workId = job?.workId ?? "";
-    jobService.recordEvent({ workId, jobId, event: "job_cancel_requested", detail: reason });
+    jobService.recordEvent({ workId, jobId: exec.jobId, event: "job_cancel_requested", detail: reason });
     exec.controller.abort();
 
     try {
       await exec.backend.cancelSession(exec.session);
     } catch (err) {
-      jobService.recordEvent({ workId, jobId, event: "job_failed", detail: `cancel failed: ${String(err)}` });
+      jobService.recordEvent({ workId, jobId: exec.jobId, event: "job_failed", detail: `cancel failed: ${String(err)}` });
       return false;
     }
 
@@ -139,9 +162,9 @@ export class WorkerRuntime {
     if (pid) {
       const exited = await waitForProcessExit(pid, 10_000);
       if (!exited) {
-        log.warn("worker job did not exit after graceful cancel, forcing kill", { jobId, pid });
+        log.warn("worker job did not exit after graceful cancel, forcing kill", { jobId: exec.jobId, pid });
         terminateSpawnedProcessTree(pid, true);
-        jobService.recordEvent({ workId, jobId, event: "job_cancel_requested", detail: `force kill pid=${pid}` });
+        jobService.recordEvent({ workId, jobId: exec.jobId, event: "job_cancel_requested", detail: `force kill pid=${pid}` });
       }
     }
     return true;
@@ -193,6 +216,7 @@ export class WorkerRuntime {
     const controller = new AbortController();
     const startedAt = Date.now();
     const work = jobService.getWork(job.workId);
+    this.inFlight.add(jobId);
     try {
       // 先解析 backend（冷解析可能耗时秒级），再准备工作区——避免解析期间占用 repo 写租约
       try {
@@ -264,11 +288,48 @@ export class WorkerRuntime {
         }
       }, 30_000);
 
+      // backend 一旦产出原生 session ID，就保存只读 transcript 引用。
+      // inspectSessionTranscript 明确禁止等待/终止进程，因此可在 Job 运行中调用。
+      let sessionReferenceCaptured = false;
+      let sessionReferenceCaptureInFlight: Promise<void> | undefined;
+      const captureSessionReference = async (): Promise<void> => {
+        if (sessionReferenceCaptured || !jobBackend?.inspectSessionTranscript || !session) return;
+        if (sessionReferenceCaptureInFlight) return sessionReferenceCaptureInFlight;
+        sessionReferenceCaptureInFlight = (async () => {
+          try {
+            const transcript = await jobBackend.inspectSessionTranscript!(session!);
+            if (!transcript.agentSessionId || !transcript.sources?.length) return;
+            const updated = jobService.recordJobSession(jobId, {
+              backendSessionId: transcript.agentSessionId,
+              backendType: transcript.backend,
+              sources: transcript.sources,
+            });
+            sessionReferenceCaptured = !!updated;
+          } catch {
+            // session ID / 原生日志通常在子进程启动后才出现；下次轮询再试。
+          }
+        })();
+        try {
+          await sessionReferenceCaptureInFlight;
+        } finally {
+          sessionReferenceCaptureInFlight = undefined;
+        }
+      };
+      const sessionReferenceTimer = setInterval(() => {
+        void captureSessionReference();
+      }, 1_000);
+
       let response;
       try {
         response = await jobBackend.sendMessage(session, prompt);
       } finally {
         clearInterval(heartbeat);
+        clearInterval(sessionReferenceTimer);
+        // 短任务可能在首次 1 秒轮询前结束；失败/取消也保留已产生的日志。
+        // 第一次可能只是在等待一个早于 session ID 就绪的轮询，需再次主动捕获。
+        for (let attempt = 0; attempt < 2 && !sessionReferenceCaptured; attempt++) {
+          await captureSessionReference();
+        }
       }
 
       const record: JobExecutionRecord = {
@@ -299,6 +360,7 @@ export class WorkerRuntime {
       };
       jobService.failJob(jobId, record);
     } finally {
+      this.inFlight.delete(jobId);
       this.running.delete(jobId);
       if (session && jobBackend) {
         try {

@@ -1,8 +1,8 @@
 /**
  * nbt worker — 主 Agent 派工与验收的 Worker CLI（方案 §7.1）。
  *
- * 第一版说明：
- * - CLI 直接打开 NIUBOT_DB_PATH 使用 SqliteJobService（本地 API 化列入后续阶段）。
+ * 实现边界：
+ * - 查询使用只读数据库连接；所有 Worker 状态写入通过本地 IPC 交给 Pipeline。
  * - 身份来自 Engine 注入的环境变量（NIUBOT_BOT_ID / NIUBOT_CHAT_ID / NIUBOT_USER_ID），
  *   不接受命令行参数覆盖。
  * - Work/Job 内容使用自由 Markdown 文件，避免复杂 shell 转义。
@@ -11,14 +11,15 @@
 
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import path from "node:path";
 
 import type Database from "better-sqlite3";
 
-import { findLatestUserPlatformMsgId } from "../messages/store.js";
+import { localApiRequest } from "../local-api/client.js";
 import { SqliteJobService } from "../worker/job-service.js";
-import { WorkerProfileRegistry } from "../worker/profiles.js";
 import { TeamConfigStore } from "../worker/team-config.js";
-import type { WorkVisibility } from "../worker/types.js";
+import type { WorkerAgentCommand, WorkerAgentCommandResult } from "../worker/agent-command.js";
+import { resolveSendEndpoint } from "./send.js";
 
 interface WorkerCliContext {
   db: Database.Database;
@@ -27,6 +28,35 @@ interface WorkerCliContext {
   userId: string;
   chatType: string;
   workDir: string;
+}
+
+export type WorkerCommandExecutor = (
+  chatId: string,
+  command: WorkerAgentCommand,
+) => Promise<WorkerAgentCommandResult>;
+
+async function executeViaPipeline(chatId: string, command: WorkerAgentCommand): Promise<WorkerAgentCommandResult> {
+  let response;
+  try {
+    response = await localApiRequest(resolveSendEndpoint(), "/worker", {
+      method: "POST",
+      body: { chat_id: chatId, command },
+      timeoutMs: 30_000,
+    });
+  } catch (error) {
+    throw new Error(`无法连接 NiuBot Pipeline: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (response.statusCode >= 400) {
+    let detail = response.body;
+    try {
+      const parsed = JSON.parse(response.body) as { error?: string };
+      detail = parsed.error ?? detail;
+    } catch { /* 保留原始响应 */ }
+    throw new Error(`Pipeline 拒绝 Worker 操作 (${response.statusCode}): ${detail}`);
+  }
+  const result = JSON.parse(response.body) as WorkerAgentCommandResult;
+  if (!result || typeof result.output !== "string") throw new Error("Pipeline 返回了无效的 Worker 响应");
+  return result;
 }
 
 function fail(message: string): never {
@@ -48,9 +78,17 @@ function idempotencyKey(prefix: string, text: string, chatId: string): string {
   return `${chatId}:${prefix}:${createHash("sha256").update(normalized).digest("hex").slice(0, 32)}`;
 }
 
-function printWork(service: SqliteJobService, workId: string): void {
+function assertReadableWork(ctx: WorkerCliContext, service: SqliteJobService, workId: string) {
   const work = service.getWork(workId);
   if (!work) fail(`Work 不存在: ${workId}`);
+  if (work.sourceChatId !== ctx.chatId || (work.visibility === "private" && work.ownerUserId !== ctx.userId)) {
+    fail(`无权读取 Work: ${workId}`);
+  }
+  return work;
+}
+
+function printWork(ctx: WorkerCliContext, service: SqliteJobService, workId: string): void {
+  const work = assertReadableWork(ctx, service, workId);
   const jobs = service.listJobs(workId);
   console.log(`Work: ${work.id} (${work.status})`);
   console.log(`  需求: ${work.request.slice(0, 120)}${work.request.length > 120 ? "…" : ""}`);
@@ -60,24 +98,14 @@ function printWork(service: SqliteJobService, workId: string): void {
   }
 }
 
-function handleWorkCreate(ctx: WorkerCliContext, service: SqliteJobService, args: string[]): void {
+async function handleWorkCreate(ctx: WorkerCliContext, execute: WorkerCommandExecutor, args: string[]): Promise<void> {
   const fileIndex = args.indexOf("--file");
   const content = readFileOrFail(fileIndex >= 0 ? args[fileIndex + 1] : undefined, "work 文件");
-  const visibility: WorkVisibility = ctx.chatType === "group" ? "public" : "private";
-  // 触发消息：当前 chat 最近一条用户消息的平台侧 ID，验收回合回复时引用它（关联原始问题）。
-  // 限定发送者 = 触发派工的用户（群聊中避免选到其他成员的消息）。
-  const work = service.createWork({
-    botId: ctx.botId,
-    ownerUserId: ctx.userId,
-    sourceChatId: ctx.chatId,
-    visibility,
-    request: content.trim(),
-    triggerMsgPlatformId: findLatestUserPlatformMsgId(ctx.db, ctx.chatId, ctx.userId),
-  });
-  console.log(work.id);
+  const result = await execute(ctx.chatId, { type: "work.create", request: content.trim() });
+  console.log(result.output);
 }
 
-function handleJobCreate(ctx: WorkerCliContext, service: SqliteJobService, args: string[]): void {
+async function handleJobCreate(ctx: WorkerCliContext, execute: WorkerCommandExecutor, args: string[]): Promise<void> {
   const workId = args.find((a, i) => args[i - 1] === "--work");
   if (!workId) fail("job create 需要 --work <work-id>");
   const workerId = args.find((a, i) => args[i - 1] === "--worker");
@@ -96,23 +124,21 @@ function handleJobCreate(ctx: WorkerCliContext, service: SqliteJobService, args:
     .filter((a): a is string => !!a)
     .flatMap((v) => v.split(",").map((s) => s.trim()).filter(Boolean));
 
-  const registry = new WorkerProfileRegistry();
-  if (!registry.get(workerId)) {
-    fail(`未知 Worker Profile: ${workerId}（可用: ${registry.list().map((p) => p.id).join(", ")}）`);
-  }
-
-  const job = service.createJob(
-    {
+  const result = await execute(ctx.chatId, {
+      type: "job.create",
       workId,
       workerProfileId: workerId,
       prompt: prompt.trim(),
       workdir,
-      workspacePolicy: workspacePolicy as never,
+      workspacePolicy: workspacePolicy as "read_only" | "scratch" | "git_worktree" | undefined,
       dependsOn: dependsOn.length > 0 ? dependsOn : undefined,
-    },
-    idempotencyKey("job", prompt, ctx.chatId),
-  );
-  console.log(job.id);
+      idempotencyKey: idempotencyKey(
+        `job:${workId}:${workerId}:${workspacePolicy ?? "default"}:${dependsOn.join(",")}:${path.resolve(workdir)}`,
+        prompt,
+        ctx.chatId,
+      ),
+    });
+  console.log(result.output);
 }
 
 function handleList(ctx: WorkerCliContext, service: SqliteJobService, args: string[]): void {
@@ -120,32 +146,37 @@ function handleList(ctx: WorkerCliContext, service: SqliteJobService, args: stri
   const status = statusIndex >= 0 ? args[statusIndex + 1] : undefined;
   const works = service.listWorks({
     botId: ctx.botId,
-    ownerUserId: ctx.userId,
+    sourceChatId: ctx.chatId,
     status: status as never,
-  });
+  }).filter((work) => work.visibility === "public" || work.ownerUserId === ctx.userId);
   if (works.length === 0) {
     console.log("(无 Work)");
     return;
   }
   for (const work of works) {
-    printWork(service, work.id);
+    printWork(ctx, service, work.id);
   }
 }
 
-function handleGet(service: SqliteJobService, id: string): void {
+function handleGet(ctx: WorkerCliContext, service: SqliteJobService, id: string): void {
   if (id.startsWith("wrk_")) {
-    printWork(service, id);
+    printWork(ctx, service, id);
     return;
   }
   if (id.startsWith("job_")) {
     const job = service.getJob(id);
     if (!job) fail(`Job 不存在: ${id}`);
-    const work = service.getWork(job!.workId);
+    const work = assertReadableWork(ctx, service, job!.workId);
     console.log(`Job: ${job!.id} (${job!.status})`);
     console.log(`  Worker: ${job!.workerProfileId}`);
     console.log(`  Work: ${job!.workId}${work ? ` (${work.request.slice(0, 80)})` : ""}`);
     console.log(`  Prompt: ${job!.prompt.slice(0, 200)}`);
     console.log(`  工作目录: ${job!.workdir}`);
+    if (job!.backendSessionId && job!.transcriptSourcesJson !== "[]") {
+      console.log(`  Session 日志: nbt sessions get ${job!.id}`);
+    } else if (job!.status === "running" || job!.status === "cancelling") {
+      console.log("  Session 日志: 正在启动，暂未就绪");
+    }
     console.log(`  最终文本: ${(job!.responseText ?? "(无)").slice(0, 2000)}`);
     if (job!.error) console.log(`  错误: ${job!.error}`);
     return;
@@ -153,45 +184,38 @@ function handleGet(service: SqliteJobService, id: string): void {
   fail(`无法识别的 ID: ${id}（work 以 wrk_ 开头，job 以 job_ 开头）`);
 }
 
-function handleCancel(service: SqliteJobService, id: string): void {
-  if (id.startsWith("wrk_")) {
-    const work = service.cancelWork(id);
-    if (!work) fail(`Work 不存在: ${id}`);
-    console.log(`Work ${id} 已请求取消（cancelling），运行中 Job 确认退出后进入 cancelled`);
-    return;
-  }
-  if (id.startsWith("job_")) {
-    const job = service.requestCancel(id);
-    if (!job) fail(`Job 不存在或不可取消: ${id}`);
-    console.log(`Job ${id} 已请求取消（cancelling），确认退出后进入 cancelled`);
-    return;
-  }
-  fail(`无法识别的 ID: ${id}`);
+async function handleCancel(ctx: WorkerCliContext, execute: WorkerCommandExecutor, id: string): Promise<void> {
+  const result = await execute(ctx.chatId, { type: "cancel", id });
+  console.log(result.output);
 }
 
-function handleComplete(ctx: WorkerCliContext, service: SqliteJobService, args: string[]): void {
+async function handleComplete(ctx: WorkerCliContext, execute: WorkerCommandExecutor, args: string[]): Promise<void> {
+  if (!args.includes("--force")) {
+    fail("complete 仅用于人工修复异常悬挂的 Work，确认后请加 --force");
+  }
   const workId = args.find((a, i) => args[i - 1] === "--work");
   if (!workId) fail("complete 需要 --work <work-id>");
   const fileIndex = args.indexOf("--file");
   const conclusion = readFileOrFail(fileIndex >= 0 ? args[fileIndex + 1] : undefined, "结论文件");
-  const work = service.completeWork(workId, { conclusion: conclusion.trim() });
-  if (!work) fail(`Work 不存在或不可完成: ${workId}`);
-  console.log(`Work ${workId} 已完成`);
+  const result = await execute(ctx.chatId, {
+    type: "work.complete_recovery",
+    workId,
+    conclusion: conclusion.trim(),
+    force: true,
+  });
+  console.log(result.output);
 }
 
 /** nbt worker config：主 Agent 生成配置草案（管理员 /worker config 确认应用）。 */
-function handleConfig(ctx: WorkerCliContext, args: string[]): void {
+async function handleConfig(ctx: WorkerCliContext, execute: WorkerCommandExecutor, args: string[]): Promise<void> {
   const sub = args[0];
   const store = new TeamConfigStore(ctx.db, ctx.botId);
   if (sub === "draft") {
     const fileIndex = args.indexOf("--file");
     const yamlText = readFileOrFail(fileIndex >= 0 ? args[fileIndex + 1] : undefined, "配置 yaml");
     const baseVersion = args.find((a, i) => args[i - 1] === "--base") ?? store.getActiveConfig().version;
-    const result = store.createDraft(yamlText, ctx.userId, baseVersion);
-    if (!result.ok) {
-      fail(result.error);
-    }
-    console.log(result.draftId);
+    const result = await execute(ctx.chatId, { type: "config.draft", yamlText, baseVersion });
+    console.log(result.output);
     return;
   }
   if (sub === "show") {
@@ -218,23 +242,25 @@ function handleConfig(ctx: WorkerCliContext, args: string[]): void {
   if (sub === "apply") {
     const draftId = args[1];
     if (!draftId) fail("config apply 需要 <draft-id>");
-    const result = store.applyDraft(draftId, ctx.userId);
-    if (!result.ok) fail(result.error);
-    console.log(`applied: ${result.version}`);
+    const result = await execute(ctx.chatId, { type: "config.apply", draftId });
+    console.log(result.output);
     return;
   }
   if (sub === "rollback") {
     const version = args[1];
     if (!version) fail("config rollback 需要 <version>");
-    const result = store.rollback(version, ctx.userId);
-    if (!result.ok) fail(result.error);
-    console.log(`rolled back to ${version}; active: ${result.version}`);
+    const result = await execute(ctx.chatId, { type: "config.rollback", version });
+    console.log(result.output);
     return;
   }
   fail("config 子命令仅支持 draft --file <yaml> | show | drafts | apply <draft-id> | rollback <version>");
 }
 
-export function handleWorker(db: Database.Database, args: string[]): void {
+export async function handleWorker(
+  db: Database.Database,
+  args: string[],
+  execute: WorkerCommandExecutor = executeViaPipeline,
+): Promise<void> {
   const sub = args[0];
   if (sub === "--help" || sub === "help" || sub === undefined) {
     console.log(`nbt worker — Worker 派工与验收
@@ -244,8 +270,9 @@ export function handleWorker(db: Database.Database, args: string[]): void {
   nbt worker job create --work <id> --worker <profile> --file <job.md> [--workdir <dir>] [--workspace read_only|scratch|git_worktree] [--depends-on <job-id>[,<job-id>...]]
   nbt worker list [--status <status>]           列出当前会话的 Work 和 Job
   nbt worker get <work-or-job-id>               查看详情
+  nbt sessions get <job-id>                     查看 Worker 运行中或已结束的 session 日志
   nbt worker cancel <work-or-job-id>            取消 Work 或 Job
-  nbt worker complete --work <id> --file <result.md>   主 Agent 验收完成
+  nbt worker complete --force --work <id> --file <result.md>   人工修复异常悬挂的 Work
   nbt worker config draft --file <yaml> [--base <v>]   生成配置草案（主 Agent 用）
   nbt worker config drafts                            列出待确认草案
   nbt worker config show                              查看当前配置
@@ -257,7 +284,8 @@ Work/Job 内容使用自由 Markdown 文件；CLI 不接受 --user/--chat 参数
     return;
   }
 
-  const botId = process.env["NIUBOT_BOT_ID"] ?? "unknown";
+  // Worker 表按 Bot 配置 ID（bot name）分区；NIUBOT_BOT_ID 是平台机器人 ID，不能混用。
+  const botId = process.env["NIUBOT_BOT_NAME"] ?? process.env["NIUBOT_BOT_ID"] ?? "unknown";
   const chatId = process.env["NIUBOT_CHAT_ID"];
   const userId = process.env["NIUBOT_USER_ID"];
   if (!chatId || !userId) {
@@ -275,11 +303,11 @@ Work/Job 内容使用自由 Markdown 文件；CLI 不接受 --user/--chat 参数
 
   switch (sub) {
     case "work":
-      if (args[1] === "create") handleWorkCreate(ctx, service, args.slice(2));
+      if (args[1] === "create") await handleWorkCreate(ctx, execute, args.slice(2));
       else fail("work 子命令仅支持 create");
       break;
     case "job":
-      if (args[1] === "create") handleJobCreate(ctx, service, args.slice(2));
+      if (args[1] === "create") await handleJobCreate(ctx, execute, args.slice(2));
       else fail("job 子命令仅支持 create");
       break;
     case "list":
@@ -288,17 +316,17 @@ Work/Job 内容使用自由 Markdown 文件；CLI 不接受 --user/--chat 参数
       break;
     case "get":
       if (!args[1]) fail("get 需要 <id>");
-      handleGet(service, args[1]!);
+      handleGet(ctx, service, args[1]!);
       break;
     case "cancel":
       if (!args[1]) fail("cancel 需要 <id>");
-      handleCancel(service, args[1]!);
+      await handleCancel(ctx, execute, args[1]!);
       break;
     case "complete":
-      handleComplete(ctx, service, args.slice(1));
+      await handleComplete(ctx, execute, args.slice(1));
       break;
     case "config":
-      handleConfig(ctx, args.slice(1));
+      await handleConfig(ctx, execute, args.slice(1));
       break;
     default:
       fail(`未知子命令: ${sub}（用 nbt worker help 查看用法）`);

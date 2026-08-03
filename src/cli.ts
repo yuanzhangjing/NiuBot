@@ -131,6 +131,16 @@ function openDb(): Database.Database {
   }
 }
 
+/** Worker 的写操作走 Pipeline IPC；本地连接只供 list/get/config show 等查询。 */
+function openWorkerReadDb(): Database.Database {
+  try {
+    return new Database(DB_PATH, { readonly: true, fileMustExist: true });
+  } catch {
+    console.error(`Error: cannot open worker database at ${DB_PATH}`);
+    process.exit(1);
+  }
+}
+
 // ─── Main ──────────────────────────────────────────────────
 
 async function main(): Promise<void> {
@@ -160,7 +170,7 @@ async function main(): Promise<void> {
       handleTask(args.slice(1), WORK_DIR, CHAT_ID, CHAT_TYPE, USER_ID, parseArgs);
       break;
     case "worker":
-      handleWorker(openDb(), args.slice(1));
+      await handleWorker(openWorkerReadDb(), args.slice(1));
       break;
     case "system-rules":
       handleSystemRules(args.slice(1));
@@ -426,7 +436,7 @@ Usage: nbt <command> <subcommand> [options]
 Commands:
   user-memory   add|list|get|update|del     Manage user memories
   messages      list|search|get             Query message history
-  sessions      list|search|get             Query archived backend transcripts
+  sessions      list|search|get             Query archived sessions or live Worker transcripts
   contacts      list-users|list-chats|get-user|get-chat|set-name
                Manage users and chats directory
   send          <text>                      Send text, card, or file

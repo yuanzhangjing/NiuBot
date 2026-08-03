@@ -219,4 +219,44 @@ describe("CliAgentBackend diagnostic logging", () => {
       data: expect.objectContaining({ sessionId: session.id }),
     }));
   });
+
+  test("truncates oversized stdout instead of throwing RangeError", async () => {
+    const backend = new (class extends ParsedOutputBackend {
+      constructor() {
+        super({ text: "ok" });
+      }
+
+      buildInput(_session: BaseCliSession, _message: string): { args: string[]; stdin?: string } {
+        return {
+          // 先输出 40MB 数据（超过 32MB 截断阈值），最后一行输出 completion 标记
+          args: ["-e", `for (let i = 0; i < 400; i++) { process.stdout.write('x'.repeat(100 * 1024) + '\\n'); } process.stdout.write('DONE\\n');`],
+        };
+      }
+
+      protected getExecHooks(): ExecHooks {
+        return {
+          isComplete: (line) => line === "DONE",
+        };
+      }
+    })();
+    const entries: Array<{ level: string; msg: string; data?: Record<string, unknown> }> = [];
+    (backend as any).log = {
+      debug: (msg: string, data?: Record<string, unknown>) => entries.push({ level: "debug", msg, data }),
+      info: (msg: string, data?: Record<string, unknown>) => entries.push({ level: "info", msg, data }),
+      warn: (msg: string, data?: Record<string, unknown>) => entries.push({ level: "warn", msg, data }),
+      error: (msg: string, data?: Record<string, unknown>) => entries.push({ level: "error", msg, data }),
+    };
+    const session = await backend.createSession({ workingDirectory: process.cwd() });
+
+    await expect(backend.sendMessage(session as AgentSession, "ping")).resolves.toMatchObject({ text: "ok" });
+    expect(entries).toContainEqual(expect.objectContaining({
+      level: "warn",
+      msg: "stdout exceeded limit, truncating",
+    }));
+    expect(entries).toContainEqual(expect.objectContaining({
+      level: "info",
+      msg: "completion detected, resolving immediately",
+      data: expect.objectContaining({ stdoutTruncated: true }),
+    }));
+  });
 });

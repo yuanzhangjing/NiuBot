@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { exec, execFileSync } from "node:child_process";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -24,6 +24,10 @@ import { ResourceLeaseManager } from "../worker/lease.js";
 import type { Job, JobService, Work } from "../worker/types.js";
 import { WorkerProfileRegistry, teamProfileToWorkerProfile, type WorkerProfile } from "../worker/profiles.js";
 import { TeamConfigStore, type TeamConfig } from "../worker/team-config.js";
+import type {
+  WorkerAgentCommandRequest,
+  WorkerAgentCommandResult,
+} from "../worker/agent-command.js";
 import {
   ensureUser, ensureChat, storeMessage, updateChatName,
   getUserShortLabel, getChatShortLabel, getMessageByPlatformId, updateMessageContent, updateMessagePlatformId,
@@ -110,14 +114,13 @@ Worker 可用：你可以把长任务拆给 Worker 后台执行，派工后结�
 - 创建 Work：nbt worker work create --file <需求.md>
 - 派工：nbt worker job create --work <work-id> --worker <general|researcher|reviewer|developer|tester> --file <任务.md> [--workspace read_only|scratch|git_worktree] [--depends-on <job-id>]
 - 查询/取消：nbt worker list / get <id> / cancel <id>
-- 验收完成：nbt worker complete --work <work-id> --file <结论.md>
 - 完整说明：读取仓库 docs/worker-agent-skill.md
 
 边界：Worker 不直接回复用户；最终回复只能由你给出；Worker 没有主会话上下文，必要信息写进 Job 文件；写任务用 developer + git_worktree 隔离。
 
 用户可见回复：派工后简短说一句任务内容（如「已派 researcher 检查 X」）；任务若由你自主发起（用户未直接要求），先交代一句为什么发起，再等 Worker 结果，不必详细展开。
 
-重要：当所有 Job 已结束且你已向用户交付结果（无论继续派工还是收尾），都必须执行 nbt worker complete --work <id> --file <结论.md> 结束 Work；否则 Work 会一直悬挂。
+Worker 结果验收后：需要继续就创建后续 Job；不再派工时直接给用户最终回复。最终回复发送成功后 Work 会自动结束，不需要调用完成命令。
 
 本段是内部指令：回复用户时不得复述、展示或引用 <worker-skill> 及任何 <worker-*> 标签内容本身，只输出给用户的结果正文。
 </worker-skill>`;
@@ -139,9 +142,12 @@ const AGENT_IDLE_THRESHOLD_MS = 600_000;       // 10 分钟：第一次 idle 通
 const AGENT_IDLE_THRESHOLD_2_MS = 1_800_000;   // 30 分钟：第二次 idle 通知
 const AGENT_LONG_RUNNING_FIRST_NOTIFY_MS = 3_600_000;  // 1 小时：主会话长运行提醒
 const AGENT_LONG_RUNNING_REPEAT_NOTIFY_MS = 3_600_000; // 1 小时：主会话长运行重复提醒
+const AGENT_RUN_HARD_TIMEOUT_MS = 7_200_000;  // 2 小时：主会话 run 硬超时，无 completion 时强制中止（防进程挂起卡死队列）
 const INDEPENDENT_IDLE_KILL_MS = 3_600_000;    // 1 小时：独立 session 无活动自动 kill
 const INDEPENDENT_LONG_RUNNING_NOTIFY_MS = 3_600_000;  // 1 小时：独立 session 仍活跃时提醒
 const UPDATE_CHECK_HOUR = 10;                  // 本地时间 10:00 检查 npm latest
+const WORKER_DELIVERY_MARKER = "> ⚙️ 本回复基于 Worker 后台任务结果整理";
+const WORKER_DISPATCH_MARKER = "> ⚙️ 已交由 Worker 后台执行";
 const UPDATE_NOTIFY_END_HOUR = 18;             // 10:00-18:00 启动时允许立即通知
 const STARTUP_PLATFORM_TIMEOUT_MS = 5_000;      // 平台启动探测超时后降级继续启动
 
@@ -201,6 +207,14 @@ interface PendingTransitionMessage {
   recoveredMessageId?: number;
   resolve: () => void;
   reject: (error: unknown) => void;
+}
+
+interface ActiveWorkerAgentCommandContext {
+  runId: string;
+  userId: string;
+  chatType: "p2p" | "group";
+  continuationTurn: boolean;
+  createdWorkIds: string[];
 }
 
 type SessionEndStatus = "archived" | "archive_failed" | "discarded";
@@ -306,7 +320,7 @@ export class Pipeline {
   /** Watchdog 定时器 */
   private watchdogTimer: ReturnType<typeof setInterval> | null = null;
 
-  /** 已加载的 Worker 配置版本（watchdog 检测 CLI 侧 apply/rollback 变更用） */
+  /** 已加载的 Worker 配置版本（Pipeline 写入后立即刷新，watchdog 负责异常恢复兜底） */
   private lastTeamConfigVersion?: string;
 
   /** 更新检查定时器 */
@@ -332,6 +346,9 @@ export class Pipeline {
   private workerRuntime?: WorkerRuntime;
   private workerScheduler?: WorkerScheduler;
   private workerLeaseManager?: ResourceLeaseManager;
+
+  /** 仅在主 Agent 的 runAgent 调用期间存在；Worker 写命令必须绑定到这里的活动回合。 */
+  private activeWorkerAgentCommands = new Map<string, ActiveWorkerAgentCommandContext>();
 
   constructor(
     db: Database.Database,
@@ -392,13 +409,6 @@ export class Pipeline {
     this.queue.onProcess((runId, chatId, mergedText, messages, signal) => (
       this.process(chatId, mergedText, messages, signal, runId)
     ));
-    // 用户消息优先：抢占的 Continuation 释放认领，后续由 Scheduler 重新投递
-    this.queue.onContinuationsPreempted((chatId, ids) => {
-      for (const id of ids) {
-        this.workerConfig?.jobService.releaseContinuationClaim(id);
-      }
-      this.log.info("worker continuations released after user preemption", { chatId, continuationIds: ids });
-    });
     this.queue.onDiscard((messages) => {
       this.transport.discardInboundMessages?.(
         messages.map((message) => message.dbMsgId).filter((id): id is number => id != null),
@@ -475,8 +485,8 @@ export class Pipeline {
         leaseManager: this.workerLeaseManager,
         isSchedulingEnabled: () => (this.workerConfig?.teamConfigStore?.isEnabled() ?? true),
       });
-      this.workerScheduler.start();
       this.recoverInterruptedWorkerJobs();
+      this.workerScheduler.start();
     }
     if (this.autoUpdateNotificationsEnabled) {
       if (this.isUpdateNotificationWindow(new Date())) {
@@ -580,9 +590,9 @@ export class Pipeline {
     this.chatSessions.clear();
   }
 
-  /** 是否有正在处理的 chat */
+  /** 是否有正在处理的主会话或 Worker Job（优雅关闭等待用） */
   hasBusyChats(): boolean {
-    return this.queue.hasBusyChats();
+    return this.queue.hasBusyChats() || (this.workerRuntime?.runningCount() ?? 0) > 0;
   }
 
   /** 检查用户是否为 admin 或 owner */
@@ -593,6 +603,173 @@ export class Pipeline {
   /** 检查用户是否为 owner */
   isOwner(userId: string): boolean {
     return this.adminRoles.get(userId) === "owner";
+  }
+
+  /**
+   * 主 Agent 的 Worker 写入口。请求只在对应 chat 的活动 Agent 回合内受理；
+   * CLI 不再直接修改 Worker 表。
+   */
+  async executeWorkerAgentCommand(request: WorkerAgentCommandRequest): Promise<WorkerAgentCommandResult> {
+    const context = this.activeWorkerAgentCommands.get(request.chatId);
+    const activeRun = this.runtimeState.getActiveRun(request.chatId);
+    if (!context || !activeRun || activeRun.runId !== context.runId || activeRun.stage !== "agent_running") {
+      throw new Error("Worker 写操作必须在当前主会话的活动 Agent 回合内执行");
+    }
+    const service = this.workerConfig?.jobService;
+    const teamConfig = this.workerConfig?.teamConfigStore;
+    if (!service || !teamConfig) throw new Error("当前 Bot 未启用 Worker");
+
+    const requireWorkAccess = (workId: string): Work => {
+      const work = service.getWork(workId);
+      if (!work) throw new Error(`Work 不存在: ${workId}`);
+      if (work.sourceChatId !== request.chatId) throw new Error(`Work 不属于当前会话: ${workId}`);
+      if (work.visibility === "private" && work.ownerUserId !== context.userId) {
+        throw new Error(`无权操作 Work: ${workId}`);
+      }
+      return work;
+    };
+    const requireAdmin = () => {
+      if (!this.isAdmin(context.userId)) throw new Error("该 Worker 操作仅管理员可用");
+    };
+
+    switch (request.command.type) {
+      case "work.create": {
+        if (context.continuationTurn) throw new Error("验收回合不能新建 Work；需要继续时请在原 Work 下追加 Job");
+        if (!teamConfig.isEnabled()) throw new Error("Worker 当前已暂停，不能创建 Work");
+        const content = request.command.request.trim();
+        if (!content) throw new Error("Work 需求不能为空");
+        const existing = context.createdWorkIds
+          .map((workId) => service.getWork(workId))
+          .find((work) => work?.status === "active" && work.request === content);
+        if (existing) return { output: existing.id };
+        const work = service.createWork({
+          botId: this.botIdentity.name,
+          ownerUserId: context.userId,
+          sourceChatId: request.chatId,
+          visibility: context.chatType === "group" ? "public" : "private",
+          request: content,
+          triggerMsgPlatformId: activeRun.replyToPlatformMsgId
+            ?? findLatestUserPlatformMsgId(this.db, request.chatId, context.userId),
+        });
+        context.createdWorkIds.push(work.id);
+        return { output: work.id };
+      }
+      case "job.create": {
+        if (!teamConfig.isEnabled()) throw new Error("Worker 当前已暂停，不能创建 Job");
+        requireWorkAccess(request.command.workId);
+        const profile = this.workerConfig.registry.get(request.command.workerProfileId);
+        if (!profile) {
+          throw new Error(`未知 Worker Profile: ${request.command.workerProfileId}（可用: ${this.workerConfig.registry.list().map((item) => item.id).join(", ")}）`);
+        }
+        const requestedPolicy = request.command.workspacePolicy ?? profile.access;
+        const accessRank = { read_only: 0, scratch: 1, git_worktree: 2 } as const;
+        if (typeof requestedPolicy !== "string" || !Object.hasOwn(accessRank, requestedPolicy)) {
+          throw new Error(`未知 Worker 工作区策略: ${String(requestedPolicy)}`);
+        }
+        if (accessRank[requestedPolicy] > accessRank[profile.access]) {
+          throw new Error(`Worker ${profile.id} 只允许 ${profile.access}，不能使用 ${requestedPolicy}`);
+        }
+        const requestedWorkdir = path.resolve(request.command.workdir ?? this.workingDirectory);
+        let workspaceRootReal: string;
+        let requestedWorkdirReal: string;
+        try {
+          workspaceRootReal = realpathSync(this.workingDirectory);
+          requestedWorkdirReal = realpathSync(requestedWorkdir);
+        } catch {
+          throw new Error("Worker 工作目录不存在或无法访问");
+        }
+        const relative = path.relative(workspaceRootReal, requestedWorkdirReal);
+        if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+          throw new Error("Worker 工作目录必须位于当前 workspace 内");
+        }
+        const prompt = request.command.prompt.trim();
+        if (!prompt) throw new Error("Job 内容不能为空");
+        if (typeof request.command.idempotencyKey !== "string" || !request.command.idempotencyKey.trim()) {
+          throw new Error("Job 幂等键不能为空");
+        }
+        const job = service.createJob({
+          workId: request.command.workId,
+          workerProfileId: profile.id,
+          prompt,
+          workdir: requestedWorkdirReal,
+          workspacePolicy: requestedPolicy,
+          dependsOn: request.command.dependsOn,
+        }, request.command.idempotencyKey);
+        this.workerScheduler?.kick();
+        return { output: job.id };
+      }
+      case "cancel": {
+        const id = request.command.id;
+        const affectedJobs: Job[] = [];
+        if (id.startsWith("wrk_")) {
+          requireWorkAccess(id);
+          const work = service.cancelWork(id);
+          if (!work) throw new Error(`Work 不存在: ${id}`);
+          affectedJobs.push(...service.listJobs(id).filter((job) => job.status === "cancelling"));
+        } else if (id.startsWith("job_")) {
+          const before = service.getJob(id);
+          if (!before) throw new Error(`Job 不存在: ${id}`);
+          requireWorkAccess(before.workId);
+          const job = service.requestCancel(id);
+          if (!job) throw new Error(`Job 不可取消: ${id}`);
+          affectedJobs.push(job);
+        } else {
+          throw new Error(`无法识别的 ID: ${id}`);
+        }
+        for (const job of affectedJobs) {
+          if (this.workerRuntime?.inspect(job.id)) {
+            void this.workerRuntime.cancel(job.id, "agent_cancel").catch((error) => {
+              this.log.error("worker cancel request failed", { jobId: job.id, error: String(error) });
+            });
+          } else if (!job.startedAt) {
+            service.confirmCancelled(job.id, {
+              status: "cancelled",
+              responseText: "",
+              error: "cancelled before execution",
+              changedFiles: [],
+              artifacts: [],
+              startedAt: new Date().toISOString(),
+              endedAt: new Date().toISOString(),
+            });
+          }
+        }
+        const currentWork = id.startsWith("wrk_") ? service.getWork(id) : undefined;
+        return { output: currentWork?.status === "cancelled" ? `${id} 已取消` : `${id} 已请求取消` };
+      }
+      case "work.complete_recovery": {
+        requireAdmin();
+        if (request.command.force !== true) throw new Error("人工完成 Work 必须显式确认 force=true");
+        requireWorkAccess(request.command.workId);
+        const work = service.completeWork(request.command.workId, { conclusion: request.command.conclusion.trim() });
+        if (!work) throw new Error(`Work 不可完成: ${request.command.workId}`);
+        return { output: `Work ${request.command.workId} 已完成` };
+      }
+      case "config.draft": {
+        requireAdmin();
+        const result = teamConfig.createDraft(
+          request.command.yamlText,
+          context.userId,
+          request.command.baseVersion ?? teamConfig.getActiveConfig().version,
+        );
+        if (!result.ok) throw new Error(result.error);
+        return { output: result.draftId };
+      }
+      case "config.apply": {
+        requireAdmin();
+        const result = teamConfig.applyDraft(request.command.draftId, context.userId);
+        if (!result.ok) throw new Error(result.error);
+        this.reloadTeamConfigIfChanged();
+        return { output: `applied: ${result.version}` };
+      }
+      case "config.rollback": {
+        requireAdmin();
+        const result = teamConfig.rollback(request.command.version, context.userId);
+        if (!result.ok) throw new Error(result.error);
+        this.reloadTeamConfigIfChanged();
+        return { output: `rolled back to ${request.command.version}; active: ${result.version}` };
+      }
+    }
+    throw new Error(`未知 Worker 操作: ${String((request.command as { type?: unknown }).type)}`);
   }
 
   /** 获取 bot 用户 ID */
@@ -1074,7 +1251,18 @@ export class Pipeline {
     if (INTERRUPT_WORDS.has(trimmedText) && this.chatSessions.has(chatId)) {
       persistIncomingMessage("processing");
       this.log.info("interrupt word detected", { chatId, word: trimmedText });
-      this.cancelChat(chatId).catch(() => {});
+      const activeRun = this.runtimeState.getActiveRun(chatId);
+      const hasActiveRun = !!activeRun;
+      if (activeRun) {
+        this.markRuntimeRun(activeRun.runId, "stopped");
+      }
+      if (hasActiveRun && this.chatSessions.has(chatId)) {
+        this.cancelChat(chatId).catch(() => {});
+      }
+      // 与 /stop 一致：abort 队列信号，保证 agent 进程杀不掉时 run 也能退出、busy 恢复
+      if (hasActiveRun || this.queue.isBusy(chatId)) {
+        this.queue.cancel(chatId);
+      }
       const interruptText = "好的，已停止。";
       this.transport.sendText(msg.chatPlatformId, interruptText).then((pmid) => {
         this.storeBotResponse(chatId, interruptText, pmid);
@@ -1590,14 +1778,26 @@ export class Pipeline {
       }
     }
 
+    // Worker：只显示当前 chat 关联的非终态 Job 和待验收结果，避免跨会话泄露。
+    const workerStatus = this.buildWorkerStatusSection(chatId);
+    if (workerStatus) {
+      count += workerStatus.runningCount;
+      sections.push(workerStatus.content);
+    }
+
     if (count === 0 && sections.length === 0) {
       this.replyText(chatId, platformChatId, msgId, "当前没有正在执行的任务。");
       return;
     }
 
     const latestAgentOutputAt = this.getLatestAgentOutputAt(chatId);
-    const latestDataAge = latestAgentOutputAt !== undefined
-      ? formatRelativeAgeMs(latestAgentOutputAt)
+    const latestDataAt = latestAgentOutputAt === undefined
+      ? workerStatus?.latestUpdatedAt
+      : workerStatus?.latestUpdatedAt === undefined
+        ? latestAgentOutputAt
+        : Math.max(latestAgentOutputAt, workerStatus.latestUpdatedAt);
+    const latestDataAge = latestDataAt !== undefined
+      ? formatRelativeAgeMs(latestDataAt)
       : "无";
     const content = [
       `**最新数据:** ${latestDataAge}`,
@@ -1607,6 +1807,95 @@ export class Pipeline {
     this.transport.sendCard(platformChatId, header, content, undefined, msgId)
       .then((pmid) => { this.storeBotResponse(chatId, content, pmid); })
       .catch((err) => this.log.error("running list card send failed", { chatId, error: String(err) }));
+  }
+
+  /** 构建当前 chat 的 Worker 状态；查询失败时静默跳过，不影响 /status 主体。 */
+  private buildWorkerStatusSection(chatId: string): {
+    content: string;
+    runningCount: number;
+    latestUpdatedAt?: number;
+  } | undefined {
+    try {
+      const jobs = this.db.prepare(
+        `SELECT j.worker_profile_id, j.prompt, j.status, j.created_at, j.started_at, j.updated_at
+         FROM worker_jobs j
+         JOIN worker_works w ON w.id = j.work_id
+         WHERE w.bot_id = ? AND w.source_chat_id = ?
+           AND w.status IN ('active', 'cancelling')
+           AND j.status IN ('queued', 'running', 'cancelling')
+         ORDER BY CASE j.status WHEN 'running' THEN 0 WHEN 'cancelling' THEN 1 ELSE 2 END,
+                  j.created_at ASC`,
+      ).all(this.botIdentity.name, chatId) as Array<{
+        worker_profile_id: string;
+        prompt: string;
+        status: "queued" | "running" | "cancelling";
+        created_at: string;
+        started_at: string | null;
+        updated_at: string;
+      }>;
+      const continuations = this.db.prepare(
+        `SELECT c.work_id, c.status, c.created_at, c.claimed_at
+         FROM agent_continuations c
+         JOIN worker_works w ON w.id = c.work_id AND w.bot_id = c.bot_id
+         WHERE c.bot_id = ? AND w.bot_id = ? AND c.chat_id = ?
+           AND w.source_chat_id = c.chat_id
+           AND c.status IN ('pending', 'claimed')`,
+      ).all(this.botIdentity.name, this.botIdentity.name, chatId) as Array<{
+        work_id: string;
+        status: "pending" | "claimed";
+        created_at: string;
+        claimed_at: string | null;
+      }>;
+
+      const running = jobs.filter((job) => job.status === "running").length;
+      const queued = jobs.filter((job) => job.status === "queued").length;
+      const cancelling = jobs.filter((job) => job.status === "cancelling").length;
+      const continuationWorkStates = new Map<string, "pending" | "claimed">();
+      for (const continuation of continuations) {
+        const current = continuationWorkStates.get(continuation.work_id);
+        if (current !== "claimed") continuationWorkStates.set(continuation.work_id, continuation.status);
+      }
+      const waitingCount = [...continuationWorkStates.values()].filter((status) => status === "pending").length;
+      const reviewingCount = [...continuationWorkStates.values()].filter((status) => status === "claimed").length;
+      if (jobs.length === 0 && waitingCount === 0 && reviewingCount === 0) return undefined;
+
+      let latestUpdatedAt: number | undefined;
+      const considerLatest = (value: string | null) => {
+        if (!value) return;
+        const timestamp = parseSqlUtcDatetime(value);
+        if (timestamp !== undefined) latestUpdatedAt = latestUpdatedAt === undefined ? timestamp : Math.max(latestUpdatedAt, timestamp);
+      };
+      for (const job of jobs) considerLatest(job.updated_at);
+      for (const continuation of continuations) considerLatest(continuation.claimed_at ?? continuation.created_at);
+
+      const lines = [
+        "**⚙️ Worker**",
+        `运行中: **${running}** · 排队: **${queued}** · 取消中: **${cancelling}** · 等待验收: **${waitingCount}** · 验收中: **${reviewingCount}**`,
+      ];
+      const shownJobs = jobs.slice(0, 5);
+      for (const job of shownJobs) {
+        const statusLabel = job.status === "running" ? "运行中" : job.status === "cancelling" ? "取消中" : "排队";
+        const since = parseSqlUtcDatetime(job.started_at ?? job.created_at);
+        const elapsed = since === undefined ? "" : ` · ${formatUptime(Math.max(0, Date.now() - since))}`;
+        const promptText = stripInternalWorkerTags(job.prompt).replace(/\s+/g, " ").trim().slice(0, 80) || "(无任务描述)";
+        const profileId = escapeLarkMarkdownText(job.worker_profile_id.slice(0, 40));
+        const prompt = escapeLarkMarkdownText(promptText);
+        lines.push(`· ${profileId} · ${statusLabel}${elapsed} — ${prompt}`);
+      }
+      if (jobs.length > shownJobs.length) {
+        lines.push(`· 另有 ${jobs.length - shownJobs.length} 个 Worker Job`);
+      }
+      if (waitingCount > 0) {
+        lines.push(`· ${waitingCount} 个需求已产出结果，等待主会话验收`);
+      }
+      if (reviewingCount > 0) {
+        lines.push(`· ${reviewingCount} 个需求正在由主会话验收`);
+      }
+      return { content: lines.join("\n"), runningCount: running + cancelling, latestUpdatedAt };
+    } catch (err) {
+      this.log.warn("failed to build worker status", { chatId, error: String(err) });
+      return undefined;
+    }
   }
 
   private stopAllTasks(chatId: string, platformChatId: string, msgId?: string): void {
@@ -1904,6 +2193,37 @@ export class Pipeline {
     this.log.info("worker continuations dispatched", { chatId, continuationIds: claimed });
   }
 
+  /** Worker 事件游标；用来识别 Agent 回合内真正创建的 Job。 */
+  private getWorkerEventCursor(): number | undefined {
+    if (!this.workerConfig) return undefined;
+    try {
+      const row = this.db.prepare(
+        "SELECT COALESCE(MAX(id), 0) AS cursor FROM worker_events",
+      ).get() as { cursor: number };
+      return row.cursor;
+    } catch {
+      // fail-closed：游标读取失败时不做派工标识判断，避免把历史事件误算成本回合创建。
+      return undefined;
+    }
+  }
+
+  /** 游标之后，该 chat 是否创建了新 Job（空 Work 不算已经派工）。 */
+  private hasWorkerJobCreatedSince(chatId: string, cursor: number | undefined): boolean {
+    if (!this.workerConfig || cursor === undefined) return false;
+    try {
+      const row = this.db.prepare(
+        `SELECT 1
+         FROM worker_events e
+         JOIN worker_works w ON w.id = e.work_id AND w.bot_id = e.bot_id
+         WHERE e.id > ? AND e.event = 'job_created' AND w.source_chat_id = ?
+         LIMIT 1`,
+      ).get(cursor, chatId);
+      return !!row;
+    } catch {
+      return false;
+    }
+  }
+
   /** 崩溃恢复（§14）：Engine 重启后把 running Job 标记 interrupted（进程已随旧进程消失）。 */
   private recoverInterruptedWorkerJobs(): void {
     const jobService = this.workerConfig?.jobService;
@@ -1912,6 +2232,10 @@ export class Pipeline {
     const resetCount = jobService.resetClaimedContinuations();
     if (resetCount > 0) {
       this.log.info("worker continuations reset for redelivery after restart", { count: resetCount });
+    }
+    const emptyWorkCount = jobService.failOrphanedEmptyWorks("Engine 重启时发现 Work 尚未创建任何 Job，已自动结束。");
+    if (emptyWorkCount > 0) {
+      this.log.warn("orphaned empty worker works failed during restart recovery", { count: emptyWorkCount });
     }
     for (const job of jobService.listJobsByStatus("running")) {
       jobService.interruptJob(job.id);
@@ -2046,11 +2370,9 @@ ${jobParts.join("\n\n")}
     const intro =
       "以下是 Worker 的执行结果。你不是在回复用户消息，而是在处理内部续接事件。请：\n" +
       "1. 对照 Work 目标验收结果是否满足用户需求；\n" +
-      "2. 需要继续时，用 nbt worker 命令创建后续 Job；\n" +
-      "3. 认为需求已完成时，用 nbt worker complete 结束 Work；\n" +
-      "4. 最后给用户一条最终回复（简洁说明结果或需要用户补充什么）。\n" +
-      "如果这些结果需要用户输入才能继续，直接向用户提问，Work 保持进行中。\n" +
-      "重要：本回合结束时，如果所有 Job 已结束且你已向用户交付结果，必须执行 nbt worker complete --work <id> --file <结论.md> 结束 Work，不要让它悬挂。\n" +
+      "2. 需要继续就用 nbt worker 命令创建后续 Job；不再派工时直接给用户最终回复。\n" +
+      "3. 最终回复发送成功后 Work 会自动结束，不要调用工具标记完成。\n" +
+      "如果这些结果需要用户输入才能继续，直接向用户提问；正文成功发送后本次 Work 自动完成，用户补充后另开 Work。\n" +
       (silent
         ? "本批次是中间结果：Work 还有其他 Job 执行中。**不要向用户发送任何消息**（本回合静默），验收结果留待 Work 全部完成时统一汇报。\n"
         : "最终回复注意上下文衔接：回述一句任务（如「你重启后跑的验证 Work」），让用户不看中间记录也能对上「任务 → 结果」的来龙去脉；不展开执行细节。\n") +
@@ -3035,11 +3357,17 @@ ${jobParts.join("\n\n")}
     }
 
     // Worker Continuation 分流：内部事件不写成用户发言。
-    // 同批混有用户消息时，Continuation 重新入队到用户消息之后（队列串行保证顺序）。
+    // MessageQueue 按来源切分批次，正常情况下不会与用户消息混在同一批。
     const continuationIds = messages
       .filter((m) => m.triggerKind === "worker_continuation")
       .flatMap((m) => m.continuationIds ?? []);
     const isContinuationTurn = continuationIds.length > 0 && messages.every((m) => m.triggerKind === "worker_continuation");
+    const releaseContinuationClaims = () => {
+      if (!isContinuationTurn) return;
+      for (const id of continuationIds) {
+        this.workerConfig?.jobService.releaseContinuationClaim(id);
+      }
+    };
     if (continuationIds.length > 0 && !isContinuationTurn) {
       this.queue.enqueueContinuation(chatId, continuationIds);
       this.log.info("worker continuation deferred behind user messages", { chatId, continuationIds });
@@ -3054,7 +3382,9 @@ ${jobParts.join("\n\n")}
         const cont = jobService.getContinuation(id);
         if (cont) workIds.add(cont.workId);
       }
-      silentContinuationTurn = [...workIds].some((workId) =>
+      // 只有本批所有 Work 都还有未终态 Job 时才整体静默。若混有已完成的 Work，
+      // 必须正常交付这一批；出站收尾会逐个决定完成或继续。
+      silentContinuationTurn = workIds.size > 0 && [...workIds].every((workId) =>
         jobService.listJobs(workId).some((j) => j.status === "queued" || j.status === "running" || j.status === "cancelling"));
     }
 
@@ -3104,6 +3434,7 @@ ${jobParts.join("\n\n")}
     try {
       if (signal?.aborted) {
         this.log.info("process cancelled before session creation", { chatId });
+        releaseContinuationClaims();
         this.markRuntimeRun(runId, "stopped");
         return;
       }
@@ -3120,6 +3451,7 @@ ${jobParts.join("\n\n")}
         messageToSend = this.buildWorkerContinuationPrompt(continuationIds, silentContinuationTurn);
         if (!messageToSend) {
           this.log.warn("worker continuation content unavailable, skipping turn", { chatId, continuationIds });
+          releaseContinuationClaims();
           this.markRuntimeRun(runId, "failed");
           return;
         }
@@ -3205,6 +3537,7 @@ ${jobParts.join("\n\n")}
         if (!this.globalSessionTransition && !this.sessionTransitionLocks.has(chatId)) {
           await this.archiveSession(chatId);
         }
+        releaseContinuationClaims();
         this.markRuntimeRun(runId, "stopped");
         return;
       }
@@ -3226,21 +3559,51 @@ ${jobParts.join("\n\n")}
         textLength: messageToSend.length,
       });
 
-      const agentResult = await this.runManager.runAgent({
-        runId: runId!,
-        chatId,
-        session: chatSession.agentSession,
-        message: messageToSend,
-        signal,
-      });
+      // 普通用户回合在调用 Agent 前记住 Worker 事件游标；Agent 可能通过
+      // nbt worker CLI 创建 Job。只认 job_created，不会把空 Work 或已有后台任务误算成派工。
+      const workerEventCursorBeforeAgent = this.getWorkerEventCursor();
+      const latestSenderId = [...messages].reverse().find((message) => !!message.senderId)?.senderId;
+      const continuationOwnerId = continuationIds
+        .map((id) => this.workerConfig?.jobService.getContinuation(id))
+        .map((continuation) => continuation ? this.workerConfig?.jobService.getWork(continuation.workId)?.ownerUserId : undefined)
+        .find((userId): userId is string => !!userId);
+      const commandUserId = latestSenderId ?? continuationOwnerId ?? chatSession.userId;
+      const agentResult = await (async () => {
+        if (this.workerConfig) {
+          this.activeWorkerAgentCommands.set(chatId, {
+            runId: runId!,
+            userId: commandUserId,
+            chatType: processChatType,
+            continuationTurn: isContinuationTurn,
+            createdWorkIds: [],
+          });
+        }
+        try {
+          return await this.runManager.runAgent({
+            runId: runId!,
+            chatId,
+            session: chatSession.agentSession,
+            message: messageToSend,
+            signal,
+          });
+        } finally {
+          const commandContext = this.activeWorkerAgentCommands.get(chatId);
+          if (commandContext && commandContext.runId === runId) {
+            for (const workId of commandContext.createdWorkIds) {
+              const work = this.workerConfig?.jobService.getWork(workId);
+              if (work?.status === "active" && this.workerConfig?.jobService.listJobs(workId).length === 0) {
+                this.workerConfig.jobService.failWork(workId, "主会话未创建任何 Worker Job，已自动结束空 Work");
+                this.log.warn("empty worker work closed after agent turn", { chatId, runId, workId });
+              }
+            }
+            this.activeWorkerAgentCommands.delete(chatId);
+          }
+        }
+      })();
       if (agentResult.status === "stopped") {
         this.log.info("prompt cancelled, no response to send", { chatId });
         // 验收回合被取消：释放认领，允许后续重新投递（否则卡死 claimed）
-        if (isContinuationTurn) {
-          for (const id of continuationIds) {
-            this.workerConfig?.jobService.releaseContinuationClaim(id);
-          }
-        }
+        releaseContinuationClaims();
         return;
       }
       const response = agentResult.response;
@@ -3318,10 +3681,23 @@ ${jobParts.join("\n\n")}
         displayText = `> 📌 回复 ${messages.length} 条消息：\n${lines.map((l) => `> ${l}`).join("\n")}\n\n${response.text}`;
       }
 
+      // Worker 结果交付强制标识：只按本回合是否由 Continuation 触发判断。
+      // Work 会在正文成功发送后自动完成，因此此处不依赖 Work 状态。
+      if (isContinuationTurn && !displayText.trimEnd().endsWith(WORKER_DELIVERY_MARKER)) {
+        displayText = `${displayText}\n\n${WORKER_DELIVERY_MARKER}`;
+      } else if (!isContinuationTurn) {
+        const dispatchedWorker = this.hasWorkerJobCreatedSince(chatId, workerEventCursorBeforeAgent);
+        if (dispatchedWorker && !displayText.trimEnd().endsWith(WORKER_DISPATCH_MARKER)) {
+          displayText = `${displayText}\n\n${WORKER_DISPATCH_MARKER}`;
+        }
+      }
+      deliveredText = displayText;
+
       // 发送到 IM（始终优先卡片，footer 带 session 信息）
       // 超长内容由 adapter 层自动转文件发送；发送器负责超时和降级。
       this.markRuntimeRun(runId, "sending_response");
       let sentPlatformMsgId: string | undefined;
+      let deliveredResponseBody = false;
       const sendTextWithReplyFallback = async (text: string): Promise<string> => {
         if (!triggerMsgId) {
           return this.responseSender.sendText(chatSession.platformChatId, text, signal);
@@ -3345,6 +3721,7 @@ ${jobParts.join("\n\n")}
         } else {
           sentPlatformMsgId = await this.responseSender.sendCard(chatSession.platformChatId, "", displayText, footer, undefined, signal);
         }
+        deliveredResponseBody = true;
       } catch (sendErr) {
         this.log.error("failed to send response to IM", {
           chatId,
@@ -3397,11 +3774,25 @@ ${jobParts.join("\n\n")}
         updateMessagePlatformId(this.db, replyMsgId, sentPlatformMsgId);
       }
 
-      // Worker Continuation 回合结束：标记 Continuation completed（主 Agent 已收到结果）
-      if (isContinuationTurn && sentPlatformMsgId && this.workerConfig) {
-        for (const id of continuationIds) {
-          this.workerConfig.jobService.markContinuationCompleted(id, runId ?? "");
-          this.log.info("worker continuation completed", { continuationId: id, runId });
+      // 只有 Worker 正文真实发送成功才完成 Continuation；错误提示不算交付。
+      if (isContinuationTurn && this.workerConfig) {
+        if (sentPlatformMsgId && deliveredResponseBody) {
+          const conclusion = stripInternalWorkerTags(response.text).trim() || "Worker 结果已交付。";
+          const settled = this.workerConfig.jobService.completeDeliveredContinuations({
+            continuationIds,
+            agentTurnId: runId ?? "",
+            conclusion,
+            workerEventCursor: workerEventCursorBeforeAgent,
+          });
+          this.log.info("worker continuation delivery settled", {
+            continuationIds,
+            completedWorkIds: settled.completedWorkIds,
+            continuedWorkIds: settled.continuedWorkIds,
+            runId,
+          });
+        } else {
+          releaseContinuationClaims();
+          this.log.warn("worker continuation result not delivered, released for retry", { chatId, continuationIds });
         }
       }
 
@@ -3422,11 +3813,7 @@ ${jobParts.join("\n\n")}
     } catch (err) {
       this.log.error("pipeline error", { chatId, error: String(err) });
       // Worker Continuation 回合失败：释放认领，允许重新投递
-      if (isContinuationTurn) {
-        for (const id of continuationIds) {
-          this.workerConfig?.jobService.releaseContinuationClaim(id);
-        }
-      }
+      releaseContinuationClaims();
       this.markRuntimeRun(runId, signal?.aborted ? "stopped" : "failed", String(err));
 
       if (platformChatId) {
@@ -3697,6 +4084,11 @@ ${jobParts.join("\n\n")}
     const session = this.chatSessions.get(chatId);
     if (!session) return;
 
+    // 先 abort 队列 signal：让 runAgent 的 abortable 立即 reject，run 退出、busy 恢复。
+    // 不依赖进程能否被 kill——进程挂起（不在 activeProcesses 或杀不掉）时也能解卡。
+    if (this.queue.isBusy(chatId)) {
+      this.queue.cancel(chatId);
+    }
     await this.agent.cancelSession(session.agentSession);
   }
 
@@ -3790,6 +4182,11 @@ ${jobParts.join("\n\n")}
           sessionId: session.agentSession.id,
           idleMs,
         });
+        // 首次 kill 时告知用户（只发一次，避免每 15 秒刷屏）
+        if (!a.killNotifiedAt) {
+          a.killNotifiedAt = now;
+          this.sendWatchdogNotification(chatId, "任务输出已完成但进程未退出，正在尝试结束进程。");
+        }
         this.cancelChat(chatId).catch(() => {});
         continue;
       }
@@ -3812,13 +4209,38 @@ ${jobParts.join("\n\n")}
         continue;
       }
 
+      // ── 策略 2b: run 硬超时 → 强制中止（进程挂起但无 completion 时队列会永久卡死）
+      if (!a.completionDetected && runningMs > AGENT_RUN_HARD_TIMEOUT_MS) {
+        const runningHours = formatLongRunningHours(runningMs);
+        this.log.warn("watchdog: hard timeout, aborting stuck run", {
+          chatId,
+          sessionId: session.agentSession.id,
+          runningMs,
+          idleMs,
+        });
+        this.sendWatchdogNotification(chatId, `任务运行超过 ${runningHours} 小时且未完成，已强制中止。`);
+        this.cancelChat(chatId).catch(() => {});
+        continue;
+      }
+
       // 工具执行期间可能长时间没有新日志；一小时内先不按“无输出”误报。
       // tool_started 不是持续心跳，超过一小时仍恢复原 idle 策略，避免永久挂住。
       if (a.executingTool && idleMs <= INDEPENDENT_IDLE_KILL_MS) continue;
 
-      // ── 策略 3: 无 completion + 长时间无活动 → 通知 ──
+      // ── 策略 3: 无 completion + 长时间无活动 → 通知两次后强制中止 ──
       if (!a.completionDetected) {
-        if (a.notifyCount >= 2) continue;  // 两次封顶
+        // 两次通知后（30+ 分钟无输出）仍无进展 → 视为挂起，强制中止（防止队列永久 busy）
+        if (a.notifyCount >= 2) {
+          this.log.warn("watchdog: no progress after notifications, aborting stuck run", {
+            chatId,
+            sessionId: session.agentSession.id,
+            idleMs,
+            runningMs,
+          });
+          this.sendWatchdogNotification(chatId, "任务长时间无输出且未完成，已强制中止。可以重新发送需求。");
+          this.cancelChat(chatId).catch(() => {});
+          continue;
+        }
 
         const thresholdMs = a.notifyCount === 0
           ? AGENT_IDLE_THRESHOLD_MS       // 第一次：10 分钟
@@ -4073,6 +4495,15 @@ function formatUptime(ms: number): string {
   if (minutes > 0) parts.push(`${minutes}m`);
   parts.push(`${secs}s`);
   return parts.join(" ");
+}
+
+/** 转义飞书卡片 Markdown 行内文本；尖括号改为全角，避免被识别为组件标签。 */
+function escapeLarkMarkdownText(value: string): string {
+  return value
+    .replace(/\\/g, "\\\\")
+    .replace(/([*_~`\[\]()])/g, "\\$1")
+    .replace(/</g, "＜")
+    .replace(/>/g, "＞");
 }
 
 function formatRelativeAge(sqlUtcDatetime: string): string {

@@ -79,7 +79,7 @@ describe("MessageQueue discard semantics", () => {
   });
 });
 
-describe("MessageQueue worker continuation preemption", () => {
+describe("MessageQueue worker continuation FIFO", () => {
   function continuationMsg(ids: string[]): QueuedMessage {
     return message({
       text: `[worker continuation: ${ids.join(",")}]`,
@@ -88,35 +88,39 @@ describe("MessageQueue worker continuation preemption", () => {
     });
   }
 
-  test("user message push preempts buffered continuations", () => {
-    const queue = new MessageQueue(10_000);
+  test("continuation 先到时，后到的用户消息等待 continuation 完成", async () => {
+    const queue = new MessageQueue(0);
+    const seen: string[] = [];
+    let releaseFirst: () => void = () => {};
+    queue.onProcess(async (_chatId, _text, messages) => {
+      seen.push(messages[0]?.triggerKind ?? "user");
+      if (seen.length === 1) await new Promise<void>((resolve) => { releaseFirst = resolve; });
+    });
+
     queue.push(continuationMsg(["ctn-1"]));
-    expect(queue.preemptWorkerContinuations("c1")).toEqual(["ctn-1"]);
-  });
-
-  test("preempts pending continuations while busy", () => {
-    const queue = new MessageQueue(10);
-    let release: () => void = () => {};
-    queue.onProcess(() => new Promise<void>((resolve) => { release = resolve; }));
     queue.push(message({ dbMsgId: 1 }));
-    queue.push(continuationMsg(["ctn-2"])); // busy 中入 pending
-    expect(queue.preemptWorkerContinuations("c1")).toEqual(["ctn-2"]);
-    release();
+    expect(seen).toEqual(["worker_continuation"]);
+
+    releaseFirst();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(seen).toEqual(["worker_continuation", "user"]);
   });
 
-  test("preempt leaves user messages in place", () => {
+  test("用户消息先到时，后到的 continuation 不跨过用户消息", async () => {
     const queue = new MessageQueue(10_000);
-    queue.push(message({ dbMsgId: 1 }));
-    queue.push(continuationMsg(["ctn-3"]));
-    queue.push(message({ dbMsgId: 2 }));
-    expect(queue.preemptWorkerContinuations("c1")).toEqual(["ctn-3"]);
-    // 用户消息仍在（两条用户消息在 buffer，continuation 被移除）
-    expect(queue.pendingCount("c1")).toBe(2);
-  });
+    const seen: string[] = [];
+    let releaseFirst: () => void = () => {};
+    queue.onProcess(async (_chatId, _text, messages) => {
+      seen.push(messages[0]?.triggerKind ?? "user");
+      if (seen.length === 1) await new Promise<void>((resolve) => { releaseFirst = resolve; });
+    });
 
-  test("no-op when no continuations", () => {
-    const queue = new MessageQueue(10_000);
     queue.push(message({ dbMsgId: 1 }));
-    expect(queue.preemptWorkerContinuations("c1")).toEqual([]);
+    queue.push(continuationMsg(["ctn-2"]));
+    expect(seen).toEqual(["user"]);
+
+    releaseFirst();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(seen).toEqual(["user", "worker_continuation"]);
   });
 });

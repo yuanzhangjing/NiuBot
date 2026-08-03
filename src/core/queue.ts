@@ -92,40 +92,49 @@ export class MessageQueue {
       return true;
     }
 
+    // buffer 正在等待启动且 pending 里已有更早消息时，新消息只能追加到 pending；
+    // 否则会与 buffer 合并并越过 pending 中的 Continuation。
+    if (q.pending.length > 0) {
+      q.pending.push(msg);
+      try {
+        this.pendingFn?.(msg);
+      } catch (err) {
+        log.warn("pending callback failed", { chatId: msg.chatId, error: String(err) });
+      }
+      this.emitState(msg.chatId, q);
+      return true;
+    }
+
+    // 用户消息可以在短窗口内合并，但不能跨过 Worker Continuation 合并或重排。
+    // 遇到不同来源时，立即处理已经先到的 buffer，新消息进入 pending 保持 FIFO。
+    if (q.buffer.length > 0 && queueKind(q.buffer[0]!) !== queueKind(msg)) {
+      q.pending.push(msg);
+      try {
+        this.pendingFn?.(msg);
+      } catch (err) {
+        log.warn("pending callback failed", { chatId: msg.chatId, error: String(err) });
+      }
+      if (q.bufferTimer) {
+        clearTimeout(q.bufferTimer);
+        q.bufferTimer = null;
+      }
+      this.emitState(msg.chatId, q);
+      void this.flush(q, msg.chatId).catch((err) => {
+        log.error("flush failed", { chatId: msg.chatId, error: String(err) });
+      });
+      return true;
+    }
+
     q.buffer.push(msg);
     this.emitState(msg.chatId, q);
-    this.resetBufferTimer(q, msg.chatId);
-    return false;
-  }
-
-  /**
-   * 用户消息优先：移除该 chat 队列中尚未开始处理的 Worker Continuation（buffer/pending 中的），
-   * 返回被移除的 continuationIds。已开始处理（busy）的不受影响。
-   * 调用方负责把返回的 id 释放回 pending（允许后续重新投递）。
-   */
-  preemptWorkerContinuations(chatId: string): string[] {
-    const q = this.queues.get(chatId);
-    if (!q) return [];
-    const collect = (list: QueuedMessage[]): string[] => {
-      const ids: string[] = [];
-      const keep: QueuedMessage[] = [];
-      for (const m of list) {
-        if (m.triggerKind === "worker_continuation") {
-          ids.push(...(m.continuationIds ?? []));
-        } else {
-          keep.push(m);
-        }
-      }
-      list.length = 0;
-      list.push(...keep);
-      return ids;
-    };
-    const preempted = [...collect(q.buffer), ...collect(q.pending)];
-    if (preempted.length > 0) {
-      this.emitState(chatId, q);
-      log.info("worker continuations preempted by user message", { chatId, count: preempted.length });
+    if (msg.triggerKind === "worker_continuation") {
+      void this.flush(q, msg.chatId).catch((err) => {
+        log.error("flush failed", { chatId: msg.chatId, error: String(err) });
+      });
+    } else {
+      this.resetBufferTimer(q, msg.chatId);
     }
-    return preempted;
+    return false;
   }
 
   /** 停止队列，清除所有计时器 */
@@ -226,11 +235,19 @@ export class MessageQueue {
     if (this.stopped) return;
 
     if (q.pending.length > 0) {
-      const next = q.pending;
-      q.pending = [];
+      const kind = queueKind(q.pending[0]!);
+      let count = 1;
+      while (count < q.pending.length && queueKind(q.pending[count]!) === kind) count++;
+      const next = q.pending.splice(0, count);
       q.buffer = next;
       this.emitState(chatId, q);
-      this.resetBufferTimer(q, chatId);
+      if (kind === "worker_continuation") {
+        void this.flush(q, chatId).catch((err) => {
+          log.error("flush failed", { chatId, error: String(err) });
+        });
+      } else {
+        this.resetBufferTimer(q, chatId);
+      }
     }
   }
 
@@ -278,4 +295,8 @@ export class MessageQueue {
     }
   }
 
+}
+
+function queueKind(message: QueuedMessage): "user" | "worker_continuation" {
+  return message.triggerKind === "worker_continuation" ? "worker_continuation" : "user";
 }

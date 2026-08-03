@@ -12,6 +12,7 @@ import {
   prepareLocalIpcEndpoint,
   type LocalIpcEndpoint,
 } from "../platform/ipc.js";
+import type { WorkerAgentCommand, WorkerAgentCommandResult } from "../worker/agent-command.js";
 
 const log = createLogger("api");
 
@@ -26,6 +27,8 @@ export interface ApiHandler {
   resolveChatPlatformId(chatIdOrShort: string): string | undefined;
   /** Get the default platform chat ID (from current session context) */
   getDefaultPlatformChatId(sessionId?: string): string | undefined;
+  /** 主 Agent Worker 写操作；由 Pipeline 校验活动回合、权限和状态。 */
+  executeWorkerCommand?(chatId: string, command: WorkerAgentCommand): Promise<WorkerAgentCommandResult>;
 }
 
 export class ApiServer {
@@ -124,6 +127,22 @@ export class ApiServer {
       await this.handler.sendFile(platformChatId, filePath);
       res.writeHead(200);
       res.end(JSON.stringify({ status: "ok" }));
+    } else if (url === "/worker" && req.method === "POST") {
+      if (!this.handler.executeWorkerCommand) {
+        res.writeHead(503);
+        res.end(JSON.stringify({ error: "Worker command API unavailable" }));
+        return;
+      }
+      const chatId = data.chat_id;
+      const command = data.command;
+      if (typeof chatId !== "string" || !command || typeof command !== "object" || typeof command.type !== "string") {
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: "Missing chat_id or command" }));
+        return;
+      }
+      const result = await this.handler.executeWorkerCommand(chatId, command as WorkerAgentCommand);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(result));
     } else if (url === "/ping") {
       res.writeHead(200);
       res.end(JSON.stringify({ status: "ok" }));

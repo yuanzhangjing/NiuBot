@@ -111,6 +111,12 @@ export interface AgentBackend {
   /** 从 backend 原生记录导出完整 session transcript */
   exportSessionTranscript?(session: AgentSession): Promise<SessionTranscript>;
 
+  /**
+   * 非阻塞读取仍在运行的 session transcript 引用。
+   * 与 exportSessionTranscript 不同，此方法不得等待或终止 backend 进程。
+   */
+  inspectSessionTranscript?(session: AgentSession): Promise<SessionTranscript>;
+
   /** 更新已存在 session 的模型配置（可选，用于运行时 /model 切换） */
   updateSessionModels?(
     sessionId: string,
@@ -165,6 +171,8 @@ export interface AgentSessionActivity {
   lastNotifiedAt?: number;
   /** 上次长时间运行提醒时间 */
   lastLongRunningNotifiedAt?: number;
+  /** watchdog 策略 1（completion + idle）首次 kill 通知时间（只通知一次） */
+  killNotifiedAt?: number;
 }
 
 /** exec() 流式 hooks，由各 backend 提供 */

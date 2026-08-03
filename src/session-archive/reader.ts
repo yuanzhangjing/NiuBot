@@ -31,23 +31,27 @@ export function findSessionArchive(directory: string, sessionId: string): Locate
 
 export function readSessionArchiveManifest(file: string): SessionArchiveManifest {
   const value = JSON.parse(readFileSync(file, "utf-8")) as Partial<SessionArchiveManifest>;
+  validateSessionManifest(value, file);
+  return value as SessionArchiveManifest;
+}
+
+function validateSessionManifest(value: Partial<SessionArchiveManifest>, label: string): void {
   if (value.schema_version !== 1 || !value.session_id || !value.chat_id || !value.backend
     || !value.agent_session_id || !Array.isArray(value.sources) || value.sources.length === 0) {
-    throw new Error(`invalid session archive manifest: ${file}`);
+    throw new Error(`invalid session transcript reference: ${label}`);
   }
   for (const source of value.sources) {
     if (!source || typeof source.role !== "string" || !source.role) {
-      throw new Error(`invalid session archive source in ${file}`);
+      throw new Error(`invalid session transcript source in ${label}`);
     }
     if (source.format === "native-jsonl" || source.format === "opencode-db") {
       if (typeof source.path !== "string" || !isAbsolute(source.path) || source.path.includes("\0")) {
-        throw new Error(`invalid session archive source in ${file}`);
+        throw new Error(`invalid session transcript source in ${label}`);
       }
     } else {
-      throw new Error(`invalid session archive source in ${file}`);
+      throw new Error(`invalid session transcript source in ${label}`);
     }
   }
-  return value as SessionArchiveManifest;
 }
 
 export function loadArchivedTranscript(manifestFile: string): {
@@ -55,15 +59,18 @@ export function loadArchivedTranscript(manifestFile: string): {
   transcript: SessionTranscript;
 } {
   const manifest = readSessionArchiveManifest(manifestFile);
+  return { manifest, transcript: loadReferencedTranscript(manifest) };
+}
+
+/** 读取已验证的原生 transcript 引用，可用于尚在增长的 Worker session 日志。 */
+export function loadReferencedTranscript(manifest: SessionArchiveManifest): SessionTranscript {
+  validateSessionManifest(manifest, manifest.session_id);
   const opencodeDb = manifest.sources.find((source) => source.format === "opencode-db");
   if (opencodeDb) {
-    return {
-      manifest,
-      transcript: transcriptFromOpencodeRows(
-        manifest.agent_session_id,
-        readOpencodeDatabaseRows(opencodeDb.path, manifest.agent_session_id),
-      ),
-    };
+    return transcriptFromOpencodeRows(
+      manifest.agent_session_id,
+      readOpencodeDatabaseRows(opencodeDb.path, manifest.agent_session_id),
+    );
   }
 
   const source = (role: string) => {
@@ -102,7 +109,7 @@ export function loadArchivedTranscript(manifestFile: string): {
     default:
       throw new Error(`unsupported archived transcript backend: ${manifest.backend}`);
   }
-  return { manifest, transcript };
+  return transcript;
 }
 
 async function* readOpencodeDatabaseRows(file: string, sessionId: string): AsyncGenerator<{

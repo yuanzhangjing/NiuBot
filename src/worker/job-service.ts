@@ -61,6 +61,7 @@ import {
   resetClaimedContinuations,
   resetWorkConsecutiveFailures,
   updateJobStatus,
+  updateRunningJobSession,
   updateWorkConclusion,
   updateWorkStatus,
   workRowToWork,
@@ -108,7 +109,7 @@ export class SqliteJobService implements JobService {
     return row ? workRowToWork(row) : undefined;
   }
 
-  listWorks(query: { botId: string; ownerUserId?: string; status?: Work["status"] }): Work[] {
+  listWorks(query: { botId: string; ownerUserId?: string; sourceChatId?: string; status?: Work["status"] }): Work[] {
     return listWorkRows(this.db, query).map(workRowToWork);
   }
 
@@ -120,7 +121,15 @@ export class SqliteJobService implements JobService {
     return this.db.transaction(() => {
       if (idempotencyKey) {
         const existing = getJobByJobIdempotencyKey(this.db, idempotencyKey);
-        if (existing) return jobRowToJob(existing);
+        if (existing) {
+          if (existing.work_id !== input.workId) {
+            throw new Error(`Job idempotency key belongs to another Work: ${existing.work_id}`);
+          }
+          if (existing.worker_profile_id !== input.workerProfileId || existing.prompt !== input.prompt) {
+            throw new Error("Job idempotency key was reused for different job content");
+          }
+          return jobRowToJob(existing);
+        }
       }
       const work = getWork(this.db, input.workId);
       if (!work) {
@@ -169,6 +178,14 @@ export class SqliteJobService implements JobService {
 
   listJobsByStatus(status: Job["status"]): Job[] {
     return listJobsByStatus(this.db, status).map(jobRowToJob);
+  }
+
+  recordJobSession(
+    jobId: string,
+    input: { backendSessionId: string; backendType: string; sources: import("../agent/types.js").NativeTranscriptSource[] },
+  ): Job | undefined {
+    if (!updateRunningJobSession(this.db, jobId, input)) return undefined;
+    return this.getJob(jobId);
   }
 
   claimJob(input: ClaimJobInput): ClaimJobResult {
@@ -298,6 +315,7 @@ export class SqliteJobService implements JobService {
     return this.db.transaction(() => {
       const work = getWork(this.db, workId);
       if (!work) return undefined;
+      if (work.status !== "active" && work.status !== "cancelling") return undefined;
       if (work.status === "active") {
         updateWorkStatus(this.db, workId, { from: "active", to: "cancelling", version: work.version });
       }
@@ -312,7 +330,9 @@ export class SqliteJobService implements JobService {
           this.recordEvent({ workId, jobId: jobRow.id, event: "job_cancel_requested" });
         }
       }
-      this.recordEvent({ workId, event: "work_cancelled", detail: "cancel requested" });
+      this.recordEvent({ workId, event: "work_cancel_requested" });
+      // 空 Work 或所有 Job 已经终态时，不等待 Scheduler，立即结束取消状态。
+      this.maybeSettleCancellingWork(workId);
       const after = getWork(this.db, workId)!;
       return workRowToWork(after);
     })();
@@ -322,9 +342,9 @@ export class SqliteJobService implements JobService {
     return this.db.transaction(() => {
       const work = getWork(this.db, workId);
       if (!work) return undefined;
-      // 允许 active 完成；cancelling 的 Work 若 Job 已全部终态，主 Agent 验收后也可完成（结果可用）
+      // 仅供人工修复异常悬挂的 Work；运行中的 Job 不能被提前截断。
       if (work.status !== "active" && work.status !== "cancelling") return undefined;
-      if (work.status === "cancelling" && !this.allJobsTerminal(workId)) return undefined;
+      if (!this.allJobsTerminal(workId)) return undefined;
       const updated = updateWorkStatus(this.db, workId, {
         from: work.status,
         to: "completed",
@@ -364,8 +384,25 @@ export class SqliteJobService implements JobService {
 
   /** 投递时认领单个 Continuation（pending → claimed；超限时标记 failed 不再投递）。 */
   claimContinuation(id: string, claimToken: string): boolean {
-    failContinuationByAttemptLimit(this.db, id, MAX_CONTINUATION_ATTEMPTS);
-    return claimContinuationById(this.db, id, claimToken);
+    return this.db.transaction(() => {
+      const exhausted = failContinuationByAttemptLimit(this.db, id, MAX_CONTINUATION_ATTEMPTS);
+      if (exhausted) {
+        const continuation = this.getContinuation(id);
+        if (continuation) {
+          const hasOtherDeliverable = !!this.db.prepare(`
+            SELECT 1 FROM agent_continuations
+            WHERE work_id = ? AND id <> ? AND status IN ('pending', 'claimed')
+            LIMIT 1
+          `).get(continuation.workId, id);
+          const work = this.getWork(continuation.workId);
+          if (work?.status === "active" && this.allJobsTerminal(continuation.workId) && !hasOtherDeliverable) {
+            this.failWork(continuation.workId, `Worker 结果连续 ${MAX_CONTINUATION_ATTEMPTS} 次未能交付，已停止重试`);
+          }
+        }
+        return false;
+      }
+      return claimContinuationById(this.db, id, claimToken);
+    })();
   }
 
   /** 主 Agent 回合失败/取消后释放认领（claimed → pending，允许重新投递）。 */
@@ -397,6 +434,27 @@ export class SqliteJobService implements JobService {
     return resetClaimedContinuations(this.db);
   }
 
+  failOrphanedEmptyWorks(reason: string): number {
+    return this.db.transaction(() => {
+      const rows = this.db.prepare(`
+        SELECT w.id
+        FROM worker_works w
+        WHERE w.bot_id = ? AND w.status = 'active'
+          AND NOT EXISTS (SELECT 1 FROM worker_jobs j WHERE j.work_id = w.id)
+      `).all(this.botId) as Array<{ id: string }>;
+      let failed = 0;
+      for (const row of rows) {
+        const work = getWork(this.db, row.id);
+        if (!work) continue;
+        if (!updateWorkStatus(this.db, row.id, { from: "active", to: "failed", version: work.version })) continue;
+        updateWorkConclusion(this.db, row.id, reason);
+        this.recordEvent({ workId: row.id, event: "work_failed", detail: reason });
+        failed += 1;
+      }
+      return failed;
+    })();
+  }
+
   markContinuationCompleted(id: string, agentTurnId: string): void {
     this.db.transaction(() => {
       if (markContinuationCompleted(this.db, id, agentTurnId)) {
@@ -408,6 +466,65 @@ export class SqliteJobService implements JobService {
         }
       }
     })();
+  }
+
+  completeDeliveredContinuations(input: {
+    continuationIds: string[];
+    agentTurnId: string;
+    conclusion: string;
+    workerEventCursor?: number;
+  }): { completedWorkIds: string[]; continuedWorkIds: string[] } {
+    const settle = this.db.transaction(() => {
+      const deliveredWorkIds = new Set<string>();
+      for (const id of input.continuationIds) {
+        const row = this.db.prepare(
+          "SELECT work_id FROM agent_continuations WHERE id = ? AND status = 'claimed'",
+        ).get(id) as { work_id: string } | undefined;
+        if (!row || !markContinuationCompleted(this.db, id, input.agentTurnId)) continue;
+        deliveredWorkIds.add(row.work_id);
+        this.recordEvent({ workId: row.work_id, event: "continuation_completed", detail: id });
+      }
+
+      const completedWorkIds: string[] = [];
+      const continuedWorkIds: string[] = [];
+      for (const workId of deliveredWorkIds) {
+        const work = getWork(this.db, workId);
+        if (!work || (work.status !== "active" && work.status !== "cancelling")) continue;
+
+        // 游标不可用时拒绝自动完成：无法排除 Agent 本回合已经追加后续 Job。
+        const createdFollowup = input.workerEventCursor === undefined || !!this.db.prepare(`
+          SELECT 1 FROM worker_events
+          WHERE work_id = ? AND event = 'job_created' AND id > ?
+          LIMIT 1
+        `).get(workId, input.workerEventCursor ?? 0);
+        const hasUndeliveredContinuation = !!this.db.prepare(`
+          SELECT 1 FROM agent_continuations
+          WHERE work_id = ? AND status IN ('pending', 'claimed')
+          LIMIT 1
+        `).get(workId);
+        if (createdFollowup || hasUndeliveredContinuation || !this.allJobsTerminal(workId)) {
+          continuedWorkIds.push(workId);
+          continue;
+        }
+
+        const updated = updateWorkStatus(this.db, workId, {
+          from: work.status,
+          to: "completed",
+          version: work.version,
+        });
+        if (!updated) {
+          continuedWorkIds.push(workId);
+          continue;
+        }
+        updateWorkConclusion(this.db, workId, input.conclusion);
+        this.recordEvent({ workId, event: "work_completed", detail: "final response delivered" });
+        completedWorkIds.push(workId);
+      }
+      return { completedWorkIds, continuedWorkIds };
+    });
+    // nbt CLI 可能从另一进程并发创建后续 Job；IMMEDIATE 在任何读取前取得写锁，
+    // 避免 deferred 事务读后升级写锁时 SQLITE_BUSY，或漏看刚创建的 Job。
+    return settle.immediate();
   }
 
   // -----------------------------------------------------------------------

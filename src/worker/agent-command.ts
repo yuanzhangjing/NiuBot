@@ -1,0 +1,53 @@
+import type { WorkspacePolicy } from "./types.js";
+
+/**
+ * 主 Agent 在一次 Pipeline 回合内可以请求的 Worker 写操作。
+ * CLI 只负责解析参数；身份、权限、资源归属和状态流转由 Pipeline 决定。
+ */
+export type WorkerAgentCommand =
+  | {
+      type: "work.create";
+      request: string;
+    }
+  | {
+      type: "job.create";
+      workId: string;
+      workerProfileId: string;
+      prompt: string;
+      workdir?: string;
+      workspacePolicy?: WorkspacePolicy;
+      dependsOn?: string[];
+      idempotencyKey: string;
+    }
+  | {
+      type: "cancel";
+      id: string;
+    }
+  | {
+      type: "work.complete_recovery";
+      workId: string;
+      conclusion: string;
+      force: true;
+    }
+  | {
+      type: "config.draft";
+      yamlText: string;
+      baseVersion?: string;
+    }
+  | {
+      type: "config.apply";
+      draftId: string;
+    }
+  | {
+      type: "config.rollback";
+      version: string;
+    };
+
+export interface WorkerAgentCommandRequest {
+  chatId: string;
+  command: WorkerAgentCommand;
+}
+
+export interface WorkerAgentCommandResult {
+  output: string;
+}

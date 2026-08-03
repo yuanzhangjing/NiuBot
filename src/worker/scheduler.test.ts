@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 
 import Database from "better-sqlite3";
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { initDatabase } from "../database/schema.js";
 import { SqliteJobService } from "./job-service.js";
@@ -87,13 +87,17 @@ function makeWorkAndJob() {
   return { work, job };
 }
 
-test("cancelling 超时后强制终态（不再无限等待）", async () => {
+test("cancelling 超时后强制终态（runtime 丢失的异常恢复兜底）", async () => {
   const { work, job } = makeWorkAndJob();
   service.claimJob({ jobId: job.id, claimToken: "l" });
+  // 模拟已启动（startedAt 有值）但 runtime 进程已丢失（Engine 重启等）
+  db.prepare(
+    "UPDATE worker_jobs SET started_at = datetime('now', '-1 minutes') WHERE id = ?",
+  ).run(job.id);
   service.requestCancel(job.id);
   expect(service.getJob(job.id)?.status).toBe("cancelling");
 
-  // 把 updated_at 改到超时之前
+  // 把 updated_at 改到超时之前，模拟 cancelling 长期未收敛
   db.prepare(
     `UPDATE worker_jobs SET updated_at = datetime('now', '-${Math.floor(JOB_CANCEL_CONFIRM_TIMEOUT_MS / 1000) + 60} seconds') WHERE id = ?`,
   ).run(job.id);
@@ -104,10 +108,74 @@ test("cancelling 超时后强制终态（不再无限等待）", async () => {
   expect(service.claimContinuations("chat-1", "t")).toHaveLength(1);
 });
 
+test("cancelling 且从未启动的 Job 立即确认终态（不等 10 分钟）", async () => {
+  const { job } = makeWorkAndJob();
+  service.requestCancel(job.id);
+  expect(service.getJob(job.id)?.status).toBe("cancelling");
+
+  scheduler.start();
+  await waitFor(() => service.getJob(job.id)?.status === "cancelled");
+  expect(service.getJob(job.id)?.error).toMatch(/cancelled before execution/);
+  expect(service.claimContinuations("chat-1", "t")).toHaveLength(1);
+});
+
+test("cancelling 且 running 的 Job 立即触发 runtime.cancel", async () => {
+  const { job } = makeWorkAndJob();
+  service.claimJob({ jobId: job.id, claimToken: "l" });
+  db.prepare(
+    "UPDATE worker_jobs SET started_at = datetime('now', '-1 minutes') WHERE id = ?",
+  ).run(job.id);
+  const runningExec = {
+    jobId: job.id,
+    session: { id: "s1" } as const,
+    backend: {} as never,
+    startedAt: Date.now(),
+    lastActivity: Date.now(),
+    controller: new AbortController(),
+  };
+  runtime.running.set(job.id, runningExec);
+  const cancelSpy = vi.spyOn(runtime, "cancel");
+  service.requestCancel(job.id);
+
+  scheduler.start();
+  await waitFor(() => cancelSpy.mock.calls.length >= 1);
+  expect(cancelSpy).toHaveBeenCalledWith(job.id, expect.any(String));
+  scheduler.stop();
+});
+
 test("调度把 queued Job 交给 runtime 执行", async () => {
   const { job } = makeWorkAndJob();
   scheduler.start();
   await waitFor(() => runtime.runJobCalls.includes(job.id));
+});
+
+test("Job 终态后立即投递 Continuation，不等待下一个定时 tick", async () => {
+  const { job } = makeWorkAndJob();
+  const delivered: string[] = [];
+  runtime.runJob = async (jobId: string) => {
+    runtime.runJobCalls.push(jobId);
+    service.claimJob({ jobId, claimToken: "runtime" });
+    service.completeJob(jobId, {
+      status: "completed",
+      responseText: "完成",
+      changedFiles: [],
+      artifacts: [],
+      startedAt: new Date().toISOString(),
+      endedAt: new Date().toISOString(),
+    });
+  };
+  scheduler = new WorkerScheduler({
+    runtime: runtime as unknown as WorkerRuntime,
+    jobService: service,
+    maxConcurrent: 2,
+    tickMs: 10_000,
+    onContinuations: (_chatId, ids) => delivered.push(...ids),
+  });
+
+  scheduler.start();
+  scheduler.kick();
+  await waitFor(() => delivered.length === 1, 1000);
+  expect(service.getJob(job.id)?.status).toBe("completed");
 });
 
 test("超过并发上限不认领", async () => {

@@ -7,6 +7,7 @@
 
 import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
+import type { NativeTranscriptSource } from "../agent/types.js";
 
 import type {
   AgentContinuation,
@@ -50,6 +51,8 @@ export interface JobRow {
   prompt: string;
   workdir: string;
   backend_session_id: string | null;
+  backend_type: string | null;
+  transcript_sources_json: string;
   status: JobStatus;
   response_text: string | null;
   exit_code: number | null;
@@ -142,6 +145,8 @@ export function jobRowToJob(row: JobRow): Job {
     prompt: row.prompt,
     workdir: row.workdir,
     backendSessionId: row.backend_session_id ?? undefined,
+    backendType: row.backend_type ?? undefined,
+    transcriptSourcesJson: row.transcript_sources_json,
     status: row.status,
     responseText: row.response_text ?? undefined,
     exitCode: row.exit_code ?? undefined,
@@ -220,13 +225,17 @@ export function getWork(db: Database.Database, workId: string): WorkRow | undefi
 
 export function listWorks(
   db: Database.Database,
-  query: { botId: string; ownerUserId?: string; status?: WorkStatus },
+  query: { botId: string; ownerUserId?: string; sourceChatId?: string; status?: WorkStatus },
 ): WorkRow[] {
   const where: string[] = ["bot_id = ?"];
   const params: unknown[] = [query.botId];
   if (query.ownerUserId !== undefined) {
     where.push("owner_user_id = ?");
     params.push(query.ownerUserId);
+  }
+  if (query.sourceChatId !== undefined) {
+    where.push("source_chat_id = ?");
+    params.push(query.sourceChatId);
   }
   if (query.status !== undefined) {
     where.push("status = ?");
@@ -450,6 +459,21 @@ export function updateJobStatus(db: Database.Database, jobId: string, change: Jo
   return result.changes === 1;
 }
 
+/** 持久化运行中 session 的只读 transcript 引用；终态后不再改写。 */
+export function updateRunningJobSession(
+  db: Database.Database,
+  jobId: string,
+  input: { backendSessionId: string; backendType: string; sources: NativeTranscriptSource[] },
+): boolean {
+  const result = db.prepare(`
+    UPDATE worker_jobs
+    SET backend_session_id = ?, backend_type = ?, transcript_sources_json = ?,
+        updated_at = datetime('now'), version = version + 1
+    WHERE id = ? AND status IN ('running', 'cancelling')
+  `).run(input.backendSessionId, input.backendType, JSON.stringify(input.sources), jobId);
+  return result.changes === 1;
+}
+
 // ---------------------------------------------------------------------------
 // Events
 // ---------------------------------------------------------------------------
@@ -496,19 +520,7 @@ export function getContinuationByDedupeKey(db: Database.Database, dedupeKey: str
   return db.prepare("SELECT * FROM agent_continuations WHERE dedupe_key = ?").get(dedupeKey) as ContinuationRow | undefined;
 }
 
-/** Work 已终态的 Continuation 直接收敛为 completed（已验收过，不再投递打扰主 Agent）。 */
-export function settleTerminalWorkContinuations(db: Database.Database): number {
-  const result = db.prepare(`
-    UPDATE agent_continuations
-    SET status = 'completed', completed_at = COALESCE(completed_at, datetime('now'))
-    WHERE status IN ('pending', 'claimed')
-      AND work_id IN (SELECT id FROM worker_works WHERE status IN ('completed', 'failed', 'cancelled'))
-  `).run();
-  return result.changes;
-}
-
 export function listPendingContinuations(db: Database.Database): ContinuationRow[] {
-  settleTerminalWorkContinuations(db);
   return db
     .prepare(`
       SELECT c.* FROM agent_continuations c
@@ -574,7 +586,6 @@ export function failContinuationByAttemptLimit(db: Database.Database, id: string
 
 /** claimed 超时兜底：认领后超过阈值未完成（进程被杀等）→ 重置 pending 允许重新投递（Work 已终态的直接收敛）。 */
 export function resetStaleClaimedContinuations(db: Database.Database, staleMinutes: number): number {
-  settleTerminalWorkContinuations(db);
   const result = db.prepare(`
     UPDATE agent_continuations
     SET status = 'pending', claim_token = NULL, claimed_at = NULL
@@ -648,12 +659,8 @@ export function cleanupExpiredLeases(db: Database.Database, nowIso: string): num
   return result.changes;
 }
 
-/**
- * 重启恢复：claimed Continuation 重置为 pending，允许重新投递（§7.5）。
- * Work 已终态的 claimed 直接收敛为 completed——验收已发生过，重投只会重复打扰主 Agent 并堵住队列。
- */
+/** 重启恢复：claimed Continuation 重置为 pending，允许重新投递（§7.5）。 */
 export function resetClaimedContinuations(db: Database.Database): number {
-  settleTerminalWorkContinuations(db);
   const result = db.prepare(`
     UPDATE agent_continuations
     SET status = 'pending', claim_token = NULL, claimed_at = NULL, agent_turn_id = NULL

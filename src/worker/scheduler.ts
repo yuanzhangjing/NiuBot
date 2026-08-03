@@ -17,8 +17,11 @@ export const JOB_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 export const JOB_WALL_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 /** cancelling 状态无进展（进程未确认退出）超过该时间后强制终态 */
 export const JOB_CANCEL_CONFIRM_TIMEOUT_MS = 10 * 60 * 1000;
-/** Continuation 认领悬挂超时：主 Agent 回合进程被杀等场景的兜底重投阈值 */
-export const CLAIMED_CONTINUATION_STALE_MS = 30 * 60 * 1000;
+/**
+ * Continuation 认领悬挂超时：必须长于主会话 2 小时硬超时，避免正常长验收被并发重投。
+ * 进程重启会立即 resetClaimedContinuations，不依赖此兜底。
+ */
+export const CLAIMED_CONTINUATION_STALE_MS = 150 * 60 * 1000;
 
 export interface WorkerSchedulerOptions {
   runtime: WorkerRuntime;
@@ -37,6 +40,10 @@ export interface WorkerSchedulerOptions {
 export class WorkerScheduler {
   private readonly tickMs: number;
   private timer: ReturnType<typeof setInterval> | null = null;
+  /** tick 防重入：异步 tick（含 runtime.cancel 等待）未完成时，后续 tick 直接跳过 */
+  private tickInFlight = false;
+  /** tick 执行期间收到 kick 时记账，当前 tick 结束后立即再跑一次。 */
+  private kickPending = false;
 
   constructor(private readonly options: WorkerSchedulerOptions) {
     this.tickMs = options.tickMs ?? 5_000;
@@ -60,14 +67,30 @@ export class WorkerScheduler {
 
   /** 主动唤醒（Job 创建后立即调度，不必等下一个 tick） */
   kick(): void {
+    if (this.tickInFlight) {
+      this.kickPending = true;
+      return;
+    }
     void this.tickSafely();
   }
 
   private async tickSafely(): Promise<void> {
+    // tick 防重入：上一轮尚未完成（可能正在等待进程退出）时跳过本轮，避免并发重复取消/调度
+    if (this.tickInFlight) {
+      log.debug("worker scheduler tick skipped, previous tick in flight", { tickMs: this.tickMs });
+      return;
+    }
+    this.tickInFlight = true;
     try {
       await this.tick();
     } catch (err) {
       log.error("worker scheduler tick failed", { error: String(err) });
+    } finally {
+      this.tickInFlight = false;
+      if (this.kickPending) {
+        this.kickPending = false;
+        void this.tickSafely();
+      }
     }
   }
 
@@ -105,15 +128,37 @@ export class WorkerScheduler {
       }
     }
 
-    // 1b. cancelling 超时兜底：进程确认退出超时后强制终态（不再无限等待）
-    const cancelDeadline = new Date(Date.now() - JOB_CANCEL_CONFIRM_TIMEOUT_MS).toISOString();
+    // 1b. cancelling 立即处理：用户取消（requestCancel/cancelWork）只改 DB 状态，
+    // 这里把“取消意图”转化为实际进程取消。不等 10 分钟兜底。
+    // - running 且有 runtime exec → 立即 runtime.cancel（幂等）
+    // - queued（从未启动，无 startedAt）→ 直接确认终态
+    // - running 但 runtime 已丢（Engine 重启等）→ 超时兜底确认
     for (const job of jobService.listJobsByStatus("cancelling")) {
+      const exec = runtime.inspect(job.id);
+      if (exec) {
+        // 有活动进程：立即取消（幂等，重复 tick 复用同一个 cancel Promise）
+        await runtime.cancel(job.id, "user_cancel");
+        continue;
+      }
       const updatedAt = job.updatedAt.replace(" ", "T") + "Z";
-      if (updatedAt < cancelDeadline) {
-        log.warn("worker job cancel confirmation timed out, forcing terminal state", { jobId: job.id });
-        if (runtime.inspect(job.id)) {
-          await runtime.cancel(job.id, "cancel_confirm_timeout");
+      const cancelDeadline = new Date(Date.now() - JOB_CANCEL_CONFIRM_TIMEOUT_MS).toISOString();
+      if (!job.startedAt) {
+        // 从未启动（queued 阶段被取消）：没有进程，直接确认终态
+        const ok = jobService.confirmCancelled(job.id, {
+          status: "cancelled",
+          responseText: "",
+          error: "cancelled before execution",
+          changedFiles: [],
+          artifacts: [],
+          startedAt: job.startedAt ?? new Date().toISOString(),
+          endedAt: new Date().toISOString(),
+        });
+        if (ok) {
+          log.info("worker job cancelled before execution", { jobId: job.id });
         }
+      } else if (updatedAt < cancelDeadline) {
+        // 已启动但 runtime 丢失（Engine 重启等）：超时兜底确认终态
+        log.warn("worker job cancel confirmation timed out, forcing terminal state", { jobId: job.id });
         jobService.confirmCancelled(job.id, {
           status: "cancelled",
           responseText: "",
@@ -124,6 +169,7 @@ export class WorkerScheduler {
           endedAt: new Date().toISOString(),
         });
       }
+      // 已启动且有 startedAt、runtime 暂时不在（进程刚退出，sendMessage 正要确认）→ 交给 sendMessage 的 cancelled 结果确认
     }
 
     // 1c. 依赖失败传播：queued Job 的任一依赖已失败/中断/取消 → 本 Job 自动失败。
@@ -147,7 +193,12 @@ export class WorkerScheduler {
       const queued = jobService.listJobsByStatus("queued");
       for (const job of queued.slice(0, freeSlots)) {
         // runJob 内部 claim 失败会静默返回（并发安全），无需额外处理
-        void runtime.runJob(job.id);
+        void runtime.runJob(job.id).finally(() => {
+          const status = jobService.getJob(job.id)?.status;
+          if (status === "completed" || status === "failed" || status === "interrupted" || status === "cancelled") {
+            this.kick();
+          }
+        });
       }
     }
 

@@ -159,6 +159,7 @@ export async function createBotInstance(
     sendMessage: (chatId, text) => pipeline.sendToChat(chatId, text),
     sendCard: (chatId, header, content) => pipeline.sendCardToChat(chatId, header, content),
     sendFile: (chatId, filePath) => pipeline.sendFileToChat(chatId, filePath),
+    executeWorkerCommand: (chatId, command) => pipeline.executeWorkerAgentCommand({ chatId, command }),
     resolveChatPlatformId: (input: string) => {
       // Try as internal ID (c1, c2)
       const lower = input.toLowerCase();

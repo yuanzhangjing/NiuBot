@@ -334,6 +334,13 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
     return this.loadSessionTranscript(internal);
   }
 
+  async inspectSessionTranscript(session: AgentSession): Promise<SessionTranscript> {
+    const internal = this.sessions.get(session.id);
+    if (!internal) throw new Error(`Session not found: ${session.id}`);
+    if (!internal.agentSessionId) throw new AgentSessionNotStartedError(session.id);
+    return this.loadSessionTranscript(internal);
+  }
+
   private async waitForSessionProcessExit(sessionId: string, timeoutMs: number): Promise<boolean> {
     const child = this.activeProcesses.get(sessionId);
     if (!child || child.exitCode !== null || child.signalCode !== null) return true;
@@ -475,12 +482,26 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
       const stderrChunks: Buffer[] = [];
       let settled = false;
       let earlyResolveAt: number | undefined;
+      let stdoutBytes = 0;
+      /** stdout 累计字节上限：防止超大输出（如 100MB）join 时抛 RangeError 导致 exec 永不 resolve */
+      const MAX_STDOUT_BYTES = 32 * 1024 * 1024; // 32MB
+      let stdoutTruncated = false;
 
       // ── 流式逐行读取 stdout ──
       if (hooks) {
         const rl = createInterface({ input: child.stdout, crlfDelay: Infinity });
         rl.on("line", (line) => {
-          lines.push(line);
+          stdoutBytes += Buffer.byteLength(line);
+          if (!stdoutTruncated && stdoutBytes <= MAX_STDOUT_BYTES) {
+            lines.push(line);
+          } else if (!stdoutTruncated) {
+            stdoutTruncated = true;
+            this.log.warn("stdout exceeded limit, truncating", {
+              sessionId: sessionId ?? null,
+              limitBytes: MAX_STDOUT_BYTES,
+              firstTruncatedLineLength: line.length,
+            });
+          }
           if (myActivity) {
             myActivity.lastActiveAt = Date.now();
             if (line.trim()) {
@@ -525,14 +546,18 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
           try {
             if (hooks.isComplete?.(line)) {
               if (myActivity) myActivity.completionDetected = true;
+              // 注意顺序：先拼 stdout 再置 settled。
+              // 若 join 抛异常（超大输出），settled 保持 false，进程 close 时会走
+              // 正常退出分支重新 resolve，不会因 settled=true 而卡死。
+              const completionStdout = lines.join("\n");
               if (!settled) {
                 settled = true;
                 earlyResolveAt = Date.now();
-                const stdout = lines.join("\n");
                 this.log.info("completion detected, resolving immediately", {
                   sessionId: sessionId ?? null,
                   linesCollected: lines.length,
-                  stdoutLength: stdout.length,
+                  stdoutLength: completionStdout.length,
+                  stdoutTruncated,
                   elapsedMs: earlyResolveAt - startedAt,
                 });
                 this.maybeDumpAgentStdout(sessionId, "complete", {
@@ -541,12 +566,12 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
                   cwd: opts?.cwd,
                   stdinLength,
                   stdinPreview,
-                  stdout,
+                  stdout: completionStdout,
                   stderr: Buffer.concat(stderrChunks).toString(),
                   durationMs: earlyResolveAt - startedAt,
                   linesCollected: lines.length,
                 });
-                resolve(stdout);
+                resolve(completionStdout);
                 // 进程继续在后台运行，等它自行退出；退不了的由 watchdog 收尸
               }
             }
@@ -559,7 +584,19 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
         });
       } else {
         // 无 hooks 时退化为 buffer 模式（兼容 checkAvailable 等非业务调用）
-        child.stdout.on("data", (chunk: Buffer) => lines.push(chunk.toString()));
+        child.stdout.on("data", (chunk: Buffer) => {
+          if (stdoutTruncated) return;
+          stdoutBytes += chunk.length;
+          if (stdoutBytes <= MAX_STDOUT_BYTES) {
+            lines.push(chunk.toString());
+          } else {
+            stdoutTruncated = true;
+            this.log.warn("stdout exceeded limit, truncating (buffer mode)", {
+              sessionId: sessionId ?? null,
+              limitBytes: MAX_STDOUT_BYTES,
+            });
+          }
+        });
       }
 
       child.stderr.on("data", (chunk: Buffer) => {

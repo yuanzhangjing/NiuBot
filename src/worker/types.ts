@@ -9,6 +9,8 @@
  * 对应方案：tasks/NiuBot 内部 Worker/worker-runtime-design.md（v3.1）。
  */
 
+import type { NativeTranscriptSource } from "../agent/types.js";
+
 export type WorkStatus =
   | "active"
   | "completing"
@@ -86,6 +88,8 @@ export interface Job {
   /** 工作目录（同一 Work 的后续 Job 复用同一工作区） */
   workdir: string;
   backendSessionId?: string;
+  backendType?: string;
+  transcriptSourcesJson: string;
   status: JobStatus;
   /** Worker 最终文本（自由 Markdown） */
   responseText?: string;
@@ -157,6 +161,7 @@ export type WorkerEventName =
   | "job_failed"
   | "job_interrupted"
   | "job_cancel_requested"
+  | "work_cancel_requested"
   | "job_cancelled"
   | "work_completed"
   | "work_failed"
@@ -223,12 +228,18 @@ export interface CompleteWorkInput {
 export interface JobService {
   createWork(input: CreateWorkInput): Work;
   getWork(workId: string): Work | undefined;
-  listWorks(query: { botId: string; ownerUserId?: string; status?: WorkStatus }): Work[];
+  listWorks(query: { botId: string; ownerUserId?: string; sourceChatId?: string; status?: WorkStatus }): Work[];
   /** 幂等键由 CLI 层派生（agent_turn_id + 命令 + 规范化参数 hash）；相同键返回原 Job */
   createJob(input: CreateJobInput, idempotencyKey?: string): Job;
   getJob(jobId: string): Job | undefined;
   listJobs(workId: string): Job[];
   listJobsByStatus(status: JobStatus): Job[];
+
+  /** 记录运行中 Worker session 的原生 transcript 引用，供主会话按需查看进展。 */
+  recordJobSession(
+    jobId: string,
+    input: { backendSessionId: string; backendType: string; sources: NativeTranscriptSource[] },
+  ): Job | undefined;
 
   /** queued → running（CAS），并检查 Work 状态与 Job 上限 */
   claimJob(input: ClaimJobInput): ClaimJobResult;
@@ -247,7 +258,7 @@ export interface JobService {
 
   /** 用户取消整个 Work：所有非终态 Job 进入 cancelling，Work → cancelling */
   cancelWork(workId: string): Work | undefined;
-  /** 主 Agent 验收完成（仅 Work 处于 active/cancelling 且所有 Job 终态时允许） */
+  /** 人工修复入口；正常验收由最终回复成功交付后自动完成。 */
   completeWork(workId: string, input: CompleteWorkInput): Work | undefined;
   /** 主 Agent 判定无法继续 */
   failWork(workId: string, reason: string): Work | undefined;
@@ -267,8 +278,20 @@ export interface JobService {
   resetStaleClaimedContinuations(staleMinutes: number): number;
   /** 主 Agent 回合事务提交后标记完成 */
   markContinuationCompleted(id: string, agentTurnId: string): void;
+  /**
+   * Worker 正文成功交付后的原子收尾：完成 Continuation；若本回合未追加 Job 且
+   * Work 下所有 Job 已终态，同时自动完成 Work。
+   */
+  completeDeliveredContinuations(input: {
+    continuationIds: string[];
+    agentTurnId: string;
+    conclusion: string;
+    workerEventCursor?: number;
+  }): { completedWorkIds: string[]; continuedWorkIds: string[] };
   /** 重启恢复：claimed Continuation 重置为 pending（§7.5 重新投递） */
   resetClaimedContinuations(): number;
+  /** 重启恢复：关闭创建后尚未来得及添加 Job 的孤立 Work。 */
+  failOrphanedEmptyWorks(reason: string): number;
 
   recordEvent(event: Omit<WorkerEvent, "id" | "createdAt" | "botId">): void;
   listEvents(workId: string): WorkerEvent[];

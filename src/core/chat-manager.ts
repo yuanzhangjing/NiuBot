@@ -16,8 +16,6 @@ export class ChatManager {
   private readonly queue: MessageQueue;
   private readonly runtimeState: RuntimeStateStore;
   private processFn: ChatProcessFn | null = null;
-  /** 用户消息抢占未处理 Continuation 时的回调（Pipeline 释放认领） */
-  private preemptFn: ((chatId: string, continuationIds: string[]) => void) | null = null;
 
   constructor(bufferMs: number, runtimeState: RuntimeStateStore) {
     this.runtimeState = runtimeState;
@@ -50,10 +48,6 @@ export class ChatManager {
     this.processFn = fn;
   }
 
-  onContinuationsPreempted(fn: (chatId: string, continuationIds: string[]) => void): void {
-    this.preemptFn = fn;
-  }
-
   onPending(fn: (msg: QueuedMessage) => void): void {
     this.queue.onPending(fn);
   }
@@ -63,13 +57,6 @@ export class ChatManager {
   }
 
   enqueue(msg: QueuedMessage): boolean {
-    // 用户消息优先：到达时抢占队列中尚未处理的 Continuation（释放回待投递）
-    if (msg.triggerKind !== "worker_continuation") {
-      const preempted = this.queue.preemptWorkerContinuations(msg.chatId);
-      if (preempted.length > 0) {
-        this.preemptFn?.(msg.chatId, preempted);
-      }
-    }
     const pending = this.queue.push(msg);
     const state = this.runtimeState.getChatState(msg.chatId);
     log.info("message enqueued", {

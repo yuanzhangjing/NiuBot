@@ -529,6 +529,19 @@ const migrations: Migration[] = [
       }
     },
   },
+  {
+    version: 20,
+    description: "Expose Worker backend transcript references for live session inspection",
+    up: (db) => {
+      const columns = db.prepare("PRAGMA table_info(worker_jobs)").all() as Array<{ name: string }>;
+      if (!columns.some((column) => column.name === "backend_type")) {
+        db.exec("ALTER TABLE worker_jobs ADD COLUMN backend_type TEXT");
+      }
+      if (!columns.some((column) => column.name === "transcript_sources_json")) {
+        db.exec("ALTER TABLE worker_jobs ADD COLUMN transcript_sources_json TEXT NOT NULL DEFAULT '[]'");
+      }
+    },
+  },
 ];
 
 const transportMigrations: Migration[] = [
@@ -651,7 +664,7 @@ export const LATEST_SCHEMA_VERSION = migrations[migrations.length - 1]!.version;
 // npm 上所有公开版本（v0.1.12 起）的全局 schema 都在 10..16。
 // 这一区间之后的迁移只有加表、加 nullable 列和加索引，旧版本会忽略，
 // 因此保留原 user_version 后可以安全回到升级前的同一版本。
-export const ROLLBACK_COMPATIBLE_SCHEMA_VERSIONS = [10, 11, 12, 13, 14, 15, 16, 17, 18, 19] as const;
+export const ROLLBACK_COMPATIBLE_SCHEMA_VERSIONS = [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20] as const;
 export const LATEST_TRANSPORT_SCHEMA_VERSION = transportMigrations[transportMigrations.length - 1]!.version;
 
 // ── Database initialization ─────────────────────────────────────────

@@ -12,7 +12,7 @@ import path from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 
-import type { AgentBackend, AgentResponse, AgentSession, SessionConfig } from "../agent/types.js";
+import type { AgentBackend, AgentResponse, AgentSession, SessionConfig, SessionTranscript } from "../agent/types.js";
 import { initDatabase } from "../database/schema.js";
 import type { TransportClient } from "../transport/types.js";
 import { Pipeline } from "../core/pipeline.js";
@@ -35,13 +35,21 @@ class FakeWorkerBackend implements AgentBackend {
   resultText = "审查结论：发现 2 个并发问题，详见报告。";
   /** worker session 的 sendMessage 次数（0 时挂起，用于并发测试） */
   delayMs = 0;
+  createSessionDelayMs = 0;
   /** 非空时 sendMessage 在工作目录写入该文件（模拟写任务） */
   writeFileOnSend?: string;
+  liveTranscriptPath?: string;
+  inspectCalls = 0;
+  /** 在返回响应前模拟 Agent 的同步副作用（如验收时 complete Work）。 */
+  onSendMessage?: (session: AgentSession, message: string) => void | Promise<void>;
 
   async start(): Promise<void> {}
   async stop(): Promise<void> {}
 
   async createSession(config: SessionConfig): Promise<AgentSession> {
+    if (this.createSessionDelayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, this.createSessionDelayMs));
+    }
     const id = `agent_${this.sessions.length + 1}`;
     this.sessions.push(id);
     this.sessionModels.push(config.model ?? "");
@@ -57,6 +65,7 @@ class FakeWorkerBackend implements AgentBackend {
       writeFileSync(path.join(this.sessionDirs.get(session.id)!, this.writeFileOnSend), "changed by worker\n");
     }
     this.messages.push({ sessionId: session.id, text: message });
+    await this.onSendMessage?.(session, message);
     return { text: this.resultText };
   }
 
@@ -64,6 +73,16 @@ class FakeWorkerBackend implements AgentBackend {
   async closeSession(session: AgentSession): Promise<void> {}
   getAgentSessionId(sessionId: string): string {
     return sessionId;
+  }
+  async inspectSessionTranscript(session: AgentSession): Promise<SessionTranscript> {
+    this.inspectCalls++;
+    if (!this.liveTranscriptPath) throw new Error("transcript not ready");
+    return {
+      backend: "codex",
+      agentSessionId: session.id,
+      events: [],
+      sources: [{ path: this.liveTranscriptPath, role: "session" }],
+    };
   }
   needsStableUserPrefix(): boolean {
     return false;
@@ -78,20 +97,44 @@ class FakeWorkerBackend implements AgentBackend {
 
 class FakeTransport implements TransportClient {
   readonly sent: Array<{ chatId: string; text: string }> = [];
-  async sendText(chatId: string, text: string): Promise<{ ok: boolean }> {
+  failCardAttempts = 0;
+  onSendText?: (text: string) => void | Promise<void>;
+  private nextMessageId = 1;
+  private messageId(): string {
+    return `pm_test_${this.nextMessageId++}`;
+  }
+  async sendText(chatId: string, text: string): Promise<string> {
     this.sent.push({ chatId, text });
-    return { ok: true };
+    await this.onSendText?.(text);
+    return this.messageId();
   }
-  async sendReply(_chatId: string, _text: string, _replyTo: string): Promise<{ ok: boolean }> {
-    return { ok: true };
+  async sendReply(chatId: string, text: string, _replyTo: string): Promise<string> {
+    this.sent.push({ chatId, text });
+    return this.messageId();
   }
-  async sendCard(_chatId: string, _header: string, _text: string, _footer?: string, _replyTo?: string): Promise<{ ok: boolean }> {
-    return { ok: true };
+  async sendMarkdownCard(chatId: string, text: string): Promise<string> {
+    this.sent.push({ chatId, text });
+    return this.messageId();
   }
-  async sendFile(_chatId: string, _filePath: string, _fileName?: string, _replyTo?: string): Promise<{ ok: boolean }> {
-    return { ok: true };
+  async sendCard(chatId: string, _header: string, text: string, _footer?: string, _replyTo?: string): Promise<string> {
+    if (this.failCardAttempts > 0) {
+      this.failCardAttempts--;
+      throw new Error("card send failed");
+    }
+    this.sent.push({ chatId, text });
+    return this.messageId();
   }
+  async sendFile(_chatId: string, _filePath: string, _fileName?: string): Promise<string> {
+    return this.messageId();
+  }
+  async editMessage(): Promise<void> {}
   async addReaction(_chatId: string, _msgId: string, _type: string): Promise<void> {}
+  async removeReaction(_chatId: string, _msgId: string, _type: string): Promise<void> {}
+  async getBotOpenId(): Promise<string> { return "bot"; }
+  async getBotName(): Promise<string> { return "NiuBot"; }
+  async getChatName(): Promise<string> { return "test-chat"; }
+  async getMessageContent(): Promise<string | undefined> { return undefined; }
+  async getAppCreatorId(): Promise<string | undefined> { return undefined; }
   async resolveChatPlatformId(_chatId: string): Promise<string> {
     return _chatId;
   }
@@ -127,7 +170,7 @@ beforeEach(() => {
     db,
     transport as unknown as TransportClient,
     backend as unknown as AgentBackend,
-    { name: "NiuBot", platform: "feishu", platformBotId: "bot" },
+    { name: BOT_ID, platform: "feishu", platformBotId: "bot" },
     tempRoot,
     path.join(tempRoot, "niubot.db"),
     10,
@@ -153,6 +196,7 @@ beforeEach(() => {
 
 afterEach(async () => {
   pipeline.stop();
+  await waitFor(() => ((pipeline as any).workerRuntime?.runningCount() ?? 0) === 0, 5000);
   db.close();
 });
 
@@ -182,7 +226,6 @@ test("Worker 闭环：Job 执行 → 主 Agent 验收 → 最终回复", async (
     prompt: "检查登录模块的并发问题",
     workdir: tempRoot,
   });
-
   // Scheduler 认领并执行
   await waitFor(() => service.getJob(job.id)?.status === "completed");
 
@@ -191,16 +234,397 @@ test("Worker 闭环：Job 执行 → 主 Agent 验收 → 最终回复", async (
   expect(done.backendSessionId).toBe("agent_1");
 
   // Job 终态自动生成 Continuation → 唤醒主 Agent
-  await waitFor(() => backend.messages.some((m) => m.text.includes("<worker-continuation>")));
+  await waitFor(() => backend.messages.some((m) => m.text.startsWith("<worker-continuation>")));
 
   const workerMessages = backend.messages.filter((m) => m.text.includes("<worker-continuation>"));
   expect(workerMessages).toHaveLength(1);
   expect(workerMessages[0].text).toContain("审查登录模块");
   expect(workerMessages[0].text).toContain("2 个并发问题");
 
-  // 主 Agent 回复后 Continuation 被标记完成（claim 不到 pending 项）
-  await waitFor(() => service.claimContinuations(CHAT_ID, "check-final").length === 0);
+  // 主 Agent 回复后 Continuation 必须真正进入 completed，而不只是 claimed。
+  await waitFor(() => service.listEvents(work.id).some((event) => event.event === "continuation_completed"));
+  // Worker 结果交付：末尾带固定标识（不依赖 LLM 自觉）
+  expect(transport.sent.some((m) => m.text.includes("⚙️ 本回复基于 Worker 后台任务结果整理"))).toBe(true);
+  expect(service.getWork(work.id)?.status).toBe("completed");
+  expect(service.getWork(work.id)?.finalConclusion).toContain("审查结论");
 }, 15000);
+
+test("验收回合创建后续 Job 时 Work 保持 active，最后一次交付后自动完成", async () => {
+  await pipeline.start();
+  const work = service.createWork({
+    botId: BOT_ID,
+    ownerUserId: OWNER,
+    sourceChatId: CHAT_ID,
+    visibility: "private",
+    request: "分两步处理",
+  });
+  const firstJob = service.createJob({
+    workId: work.id,
+    workerProfileId: "researcher",
+    prompt: "先调查",
+    workdir: tempRoot,
+  });
+  let followupJobId: string | undefined;
+  let releaseFirstReview!: () => void;
+  const firstReviewGate = new Promise<void>((resolve) => { releaseFirstReview = resolve; });
+  backend.onSendMessage = async (_session, message) => {
+    if (!message.includes("<worker-continuation>") || followupJobId) return;
+    const followup = service.createJob({
+      workId: work.id,
+      workerProfileId: "tester",
+      prompt: "根据调查结果复核",
+      workdir: tempRoot,
+    });
+    followupJobId = followup.id;
+    await firstReviewGate;
+  };
+
+  await waitFor(() => service.getJob(firstJob.id)?.status === "completed");
+  await waitFor(() => !!followupJobId);
+  expect(service.getWork(work.id)?.status).toBe("active");
+  releaseFirstReview();
+
+  await waitFor(() => service.getJob(followupJobId!)?.status === "completed");
+  await waitFor(() => service.getWork(work.id)?.status === "completed", 8_000);
+  expect(service.listEvents(work.id).filter((event) => event.event === "continuation_completed")).toHaveLength(2);
+}, 15_000);
+
+test("Worker 运行中持久化 session 日志引用，短任务结束前也会最后捕获", async () => {
+  backend.delayMs = 1_300;
+  backend.liveTranscriptPath = path.join(tempRoot, "worker-live.jsonl");
+  writeFileSync(backend.liveTranscriptPath, "{\"type\":\"response_item\"}\n");
+  await pipeline.start();
+  const work = service.createWork({
+    botId: BOT_ID,
+    ownerUserId: OWNER,
+    sourceChatId: CHAT_ID,
+    visibility: "private",
+    request: "观察 Worker 进展",
+  });
+  const job = service.createJob({
+    workId: work.id,
+    workerProfileId: "researcher",
+    prompt: "运行一会儿并保留日志",
+    workdir: tempRoot,
+  });
+
+  await waitFor(() => service.getJob(job.id)?.status === "running");
+  await waitFor(() => !!service.getJob(job.id)?.backendSessionId, 3_000);
+  const running = service.getJob(job.id)!;
+  expect(running.status).toBe("running");
+  expect(running.backendType).toBe("codex");
+  expect(JSON.parse(running.transcriptSourcesJson)).toEqual([
+    expect.objectContaining({ path: backend.liveTranscriptPath, role: "session" }),
+  ]);
+  expect(backend.inspectCalls).toBeGreaterThan(0);
+  await waitFor(() => service.getJob(job.id)?.status === "completed", 5_000);
+  expect(service.getJob(job.id)?.backendSessionId).toBe("agent_1");
+}, 10_000);
+
+test("存在运行中的 Work 时，普通用户消息回复不带 Worker 交付标识", async () => {
+  await pipeline.start();
+  service.createWork({
+    botId: BOT_ID,
+    ownerUserId: OWNER,
+    sourceChatId: CHAT_ID,
+    visibility: "private",
+    request: "后台调研",
+  });
+
+  (pipeline as any).handleMessage({
+    senderPlatformId: "user-open-id",
+    senderName: "admin",
+    chatPlatformId: "oc_chat_1",
+    chatType: "p2p",
+    contentText: "普通问题",
+    contentType: "text",
+    timestamp: new Date(),
+    platformMsgId: "ordinary-user-message",
+    platformTs: Date.now(),
+    raw: {},
+  } as any);
+
+  await waitFor(() => transport.sent.length > 0);
+  expect(transport.sent.every((m) => !m.text.includes("⚙️ 本回复基于 Worker 后台任务结果整理"))).toBe(true);
+  expect(transport.sent.every((m) => !m.text.includes("⚙️ 已交由 Worker 后台执行"))).toBe(true);
+}, 15000);
+
+test("普通用户回合中给已有 Work 新建 Job 时，派工回复带派工标识", async () => {
+  // 本测试只验证出站识别；暂停 Scheduler，避免新 Job 在断言期间异步执行。
+  teamConfig.setEnabled(false);
+  const existingWork = service.createWork({
+    botId: BOT_ID,
+    ownerUserId: OWNER,
+    sourceChatId: CHAT_ID,
+    visibility: "private",
+    request: "已有后台任务",
+  });
+  service.createJob({
+    workId: existingWork.id,
+    workerProfileId: "general",
+    prompt: "已有 Job",
+    workdir: tempRoot,
+  });
+  await pipeline.start();
+  backend.onSendMessage = (_session, message) => {
+    if (!message.includes("<worker-continuation>")) {
+      service.createJob({
+        workId: existingWork.id,
+        workerProfileId: "general",
+        prompt: "本回合追加的 Job",
+        workdir: tempRoot,
+      });
+    }
+  };
+
+  (pipeline as any).handleMessage({
+    senderPlatformId: "user-open-id",
+    senderName: "admin",
+    chatPlatformId: "oc_chat_1",
+    chatType: "p2p",
+    contentText: "请派 Worker 调研",
+    contentType: "text",
+    timestamp: new Date(),
+    platformMsgId: "dispatch-user-message",
+    platformTs: Date.now(),
+    raw: {},
+  } as any);
+
+  await waitFor(() => transport.sent.length > 0);
+  const response = transport.sent.at(-1)?.text ?? "";
+  expect(response).toContain("⚙️ 已交由 Worker 后台执行");
+  expect(response).not.toContain("⚙️ 本回复基于 Worker 后台任务结果整理");
+}, 15000);
+
+test("普通用户回合只创建空 Work 时，不追加派工标识", async () => {
+  teamConfig.setEnabled(false);
+  await pipeline.start();
+  backend.onSendMessage = (_session, message) => {
+    if (!message.includes("<worker-continuation>")) {
+      service.createWork({
+        botId: BOT_ID,
+        ownerUserId: OWNER,
+        sourceChatId: CHAT_ID,
+        visibility: "private",
+        request: "只有 Work，没有 Job",
+      });
+    }
+  };
+
+  (pipeline as any).handleMessage({
+    senderPlatformId: "user-open-id",
+    senderName: "admin",
+    chatPlatformId: "oc_chat_1",
+    chatType: "p2p",
+    contentText: "创建空 Work",
+    contentType: "text",
+    timestamp: new Date(),
+    platformMsgId: "empty-work-message",
+    platformTs: Date.now(),
+    raw: {},
+  } as any);
+
+  await waitFor(() => transport.sent.length > 0);
+  expect(transport.sent.at(-1)?.text).not.toContain("⚙️ 已交由 Worker 后台执行");
+}, 15000);
+
+test("主 Agent 的 Worker 写操作由 Pipeline 活动回合统一校验和执行", async () => {
+  await pipeline.start();
+  let workId: string | undefined;
+  let jobId: string | undefined;
+  backend.onSendMessage = async (_session, message) => {
+    if (!message.includes("请通过 Pipeline 派工") || message.includes("<worker-continuation>")) return;
+    const work = await pipeline.executeWorkerAgentCommand({
+      chatId: CHAT_ID,
+      command: { type: "work.create", request: "统一写入口验证" },
+    });
+    workId = work.output;
+    const duplicateWork = await pipeline.executeWorkerAgentCommand({
+      chatId: CHAT_ID,
+      command: { type: "work.create", request: "统一写入口验证" },
+    });
+    expect(duplicateWork.output).toBe(workId);
+    const job = await pipeline.executeWorkerAgentCommand({
+      chatId: CHAT_ID,
+      command: {
+        type: "job.create",
+        workId,
+        workerProfileId: "reviewer",
+        prompt: "检查状态流转",
+        idempotencyKey: `test:${workId}:review`,
+      },
+    });
+    jobId = job.output;
+  };
+
+  (pipeline as any).handleMessage({
+    senderPlatformId: "user-open-id",
+    senderName: "admin",
+    chatPlatformId: "oc_chat_1",
+    chatType: "p2p",
+    contentText: "请通过 Pipeline 派工",
+    contentType: "text",
+    timestamp: new Date(),
+    platformMsgId: "pipeline-dispatch-message",
+    platformTs: Date.now(),
+    raw: {},
+  } as any);
+
+  await waitFor(() => !!jobId);
+  expect(service.getWork(workId!)).toMatchObject({ sourceChatId: CHAT_ID, visibility: "private" });
+  expect(service.getJob(jobId!)).toMatchObject({
+    workId,
+    workerProfileId: "reviewer",
+    workspacePolicy: "read_only",
+  });
+  await waitFor(() => transport.sent.some((message) => message.text.includes("⚙️ 已交由 Worker 后台执行")));
+}, 15_000);
+
+test("Pipeline 拒绝活动回合外写入和提升 Worker 工作区权限", async () => {
+  await expect(pipeline.executeWorkerAgentCommand({
+    chatId: CHAT_ID,
+    command: { type: "work.create", request: "绕过活动回合" },
+  })).rejects.toThrow(/活动 Agent 回合/);
+
+  await pipeline.start();
+  let policyError: string | undefined;
+  let accessError: string | undefined;
+  let policyWorkId: string | undefined;
+  const foreignWork = service.createWork({
+    botId: BOT_ID,
+    ownerUserId: OWNER,
+    sourceChatId: "other-chat",
+    visibility: "public",
+    request: "其他会话的任务",
+  });
+  backend.onSendMessage = async (_session, message) => {
+    if (!message.includes("测试权限提升") || message.includes("<worker-continuation>")) return;
+    const work = await pipeline.executeWorkerAgentCommand({
+      chatId: CHAT_ID,
+      command: { type: "work.create", request: "权限边界验证" },
+    });
+    policyWorkId = work.output;
+    try {
+      await pipeline.executeWorkerAgentCommand({
+        chatId: CHAT_ID,
+        command: {
+          type: "job.create",
+          workId: work.output,
+          workerProfileId: "reviewer",
+          prompt: "不应获得写权限",
+          workspacePolicy: "git_worktree",
+          idempotencyKey: `test:${work.output}:escalation`,
+        },
+      });
+    } catch (error) {
+      policyError = String(error);
+    }
+    try {
+      await pipeline.executeWorkerAgentCommand({
+        chatId: CHAT_ID,
+        command: { type: "cancel", id: foreignWork.id },
+      });
+    } catch (error) {
+      accessError = String(error);
+    }
+  };
+
+  (pipeline as any).handleMessage({
+    senderPlatformId: "user-open-id",
+    senderName: "admin",
+    chatPlatformId: "oc_chat_1",
+    chatType: "p2p",
+    contentText: "测试权限提升",
+    contentType: "text",
+    timestamp: new Date(),
+    platformMsgId: "pipeline-policy-message",
+    platformTs: Date.now(),
+    raw: {},
+  } as any);
+
+  await waitFor(() => !!policyError && !!accessError);
+  expect(policyError).toMatch(/不能使用 git_worktree/);
+  expect(accessError).toMatch(/不属于当前会话/);
+  await waitFor(() => service.getWork(policyWorkId!)?.status === "failed");
+  expect(service.getWork(policyWorkId!)?.finalConclusion).toContain("空 Work");
+}, 15_000);
+
+test("Pipeline 人工完成入口必须在服务端再次确认 force", async () => {
+  await pipeline.start();
+  let forceError: string | undefined;
+  backend.onSendMessage = async (_session, message) => {
+    if (!message.includes("测试人工完成确认") || message.includes("<worker-continuation>")) return;
+    const work = await pipeline.executeWorkerAgentCommand({
+      chatId: CHAT_ID,
+      command: { type: "work.create", request: "人工完成确认" },
+    });
+    try {
+      await pipeline.executeWorkerAgentCommand({
+        chatId: CHAT_ID,
+        command: { type: "work.complete_recovery", workId: work.output, conclusion: "不应完成" } as any,
+      });
+    } catch (error) {
+      forceError = String(error);
+    }
+  };
+
+  (pipeline as any).handleMessage({
+    senderPlatformId: "user-open-id",
+    senderName: "admin",
+    chatPlatformId: "oc_chat_1",
+    chatType: "p2p",
+    contentText: "测试人工完成确认",
+    contentType: "text",
+    timestamp: new Date(),
+    platformMsgId: "pipeline-force-message",
+    platformTs: Date.now(),
+    raw: {},
+  } as any);
+
+  await waitFor(() => !!forceError);
+  expect(forceError).toMatch(/force=true/);
+}, 15_000);
+
+test("Pipeline 取消排队 Job 时立即确认终态，不等待调度轮询", async () => {
+  teamConfig.setEnabled(false);
+  await pipeline.start();
+  const work = service.createWork({
+    botId: BOT_ID,
+    ownerUserId: OWNER,
+    sourceChatId: CHAT_ID,
+    visibility: "public",
+    request: "取消排队任务",
+  });
+  const job = service.createJob({
+    workId: work.id,
+    workerProfileId: "reviewer",
+    prompt: "尚未开始",
+    workdir: tempRoot,
+  });
+  backend.onSendMessage = async (_session, message) => {
+    if (!message.includes("取消后台任务")) return;
+    await pipeline.executeWorkerAgentCommand({
+      chatId: CHAT_ID,
+      command: { type: "cancel", id: work.id },
+    });
+  };
+
+  (pipeline as any).handleMessage({
+    senderPlatformId: "user-open-id",
+    senderName: "admin",
+    chatPlatformId: "oc_chat_1",
+    chatType: "p2p",
+    contentText: "取消后台任务",
+    contentType: "text",
+    timestamp: new Date(),
+    platformMsgId: "pipeline-cancel-message",
+    platformTs: Date.now(),
+    raw: {},
+  } as any);
+
+  await waitFor(() => service.getJob(job.id)?.status === "cancelled");
+  expect(service.getWork(work.id)?.status).toBe("cancelled");
+}, 15_000);
 
 test("多 Job Work：中间 Job 完成时验收回合静默，全部完成后统一交付", async () => {
   backend.delayMs = 400;
@@ -247,7 +671,69 @@ test("多 Job Work：中间 Job 完成时验收回合静默，全部完成后统
   expect(transport.sent.length).toBeGreaterThan(sentAfterFirst);
 }, 20000);
 
-test("用户消息优先于 Continuation：串行处理", async () => {
+test("同批多个 Work 混合完成状态时交付已完成 Work，不被运行中 Work 整批静默", async () => {
+  await pipeline.start();
+
+  const workA = service.createWork({
+    botId: BOT_ID,
+    ownerUserId: OWNER,
+    sourceChatId: CHAT_ID,
+    visibility: "private",
+    request: "仍在执行的任务",
+  });
+  const jobAResult = service.createJob({
+    workId: workA.id,
+    workerProfileId: "researcher",
+    prompt: "已完成的阶段",
+    workdir: tempRoot,
+  });
+  const jobARunning = service.createJob({
+    workId: workA.id,
+    workerProfileId: "tester",
+    prompt: "仍在运行的阶段",
+    workdir: tempRoot,
+  });
+  service.claimJob({ jobId: jobAResult.id, claimToken: "manual-a-result" });
+  service.claimJob({ jobId: jobARunning.id, claimToken: "manual-a-running" });
+  service.completeJob(jobAResult.id, {
+    status: "completed",
+    responseText: "A 的阶段结果",
+    changedFiles: [],
+    artifacts: [],
+    startedAt: "2026-08-03 13:00:00",
+    endedAt: "2026-08-03 13:01:00",
+  });
+
+  const workB = service.createWork({
+    botId: BOT_ID,
+    ownerUserId: OWNER,
+    sourceChatId: CHAT_ID,
+    visibility: "private",
+    request: "已经完成的任务",
+  });
+  const jobB = service.createJob({
+    workId: workB.id,
+    workerProfileId: "researcher",
+    prompt: "完整结果",
+    workdir: tempRoot,
+  });
+  service.claimJob({ jobId: jobB.id, claimToken: "manual-b" });
+  service.completeJob(jobB.id, {
+    status: "completed",
+    responseText: "B 的最终结果",
+    changedFiles: [],
+    artifacts: [],
+    startedAt: "2026-08-03 13:00:00",
+    endedAt: "2026-08-03 13:01:00",
+  });
+
+  await waitFor(() => service.getWork(workB.id)?.status === "completed", 8_000);
+  expect(transport.sent.some((message) => message.text.includes("⚙️ 本回复基于 Worker 后台任务结果整理"))).toBe(true);
+  expect(service.getWork(workA.id)?.status).toBe("active");
+  expect(service.getJob(jobARunning.id)?.status).toBe("running");
+}, 15_000);
+
+test("用户消息与 Continuation 由同一队列串行处理", async () => {
   await pipeline.start();
 
   const work = service.createWork({
@@ -264,10 +750,49 @@ test("用户消息优先于 Continuation：串行处理", async () => {
     workdir: tempRoot,
   });
 
-  // 用户消息先入队
+  // 保持任务运行一段时间，确认 Worker 完成后 Continuation 可进入同一串行队列
   await new Promise((resolve) => setTimeout(resolve, 60));
-  // Worker 完成前用户发消息：用户消息应先被处理（worker 回合排后）
   await waitFor(() => service.getJob(job.id)?.status === "completed");
+});
+
+test("Worker 正文发送失败时不完成 Continuation，后续重试成功后才完成", async () => {
+  transport.failCardAttempts = 1;
+  let fallbackStarted = false;
+  let releaseFallback!: () => void;
+  const fallbackGate = new Promise<void>((resolve) => { releaseFallback = resolve; });
+  transport.onSendText = async (text) => {
+    if (!text.startsWith("发送失败：")) return;
+    fallbackStarted = true;
+    await fallbackGate;
+  };
+  await pipeline.start();
+
+  const work = service.createWork({
+    botId: BOT_ID,
+    ownerUserId: OWNER,
+    sourceChatId: CHAT_ID,
+    visibility: "private",
+    request: "发送失败重试",
+  });
+  const job = service.createJob({
+    workId: work.id,
+    workerProfileId: "researcher",
+    prompt: "生成结果",
+    workdir: tempRoot,
+  });
+
+  await waitFor(() => service.getJob(job.id)?.status === "completed");
+  await waitFor(() => fallbackStarted);
+  expect(service.getWork(work.id)?.status).toBe("active");
+  releaseFallback();
+  await waitFor(() => {
+    const row = db.prepare("SELECT status FROM agent_continuations WHERE work_id = ?").get(work.id) as { status: string } | undefined;
+    return row?.status === "completed";
+  }, 5000);
+
+  expect(transport.sent.some((m) => m.text.startsWith("发送失败："))).toBe(true);
+  expect(transport.sent.some((m) => m.text.includes("⚙️ 本回复基于 Worker 后台任务结果整理"))).toBe(true);
+  expect(service.getWork(work.id)?.status).toBe("completed");
 });
 
 test("两个 Job 受控并发执行", async () => {
@@ -287,6 +812,30 @@ test("两个 Job 受控并发执行", async () => {
   await waitFor(() => service.getJob(jobA.id)?.status === "completed" && service.getJob(jobB.id)?.status === "completed");
   expect(service.getJob(jobA.id)?.responseText).toBeTruthy();
   expect(service.getJob(jobB.id)?.responseText).toBeTruthy();
+});
+
+test("Worker 在 session 创建前也计入 busy，关闭流程不会提前关 DB", async () => {
+  backend.createSessionDelayMs = 500;
+  await pipeline.start();
+
+  const work = service.createWork({
+    botId: BOT_ID,
+    ownerUserId: OWNER,
+    sourceChatId: CHAT_ID,
+    visibility: "private",
+    request: "pre-session busy",
+  });
+  const job = service.createJob({
+    workId: work.id,
+    workerProfileId: "general",
+    prompt: "慢速创建 session",
+    workdir: tempRoot,
+  });
+
+  await waitFor(() => service.getJob(job.id)?.status === "running");
+  expect(backend.sessions).toHaveLength(0);
+  expect(pipeline.hasBusyChats()).toBe(true);
+  await waitFor(() => service.getJob(job.id)?.status === "completed", 5000);
 });
 
 test("Work 完成后不再调度新 Job", async () => {
@@ -337,7 +886,7 @@ test("重启恢复：running Job 标记 interrupted，claimed Continuation 重�
     db,
     transport as unknown as TransportClient,
     backend as unknown as AgentBackend,
-    { name: "NiuBot", platform: "feishu", platformBotId: "bot" },
+    { name: BOT_ID, platform: "feishu", platformBotId: "bot" },
     tempRoot,
     path.join(tempRoot, "niubot.db"),
     10,
@@ -501,11 +1050,17 @@ test("延续性 Job 自动注入同 Work 前序结果和检索入口", async () 
     visibility: "private",
     request: "延续任务",
   });
+  const workerMessagesBefore = backend.messages.length;
   const jobA = service.createJob({ workId: work.id, workerProfileId: "researcher", prompt: "第一步调研", workdir: tempRoot });
+  const jobB = service.createJob({
+    workId: work.id,
+    workerProfileId: "researcher",
+    prompt: "基于第一步继续",
+    workdir: tempRoot,
+    dependsOn: [jobA.id],
+  });
   await waitFor(() => service.getJob(jobA.id)?.status === "completed");
 
-  const workerMessagesBefore = backend.messages.length;
-  const jobB = service.createJob({ workId: work.id, workerProfileId: "researcher", prompt: "基于第一步继续", workdir: tempRoot });
   await waitFor(() => service.getJob(jobB.id)?.status === "completed");
 
   const jobBPrompt = backend.messages.slice(workerMessagesBefore).find((m) => m.text.includes("基于第一步继续"));
@@ -568,7 +1123,7 @@ test("角色配置 backend 时使用专属 backend，否则复用主 Agent backe
     db,
     transport as unknown as TransportClient,
     backend as unknown as AgentBackend,
-    { name: "NiuBot", platform: "feishu", platformBotId: "bot" },
+    { name: BOT_ID, platform: "feishu", platformBotId: "bot" },
     tempRoot,
     path.join(tempRoot, "niubot.db"),
     10,
@@ -645,7 +1200,7 @@ test("未知 backend 类型：Job 失败且错误带角色上下文", async () =
     db,
     transport as unknown as TransportClient,
     backend as unknown as AgentBackend,
-    { name: "NiuBot", platform: "feishu", platformBotId: "bot" },
+    { name: BOT_ID, platform: "feishu", platformBotId: "bot" },
     tempRoot,
     path.join(tempRoot, "niubot.db"),
     10,
@@ -702,6 +1257,64 @@ test("未知 backend 类型：Job 失败且错误带角色上下文", async () =
   // 错误信息带 profile id，便于定位配置问题
   expect(failed.error).toContain("broken-role");
   expect(failed.error).toContain("nope");
-  // 主 backend 未被执行（session 未被创建）
-  expect(backend.sessions).toHaveLength(0);
+  // Worker backend 在创建 session 前失败；主 backend 仅创建一个 session 用于交付失败结果
+  await waitFor(() => backend.messages.some((m) => m.text.startsWith("<worker-continuation>")));
+  expect(backend.sessions).toHaveLength(1);
 }, 15000);
+
+test("active continuation 回合按 FIFO 完成后再处理用户消息", async () => {
+  // 主 backend 处理消息时延迟，模拟 continuation 验收回合进行中
+  backend.delayMs = 800;
+  await pipeline.start();
+
+  const work = service.createWork({
+    botId: BOT_ID,
+    ownerUserId: OWNER,
+    sourceChatId: CHAT_ID,
+    visibility: "private",
+    request: "FIFO 验证",
+  });
+  const job = service.createJob({
+    workId: work.id,
+    workerProfileId: "general",
+    prompt: "任务内容",
+    workdir: tempRoot,
+  });
+
+  // Job 完成 → 生成 continuation（不手动 claim，让 pipeline 自动投递）
+  const jobDeadline = Date.now() + 5000;
+  while (Date.now() < jobDeadline && service.getJob(job.id)?.status !== "completed") {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  const afterJob = service.getJob(job.id)!;
+  expect(afterJob.status).toBe("completed");
+
+  // continuation 已先进入主 backend（busy 处理中）
+  await waitFor(() => (pipeline as any).queue.isBusy(CHAT_ID));
+
+  // 用户消息后到：只能排在 continuation 后面，不能取消当前验收回合
+  const userMsgText = `插一句-${Date.now()}`;
+  (pipeline as any).handleMessage({
+    senderPlatformId: "user-open-id",
+    senderName: "admin",
+    chatPlatformId: "oc_chat_1",
+    chatType: "p2p",
+    contentText: userMsgText,
+    contentType: "text",
+    timestamp: new Date(),
+    platformMsgId: `user-msg-${Date.now()}`,
+    platformTs: Date.now(),
+    raw: {},
+  } as any);
+
+  // 用户消息最终被处理，且调用顺序严格晚于 continuation
+  await waitFor(() => backend.messages.some((m) => m.text.includes(userMsgText)), 8000);
+  const continuationIndex = backend.messages.findIndex((m) => m.text.startsWith("<worker-continuation>"));
+  const userIndex = backend.messages.findIndex((m) => m.text.includes(userMsgText));
+  expect(continuationIndex).toBeGreaterThanOrEqual(0);
+  expect(userIndex).toBeGreaterThan(continuationIndex);
+  await waitFor(() => {
+    const q = (pipeline as any).queue as { isBusy: (c: string) => boolean };
+    return !q.isBusy(CHAT_ID);
+  }, 8000);
+}, 20000);

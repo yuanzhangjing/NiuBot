@@ -44,17 +44,19 @@ nbt worker job create --work <work-id> --worker <profile> --file /tmp/job.md [--
 
 被唤醒后你会收到 `<worker-continuation>` 内部区段（Work 目标 + 各 Job 结果文本）。此时：
 
-- 结果满足需求 → `nbt worker complete --work <id> --file /tmp/result.md`，然后给用户最终回复；
+- 结果满足需求 → 直接给用户最终回复；正文发送成功后 Work 自动完成；
 - 结果不完整 → 创建后续 Job（可携带补充信息）；
-- 需要用户输入 → 直接提问，Work 保持进行中；
-- 无法继续 → `nbt worker complete --work <id> --file /tmp/result.md`（结论里说明失败原因）。
+- 需要用户输入 → 直接提问；正文成功发送后本次 Work 自动完成，用户补充后另开 Work；
+- 无法继续 → 向用户说明原因；成功发送后 Work 自动完成。
 
 ### 5. 其他操作
 
 ```bash
 nbt worker list                # 当前会话的 Work/Job 状态
 nbt worker get <id>            # 详情（Job 最终文本、错误、产物）
+nbt sessions get <job-id>      # 查看 Worker 当前或已结束的 session 日志/工具调用
 nbt worker cancel <id>         # 取消 Work 或 Job
+nbt worker complete --force --work <id> --file <结论.md>  # 仅用于人工修复异常悬挂的 Work
 nbt worker config show         # 当前 Worker 配置
 nbt worker config draft --file /tmp/team.yaml   # 生成配置草案（管理员确认后应用）
 ```
@@ -81,6 +83,9 @@ profiles:
 ## 边界
 
 - Worker 不直接回复用户；最终回复只能由主 Agent 给出。
+- `nbt worker` 的创建、追加、取消、人工修复和配置写入都通过本地 IPC 交给当前 Pipeline；CLI 只直接读取状态，不直接修改 Worker 数据库。
+- 主 Agent 不需要手工完成 Work：验收回合未创建后续 Job且最终正文发送成功时，Engine 自动收尾。
 - Worker 无主会话上下文和用户记忆；需要历史时把必要信息写进 Job 文件。
+- 主 Agent 需要检查 Worker 的实际进展时，用 `nbt sessions get <job-id>`；session 尚未启动完成时会提示暂无日志，稍后重试。
 - 同一 Work 的后续 Job 复用同一工作区（文件保留），不同 Work 隔离。
 - 写 Job 的修改留在 worktree（`niubot-worker/<jobId>` 分支），不自动提交、不 push。
