@@ -63,7 +63,9 @@ import {
   addCronJob,
   CRON_FAILURE_LIMIT,
   deleteCronJobForAccess,
+  describeCronSchedule,
   getCronJob,
+  listCronJobs,
 } from "./cron.js";
 import {
   addLoopJob,
@@ -169,7 +171,10 @@ const BUILTIN_COMMANDS = new Set([
   "/admin", "/help", "/stop", "/clear", "/flush", "/task", "/status", "/history",
   "/worker",
 ]);
-const AGENT_COMMANDS = new Set(["/loop", "/cron"]);
+const HYBRID_SCHEDULE_COMMANDS = new Set(["/loop", "/cron"]);
+const SCHEDULE_BUILTIN_SUBCOMMANDS = new Set([
+  "list", "ls", "help", "--help", "cancel", "stop", "del", "delete", "rm",
+]);
 // ── Watchdog 常量 ──
 const AGENT_WATCHDOG_INTERVAL_MS = 15_000;     // 15 秒检测间隔
 const AGENT_IDLE_THRESHOLD_MS = 600_000;       // 10 分钟：第一次 idle 通知
@@ -182,6 +187,7 @@ const INDEPENDENT_LONG_RUNNING_NOTIFY_MS = 3_600_000;  // 1 小时：独立 sess
 const UPDATE_CHECK_HOUR = 10;                  // 本地时间 10:00 检查 npm latest
 const WORKER_DELIVERY_MARKER = "> ⚙️ 本回复基于 Worker 后台任务结果整理";
 const WORKER_DISPATCH_MARKER = "> ⚙️ 已交由 Worker 后台执行";
+const LOOP_TASK_PREVIEW_MAX_CHARS = 80;
 const UPDATE_NOTIFY_END_HOUR = 18;             // 10:00-18:00 启动时允许立即通知
 const STARTUP_PLATFORM_TIMEOUT_MS = 5_000;      // 平台启动探测超时后降级继续启动
 
@@ -191,6 +197,34 @@ function withShutdownTimeout<T>(promise: Promise<T>, ms: number): Promise<T | un
     promise,
     new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), ms)),
   ]);
+}
+
+/** Engine 强制添加的 Loop 来源信息，不依赖模型自行说明。 */
+function buildTaskPreview(prompt: string): string {
+  const normalizedPrompt = stripInternalWorkerTags(prompt).replace(/\s+/g, " ").trim();
+  const promptChars = Array.from(normalizedPrompt);
+  return promptChars.length > LOOP_TASK_PREVIEW_MAX_CHARS
+    ? `${promptChars.slice(0, LOOP_TASK_PREVIEW_MAX_CHARS).join("")}…`
+    : normalizedPrompt || "（无任务描述）";
+}
+
+/** Loop 卡片标题：固定展示类型 + ID + 进度 + 频率。 */
+function buildLoopCardHeader(job: LoopJob): string {
+  const iteration = job.runCount + 1;
+  const progress = job.maxTimes === null
+    ? `第 ${iteration} 次`
+    : `第 ${iteration}/${job.maxTimes} 次`;
+  return `🔁 Loop loop:${job.id} · ${progress} · 每 ${formatLoopInterval(job.intervalSeconds)}`;
+}
+
+/** Loop 任务内容引用（正文开头 2-3 行）。 */
+function buildLoopTaskQuote(job: LoopJob): string {
+  return `> 任务：${escapeLarkMarkdownText(buildTaskPreview(job.prompt))}`;
+}
+
+/** Loop 完整投递标记（标题行 + 任务引用），用于无卡片降级时的纯文本。 */
+function buildLoopDeliveryMarker(job: LoopJob): string {
+  return `> ${buildLoopCardHeader(job)}\n${buildLoopTaskQuote(job)}`;
 }
 
 function formatLongRunningHours(runningMs: number): number {
@@ -240,6 +274,9 @@ interface RunningTask {
   chatId: string;
   description: string;
   startedAt: number;
+  source: "cron" | "task";
+  cronJobId?: number;
+  cronClaimToken?: string;
 }
 
 interface PendingTransitionMessage {
@@ -412,6 +449,9 @@ export class Pipeline {
 
   /** chatId → 主会话调度令牌：随主 Agent 环境注入，独立 session 拿不到，防跨进程身份借用。 */
   private chatScheduleTokens = new Map<string, string>();
+
+  /** 正在占用主聊天队列的 Loop 回合；取消命令用它精确中止对应 run。 */
+  private activeLoopRuns = new Map<number, { chatId: string; runId?: string }>();
 
   constructor(
     db: Database.Database,
@@ -933,7 +973,8 @@ export class Pipeline {
           chatType: context.chatType,
           userId: context.userId,
         });
-        if (!job) throw new Error(`cron:${id} 不存在`);
+        if (!job) throw new Error(`cron:${id} 不存在或已经结束`);
+        await this.cancelRunningCronSessions(id);
         return { output: `Cancelled cron:${id}` };
       }
     }
@@ -1637,7 +1678,7 @@ export class Pipeline {
    * 未命中返回 false，消息继续走 agent 流程。
    *
    * 分发顺序：
-   *   1. 内置命令 switch（/restart, /service, /new, /clear, /stop, /cron）
+   *   1. 内置命令 switch（含 /loop、/cron 的查看、帮助和取消）
    *   2. 管理员 shell 命令（tryShellCommand）
    *   3. return false → 转发给 agent
    */
@@ -1684,6 +1725,19 @@ export class Pipeline {
           return true;
         }
         this.handleWorkerCommand(parts.slice(1), chatId, platformChatId, msgId);
+        return true;
+      }
+      case "/loop":
+      case "/cron": {
+        this.handleScheduleBuiltinCommand(
+          cmd === "/loop" ? "loop" : "cron",
+          parts.slice(1),
+          userId,
+          chatId,
+          chatType === "group" ? "group" : "p2p",
+          platformChatId,
+          msgId,
+        );
         return true;
       }
       case "/agent": {
@@ -1843,11 +1897,134 @@ export class Pipeline {
   private isBuiltinCommand(text: string, userId: string): boolean {
     if (!text.startsWith("/") || text.startsWith("//")) return false;
     const firstToken = text.split(/\s+/, 1)[0]?.toLowerCase();
-    if (firstToken && AGENT_COMMANDS.has(firstToken)) return false;
+    if (firstToken && HYBRID_SCHEDULE_COMMANDS.has(firstToken)) {
+      const parts = text.trim().split(/\s+/);
+      const subcommand = parts[1]?.toLowerCase();
+      return subcommand === undefined || SCHEDULE_BUILTIN_SUBCOMMANDS.has(subcommand);
+    }
     if (firstToken && BUILTIN_COMMANDS.has(firstToken)) return true;
     if (!this.adminRoles.has(userId)) return false;
     const executable = text.slice(1).split(/\s+/, 1)[0];
     return !!executable && commandExistsSync(executable);
+  }
+
+  private handleScheduleBuiltinCommand(
+    mode: "loop" | "cron",
+    args: string[],
+    userId: string,
+    chatId: string,
+    chatType: "p2p" | "group",
+    platformChatId: string,
+    msgId?: string,
+  ): void {
+    const subcommand = args[0]?.toLowerCase() ?? "list";
+    if (subcommand === "list" || subcommand === "ls") {
+      this.sendScheduleBuiltinList(mode, chatId, platformChatId, msgId);
+      return;
+    }
+    if (subcommand === "help" || subcommand === "--help") {
+      const label = mode === "loop" ? "Loop" : "Cron";
+      this.replyText(
+        chatId,
+        platformChatId,
+        msgId,
+        `/${mode} 或 /${mode} list：查看 ${label} 任务\n/${mode} del <id>：删除任务\n/${mode} <任务与时间>：创建任务`,
+      );
+      return;
+    }
+
+    const rawId = args[1];
+    const idMatch = rawId?.match(/^(?:(loop|cron):)?(\d+)$/i);
+    const idPrefix = idMatch?.[1]?.toLowerCase();
+    const id = Number(idMatch?.[2]);
+    if (!idMatch || (idPrefix && idPrefix !== mode) || !Number.isInteger(id) || id <= 0) {
+      this.replyText(chatId, platformChatId, msgId, `用法：/${mode} del <id>`);
+      return;
+    }
+    try {
+      if (mode === "loop") {
+        const job = cancelLoopJobForAccess(this.db, id, {
+          currentChatId: chatId,
+          chatType,
+          userId,
+        });
+        if (!job) {
+          this.replyText(chatId, platformChatId, msgId, `loop:${id} 不存在或已经结束。`);
+          return;
+        }
+        if (job.status === "running") this.cancelActiveLoopRun(id, chatId);
+      } else {
+        const job = deleteCronJobForAccess(this.db, id, {
+          currentChatId: chatId,
+          chatType,
+          userId,
+        });
+        if (!job) {
+          this.replyText(chatId, platformChatId, msgId, `cron:${id} 不存在或已经结束。`);
+          return;
+        }
+        void this.cancelRunningCronSessions(id);
+      }
+      this.replyText(chatId, platformChatId, msgId, `已删除 ${mode}:${id}。`);
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      const message = detail.includes("own") ? "只能删除自己创建的任务。" : `删除失败：${detail}`;
+      this.replyText(chatId, platformChatId, msgId, message);
+    }
+  }
+
+  private sendScheduleBuiltinList(
+    mode: "loop" | "cron",
+    chatId: string,
+    platformChatId: string,
+    msgId?: string,
+  ): void {
+    const lines: string[] = [];
+    if (mode === "loop") {
+      for (const job of listLoopJobs(this.db, chatId)) {
+        const progress = job.maxTimes ? `${job.runCount}/${job.maxTimes}` : `${job.runCount} 次`;
+        lines.push(`· loop:${job.id} · ${job.status} · 每 ${formatLoopInterval(job.intervalSeconds)} · ${progress}`);
+        lines.push(`  ${escapeLarkMarkdownText(job.prompt.replace(/\s+/g, " ").slice(0, 120))}`);
+      }
+    } else {
+      for (const job of listCronJobs(this.db, chatId)) {
+        const schedule = job.cronExpr
+          ? `${job.cronExpr}（${job.timezone}）`
+          : formatLocalDateTimeWithTZ(job.runAt!, job.timezone);
+        const progress = job.maxTimes ? ` · ${job.runCount}/${job.maxTimes}` : job.runCount ? ` · 已执行 ${job.runCount} 次` : "";
+        lines.push(`· cron:${job.id} · ${job.status} · ${schedule}${progress}`);
+        lines.push(`  ${escapeLarkMarkdownText(job.prompt.replace(/\s+/g, " ").slice(0, 120))}`);
+      }
+    }
+    if (lines.length === 0) lines.push(`当前没有 ${mode === "loop" ? "Loop" : "Cron"} 任务。`);
+    lines.push("", `创建：/${mode} <任务与时间>`, `删除：/${mode} del <id>`);
+    const content = lines.join("\n");
+    this.transport.sendCard(platformChatId, mode === "loop" ? "Loop" : "Cron", content, undefined, msgId)
+      .then((pmid) => { this.storeBotResponse(chatId, content, pmid); })
+      .catch((err) => this.log.error("schedule list send failed", { mode, chatId, error: String(err) }));
+  }
+
+  private async cancelRunningCronSessions(id: number): Promise<void> {
+    const running = [...this.runningTasks.values()].filter(
+      (task) => task.source === "cron" && task.cronJobId === id,
+    );
+    await Promise.all(running.map((task) => task.backend.cancelSession(task.agentSession).catch((err) => {
+      this.log.warn("failed to stop cancelled Cron session", { id, error: String(err) });
+    })));
+  }
+
+  private cancelActiveLoopRun(id: number, chatId: string): void {
+    const active = this.activeLoopRuns.get(id);
+    if (!active || active.chatId !== chatId) return;
+    if (active.runId) this.markRuntimeRun(active.runId, "stopped");
+    // 先 abort 当前 queue run，RunManager 会立即结束等待，聊天随后继续处理 pending。
+    this.queue.cancel(chatId);
+    const session = this.chatSessions.get(chatId);
+    if (session) {
+      void this.agent.cancelSession(session.agentSession).catch((err) => {
+        this.log.warn("failed to stop cancelled Loop session", { id, chatId, error: String(err) });
+      });
+    }
   }
 
   /** //xxx 表示强制透传给 agent，实际发送时去掉一个前缀 / */
@@ -1940,7 +2117,7 @@ export class Pipeline {
       const taskCliAgent = t.backend instanceof CliAgentBackend ? t.backend : undefined;
       const a = taskCliAgent?.getActivity(sessionId);
       const status = a?.compacting ? "压缩上下文" : a?.executingTool ? "执行工具" : "处理中";
-      sections.push(`**⚡ ${t.description}**（${status} · ${elapsed}）`);
+      sections.push(`**${t.source === "cron" ? "⏰" : "⚡"} ${t.description}**（${status} · ${elapsed}）`);
       if (a && a.recentLines.length > 0) {
         const logBlock = a.recentLines.map((l) => l.replace(/`{3,}/g, "``").slice(0, ERROR_DISPLAY_MAX_LEN)).join("\n");
         sections.push(`\`\`\`\n${logBlock}\n\`\`\``);
@@ -2104,7 +2281,7 @@ export class Pipeline {
   }
 
   private stopAllTasks(chatId: string, platformChatId: string, msgId?: string): void {
-    const tasks = [...this.runningTasks.entries()].filter(([, t]) => t.chatId === chatId);
+    const tasks = [...this.runningTasks.entries()].filter(([, t]) => t.chatId === chatId && t.source === "task");
     if (tasks.length === 0) {
       this.replyText(chatId, platformChatId, msgId, "当前没有运行中的 task。");
       return;
@@ -2179,7 +2356,7 @@ export class Pipeline {
     return latest;
   }
 
-  // ── /cron command ─────────────────────────────────────────────
+  // ── 独立 Cron 执行 ────────────────────────────────────────────
 
   /** 检测配置版本变化并热更新 registry（只影响新 Job）。Watchdog 轮询调用；CLI 侧 apply/rollback 后自动生效。 */
   reloadTeamConfigIfChanged(): void {
@@ -2277,8 +2454,16 @@ export class Pipeline {
    * 执行定时任务：创建独立 session，发送 prompt，结果用 ⏰ header 卡片发送，完成后归档。
    * 不走用户消息队列，不干扰当前对话 session。
    */
-  async processCronJob(chatId: string, userId: string, prompt: string, description: string): Promise<void> {
-    return this.processIndependentSession(chatId, userId, prompt, description, "cron");
+  async processCronJob(
+    chatId: string,
+    userId: string,
+    prompt: string,
+    description: string,
+    cronJobId?: number,
+    claimToken?: string,
+  ): Promise<void> {
+    const cronRun = cronJobId !== undefined && claimToken !== undefined ? { cronJobId, claimToken } : undefined;
+    return this.processIndependentSession(chatId, userId, prompt, description, "cron", cronRun);
   }
 
   async reportCronJobFailure(
@@ -2554,6 +2739,7 @@ ${jobParts.join("\n\n")}
   private async processIndependentSession(
     chatId: string, userId: string, prompt: string, description: string,
     source: "cron" | "task",
+    cronRun?: { cronJobId: number; claimToken: string },
   ): Promise<void> {
     // 从入口开始跟踪完整生命周期（含清理），优雅关闭只有在全部收尾后才放行 DB。
     this.independentRunCount += 1;
@@ -2606,6 +2792,10 @@ ${jobParts.join("\n\n")}
       buildSessionArchiveContext(getSessionArchiveDirectory(this.archiveHome, this.botIdentity.name, chatId)),
     ].filter(Boolean).join("\n\n");
 
+    if (cronRun && !this.isCronClaimCurrent(cronRun.cronJobId, cronRun.claimToken)) {
+      throw new Error(`cron:${cronRun.cronJobId} 已取消或运行令牌失效`);
+    }
+
     // Create independent agent session
     const agentSession = await this.createAgentSession({
       workingDirectory: this.workingDirectory,
@@ -2629,13 +2819,14 @@ ${jobParts.join("\n\n")}
       VALUES (?, ?, ?, ?, 'active', datetime('now'), datetime('now'), ?)
     `).run(sessionId, chatId, userId, source, sessionBackendType);
 
-    // Store prompt as user message
+    // 独立任务的 prompt 只属于 session transcript，不是平台收到的用户消息。
     storeMessage(this.db, {
       chatId,
-      senderId: userId,
+      senderId: this.botUserId!,
       sessionId,
       role: "user",
       contentText: prompt,
+      contentType: "internal_prompt",
       platform: this.botIdentity.platform,
     });
 
@@ -2658,10 +2849,15 @@ ${jobParts.join("\n\n")}
 
     this.runningTasks.set(agentSession.id, {
       agentSession, backend: sessionBackend, backendType: sessionBackendType,
-      chatId, description, startedAt: Date.now(),
+      chatId, description, startedAt: Date.now(), source,
+      cronJobId: cronRun?.cronJobId,
+      cronClaimToken: cronRun?.claimToken,
     });
 
     try {
+      if (cronRun && !this.isCronClaimCurrent(cronRun.cronJobId, cronRun.claimToken)) {
+        throw new Error(`cron:${cronRun.cronJobId} 已取消或运行令牌失效`);
+      }
       const response = await sessionBackend.sendMessage(agentSession, messageToSend);
 
       if (response.cancelled) {
@@ -2674,28 +2870,11 @@ ${jobParts.join("\n\n")}
         response.text = EMPTY_RESPONSE_FALLBACK;
       }
 
-      // Store response
-      const replyMsgId = storeMessage(this.db, {
-        chatId,
-        senderId: this.botUserId!,
-        sessionId,
-        role: "assistant",
-        contentText: response.text,
-        platform: this.botIdentity.platform,
-      });
+      if (cronRun && !this.isCronClaimCurrent(cronRun.cronJobId, cronRun.claimToken)) {
+        throw new Error(`cron:${cronRun.cronJobId} 已取消或运行令牌失效`);
+      }
 
-      // Update session stats
       const agentSessionId = sessionBackend.getAgentSessionId?.(agentSession.id);
-      this.db.prepare(`
-        UPDATE sessions
-        SET message_count = 2,
-            turn_count = 1,
-            last_active_at = datetime('now'),
-            end_msg_id = ?,
-            agent_session_id = ?,
-            backend_type = ?
-        WHERE id = ?
-      `).run(replyMsgId, agentSessionId ?? null, sessionBackendType, sessionId);
 
       // Build footer
       const footer = buildResponseFooter({
@@ -2707,12 +2886,38 @@ ${jobParts.join("\n\n")}
       });
 
       const emoji = source === "cron" ? "⏰" : "⚡";
-      const header = `${emoji} ${description || prompt.slice(0, 40)}`;
-      const sentPlatformMsgId = await this.transport.sendCard(platformChatId, header, response.text, footer);
-
-      if (sentPlatformMsgId) {
-        updateMessagePlatformId(this.db, replyMsgId, sentPlatformMsgId);
+      let header = `${emoji} ${description || prompt.slice(0, 40)}`;
+      let content = response.text;
+      if (cronRun) {
+        // 固定标题：类型 + ID + 触发节奏；任务内容作为引用放在正文开头
+        const cronJob = getCronJob(this.db, cronRun.cronJobId);
+        if (cronJob) {
+          header = `⏰ Cron cron:${cronRun.cronJobId} · ${describeCronSchedule(cronJob.cronExpr, cronJob.runAt, cronJob.timezone)}`;
+          content = `> 任务：${escapeLarkMarkdownText(buildTaskPreview(prompt))}\n\n${response.text}`;
+        }
       }
+      const sentPlatformMsgId = await this.transport.sendCard(platformChatId, header, content, footer);
+
+      // 只有平台确认发送成功后才写 assistant 消息，避免发送失败留下“幽灵回复”。
+      const replyMsgId = storeMessage(this.db, {
+        chatId,
+        senderId: this.botUserId!,
+        sessionId,
+        role: "assistant",
+        contentText: response.text,
+        platform: this.botIdentity.platform,
+        platformMsgId: sentPlatformMsgId,
+      });
+      this.db.prepare(`
+        UPDATE sessions
+        SET message_count = 2,
+            turn_count = 1,
+            last_active_at = datetime('now'),
+            end_msg_id = ?,
+            agent_session_id = ?,
+            backend_type = ?
+        WHERE id = ?
+      `).run(replyMsgId, agentSessionId ?? null, sessionBackendType, sessionId);
 
       this.log.info(`${source} job completed`, { chatId, sessionId, responseLength: response.text.length });
     } catch (err) {
@@ -2759,6 +2964,13 @@ ${jobParts.join("\n\n")}
     } finally {
       this.independentRunCount -= 1;
     }
+  }
+
+  private isCronClaimCurrent(cronJobId: number, claimToken: string): boolean {
+    const row = this.db.prepare(
+      "SELECT status, claim_token FROM cron_jobs WHERE id = ?",
+    ).get(cronJobId) as { status: string; claim_token: string | null } | undefined;
+    return row?.status === "running" && row.claim_token === claimToken;
   }
 
   /** /new：归档当前 session，让下一条消息自然创建新 session。 */
@@ -3278,8 +3490,8 @@ ${jobParts.join("\n\n")}
       "`/history`　shell 命令历史",
       "`/clear`　　仅清空排队消息（不停当前任务）",
       "`/service`　查看服务信息",
-      "`/cron`　　独立提醒或定时任务（每次重新执行）",
-      "`/loop`　　持续跟进（记住当前对话）",
+      "`/cron`　　查看独立提醒；带任务与时间可创建",
+      "`/loop`　　查看持续跟进；带任务与时间可创建",
       "`/help`　　显示本帮助",
     ];
     if (isAdmin) {
@@ -3562,10 +3774,18 @@ ${jobParts.join("\n\n")}
 
     let activeLoopJob: LoopJob | undefined;
     let loopSettled = false;
+    const clearActiveLoopRun = () => {
+      if (!activeLoopJob) return;
+      const active = this.activeLoopRuns.get(activeLoopJob.id);
+      if (active?.chatId === chatId && active.runId === runId) {
+        this.activeLoopRuns.delete(activeLoopJob.id);
+      }
+    };
     const settleLoop = (result: { success: boolean; error?: string; cancelled?: boolean }) => {
       if (!activeLoopJob || loopSettled) return;
       completeLoopRun(this.db, activeLoopJob.id, result);
       loopSettled = true;
+      clearActiveLoopRun();
     };
     if (isLoopTurn) {
       const queuedJob = getLoopJob(this.db, loopJobIds[0]!);
@@ -3579,6 +3799,7 @@ ${jobParts.join("\n\n")}
         this.markRuntimeRun(runId, "done");
         return;
       }
+      this.activeLoopRuns.set(activeLoopJob.id, { chatId, runId });
     }
 
     // Worker Continuation 分流：内部事件不写成用户发言。
@@ -3862,6 +4083,17 @@ ${jobParts.join("\n\n")}
         return;
       }
       const response = agentResult.response;
+
+      // `/loop del` 可在 Agent 执行期间由内置命令立即处理。Agent 返回后先查持久状态，
+      // 被取消的本轮不写入主会话历史，也不向平台发送。检查后到 sendCard 之间没有 await，
+      // 因此同一进程内的新取消命令不能插入这段同步路径；已经开始的平台请求只能尽力取消。
+      if (isLoopTurn && activeLoopJob && getLoopJob(this.db, activeLoopJob.id)?.status !== "running") {
+        loopSettled = true;
+        clearActiveLoopRun();
+        this.log.info("cancelled loop result discarded", { chatId, loopJobId: activeLoopJob.id });
+        this.markRuntimeRun(runId, "stopped");
+        return;
+      }
       const compactedThisTurn = this.updateCompactRecoveryState(chatId, response.compactCount);
       if (compactedThisTurn) {
         this.scheduleBriefInjectedSessions.delete(chatSession.sessionId);
@@ -3939,8 +4171,14 @@ ${jobParts.join("\n\n")}
       }
 
       // 合并消息提示头；出站前强制剥离内部标签（保护：不依赖 LLM 自觉）
+      const loopCardHeader = isLoopTurn && activeLoopJob ? buildLoopCardHeader(activeLoopJob) : "";
+      const loopTaskQuote = isLoopTurn && activeLoopJob ? buildLoopTaskQuote(activeLoopJob) : undefined;
+      const loopFullMarker = isLoopTurn && activeLoopJob ? buildLoopDeliveryMarker(activeLoopJob) : undefined;
+      const addLoopTaskQuote = (text: string): string => loopTaskQuote ? `${loopTaskQuote}\n\n${text}` : text;
+      const addLoopFullMarker = (text: string): string => loopFullMarker ? `${loopFullMarker}\n\n${text}` : text;
       let displayText = stripInternalWorkerTags(response.text);
       let deliveredText = displayText;
+      displayText = addLoopTaskQuote(displayText);
       if (isMerged) {
         const lines = messages.map((m) => {
           const brief = m.text.length > 10 ? m.text.slice(0, 10) + "…" : m.text;
@@ -3981,13 +4219,13 @@ ${jobParts.join("\n\n")}
         this.log.info("send decision", { chatId, useReply: !!triggerMsgId, merged: isMerged, messageCount: messages.length, triggerMsgId: triggerMsgId ?? "none" });
         if (triggerMsgId) {
           try {
-            sentPlatformMsgId = await this.responseSender.sendCard(chatSession.platformChatId, "", displayText, footer, triggerMsgId, signal);
+            sentPlatformMsgId = await this.responseSender.sendCard(chatSession.platformChatId, loopCardHeader, displayText, footer, triggerMsgId, signal);
           } catch (error) {
             if (isUncertainSendError(error)) throw error;
-            sentPlatformMsgId = await this.responseSender.sendCard(chatSession.platformChatId, "", displayText, footer, undefined, signal);
+            sentPlatformMsgId = await this.responseSender.sendCard(chatSession.platformChatId, loopCardHeader, displayText, footer, undefined, signal);
           }
         } else {
-          sentPlatformMsgId = await this.responseSender.sendCard(chatSession.platformChatId, "", displayText, footer, undefined, signal);
+          sentPlatformMsgId = await this.responseSender.sendCard(chatSession.platformChatId, loopCardHeader, displayText, footer, undefined, signal);
         }
         deliveredResponseBody = true;
       } catch (sendErr) {
@@ -4000,13 +4238,13 @@ ${jobParts.join("\n\n")}
           this.log.warn("response delivery result unknown, skipping fallback", { chatId, error: String(sendErr) });
         } else {
           try {
-            deliveredText = `发送失败：${extractPlatformErrorDetail(sendErr)}`;
+            deliveredText = addLoopFullMarker(`发送失败：${extractPlatformErrorDetail(sendErr)}`);
             sentPlatformMsgId = await sendTextWithReplyFallback(deliveredText);
           } catch (firstFallbackErr) {
             this.log.warn("failed to send first fallback text", { chatId, error: String(firstFallbackErr) });
             if (!isUncertainSendError(firstFallbackErr)) {
               try {
-                deliveredText = buildPlatformFailureFallback(sendErr);
+                deliveredText = addLoopFullMarker(buildPlatformFailureFallback(sendErr));
                 sentPlatformMsgId = await sendTextWithReplyFallback(deliveredText);
               } catch (fallbackSendErr) {
                 if (!isUncertainSendError(fallbackSendErr)) {
@@ -4020,8 +4258,6 @@ ${jobParts.join("\n\n")}
                   });
                   if (result.ok) {
                     sentPlatformMsgId = result.platformMsgId;
-                    // 降级文件发送成功也视为正文已交付，Loop/Worker 结算不应重试。
-                    deliveredResponseBody = true;
                   } else {
                     this.log.error("failed to send degraded response", {
                       chatId,
@@ -4090,6 +4326,13 @@ ${jobParts.join("\n\n")}
       }
     } catch (err) {
       this.log.error("pipeline error", { chatId, error: String(err) });
+      if (isLoopTurn && activeLoopJob && getLoopJob(this.db, activeLoopJob.id)?.status === "cancelled") {
+        loopSettled = true;
+        clearActiveLoopRun();
+        this.log.info("cancelled loop error discarded", { chatId, loopJobId: activeLoopJob.id });
+        this.markRuntimeRun(runId, "stopped");
+        return;
+      }
       // Worker Continuation 回合失败：释放认领，允许重新投递
       releaseContinuationClaims();
       settleLoop({ success: false, error: String(err) });
@@ -4099,9 +4342,12 @@ ${jobParts.join("\n\n")}
         // 异常终态会附带最后一段 assistant 文本；出站前仍要剥离内部标签，
         // 避免 Worker/Loop 注入内容经错误提示旁路泄漏。
         const detail = stripInternalWorkerTags(extractAgentErrorDetail(err) ?? "").trim();
-        const errorText = detail
+        const baseErrorText = detail
           ? `处理出错了：\n\`\`\`\n${detail.replace(/`{3,}/g, "``")}\n\`\`\``
           : "处理出错了，请稍后再试。";
+        const errorText = isLoopTurn && activeLoopJob
+          ? `${buildLoopDeliveryMarker(activeLoopJob)}\n\n${baseErrorText}`
+          : baseErrorText;
         try {
           const pmid = await this.transport.sendText(platformChatId, errorText);
           this.storeBotResponse(chatId, errorText, pmid);
@@ -4554,6 +4800,15 @@ ${jobParts.join("\n\n")}
 
     // ── 独立 session（cron/task）idle 检测 ──
     for (const [sessionId, task] of this.runningTasks) {
+      if (
+        task.source === "cron"
+        && task.cronJobId !== undefined
+        && task.cronClaimToken !== undefined
+        && !this.isCronClaimCurrent(task.cronJobId, task.cronClaimToken)
+      ) {
+        task.backend.cancelSession(task.agentSession).catch(() => {});
+        continue;
+      }
       if (!(task.backend instanceof CliAgentBackend)) continue;
       const a = task.backend.getActivity(sessionId);
       if (!a || a.status !== "running") continue;

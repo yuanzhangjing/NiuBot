@@ -181,8 +181,8 @@ export async function createBotInstance(
   // 7. 创建 Cron Scheduler（独立 session，不走用户消息队列）
   const cronScheduler = new CronScheduler(
     db,
-    async (chatId, userId, prompt, description) => {
-      await pipeline.processCronJob(chatId, userId, prompt, description);
+    async (chatId, userId, prompt, description, cronJobId, claimToken) => {
+      await pipeline.processCronJob(chatId, userId, prompt, description, cronJobId, claimToken);
     },
     {
       reportFailure: (chatId, description, error, paused) =>

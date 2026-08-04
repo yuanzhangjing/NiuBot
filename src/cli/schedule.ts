@@ -46,7 +46,7 @@ async function executeViaPipeline(chatId: string, command: ScheduleAgentCommand)
 }
 
 export async function handleSchedule(
-  db: Database.Database,
+  db: Database.Database | undefined,
   args: string[],
   chatId: string | undefined,
   chatType: "p2p" | "group",
@@ -62,6 +62,7 @@ export async function handleSchedule(
       return;
     case "list":
     case "ls":
+      if (!db) fail("Error: database is required to list schedules");
       listSchedules(db, args.slice(1), chatId, chatType, parseArgs);
       return;
     case "cancel":

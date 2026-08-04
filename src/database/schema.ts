@@ -668,6 +668,23 @@ const migrations: Migration[] = [
       }
     },
   },
+  {
+    version: 24,
+    description: "Fence Cron execution claims with unique tokens",
+    up: (db) => {
+      const tableExists = db.prepare(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'cron_jobs'",
+      ).get();
+      if (!tableExists) return;
+      const columns = new Set(
+        (db.prepare("PRAGMA table_info(cron_jobs)").all() as Array<{ name: string }>)
+          .map((column) => column.name),
+      );
+      if (!columns.has("claim_token")) {
+        db.exec("ALTER TABLE cron_jobs ADD COLUMN claim_token TEXT");
+      }
+    },
+  },
 ];
 
 const transportMigrations: Migration[] = [
@@ -789,24 +806,30 @@ const transportMigrations: Migration[] = [
 export const LATEST_SCHEMA_VERSION = migrations[migrations.length - 1]!.version;
 // Loop v22 保留了旧 session_id 列作为回滚兼容占位，当前运行时不再读取或写入它。
 // 因此这些版本升级后仍可由原版本打开；新建 Loop 在旧代码中不会继续执行。
-export const ROLLBACK_COMPATIBLE_SCHEMA_VERSIONS = [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23] as const;
+export const ROLLBACK_COMPATIBLE_SCHEMA_VERSIONS = [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24] as const;
 export const LATEST_TRANSPORT_SCHEMA_VERSION = transportMigrations[transportMigrations.length - 1]!.version;
+const CORE_SCHEMA_COMPONENT = "core";
 
 // ── Database initialization ─────────────────────────────────────────
 
 export function initDatabase(dbPath: string): Database.Database {
   const db = new Database(dbPath);
   try {
-    db.pragma("journal_mode = WAL");
-    db.pragma("foreign_keys = ON");
+    // busy_timeout 必须先于可能争写锁的 WAL 切换和迁移。多个 CLI/Engine
+    // 同时打开同一数据库时，应等待当前初始化完成，而不是立即报锁冲突。
     db.pragma("busy_timeout = 5000");
+    const journalMode = db.pragma("journal_mode", { simple: true }) as string;
+    if (journalMode.toLowerCase() !== "wal") db.pragma("journal_mode = WAL");
+    db.pragma("foreign_keys = ON");
 
     runMigrations(db);
     runTransportMigrations(db);
+    reconcileRollbackCompatibleData(db);
 
     log.info("database initialized", {
       path: dbPath,
       schemaVersion: getSchemaVersion(db),
+      coreMigrationVersion: getComponentSchemaVersion(db, CORE_SCHEMA_COMPONENT),
       transportSchemaVersion: getComponentSchemaVersion(db, "transport"),
     });
     return db;
@@ -1208,56 +1231,133 @@ function assertRequiredColumns(table: string, columns: Set<string>, required: st
 }
 
 function runMigrations(db: Database.Database): void {
-  let currentVersion = getSchemaVersion(db);
-
-  // 已有 DB 但从未设过版本号（user_version 默认 0）
-  if (currentVersion === 0) {
-    const hasTable = db.prepare(
-      "SELECT COUNT(*) as n FROM sqlite_master WHERE type='table' AND name='users'",
-    ).get() as { n: number };
-
-    if (hasTable.n > 0) {
-      // 已有表结构，视为 v1
-      currentVersion = 1;
-      setSchemaVersion(db, 1);
-      log.info("existing database detected, set schema version to 1");
-    }
-  }
-
-  // 版本高于代码：DB 由更新版本创建，拒绝启动防止数据损坏
-  if (currentVersion > LATEST_SCHEMA_VERSION) {
+  ensureComponentSchemaTable(db);
+  const observedVersion = getSchemaVersion(db);
+  const observedCoreVersion = getComponentSchemaVersion(db, CORE_SCHEMA_COMPONENT);
+  if (observedVersion > LATEST_SCHEMA_VERSION) {
     throw new Error(
-      `Database schema version (${currentVersion}) is newer than code (${LATEST_SCHEMA_VERSION}). ` +
+      `Database schema version (${observedVersion}) is newer than code (${LATEST_SCHEMA_VERSION}). ` +
       "Please upgrade NiuBot to a version that supports this database.",
     );
   }
+  // core 水位不是兼容性门槛。未来版本若仍保持旧 user_version，表示其迁移声明可回滚；
+  // 当前代码必须像旧程序一样忽略更高的辅助水位。非兼容迁移必须提高 user_version，
+  // 并由上面的检查拒绝打开。
+  // 常规 CLI 打开已升级数据库时保持纯读，不获取 BEGIN IMMEDIATE 写锁。
+  // 首次升级或旧版本回滚后的数据库仍进入事务，并在锁内重新读取水位。
+  if (observedVersion > 0 && observedCoreVersion >= LATEST_SCHEMA_VERSION) return;
 
-  // 公开版本 schema 10..16 之后的迁移均向后兼容。旧 worker 只能回滚程序，
-  // 不能恢复数据库，所以必须保留升级前的 user_version，让原版本仍能打开。
-  // 未来新增超过当前兼容上限的迁移时会正常提高版本号，不能误延长承诺。
-  const preserveLegacyVersion = ROLLBACK_COMPATIBLE_SCHEMA_VERSIONS.includes(
-    currentVersion as (typeof ROLLBACK_COMPATIBLE_SCHEMA_VERSIONS)[number],
-  );
-  const rollbackCompatibleCeiling = ROLLBACK_COMPATIBLE_SCHEMA_VERSIONS.at(-1)!;
+  const applied = db.transaction(() => {
+    ensureComponentSchemaTable(db);
+    let currentVersion = getSchemaVersion(db);
 
-  // 跑 pending migrations
-  const pending = migrations.filter((m) => m.version > currentVersion);
-  if (pending.length === 0) return;
+    // 已有 DB 但从未设过版本号（user_version 默认 0）
+    if (currentVersion === 0) {
+      const hasTable = db.prepare(
+        "SELECT COUNT(*) as n FROM sqlite_master WHERE type='table' AND name='users'",
+      ).get() as { n: number };
 
-  for (const migration of pending) {
-    log.info("running migration", { version: migration.version, description: migration.description });
-    db.transaction(() => {
-      migration.up(db);
-      if (!(preserveLegacyVersion && migration.version <= rollbackCompatibleCeiling)) {
-        setSchemaVersion(db, migration.version);
+      if (hasTable.n > 0) {
+        currentVersion = 1;
+        setSchemaVersion(db, 1);
+        log.info("existing database detected, set schema version to 1");
       }
-    })();
+    }
+
+    // user_version 高于代码代表存在非兼容结构，仍按原规则拒绝。
+    if (currentVersion > LATEST_SCHEMA_VERSION) {
+      throw new Error(
+        `Database schema version (${currentVersion}) is newer than code (${LATEST_SCHEMA_VERSION}). ` +
+        "Please upgrade NiuBot to a version that supports this database.",
+      );
+    }
+
+    // core 组件水位只记录本代码实际执行过的兼容迁移。旧程序忽略此表，
+    // user_version 继续保留旧值，因此更新失败后仍能回滚程序。
+    const trackedVersion = getComponentSchemaVersion(db, CORE_SCHEMA_COMPONENT);
+    const effectiveVersion = Math.max(currentVersion, Math.min(trackedVersion, LATEST_SCHEMA_VERSION));
+    const preserveLegacyVersion = ROLLBACK_COMPATIBLE_SCHEMA_VERSIONS.includes(
+      currentVersion as (typeof ROLLBACK_COMPATIBLE_SCHEMA_VERSIONS)[number],
+    );
+    const rollbackCompatibleCeiling = ROLLBACK_COMPATIBLE_SCHEMA_VERSIONS.at(-1)!;
+    const completed: Array<{ version: number; description: string; rollbackCompatible: boolean }> = [];
+
+    for (const migration of migrations.filter((item) => item.version > effectiveVersion)) {
+      migration.up(db);
+      const rollbackCompatible = preserveLegacyVersion && migration.version <= rollbackCompatibleCeiling;
+      if (!rollbackCompatible) setSchemaVersion(db, migration.version);
+      setComponentSchemaVersion(db, CORE_SCHEMA_COMPONENT, migration.version);
+      completed.push({ version: migration.version, description: migration.description, rollbackCompatible });
+    }
+    return completed;
+  }).immediate();
+
+  for (const migration of applied) {
     log.info("migration completed", {
       version: migration.version,
+      description: migration.description,
       schemaVersion: getSchemaVersion(db),
-      rollbackCompatible: preserveLegacyVersion && migration.version <= rollbackCompatibleCeiling,
+      rollbackCompatible: migration.rollbackCompatible,
     });
   }
+}
+
+/**
+ * 兼容版本回滚期间可能产生需要新版本补齐的数据。结构迁移只执行一次，
+ * 但数据修复必须按缺口重入；没有候选行时保持只读，避免普通 CLI 争写锁。
+ */
+function reconcileRollbackCompatibleData(db: Database.Database): void {
+  const availableTables = new Set((db.prepare(`
+    SELECT name FROM sqlite_master
+    WHERE type = 'table' AND name IN ('messages', 'worker_works', 'agent_continuations')
+  `).pluck().all()) as string[]);
+  if (!["messages", "worker_works", "agent_continuations"].every((table) => availableTables.has(table))) {
+    return;
+  }
+  const workNeedsBackfill = db.prepare(`
+    SELECT 1 FROM worker_works w
+    WHERE w.trigger_msg_platform_id IS NULL
+      AND EXISTS (
+        SELECT 1 FROM messages m
+        WHERE m.chat_id = w.source_chat_id AND m.role = 'user'
+          AND m.platform_msg_id IS NOT NULL AND m.platform_msg_id != ''
+      )
+    LIMIT 1
+  `).get();
+  const continuationNeedsBackfill = db.prepare(`
+    SELECT 1 FROM agent_continuations c
+    JOIN worker_works w ON w.id = c.work_id
+    WHERE c.trigger_msg_platform_id IS NULL AND w.trigger_msg_platform_id IS NOT NULL
+    LIMIT 1
+  `).get();
+  if (!workNeedsBackfill && !continuationNeedsBackfill) return;
+
+  db.transaction(() => {
+    db.exec(`
+      UPDATE worker_works
+      SET trigger_msg_platform_id = (
+        SELECT platform_msg_id FROM messages
+        WHERE chat_id = worker_works.source_chat_id AND role = 'user'
+          AND platform_msg_id IS NOT NULL AND platform_msg_id != ''
+        ORDER BY id DESC LIMIT 1
+      )
+      WHERE trigger_msg_platform_id IS NULL
+        AND EXISTS (
+          SELECT 1 FROM messages
+          WHERE chat_id = worker_works.source_chat_id AND role = 'user'
+            AND platform_msg_id IS NOT NULL AND platform_msg_id != ''
+        );
+      UPDATE agent_continuations
+      SET trigger_msg_platform_id = (
+        SELECT trigger_msg_platform_id FROM worker_works WHERE id = agent_continuations.work_id
+      )
+      WHERE trigger_msg_platform_id IS NULL
+        AND EXISTS (
+          SELECT 1 FROM worker_works
+          WHERE id = agent_continuations.work_id AND trigger_msg_platform_id IS NOT NULL
+        );
+    `);
+  }).immediate();
 }
 
 function runTransportMigrations(db: Database.Database): void {

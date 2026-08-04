@@ -4,9 +4,11 @@
  * to the agent via the pipeline.
  */
 
+import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import { createLogger } from "../logger.js";
 import {
+  formatLocalDateTimeWithTZ,
   getZonedDateTimeParts,
   TZ,
   userDateTimeToUtcSql,
@@ -16,13 +18,57 @@ import { assertChatAccess, type ChatAccessContext } from "./access.js";
 
 const log = createLogger("cron");
 
+const DOW_CN: Record<string, string> = {
+  "0": "每周日", "1": "每周一", "2": "每周二", "3": "每周三",
+  "4": "每周四", "5": "每周五", "6": "每周六", "7": "每周日",
+};
+
+/** 把 cron 表达式转成人类可读频率描述（用于卡片标题）；无法识别时原样返回。 */
+export function describeCronExpr(expr: string): string {
+  const parts = expr.trim().split(/\s+/);
+  if (parts.length !== 5) return expr;
+  const [min, hour, dom, month, dow] = parts;
+  const isEvery = (v: string): boolean => /^\*\/\d+$/.test(v);
+  const isNum = (v: string): boolean => /^\d+$/.test(v);
+  // 每 N 分钟
+  if (isEvery(min) && hour === "*" && dom === "*" && month === "*" && dow === "*") {
+    return `每 ${min.slice(2)} 分钟`;
+  }
+  // 每小时整点
+  if (min === "0" && hour === "*" && dom === "*" && month === "*" && dow === "*") {
+    return "每小时";
+  }
+  // 每 N 小时
+  if (min === "0" && isEvery(hour) && dom === "*" && month === "*" && dow === "*") {
+    return `每 ${hour.slice(2)} 小时`;
+  }
+  // 每天 HH:MM
+  if (dom === "*" && month === "*" && dow === "*" && isNum(min) && isNum(hour)) {
+    return `每天 ${hour.padStart(2, "0")}:${min.padStart(2, "0")}`;
+  }
+  // 工作日 / 每周某天 HH:MM
+  if (dom === "*" && month === "*" && isNum(min) && isNum(hour)) {
+    if (dow === "1-5") return `工作日 ${hour.padStart(2, "0")}:${min.padStart(2, "0")}`;
+    const day = DOW_CN[dow];
+    if (day) return `${day} ${hour.padStart(2, "0")}:${min.padStart(2, "0")}`;
+  }
+  return expr;
+}
+
+/** Cron 任务触发节奏描述：表达式优先；一次性任务显示本地时间。 */
+export function describeCronSchedule(expr: string | null, runAt: string | null, timezone: string = TZ): string {
+  if (expr) return describeCronExpr(expr);
+  if (runAt) return `一次性 · ${formatLocalDateTimeWithTZ(runAt, timezone)}`;
+  return "未设置";
+}
+
 /** Check interval: 60 seconds */
 const CHECK_INTERVAL_MS = 60_000;
 export const MAX_ACTIVE_CRON_JOBS_PER_CHAT = 20;
 export const DEFAULT_MAX_CONCURRENT_CRON_RUNS = 4;
 export const CRON_FAILURE_LIMIT = 3;
 
-interface CronJob {
+export interface CronJob {
   id: number;
   chatId: string;
   creatorUserId: string;
@@ -37,6 +83,7 @@ interface CronJob {
   lastRunAt: string | null;
   timezone: string;
   claimedAt: string | null;
+  claimToken: string | null;
   lastError: string | null;
   consecutiveFailures: number;
 }
@@ -57,6 +104,7 @@ interface RawCronRow {
   created_at: string;
   timezone: string | null;
   claimed_at: string | null;
+  claim_token: string | null;
   last_error: string | null;
   consecutive_failures: number;
 }
@@ -77,12 +125,20 @@ function toJob(r: RawCronRow): CronJob {
     lastRunAt: r.last_run_at,
     timezone: r.timezone ?? TZ,
     claimedAt: r.claimed_at,
+    claimToken: r.claim_token,
     lastError: r.last_error,
     consecutiveFailures: r.consecutive_failures,
   };
 }
 
-export type CronExecutor = (chatId: string, userId: string, prompt: string, description: string) => Promise<void>;
+export type CronExecutor = (
+  chatId: string,
+  userId: string,
+  prompt: string,
+  description: string,
+  cronJobId: number,
+  claimToken: string,
+) => Promise<void>;
 export type CronFailureReporter = (
   chatId: string,
   description: string,
@@ -163,24 +219,26 @@ export class CronScheduler {
   private async executeClaimedJob(job: CronJob, nowStr: string): Promise<void> {
     log.info("executing cron job", { id: job.id, desc: job.description });
     try {
-      await this.executor(job.chatId, job.creatorUserId, job.prompt, job.description);
+      if (!job.claimToken) throw new Error(`Cron ${job.id} 缺少运行令牌`);
+      await this.executor(job.chatId, job.creatorUserId, job.prompt, job.description, job.id, job.claimToken);
       const nextCount = job.runCount + 1;
       const completed = !!job.runAt || (job.maxTimes !== null && nextCount >= job.maxTimes);
       this.db.prepare(`
         UPDATE cron_jobs
         SET status = ?, run_count = ?, last_run_at = ?, claimed_at = NULL,
-            last_error = NULL, consecutive_failures = 0
-        WHERE id = ? AND status = 'running'
-      `).run(completed ? "completed" : "active", nextCount, nowStr, job.id);
+            claim_token = NULL, last_error = NULL, consecutive_failures = 0
+        WHERE id = ? AND status = 'running' AND claim_token = ?
+      `).run(completed ? "completed" : "active", nextCount, nowStr, job.id, job.claimToken);
     } catch (err) {
       const error = String(err).slice(0, 2_000);
       const failures = job.consecutiveFailures + 1;
       const paused = failures >= CRON_FAILURE_LIMIT;
       const changed = this.db.prepare(`
         UPDATE cron_jobs
-        SET status = ?, claimed_at = NULL, last_run_at = ?, last_error = ?, consecutive_failures = ?
-        WHERE id = ? AND status = 'running'
-      `).run(paused ? "paused" : "active", job.lastRunAt, error, failures, job.id).changes;
+        SET status = ?, claimed_at = NULL, claim_token = NULL,
+            last_run_at = ?, last_error = ?, consecutive_failures = ?
+        WHERE id = ? AND status = 'running' AND claim_token = ?
+      `).run(paused ? "paused" : "active", job.lastRunAt, error, failures, job.id, job.claimToken).changes;
       log.error("cron job execution failed", { id: job.id, error, failures, paused });
       if (changed === 1) {
         await Promise.resolve(this.reportFailure?.(job.chatId, job.description || job.prompt.slice(0, 40), error, paused))
@@ -195,7 +253,7 @@ export class CronScheduler {
 export function recoverInterruptedCronJobs(db: Database.Database): number {
   const restored = db.prepare(`
     UPDATE cron_jobs
-    SET status = 'active', claimed_at = NULL,
+    SET status = 'active', claimed_at = NULL, claim_token = NULL,
         last_error = COALESCE(last_error, 'Engine restarted during Cron execution')
     WHERE status = 'running'
   `).run().changes;
@@ -205,9 +263,9 @@ export function recoverInterruptedCronJobs(db: Database.Database): number {
 
 function releaseCronClaim(db: Database.Database, job: CronJob): boolean {
   return db.prepare(`
-    UPDATE cron_jobs SET status = 'active', claimed_at = NULL, last_run_at = ?
-    WHERE id = ? AND status = 'running'
-  `).run(job.lastRunAt, job.id).changes === 1;
+    UPDATE cron_jobs SET status = 'active', claimed_at = NULL, claim_token = NULL, last_run_at = ?
+    WHERE id = ? AND status = 'running' AND claim_token = ?
+  `).run(job.lastRunAt, job.id, job.claimToken).changes === 1;
 }
 
 /** Select and atomically claim every job due at this instant. */
@@ -217,7 +275,7 @@ export function claimDueCronJobs(db: Database.Database, now: Date = new Date()):
     const rows = db.prepare("SELECT * FROM cron_jobs WHERE status = 'active' ORDER BY id").all() as RawCronRow[];
     const updateStatus = db.prepare("UPDATE cron_jobs SET status = 'completed' WHERE id = ? AND status = 'active'");
     const claimJob = db.prepare(`
-      UPDATE cron_jobs SET status = 'running', claimed_at = ?, last_run_at = ?
+      UPDATE cron_jobs SET status = 'running', claimed_at = ?, last_run_at = ?, claim_token = ?
       WHERE id = ? AND status = 'active'
     `);
     const claimed: CronJob[] = [];
@@ -241,8 +299,9 @@ export function claimDueCronJobs(db: Database.Database, now: Date = new Date()):
           shouldRun = normalizeDatetime(job.lastRunAt).slice(0, 16) !== nowStr.slice(0, 16);
         }
       }
-      if (shouldRun && claimJob.run(nowStr, nowStr, job.id).changes === 1) {
-        claimed.push({ ...job, status: "running", claimedAt: nowStr });
+      const claimToken = randomUUID();
+      if (shouldRun && claimJob.run(nowStr, nowStr, claimToken, job.id).changes === 1) {
+        claimed.push({ ...job, status: "running", claimedAt: nowStr, claimToken });
       }
     }
     return claimed;
@@ -402,9 +461,13 @@ export function listCronJobsForAccess(
   return listCronJobs(db, options.targetChatId);
 }
 
-/** Delete a cron job */
+/** Cancel a cron job. Keep the row for audit/history and invalidate any active claim. */
 export function deleteCronJob(db: Database.Database, id: number): boolean {
-  const result = db.prepare("DELETE FROM cron_jobs WHERE id = ?").run(id);
+  const result = db.prepare(`
+    UPDATE cron_jobs
+    SET status = 'cancelled', claimed_at = NULL, claim_token = NULL
+    WHERE id = ? AND status IN ('active', 'running', 'paused')
+  `).run(id);
   return result.changes > 0;
 }
 
@@ -427,7 +490,7 @@ export function deleteCronJobForAccess(
   if (job.creatorUserId !== ctx.userId) {
     throw new Error("can only delete your own cron jobs");
   }
-  deleteCronJob(db, id);
+  if (!deleteCronJob(db, id)) return undefined;
   return job;
 }
 

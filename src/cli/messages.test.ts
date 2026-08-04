@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { initDatabase } from "../database/schema.js";
-import { getMessageForAccess, listMessages, searchMessages } from "../messages/store.js";
+import { getMessageForAccess, listContinuationMessages, listMessages, searchMessages } from "../messages/store.js";
 import { TZ, userTimeRangeToUtc, utcToLocalDateTime } from "../tz.js";
 import { formatMessagesForList } from "./messages.js";
 
@@ -121,5 +121,30 @@ describe("message access rules", () => {
       since: "2026-07-20",
       before: "2026-07-21",
     }).map((row) => row.id)).toEqual([2]);
+  });
+
+  it("keeps Cron internal prompts in the session transcript but out of normal messages", () => {
+    const db = setupDb();
+    db.prepare(`
+      INSERT INTO sessions (id, chat_id, user_id, source, status)
+      VALUES ('cron-session', 'c1', 'u2', 'cron', 'archived')
+    `).run();
+    db.prepare(`
+      INSERT INTO messages (id, chat_id, sender_id, session_key, role, content_text, content_type, platform)
+      VALUES (3, 'c1', 'u2', 'cron-session', 'user', 'INTERNAL_CRON_PROMPT', 'internal_prompt', 'feishu')
+    `).run();
+    db.prepare("INSERT INTO messages_fts (rowid, content_text) VALUES (3, 'INTERNAL_CRON_PROMPT')").run();
+
+    expect(listMessages(db, {
+      currentChatId: "c1", chatType: "group", targetChatId: "c1", limit: 10,
+    }).map((row) => row.id)).toEqual([1]);
+    expect(searchMessages(db, {
+      query: "INTERNAL_CRON_PROMPT", currentChatId: "c1", chatType: "group", targetChatId: "c1", limit: 10,
+    })).toEqual([]);
+    expect(getMessageForAccess(db, 3, { currentChatId: "c1", chatType: "group" })).toBeUndefined();
+    expect(listContinuationMessages(db, { chatId: "c1", limit: 10 }).map((row) => row.content_text))
+      .not.toContain("INTERNAL_CRON_PROMPT");
+    expect(db.prepare("SELECT content_text FROM messages WHERE session_key = 'cron-session'").get())
+      .toEqual({ content_text: "INTERNAL_CRON_PROMPT" });
   });
 });

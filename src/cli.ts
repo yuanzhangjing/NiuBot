@@ -127,8 +127,12 @@ function openDb(): Database.Database {
   try {
     // 走 initDatabase：跑 schema 迁移，避免新 CLI 在旧库（未升级列）上直接报 no such column
     return initDatabase(DB_PATH);
-  } catch {
-    console.error(`Error: cannot open database at ${DB_PATH}`);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    const code = typeof error === "object" && error !== null && "code" in error
+      ? ` (${String((error as { code?: unknown }).code)})`
+      : "";
+    console.error(`Error: cannot open database at ${DB_PATH}${code}: ${detail}`);
     process.exit(1);
   }
 }
@@ -166,10 +170,16 @@ async function main(): Promise<void> {
       handleSend(args.slice(1), CHAT_ID, parseArgs);
       break;
     case "cron":
-      await handleCron(openDb(), args.slice(1), CHAT_ID, CHAT_TYPE, USER_ID, parseArgs);
+      await handleCron(
+        ["list", "ls"].includes(args[1] ?? "") ? openDb() : undefined,
+        args.slice(1), CHAT_ID, CHAT_TYPE, USER_ID, parseArgs,
+      );
       break;
     case "schedule":
-      await handleSchedule(openDb(), args.slice(1), CHAT_ID, CHAT_TYPE, USER_ID, parseArgs);
+      await handleSchedule(
+        ["list", "ls"].includes(args[1] ?? "") ? openDb() : undefined,
+        args.slice(1), CHAT_ID, CHAT_TYPE, USER_ID, parseArgs,
+      );
       break;
     case "task":
       handleTask(args.slice(1), WORK_DIR, CHAT_ID, CHAT_TYPE, USER_ID, parseArgs);

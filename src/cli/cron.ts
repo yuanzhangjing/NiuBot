@@ -19,7 +19,7 @@ export function formatCronScheduleForDisplay(job: {
 }
 
 export async function handleCron(
-  db: Database.Database,
+  db: Database.Database | undefined,
   args: string[],
   chatId: string | undefined,
   chatType: "p2p" | "group",
@@ -43,6 +43,10 @@ export async function handleCron(
       break;
     case "list":
     case "ls":
+      if (!db) {
+        console.error("Error: database is required to list cron jobs");
+        process.exit(1);
+      }
       cronList(db, args.slice(1), chatId, chatType, parseArgs);
       break;
     case "del":
@@ -94,7 +98,7 @@ function cronList(
 }
 
 async function cronDel(
-  db: Database.Database,
+  db: Database.Database | undefined,
   args: string[],
   chatId: string | undefined,
   chatType: "p2p" | "group",

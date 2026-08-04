@@ -14,6 +14,7 @@ import {
   getRecentRuntimeEvents,
   markUnfinishedRuntimeRunsFailedByRestart,
   recordRuntimeEvent,
+  LATEST_SCHEMA_VERSION,
 } from "./schema.js";
 
 const tempDirs: string[] = [];
@@ -83,6 +84,32 @@ describe("loop schema", () => {
     expect(reopened.prepare("SELECT COUNT(*) FROM loop_jobs").pluck().get()).toBe(2);
     expect((reopened.prepare("PRAGMA index_list(loop_jobs)").all() as Array<{ name: string }>)
       .map((index) => index.name)).not.toContain("idx_loop_jobs_session");
+  });
+});
+
+describe("core migration waterline", () => {
+  test("reopening an upgraded database does not rewrite the core migration marker", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-waterline-test-"));
+    tempDirs.push(dir);
+    const dbPath = path.join(dir, "niubot.db");
+    const first = initDatabase(dbPath);
+    first.exec(`
+      CREATE TABLE core_marker_writes (count INTEGER NOT NULL);
+      INSERT INTO core_marker_writes VALUES (0);
+      CREATE TRIGGER audit_core_marker_update
+      AFTER UPDATE ON niubot_component_schema_versions
+      WHEN NEW.component = 'core'
+      BEGIN
+        UPDATE core_marker_writes SET count = count + 1;
+      END;
+    `);
+    first.close();
+
+    const reopened = initDatabase(dbPath);
+    expect(reopened.prepare("SELECT count FROM core_marker_writes").get()).toEqual({ count: 0 });
+    expect(reopened.prepare(
+      "SELECT version FROM niubot_component_schema_versions WHERE component = 'core'",
+    ).get()).toEqual({ version: LATEST_SCHEMA_VERSION });
   });
 });
 
@@ -197,6 +224,7 @@ describe("runtime events schema", () => {
     const db = initDatabase(dbPath);
     db.prepare("DROP TABLE runtime_events").run();
     db.pragma("user_version = 14");
+    db.prepare("DELETE FROM niubot_component_schema_versions WHERE component = 'core'").run();
     db.close();
 
     const migrated = initDatabase(dbPath);
@@ -303,6 +331,7 @@ describe("cron timezone schema", () => {
     const db = initDatabase(dbPath);
     db.pragma("user_version = 15");
     db.exec("ALTER TABLE cron_jobs DROP COLUMN timezone");
+    db.prepare("DELETE FROM niubot_component_schema_versions WHERE component = 'core'").run();
     db.close();
 
     const migrated = initDatabase(dbPath);

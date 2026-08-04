@@ -49,6 +49,18 @@ const MESSAGE_COLUMNS = `
   u.name as sender_name
 `;
 
+// Cron/Task 的首条 prompt 是独立 session 的内部输入，不是 IM 中真实收到的用户消息。
+// 保留在 session transcript 中供排障，但从普通消息列表、搜索和主会话续接上下文中排除。
+const EXCLUDE_INTERNAL_SESSION_PROMPTS = `
+  AND NOT (
+    m.role = 'user' AND EXISTS (
+      SELECT 1 FROM sessions internal_session
+      WHERE internal_session.id = m.session_key
+        AND internal_session.source IN ('cron', 'task')
+    )
+  )
+`;
+
 /**
  * 本 chat 最近一条真实用户消息的平台侧 ID。
  * 用于触发消息捕获（Worker 验收回合回复引用）和引用兜底。
@@ -85,6 +97,7 @@ export function listMessages(
     FROM messages m
     LEFT JOIN users u ON m.sender_id = u.id
     WHERE m.chat_id = ?
+    ${EXCLUDE_INTERNAL_SESSION_PROMPTS}
   `;
   const params: unknown[] = [options.targetChatId];
   sql = appendMessageFilters(sql, params, options);
@@ -131,6 +144,7 @@ export function searchMessages(
     JOIN messages_fts ON messages_fts.rowid = m.id
     LEFT JOIN users u ON m.sender_id = u.id
     WHERE messages_fts MATCH ?
+    ${EXCLUDE_INTERNAL_SESSION_PROMPTS}
   `;
   const params: unknown[] = [options.query];
 
@@ -161,6 +175,7 @@ export function getMessageForAccess(
     FROM messages m
     LEFT JOIN users u ON m.sender_id = u.id
     WHERE m.id = ?
+    ${EXCLUDE_INTERNAL_SESSION_PROMPTS}
   `).get(id) as MessageRow | undefined;
   if (row) {
     assertChatAccess({ currentChatId: ctx.currentChatId, chatType: ctx.chatType, targetChatId: row.chat_id });
@@ -179,6 +194,7 @@ export function getMessageContextRows(
     FROM messages m
     LEFT JOIN users u ON m.sender_id = u.id
     WHERE m.chat_id = ? AND m.id BETWEEN ? AND ?
+    ${EXCLUDE_INTERNAL_SESSION_PROMPTS}
     ORDER BY m.id
   `).all(chatId, messageId - contextCount, messageId + contextCount) as MessageRow[];
 }
@@ -201,6 +217,7 @@ export function listContinuationMessages(
     FROM messages m
     LEFT JOIN users u ON m.sender_id = u.id
     WHERE m.chat_id = ? AND m.content_text IS NOT NULL ${cutoff}
+    ${EXCLUDE_INTERNAL_SESSION_PROMPTS}
     ORDER BY m.id DESC
     LIMIT ?
   `).all(...params) as ContinuationMessageRow[];

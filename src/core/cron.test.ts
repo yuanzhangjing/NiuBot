@@ -9,6 +9,9 @@ import {
   claimDueCronJobs,
   CRON_FAILURE_LIMIT,
   CronScheduler,
+  deleteCronJob,
+  describeCronExpr,
+  describeCronSchedule,
   MAX_ACTIVE_CRON_JOBS_PER_CHAT,
   migrateLegacyCronTimezones,
   recoverInterruptedCronJobs,
@@ -35,6 +38,28 @@ function setupDatabase(): Database.Database {
   databases.push(db);
   return db;
 }
+
+describe("describeCronSchedule", () => {
+  test("translates common cron expressions to readable frequency", () => {
+    expect(describeCronExpr("*/5 * * * *")).toBe("每 5 分钟");
+    expect(describeCronExpr("0 * * * *")).toBe("每小时");
+    expect(describeCronExpr("0 */2 * * *")).toBe("每 2 小时");
+    expect(describeCronExpr("0 8 * * *")).toBe("每天 08:00");
+    expect(describeCronExpr("0 10 * * 1-5")).toBe("工作日 10:00");
+    expect(describeCronExpr("0 9 * * 1")).toBe("每周一 09:00");
+    expect(describeCronExpr("30 8 * * 0")).toBe("每周日 08:30");
+  });
+
+  test("falls back to raw expression for unrecognized patterns", () => {
+    expect(describeCronExpr("0 8 15 * *")).toBe("0 8 15 * *");
+    expect(describeCronExpr("0 8 * * 1,3,5")).toBe("0 8 * * 1,3,5");
+  });
+
+  test("one-off cron shows local time, missing schedule shows placeholder", () => {
+    expect(describeCronSchedule(null, "2026-08-05 07:38:00", "Asia/Shanghai")).toContain("一次性");
+    expect(describeCronSchedule(null, null)).toBe("未设置");
+  });
+});
 
 describe("CronScheduler", () => {
   test("validates exactly the five-field Cron subset the scheduler implements", () => {
@@ -325,6 +350,35 @@ describe("CronScheduler", () => {
     expect(claimDueCronJobs(db)).toEqual([]);
   });
 
+  test("running cancellation invalidates the claim and fences the stale executor", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-20T00:00:00Z"));
+    const db = setupDatabase();
+    let release!: () => void;
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const scheduler = new CronScheduler(db, async () => {
+      markStarted();
+      await new Promise<void>((resolve) => { release = resolve; });
+    });
+    const id = addCronJob(db, {
+      chatId: "c1", creatorUserId: "u2", cronExpr: "* * * * *", timeZone: "UTC", prompt: "cancel me",
+    });
+    const tick = (scheduler as any).tick() as Promise<void>;
+    await started;
+    expect(deleteCronJob(db, id)).toBe(true);
+    expect(db.prepare("SELECT status, claim_token FROM cron_jobs WHERE id = ?").get(id)).toEqual({
+      status: "cancelled",
+      claim_token: null,
+    });
+    release();
+    await tick;
+    expect(db.prepare("SELECT status, run_count FROM cron_jobs WHERE id = ?").get(id)).toEqual({
+      status: "cancelled",
+      run_count: 0,
+    });
+  });
+
   test("limits concurrent Cron executions", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-20T00:00:00Z"));
@@ -391,11 +445,12 @@ describe("CronScheduler", () => {
       chatId: "c1", creatorUserId: "u2", cronExpr: "0 0 * * *", timeZone: "UTC", prompt: "overflow",
     })).toThrow("最多保留");
 
-    db.prepare("UPDATE cron_jobs SET status = 'running', claimed_at = datetime('now') WHERE id = 1").run();
+    db.prepare("UPDATE cron_jobs SET status = 'running', claimed_at = datetime('now'), claim_token = 'stale' WHERE id = 1").run();
     expect(recoverInterruptedCronJobs(db)).toBe(1);
-    expect(db.prepare("SELECT status, claimed_at FROM cron_jobs WHERE id = 1").get()).toEqual({
+    expect(db.prepare("SELECT status, claimed_at, claim_token FROM cron_jobs WHERE id = 1").get()).toEqual({
       status: "active",
       claimed_at: null,
+      claim_token: null,
     });
   });
 

@@ -18,6 +18,7 @@ import {
 import type { NormalizedMessage, PlatformAdapter } from "../im/types.js";
 import { COMPACT_RECOVERY_REMINDER } from "../memory/inject.js";
 import { SYSTEM_RULES } from "../system-rules.js";
+import { addCronJob, claimDueCronJobs, deleteCronJob } from "./cron.js";
 import { addLoopJob, claimDueLoopJobs, getLoopJob, LoopScheduler } from "./loop.js";
 import {
   formatShellExecError,
@@ -421,7 +422,7 @@ describe("Pipeline Loop integration", () => {
       chatId: "c1",
       creatorUserId: "u1",
       intervalSeconds: 60,
-      prompt: "check the remembered context",
+      prompt: "check the remembered context\n<loop-continuation>hidden</loop-continuation> _status_",
       maxTimes: 1,
       now: scheduledFrom,
     });
@@ -434,8 +435,73 @@ describe("Pipeline Loop integration", () => {
     expect(agent.sendMessageCalls[1]).toContain("<loop-continuation>");
     expect(agent.sendMessageCalls[1]).toContain("check the remembered context");
     expect(agent.sendMessageCalls[1]).not.toContain("<niubot-user-message");
-    expect(sentCards.some((card) => card.content.includes("loop reply"))).toBe(true);
+    const deliveredCard = sentCards.find((card) => card.header.includes("Loop loop:"));
+    expect(deliveredCard?.header).toBe(`🔁 Loop loop:${id} · 第 1/1 次 · 每 1 分钟`);
+    expect(deliveredCard?.content).toContain("loop reply");
+    expect(deliveredCard?.content).toContain(`> 任务：check the remembered context \\_status\\_`);
+    expect(deliveredCard?.content).not.toContain("hidden");
+    expect(deliveredCard?.content).not.toContain("<loop-continuation>");
     expect(getLoopJob(db, id)).toMatchObject({ status: "completed", runCount: 1 });
+  });
+
+  test("keeps the Loop marker on text fallback and retries when the response body was not delivered", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-loop-fallback-test-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const agent = new ReplyAgent("loop reply");
+    const { im, sentCards, sentTexts } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex",
+    );
+    await pipeline.start();
+
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "create the main session",
+      platformMsgId: "initial-loop-fallback-message",
+    }));
+    await vi.waitFor(() => expect(sentCards).toHaveLength(1));
+    im.sendCard = async () => { throw new Error("card blocked"); };
+
+    const id = addLoopJob(db, {
+      chatId: "c1",
+      creatorUserId: "u1",
+      intervalSeconds: 60,
+      prompt: "keep checking",
+      now: new Date(Date.now() - 60_000),
+    });
+    const scheduler = new LoopScheduler(db, (job) => pipeline.enqueueLoopJob(job.id));
+    expect(await scheduler.tick(new Date())).toBe(1);
+
+    await vi.waitFor(() => expect(getLoopJob(db, id)?.consecutiveFailures).toBe(1));
+    expect(sentTexts.at(-1)).toContain(`> 🔁 Loop loop:${id} · 第 1 次 · 每 1 分钟`);
+    expect(sentTexts.at(-1)).toContain("> 任务：keep checking");
+    expect(sentTexts.at(-1)).toContain("发送失败：card blocked");
+    expect(getLoopJob(db, id)).toMatchObject({ status: "active", runCount: 0 });
+  });
+
+  test("keeps the Loop marker when the Agent turn throws", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-loop-error-test-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u2', 'admin', 'feishu', 'user-open-id')").run();
+    db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c1', 'p2p', 'feishu', 'chat-open-id')").run();
+    const { im, sentTexts } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db, im, new ErrorAgent(new Error("loop backend failed")), createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex",
+    );
+    await pipeline.start();
+    (pipeline as any).platformChatIds.set("c1", "chat-open-id");
+    const id = addLoopJob(db, {
+      chatId: "c1", creatorUserId: "u2", intervalSeconds: 60, prompt: "check error source",
+      now: new Date(Date.now() - 60_000),
+    });
+    const scheduler = new LoopScheduler(db, (job) => pipeline.enqueueLoopJob(job.id));
+    expect(await scheduler.tick(new Date())).toBe(1);
+
+    await vi.waitFor(() => expect(getLoopJob(db, id)?.consecutiveFailures).toBe(1));
+    expect(sentTexts.at(-1)).toContain(`> 🔁 Loop loop:${id} · 第 1 次 · 每 1 分钟`);
+    expect(sentTexts.at(-1)).toContain("> 任务：check error source");
+    expect(sentTexts.at(-1)).toContain("处理出错了");
   });
 
   test("/new keeps chat-scoped Loop and its next run uses the new main session", async () => {
@@ -1039,7 +1105,7 @@ describe("Pipeline.recover", () => {
     const agentSession = { id: "old-task-session" };
     (pipeline as any).runningTasks.set(agentSession.id, {
       agentSession, backend: oldBackend, backendType: "codex", chatId: "c1",
-      description: "old backend task", startedAt: Date.now(),
+      description: "old backend task", startedAt: Date.now(), source: "task",
     });
 
     (pipeline as any).stopAllTasks("c1", "chat-open-id");
@@ -1731,6 +1797,31 @@ describe("Pipeline.recover", () => {
     expect(sentCards[0]?.content).toBe("（处理完成，但未生成回复。如果没收到预期结果，请重试）");
   });
 
+  test("Cron result card shows fixed header with type, id and schedule plus task quote", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-20T00:00:00Z"));
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-cron-card-test-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u2', 'admin', 'feishu', 'user-open-id')").run();
+    db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c1', 'p2p', 'feishu', 'chat-open-id')").run();
+    const agent = new ReplyAgent("cron card result");
+    const { im, sentCards } = createRecordingImStub();
+    const pipeline = new Pipeline(db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");
+    await pipeline.start();
+
+    const id = addCronJob(db, {
+      chatId: "c1", creatorUserId: "u2", cronExpr: "*/5 * * * *", timeZone: "UTC", prompt: "check weather",
+    });
+    const claimed = claimDueCronJobs(db)[0]!;
+    await pipeline.processCronJob("c1", "u2", claimed.prompt, "check weather", id, claimed.claimToken!);
+
+    expect(sentCards).toHaveLength(1);
+    expect(sentCards[0]?.header).toBe(`⏰ Cron cron:${id} · 每 5 分钟`);
+    expect(sentCards[0]?.content).toContain("> 任务：check weather");
+    expect(sentCards[0]?.content).toContain("cron card result");
+  });
+
   test("group Cron does not inherit the creator identity or mutable recent chat messages", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-group-cron-privacy-test-"));
     tempDirs.push(dir);
@@ -1817,6 +1908,52 @@ describe("Pipeline.recover", () => {
 
     await expect(pipeline.processCronJob("c1", "u2", "fail", "retry later"))
       .rejects.toThrow("cron agent failed");
+  });
+
+  test("does not send a Cron result after its running claim is cancelled", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-20T00:00:00Z"));
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-cron-cancel-test-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u2', 'admin', 'feishu', 'user-open-id')").run();
+    db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c1', 'p2p', 'feishu', 'chat-open-id')").run();
+    const agent = new DeferredAgent();
+    const { im, sentCards } = createRecordingImStub();
+    const pipeline = new Pipeline(db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");
+    await pipeline.start();
+    const id = addCronJob(db, {
+      chatId: "c1", creatorUserId: "u2", cronExpr: "* * * * *", timeZone: "UTC", prompt: "cancel during run",
+    });
+    const claimed = claimDueCronJobs(db)[0]!;
+
+    const run = pipeline.processCronJob("c1", "u2", claimed.prompt, "cancel test", id, claimed.claimToken!);
+    await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(1));
+    expect(deleteCronJob(db, id)).toBe(true);
+    agent.resolveNext();
+    await expect(run).rejects.toThrow("已取消或运行令牌失效");
+    expect(sentCards).toEqual([]);
+  });
+
+  test("does not store an assistant message when Cron card delivery fails", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-cron-delivery-test-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u2', 'admin', 'feishu', 'user-open-id')").run();
+    db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c1', 'p2p', 'feishu', 'chat-open-id')").run();
+    const im = createImStub();
+    im.sendCard = async () => { throw new Error("platform unavailable"); };
+    const pipeline = new Pipeline(
+      db, im, new ReplyAgent("should not become history"), createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex",
+    );
+    await pipeline.start();
+
+    await expect(pipeline.processCronJob("c1", "u2", "internal prompt", "delivery test"))
+      .rejects.toThrow("platform unavailable");
+    expect(db.prepare("SELECT COUNT(*) AS count FROM messages WHERE role = 'assistant'").get()).toEqual({ count: 0 });
+    expect(db.prepare("SELECT role, content_type FROM messages").all()).toEqual([
+      { role: "user", content_type: "internal_prompt" },
+    ]);
   });
 
   test("normalizes double-slash commands before forwarding to agent", () => {
@@ -4390,18 +4527,126 @@ describe("Pipeline.recover", () => {
     expect(ftsRow).toBeTruthy();
   });
 
-  test("keeps /loop and /cron on the model route even for an administrator", async () => {
+  test("handles Loop/Cron management commands locally while creation stays on the model route", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
     const db = initDatabase(path.join(dir, "niubot.db"));
-    const { im } = createRecordingImStub();
+    db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u2', 'admin', 'feishu', 'user-open-id')").run();
+    db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c1', 'p2p', 'feishu', 'chat-open-id')").run();
+    const { im, sentCards } = createRecordingImStub();
     const pipeline = new Pipeline(
       db, im, new RecordingAgent(), createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex",
     );
+    await pipeline.start();
 
     (pipeline as any).adminRoles.set("u2", "owner");
-    expect((pipeline as any).isBuiltinCommand("/loop list", "u2")).toBe(false);
-    expect((pipeline as any).isBuiltinCommand("/cron list", "u2")).toBe(false);
+    expect((pipeline as any).isBuiltinCommand("/loop", "u2")).toBe(true);
+    expect((pipeline as any).isBuiltinCommand("/loop list", "u2")).toBe(true);
+    expect((pipeline as any).isBuiltinCommand("/cron ls", "u2")).toBe(true);
+    expect((pipeline as any).isBuiltinCommand("/cron del 1", "u2")).toBe(true);
+    expect((pipeline as any).isBuiltinCommand("/loop 每5分钟检查部署", "u2")).toBe(false);
+    expect((pipeline as any).isBuiltinCommand("/cron 每天9点提醒", "u2")).toBe(false);
+
+    addLoopJob(db, {
+      chatId: "c1", creatorUserId: "u2", intervalSeconds: 300, prompt: "follow deployment",
+    });
+    addCronJob(db, {
+      chatId: "c1", creatorUserId: "u2", cronExpr: "0 9 * * *", prompt: "daily reminder", timeZone: "UTC",
+    });
+    expect((pipeline as any).handleBuiltinCommand("/loop", "u2", "c1", "chat-open-id", "p2p", "m-loop")).toBe(true);
+    expect((pipeline as any).handleBuiltinCommand("/cron list", "u2", "c1", "chat-open-id", "p2p", "m-cron")).toBe(true);
+    await vi.waitFor(() => expect(sentCards).toHaveLength(2));
+    expect(sentCards[0]).toMatchObject({ header: "Loop" });
+    expect(sentCards[0]!.content).toContain("loop:1");
+    expect(sentCards[0]!.content).toContain("创建：/loop <任务与时间>");
+    expect(sentCards[1]).toMatchObject({ header: "Cron" });
+    expect(sentCards[1]!.content).toContain("cron:1");
+    expect(sentCards[1]!.content).toContain("创建：/cron <任务与时间>");
+  });
+
+  test("cancels Loop/Cron through their built-in management commands", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-schedule-builtin-cancel-test-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u2', 'admin', 'feishu', 'user-open-id')").run();
+    db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c1', 'p2p', 'feishu', 'chat-open-id')").run();
+    const { im, sentTexts } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db, im, new RecordingAgent(), createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex",
+    );
+    await pipeline.start();
+    const loopId = addLoopJob(db, {
+      chatId: "c1", creatorUserId: "u2", intervalSeconds: 300, prompt: "cancel loop",
+    });
+    const cronId = addCronJob(db, {
+      chatId: "c1", creatorUserId: "u2", cronExpr: "0 9 * * *", prompt: "cancel cron", timeZone: "UTC",
+    });
+    const legacyAliasLoopId = addLoopJob(db, {
+      chatId: "c1", creatorUserId: "u2", intervalSeconds: 300, prompt: "legacy cancel alias",
+    });
+
+    expect((pipeline as any).handleBuiltinCommand(`/loop del cron:${loopId}`, "u2", "c1", "chat-open-id", "p2p")).toBe(true);
+    expect((pipeline as any).handleBuiltinCommand(`/cron del loop:${cronId}`, "u2", "c1", "chat-open-id", "p2p")).toBe(true);
+    await vi.waitFor(() => expect(sentTexts.filter((text) => text.includes("用法："))).toHaveLength(2));
+    expect(getLoopJob(db, loopId)?.status).toBe("active");
+    expect(db.prepare("SELECT status FROM cron_jobs WHERE id = ?").get(cronId)).toEqual({ status: "active" });
+
+    expect((pipeline as any).handleBuiltinCommand(`/loop del loop:${loopId}`, "u2", "c1", "chat-open-id", "p2p")).toBe(true);
+    expect((pipeline as any).handleBuiltinCommand(`/cron del ${cronId}`, "u2", "c1", "chat-open-id", "p2p")).toBe(true);
+    expect((pipeline as any).handleBuiltinCommand(`/loop cancel ${legacyAliasLoopId}`, "u2", "c1", "chat-open-id", "p2p")).toBe(true);
+    await vi.waitFor(() => expect(sentTexts).toEqual(expect.arrayContaining([
+      `已删除 loop:${loopId}。`,
+      `已删除 cron:${cronId}。`,
+      `已删除 loop:${legacyAliasLoopId}。`,
+    ])));
+    expect(getLoopJob(db, loopId)?.status).toBe("cancelled");
+    expect(getLoopJob(db, legacyAliasLoopId)?.status).toBe("cancelled");
+    expect(db.prepare("SELECT status FROM cron_jobs WHERE id = ?").get(cronId)).toEqual({ status: "cancelled" });
+  });
+
+  test("discards an in-flight Loop result after the built-in cancel command", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-loop-builtin-cancel-test-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u2', 'admin', 'feishu', 'user-open-id')").run();
+    db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c1', 'p2p', 'feishu', 'chat-open-id')").run();
+    const agent = new DeferredAgent();
+    const { im, sentCards, sentTexts } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex",
+    );
+    await pipeline.start();
+
+    (pipeline as any).handleMessage(createMessage({ contentText: "create main session", platformMsgId: "m-initial" }));
+    await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(1));
+    agent.resolveNext();
+    await vi.waitFor(() => expect(sentCards).toHaveLength(1));
+
+    const id = addLoopJob(db, {
+      chatId: "c1", creatorUserId: "u2", intervalSeconds: 60, prompt: "cancel while running",
+      now: new Date(Date.now() - 60_000),
+    });
+    const scheduler = new LoopScheduler(db, (job) => pipeline.enqueueLoopJob(job.id));
+    expect(await scheduler.tick(new Date())).toBe(1);
+    await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(2));
+    expect(getLoopJob(db, id)?.status).toBe("running");
+
+    expect((pipeline as any).handleBuiltinCommand(
+      `/loop del loop:${id}`, "u2", "c1", "chat-open-id", "p2p",
+    )).toBe(true);
+    await vi.waitFor(() => expect(sentTexts).toContain(`已删除 loop:${id}。`));
+    await vi.waitFor(() => expect(getLoopJob(db, id)?.status).toBe("cancelled"));
+    await vi.waitFor(() => expect((pipeline as any).queue.isBusy("c1")).toBe(false));
+
+    expect(sentCards).toHaveLength(1);
+    expect(sentCards.some((card) => card.content.includes("cancel while running"))).toBe(false);
+    expect(agent.cancelSessionCalls).toContain("agent_1");
+    const assistantMessages = db.prepare(
+      "SELECT content_text FROM messages WHERE role = 'assistant' ORDER BY id",
+    ).all() as Array<{ content_text: string }>;
+    expect(assistantMessages).toHaveLength(2); // 初始回复 + 取消确认；没有被取消的 Loop 回复
+    expect(assistantMessages.some((message) => message.content_text.includes("cancel while running"))).toBe(false);
+    agent.resolveNext(); // 只清理测试桩；队列在此之前已经恢复。
   });
 
   test("routes /task stop through the command entrypoint and scopes it to the current chat", async () => {
@@ -4416,11 +4661,15 @@ describe("Pipeline.recover", () => {
     (pipeline as any).adminRoles.set("u2", "owner");
     (pipeline as any).runningTasks.set("task-current", {
       agentSession: { id: "task-current" }, backend, backendType: "codex", chatId: "c1",
-      description: "current", startedAt: Date.now(),
+      description: "current", startedAt: Date.now(), source: "task",
     });
     (pipeline as any).runningTasks.set("task-other", {
       agentSession: { id: "task-other" }, backend, backendType: "codex", chatId: "c2",
-      description: "other", startedAt: Date.now(),
+      description: "other", startedAt: Date.now(), source: "task",
+    });
+    (pipeline as any).runningTasks.set("cron-current", {
+      agentSession: { id: "cron-current" }, backend, backendType: "codex", chatId: "c1",
+      description: "scheduled", startedAt: Date.now(), source: "cron", cronJobId: 1, cronClaimToken: "claim",
     });
 
     const handled = (pipeline as any).handleBuiltinCommand(
