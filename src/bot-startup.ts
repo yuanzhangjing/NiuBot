@@ -32,6 +32,7 @@ export async function startBotRuntime(
 
   await bot.apiServer.start();
   bot.cronScheduler.start();
+  bot.loopScheduler.start();
 
   void startTransportInBackground(bot, log, transportStartTimeoutMs);
 

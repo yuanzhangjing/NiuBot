@@ -30,6 +30,9 @@ describe("startBotRuntime", () => {
       cronScheduler: {
         start: () => { order.push("cron.start"); },
       },
+      loopScheduler: {
+        start: () => { order.push("loop.start"); },
+      },
     } as unknown as BotInstance;
 
     await startBotRuntime(bot, {
@@ -47,6 +50,7 @@ describe("startBotRuntime", () => {
       "transport.recover",
       "api.start",
       "cron.start",
+      "loop.start",
       "transport.start",
     ]);
 

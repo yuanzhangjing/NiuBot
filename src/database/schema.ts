@@ -542,6 +542,132 @@ const migrations: Migration[] = [
       }
     },
   },
+  {
+    version: 21,
+    description: "Add session-scoped Loop jobs",
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS loop_jobs (
+          id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+          chat_id              TEXT NOT NULL,
+          creator_user_id      TEXT NOT NULL,
+          session_id           TEXT NOT NULL,
+          interval_seconds     INTEGER NOT NULL CHECK(interval_seconds >= 60),
+          prompt               TEXT NOT NULL,
+          max_times            INTEGER CHECK(max_times IS NULL OR max_times > 0),
+          until_time           TEXT NOT NULL,
+          run_count            INTEGER NOT NULL DEFAULT 0,
+          status               TEXT NOT NULL DEFAULT 'active'
+                               CHECK(status IN ('active', 'queued', 'running', 'paused', 'completed', 'cancelled')),
+          next_run_at          TEXT NOT NULL,
+          last_run_at          TEXT,
+          run_started_at       TEXT,
+          last_error           TEXT,
+          consecutive_failures INTEGER NOT NULL DEFAULT 0,
+          created_at           TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at           TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_loop_jobs_due ON loop_jobs(status, next_run_at);
+        CREATE INDEX IF NOT EXISTS idx_loop_jobs_chat ON loop_jobs(chat_id, status, id);
+      `);
+      const columns = db.prepare("PRAGMA table_info(loop_jobs)").all() as Array<{ name: string; dflt_value: string | null }>;
+      const sessionColumn = columns.find((column) => column.name === "session_id");
+      if (sessionColumn && sessionColumn.dflt_value !== "''") {
+        db.exec("CREATE INDEX IF NOT EXISTS idx_loop_jobs_session ON loop_jobs(session_id, status)");
+      }
+    },
+  },
+  {
+    version: 22,
+    description: "Bind Loop jobs to chats instead of individual sessions",
+    up: (db) => {
+      const columns = db.prepare("PRAGMA table_info(loop_jobs)").all() as Array<{ name: string; dflt_value: string | null }>;
+      const sessionColumn = columns.find((column) => column.name === "session_id");
+      if (!sessionColumn) {
+        db.exec(`
+          CREATE INDEX IF NOT EXISTS idx_loop_jobs_due ON loop_jobs(status, next_run_at);
+          CREATE INDEX IF NOT EXISTS idx_loop_jobs_chat ON loop_jobs(chat_id, status, id);
+        `);
+        return;
+      }
+      if (sessionColumn.dflt_value === "''") {
+        const indexes = new Set((db.prepare(`
+          SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'loop_jobs'
+        `).all() as Array<{ name: string }>).map((row) => row.name));
+        const statements: string[] = [];
+        if (indexes.has("idx_loop_jobs_session")) statements.push("DROP INDEX idx_loop_jobs_session");
+        if (!indexes.has("idx_loop_jobs_due")) statements.push("CREATE INDEX idx_loop_jobs_due ON loop_jobs(status, next_run_at)");
+        if (!indexes.has("idx_loop_jobs_chat")) statements.push("CREATE INDEX idx_loop_jobs_chat ON loop_jobs(chat_id, status, id)");
+        if (statements.length > 0) db.exec(statements.join(";\n"));
+        return;
+      }
+      db.exec(`
+        DROP INDEX IF EXISTS idx_loop_jobs_due;
+        DROP INDEX IF EXISTS idx_loop_jobs_chat;
+        DROP INDEX IF EXISTS idx_loop_jobs_session;
+        ALTER TABLE loop_jobs RENAME TO loop_jobs_session_scoped;
+
+        CREATE TABLE loop_jobs (
+          id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+          chat_id              TEXT NOT NULL,
+          creator_user_id      TEXT NOT NULL,
+          session_id           TEXT NOT NULL DEFAULT '',
+          interval_seconds     INTEGER NOT NULL CHECK(interval_seconds >= 60),
+          prompt               TEXT NOT NULL,
+          max_times            INTEGER CHECK(max_times IS NULL OR max_times > 0),
+          until_time           TEXT NOT NULL,
+          run_count            INTEGER NOT NULL DEFAULT 0,
+          status               TEXT NOT NULL DEFAULT 'active'
+                               CHECK(status IN ('active', 'queued', 'running', 'paused', 'completed', 'cancelled')),
+          next_run_at          TEXT NOT NULL,
+          last_run_at          TEXT,
+          run_started_at       TEXT,
+          last_error           TEXT,
+          consecutive_failures INTEGER NOT NULL DEFAULT 0,
+          created_at           TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at           TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        INSERT INTO loop_jobs (
+          id, chat_id, creator_user_id, session_id, interval_seconds, prompt, max_times,
+          until_time, run_count, status, next_run_at, last_run_at,
+          run_started_at, last_error, consecutive_failures, created_at, updated_at
+        )
+        SELECT
+          id, chat_id, creator_user_id, session_id, interval_seconds, prompt, max_times,
+          until_time, run_count, status, next_run_at, last_run_at,
+          run_started_at, last_error, consecutive_failures, created_at, updated_at
+        FROM loop_jobs_session_scoped;
+
+        DROP TABLE loop_jobs_session_scoped;
+        CREATE INDEX idx_loop_jobs_due ON loop_jobs(status, next_run_at);
+        CREATE INDEX idx_loop_jobs_chat ON loop_jobs(chat_id, status, id);
+      `);
+    },
+  },
+  {
+    version: 23,
+    description: "Track Cron claims and consecutive failures",
+    up: (db) => {
+      const table = db.prepare(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'cron_jobs'",
+      ).get();
+      if (!table) return;
+      const columns = new Set(
+        (db.prepare("PRAGMA table_info(cron_jobs)").all() as Array<{ name: string }>)
+          .map((column) => column.name),
+      );
+      if (!columns.has("claimed_at")) {
+        db.exec("ALTER TABLE cron_jobs ADD COLUMN claimed_at TEXT");
+      }
+      if (!columns.has("last_error")) {
+        db.exec("ALTER TABLE cron_jobs ADD COLUMN last_error TEXT");
+      }
+      if (!columns.has("consecutive_failures")) {
+        db.exec("ALTER TABLE cron_jobs ADD COLUMN consecutive_failures INTEGER NOT NULL DEFAULT 0");
+      }
+    },
+  },
 ];
 
 const transportMigrations: Migration[] = [
@@ -661,10 +787,9 @@ const transportMigrations: Migration[] = [
 ];
 
 export const LATEST_SCHEMA_VERSION = migrations[migrations.length - 1]!.version;
-// npm 上所有公开版本（v0.1.12 起）的全局 schema 都在 10..16。
-// 这一区间之后的迁移只有加表、加 nullable 列和加索引，旧版本会忽略，
-// 因此保留原 user_version 后可以安全回到升级前的同一版本。
-export const ROLLBACK_COMPATIBLE_SCHEMA_VERSIONS = [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20] as const;
+// Loop v22 保留了旧 session_id 列作为回滚兼容占位，当前运行时不再读取或写入它。
+// 因此这些版本升级后仍可由原版本打开；新建 Loop 在旧代码中不会继续执行。
+export const ROLLBACK_COMPATIBLE_SCHEMA_VERSIONS = [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23] as const;
 export const LATEST_TRANSPORT_SCHEMA_VERSION = transportMigrations[transportMigrations.length - 1]!.version;
 
 // ── Database initialization ─────────────────────────────────────────

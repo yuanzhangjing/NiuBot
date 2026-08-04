@@ -379,6 +379,27 @@ describe("CodexBackend session metadata", () => {
     expect(parsed.failed).toBe(true);
   });
 
+  it("keeps the terminal error when a partial agent message was emitted first", () => {
+    const backend = new CodexBackend();
+    const session = backend.buildSession({ workingDirectory: "/tmp" });
+
+    const parsed = backend.parseOutput([
+      JSON.stringify({
+        type: "item.completed",
+        item: { type: "agent_message", text: "正在处理" },
+      }),
+      JSON.stringify({
+        type: "turn.failed",
+        error: { message: "stream disconnected" },
+      }),
+    ].join("\n"), session);
+
+    expect(parsed.turnCompleted).toBe(false);
+    expect(parsed.lastMessage).toBe("正在处理");
+    expect(parsed.error).toBe("stream disconnected");
+    expect(parsed.failed).toBe(true);
+  });
+
   it("waits for turn completion instead of finishing on the first agent message", () => {
     const backend = new CodexBackend();
     const session = backend.buildSession({ workingDirectory: "/tmp" });

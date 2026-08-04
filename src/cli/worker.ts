@@ -40,7 +40,11 @@ async function executeViaPipeline(chatId: string, command: WorkerAgentCommand): 
   try {
     response = await localApiRequest(resolveSendEndpoint(), "/worker", {
       method: "POST",
-      body: { chat_id: chatId, command },
+      body: {
+        chat_id: chatId,
+        command,
+        schedule_token: process.env.NIUBOT_SCHEDULE_TOKEN ?? undefined,
+      },
       timeoutMs: 30_000,
     });
   } catch (error) {

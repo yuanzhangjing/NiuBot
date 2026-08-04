@@ -46,6 +46,8 @@ export type WorkerAgentCommand =
 export interface WorkerAgentCommandRequest {
   chatId: string;
   command: WorkerAgentCommand;
+  /** 主 Agent 回合能力令牌；缺省或与当前活动回合不匹配时拒绝 */
+  scheduleToken?: string;
 }
 
 export interface WorkerAgentCommandResult {

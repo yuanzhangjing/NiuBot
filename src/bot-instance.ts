@@ -18,6 +18,7 @@ import { WorkerProfileRegistry } from "./worker/profiles.js";
 import { TeamConfigStore } from "./worker/team-config.js";
 import { ApiServer, type ApiHandler } from "./core/api.js";
 import { CronScheduler } from "./core/cron.js";
+import { LoopScheduler } from "./core/loop.js";
 import { ensureBotProfileFile } from "./bot-profile.js";
 import { ensureStaticContextFiles, ensureWorkspaceAgentFiles } from "./static-context.js";
 import { createLogger } from "./logger.js";
@@ -34,6 +35,7 @@ export interface BotInstance {
   pipeline: Pipeline;
   apiServer: ApiServer;
   cronScheduler: CronScheduler;
+  loopScheduler: LoopScheduler;
 }
 
 /**
@@ -159,7 +161,8 @@ export async function createBotInstance(
     sendMessage: (chatId, text) => pipeline.sendToChat(chatId, text),
     sendCard: (chatId, header, content) => pipeline.sendCardToChat(chatId, header, content),
     sendFile: (chatId, filePath) => pipeline.sendFileToChat(chatId, filePath),
-    executeWorkerCommand: (chatId, command) => pipeline.executeWorkerAgentCommand({ chatId, command }),
+    executeWorkerCommand: (chatId, command, token) => pipeline.executeWorkerAgentCommand({ chatId, command, scheduleToken: token }),
+    executeScheduleCommand: (chatId, command, token) => pipeline.executeScheduleAgentCommand(chatId, command, token),
     resolveChatPlatformId: (input: string) => {
       // Try as internal ID (c1, c2)
       const lower = input.toLowerCase();
@@ -176,8 +179,18 @@ export async function createBotInstance(
   const apiServer = new ApiServer(endpoint, apiHandler);
 
   // 7. 创建 Cron Scheduler（独立 session，不走用户消息队列）
-  const cronScheduler = new CronScheduler(db, async (chatId, userId, prompt, description) => {
-    await pipeline.processCronJob(chatId, userId, prompt, description);
+  const cronScheduler = new CronScheduler(
+    db,
+    async (chatId, userId, prompt, description) => {
+      await pipeline.processCronJob(chatId, userId, prompt, description);
+    },
+    {
+      reportFailure: (chatId, description, error, paused) =>
+        pipeline.reportCronJobFailure(chatId, description, error, paused),
+    },
+  );
+  const loopScheduler = new LoopScheduler(db, (job) => {
+    pipeline.enqueueLoopJob(job.id);
   });
 
   log.info("bot instance created", {
@@ -194,6 +207,7 @@ export async function createBotInstance(
     pipeline,
     apiServer,
     cronScheduler,
+    loopScheduler,
   };
 }
 

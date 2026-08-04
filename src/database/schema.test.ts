@@ -35,6 +35,57 @@ afterEach(() => {
   }
 });
 
+describe("loop schema", () => {
+  test("creates the chat-scoped Loop table and due index", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-loop-test-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+
+    const columns = db.prepare("PRAGMA table_info(loop_jobs)").all() as Array<{ name: string }>;
+    const indexes = db.prepare("PRAGMA index_list(loop_jobs)").all() as Array<{ name: string }>;
+    expect(columns.map((column) => column.name)).toEqual(expect.arrayContaining([
+      "chat_id", "creator_user_id", "session_id", "interval_seconds", "prompt",
+      "status", "next_run_at", "run_started_at", "consecutive_failures",
+    ]));
+    expect(indexes.map((index) => index.name)).toContain("idx_loop_jobs_due");
+  });
+
+  test("migrates session-scoped rows without losing jobs and makes session_id optional for new code", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-loop-migration-test-"));
+    tempDirs.push(dir);
+    const dbPath = path.join(dir, "niubot.db");
+    const legacy = initDatabase(dbPath);
+    legacy.prepare(`
+      INSERT INTO loop_jobs (
+        chat_id, creator_user_id, session_id, interval_seconds, prompt,
+        until_time, next_run_at
+      ) VALUES ('c1', 'u1', 'legacy-session', 300, 'keep me',
+        '2026-08-05 12:00:00', '2026-08-04 12:00:00')
+    `).run();
+    legacy.pragma("user_version = 21");
+    legacy.close();
+
+    const migrated = initDatabase(dbPath);
+    expect(migrated.prepare("SELECT id, chat_id, prompt FROM loop_jobs WHERE id = 1").get()).toEqual({
+      id: 1,
+      chat_id: "c1",
+      prompt: "keep me",
+    });
+    expect(() => migrated.prepare(`
+      INSERT INTO loop_jobs (
+        chat_id, creator_user_id, interval_seconds, prompt, until_time, next_run_at
+      ) VALUES ('c1', 'u1', 300, 'new row', '2026-08-05 12:00:00', '2026-08-04 12:00:00')
+    `).run()).not.toThrow();
+    expect(migrated.prepare("SELECT session_id FROM loop_jobs WHERE id = 2").pluck().get()).toBe("");
+    migrated.close();
+
+    const reopened = initDatabase(dbPath);
+    expect(reopened.prepare("SELECT COUNT(*) FROM loop_jobs").pluck().get()).toBe(2);
+    expect((reopened.prepare("PRAGMA index_list(loop_jobs)").all() as Array<{ name: string }>)
+      .map((index) => index.name)).not.toContain("idx_loop_jobs_session");
+  });
+});
+
 describe("bot runtime state", () => {
   test("persists backend and model for a bot", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-test-"));

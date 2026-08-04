@@ -2,15 +2,17 @@ import Database from "better-sqlite3";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { initDatabase } from "../database/schema.js";
 import { addCronJob, deleteCronJobForAccess, listCronJobsForAccess } from "../core/cron.js";
-import { formatCronScheduleForDisplay } from "./cron.js";
+import { parseArgs } from "./args.js";
+import { formatCronScheduleForDisplay, handleCron } from "./cron.js";
 
 const tempDirs: string[] = [];
 const openDatabases: Database.Database[] = [];
 
 afterEach(() => {
+  vi.restoreAllMocks();
   for (const db of openDatabases.splice(0)) {
     if (db.open) db.close();
   }
@@ -48,6 +50,29 @@ function setupDb() {
 }
 
 describe("cron access rules", () => {
+  it("routes legacy add and del writes through the unified Pipeline IPC", async () => {
+    const { db } = setupDb();
+    const execute = vi.fn(async () => ({ output: "ok" }));
+    vi.spyOn(console, "log").mockImplementation(() => {});
+
+    await handleCron(db, [
+      "add", "--cron", "0 9 * * *", "--prompt", "standup", "--times", "2",
+    ], "c1", "group", "stale-session-user", parseArgs, execute);
+    expect(execute).toHaveBeenCalledWith("c1", {
+      type: "create.cron",
+      cronExpr: "0 9 * * *",
+      runAt: undefined,
+      prompt: "standup",
+      description: undefined,
+      maxTimes: 2,
+      untilTime: undefined,
+      timeZone: expect.any(String),
+    });
+
+    await handleCron(db, ["del", "3"], "c1", "group", "stale-session-user", parseArgs, execute);
+    expect(execute).toHaveBeenLastCalledWith("c1", { type: "cancel", scheduleId: "cron:3" });
+  });
+
   it("labels cron schedules as local time", () => {
     expect(formatCronScheduleForDisplay({ cronExpr: "0 10 * * *", runAt: null })).toContain("0 10 * * * (local time, ");
     expect(formatCronScheduleForDisplay({

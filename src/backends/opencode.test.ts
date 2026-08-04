@@ -44,4 +44,41 @@ describe("OpencodeBackend error parsing", () => {
     expect(parsed.error).toBe("provider temporarily unavailable");
     expect(parsed.failed).toBe(true);
   });
+
+  it("only accepts documented terminal step reasons", () => {
+    const backend = new OpencodeBackend();
+    const session = backend.buildSession({ workingDirectory: "/tmp" });
+    const hooks = (backend as any).getExecHooks(session) as { isComplete?: (line: string) => boolean };
+
+    expect(hooks.isComplete?.(JSON.stringify({
+      type: "step_finish",
+      part: { reason: "tool-calls" },
+    }))).toBe(false);
+    expect(hooks.isComplete?.(JSON.stringify({
+      type: "step_finish",
+      part: {},
+    }))).toBe(false);
+    expect(hooks.isComplete?.(JSON.stringify({
+      type: "step_finish",
+      part: { reason: "stop" },
+    }))).toBe(true);
+    expect(hooks.isComplete?.(JSON.stringify({
+      type: "step_finish",
+      part: { reason: "end_turn" },
+    }))).toBe(true);
+  });
+
+  it("marks an unknown step_finish reason as incomplete", () => {
+    const backend = new OpencodeBackend();
+    const session = backend.buildSession({ workingDirectory: "/tmp" });
+
+    const parsed = backend.parseOutput([
+      JSON.stringify({ type: "text", part: { text: "处理中" } }),
+      JSON.stringify({ type: "step_finish", part: { reason: "length" } }),
+    ].join("\n"), session);
+
+    expect(parsed.turnCompleted).toBe(false);
+    expect(parsed.lastMessage).toBe("处理中");
+    expect(parsed.incompleteReason).toContain("reason=length");
+  });
 });

@@ -7,6 +7,9 @@ export const SYSTEM_RULES = `<niubot-system-rules>
 ## Auto Delivery
 最终回复会自动发送到当前聊天；普通回复不要额外调用发送命令重复发送。用户明确要求发文件、源文件或附件时，可以使用发送命令。
 
+## 回合收尾
+每个回合结束时必须输出一段面向用户的完整最终文本（总结、结论或回复），不能以工具调用、空消息或中途碎片文本收尾。
+
 ## User-facing Identity
 对用户回复时，你就是当前 Bot。不要把 agent、backend、模型、NiuBot Engine 或 session 当作用户可见身份；只有在用户明确讨论实现细节时，才解释这些内部机制。
 

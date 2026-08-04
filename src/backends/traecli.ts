@@ -74,6 +74,7 @@ export default class TraeCliBackend extends CliAgentBackend<TraeCliSession> {
     let lastAgentText = "";
     let genericErrorMsg: string | undefined;
     let sawError = false;
+    let sawTurnCompleted = false;
     let stdoutContextTokens: number | undefined;
 
     for (const line of stdout.split("\n")) {
@@ -103,6 +104,9 @@ export default class TraeCliBackend extends CliAgentBackend<TraeCliSession> {
           sawError = true;
           const eventMessage = event.error?.message ?? event.message;
           genericErrorMsg ??= eventMessage;
+        }
+        if (event.type === "turn.completed") {
+          sawTurnCompleted = true;
         }
 
         if (event.type === "item.completed" && event.item?.type === "agent_message" && event.item.text) {
@@ -135,15 +139,20 @@ export default class TraeCliBackend extends CliAgentBackend<TraeCliSession> {
       });
     }
 
+    const unresolvedError = sawError && !sawTurnCompleted;
+
     return {
       text: lastAgentText.trim(),
+      turnCompleted: sawTurnCompleted,
+      lastMessage: lastAgentText.trim(),
+      incompleteReason: sawTurnCompleted ? undefined : "未收到 turn.completed",
       agentSessionId: resolvedThreadId,
       model,
       contextTokens,
       contextWindow,
       compactCount: session.compactCount > 0 ? session.compactCount : undefined,
-      error: lastAgentText ? undefined : genericErrorMsg,
-      failed: !lastAgentText && sawError,
+      error: unresolvedError || !lastAgentText ? genericErrorMsg : undefined,
+      failed: unresolvedError || (!lastAgentText && sawError),
     };
   }
 

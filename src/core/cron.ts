@@ -18,6 +18,9 @@ const log = createLogger("cron");
 
 /** Check interval: 60 seconds */
 const CHECK_INTERVAL_MS = 60_000;
+export const MAX_ACTIVE_CRON_JOBS_PER_CHAT = 20;
+export const DEFAULT_MAX_CONCURRENT_CRON_RUNS = 4;
+export const CRON_FAILURE_LIMIT = 3;
 
 interface CronJob {
   id: number;
@@ -33,6 +36,9 @@ interface CronJob {
   status: string;
   lastRunAt: string | null;
   timezone: string;
+  claimedAt: string | null;
+  lastError: string | null;
+  consecutiveFailures: number;
 }
 
 interface RawCronRow {
@@ -50,6 +56,9 @@ interface RawCronRow {
   last_run_at: string | null;
   created_at: string;
   timezone: string | null;
+  claimed_at: string | null;
+  last_error: string | null;
+  consecutive_failures: number;
 }
 
 function toJob(r: RawCronRow): CronJob {
@@ -67,118 +76,178 @@ function toJob(r: RawCronRow): CronJob {
     status: r.status,
     lastRunAt: r.last_run_at,
     timezone: r.timezone ?? TZ,
+    claimedAt: r.claimed_at,
+    lastError: r.last_error,
+    consecutiveFailures: r.consecutive_failures,
   };
 }
 
 export type CronExecutor = (chatId: string, userId: string, prompt: string, description: string) => Promise<void>;
+export type CronFailureReporter = (
+  chatId: string,
+  description: string,
+  error: string,
+  paused: boolean,
+) => Promise<void> | void;
+
+export interface CronSchedulerOptions {
+  maxConcurrent?: number;
+  reportFailure?: CronFailureReporter;
+}
 
 export class CronScheduler {
   private db: Database.Database;
   private executor: CronExecutor;
   private timer: ReturnType<typeof setInterval> | null = null;
   private running = false;
+  /** 当前 tick 的 Promise；stop() 等待它结束，保证 cron_jobs 更新在 DB 关闭前完成。 */
+  private currentTick: Promise<void> | null = null;
+  private stopping = false;
+  private readonly maxConcurrent: number;
+  private readonly reportFailure?: CronFailureReporter;
 
-  constructor(db: Database.Database, executor: CronExecutor) {
+  constructor(db: Database.Database, executor: CronExecutor, options: CronSchedulerOptions = {}) {
     this.db = db;
     this.executor = executor;
+    this.maxConcurrent = Math.max(1, Math.floor(options.maxConcurrent ?? DEFAULT_MAX_CONCURRENT_CRON_RUNS));
+    this.reportFailure = options.reportFailure;
     migrateLegacyCronTimezones(db);
   }
 
   start(): void {
     if (this.timer) return;
+    this.stopping = false;
+    recoverInterruptedCronJobs(this.db);
     this.timer = setInterval(() => {
       if (this.running) return;
       this.running = true;
-      this.tick().catch((err) => {
+      this.currentTick = this.tick().catch((err) => {
         log.error("cron tick error", { error: String(err) });
       }).finally(() => {
         this.running = false;
+        this.currentTick = null;
       });
     }, CHECK_INTERVAL_MS);
     log.info("cron scheduler started");
   }
 
-  stop(): void {
+  /** 停止调度并等待当前 tick 结束（tick 内会更新 cron_jobs，必须在 DB 关闭前完成）。 */
+  async stop(): Promise<void> {
+    this.stopping = true;
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
     }
+    await this.currentTick;
     log.info("cron scheduler stopped");
   }
 
   private async tick(): Promise<void> {
     const now = new Date();
     const nowStr = utcDateTimeForSql(now);
+    const jobs = claimDueCronJobs(this.db, now);
+    let nextIndex = 0;
+    const workers = Array.from({ length: Math.min(this.maxConcurrent, jobs.length) }, async () => {
+      while (nextIndex < jobs.length) {
+        const job = jobs[nextIndex++]!;
+        if (this.stopping) {
+          releaseCronClaim(this.db, job);
+          continue;
+        }
+        await this.executeClaimedJob(job, nowStr);
+      }
+    });
+    await Promise.all(workers);
+  }
 
-    const jobs = this.db.prepare(
-      "SELECT * FROM cron_jobs WHERE status = 'active'",
-    ).all() as RawCronRow[];
+  private async executeClaimedJob(job: CronJob, nowStr: string): Promise<void> {
+    log.info("executing cron job", { id: job.id, desc: job.description });
+    try {
+      await this.executor(job.chatId, job.creatorUserId, job.prompt, job.description);
+      const nextCount = job.runCount + 1;
+      const completed = !!job.runAt || (job.maxTimes !== null && nextCount >= job.maxTimes);
+      this.db.prepare(`
+        UPDATE cron_jobs
+        SET status = ?, run_count = ?, last_run_at = ?, claimed_at = NULL,
+            last_error = NULL, consecutive_failures = 0
+        WHERE id = ? AND status = 'running'
+      `).run(completed ? "completed" : "active", nextCount, nowStr, job.id);
+    } catch (err) {
+      const error = String(err).slice(0, 2_000);
+      const failures = job.consecutiveFailures + 1;
+      const paused = failures >= CRON_FAILURE_LIMIT;
+      const changed = this.db.prepare(`
+        UPDATE cron_jobs
+        SET status = ?, claimed_at = NULL, last_run_at = ?, last_error = ?, consecutive_failures = ?
+        WHERE id = ? AND status = 'running'
+      `).run(paused ? "paused" : "active", job.lastRunAt, error, failures, job.id).changes;
+      log.error("cron job execution failed", { id: job.id, error, failures, paused });
+      if (changed === 1) {
+        await Promise.resolve(this.reportFailure?.(job.chatId, job.description || job.prompt.slice(0, 40), error, paused))
+          .catch((reportError) => log.warn("failed to report cron failure", { id: job.id, error: String(reportError) }));
+      }
+    }
+  }
+}
 
-    const pending: Array<() => Promise<void>> = [];
+/** Restore claims left behind by a stopped process. Recurring jobs keep the claim minute
+ * in last_run_at, so they do not repeat within that minute after restart. */
+export function recoverInterruptedCronJobs(db: Database.Database): number {
+  const restored = db.prepare(`
+    UPDATE cron_jobs
+    SET status = 'active', claimed_at = NULL,
+        last_error = COALESCE(last_error, 'Engine restarted during Cron execution')
+    WHERE status = 'running'
+  `).run().changes;
+  if (restored > 0) log.info("recovered interrupted cron jobs", { restored });
+  return restored;
+}
 
-    for (const raw of jobs) {
+function releaseCronClaim(db: Database.Database, job: CronJob): boolean {
+  return db.prepare(`
+    UPDATE cron_jobs SET status = 'active', claimed_at = NULL, last_run_at = ?
+    WHERE id = ? AND status = 'running'
+  `).run(job.lastRunAt, job.id).changes === 1;
+}
+
+/** Select and atomically claim every job due at this instant. */
+export function claimDueCronJobs(db: Database.Database, now: Date = new Date()): CronJob[] {
+  const nowStr = utcDateTimeForSql(now);
+  const claim = db.transaction(() => {
+    const rows = db.prepare("SELECT * FROM cron_jobs WHERE status = 'active' ORDER BY id").all() as RawCronRow[];
+    const updateStatus = db.prepare("UPDATE cron_jobs SET status = 'completed' WHERE id = ? AND status = 'active'");
+    const claimJob = db.prepare(`
+      UPDATE cron_jobs SET status = 'running', claimed_at = ?, last_run_at = ?
+      WHERE id = ? AND status = 'active'
+    `);
+    const claimed: CronJob[] = [];
+    for (const raw of rows) {
       const job = toJob(raw);
-
-      // Check bounded conditions
-      if (job.maxTimes && job.runCount >= job.maxTimes) {
-        this.db.prepare("UPDATE cron_jobs SET status = 'completed' WHERE id = ?").run(job.id);
-        log.info("cron job completed (max times)", { id: job.id });
+      if (job.maxTimes !== null && job.runCount >= job.maxTimes) {
+        updateStatus.run(job.id);
         continue;
       }
       if (job.untilTime && nowStr > normalizeDatetime(job.untilTime)) {
-        this.db.prepare("UPDATE cron_jobs SET status = 'completed' WHERE id = ?").run(job.id);
-        log.info("cron job completed (until time)", { id: job.id });
+        updateStatus.run(job.id);
         continue;
       }
 
       let shouldRun = false;
-
       if (job.runAt) {
-        // One-time job
-        if (nowStr >= normalizeDatetime(job.runAt) && job.runCount === 0) {
-          shouldRun = true;
-        }
+        shouldRun = nowStr >= normalizeDatetime(job.runAt) && job.runCount === 0;
       } else if (job.cronExpr) {
-        // Recurring job — check if current minute matches cron expression
         shouldRun = matchesCron(job.cronExpr, now, job.timezone);
-        // Don't run if already ran in this minute
         if (shouldRun && job.lastRunAt) {
-          const lastMinute = normalizeDatetime(job.lastRunAt).slice(0, 16);
-          const currentMinute = nowStr.slice(0, 16);
-          if (lastMinute === currentMinute) shouldRun = false;
+          shouldRun = normalizeDatetime(job.lastRunAt).slice(0, 16) !== nowStr.slice(0, 16);
         }
       }
-
-      if (shouldRun) {
-        pending.push(async () => {
-          log.info("executing cron job", { id: job.id, desc: job.description });
-          try {
-            await this.executor(job.chatId, job.creatorUserId, job.prompt, job.description);
-
-            this.db.prepare(
-              "UPDATE cron_jobs SET run_count = run_count + 1, last_run_at = ? WHERE id = ?",
-            ).run(nowStr, job.id);
-
-            // Complete one-time jobs
-            if (job.runAt) {
-              this.db.prepare("UPDATE cron_jobs SET status = 'completed' WHERE id = ?").run(job.id);
-            }
-
-            // Check if max_times reached after this run
-            if (job.maxTimes && job.runCount + 1 >= job.maxTimes) {
-              this.db.prepare("UPDATE cron_jobs SET status = 'completed' WHERE id = ?").run(job.id);
-            }
-          } catch (err) {
-            log.error("cron job execution failed", { id: job.id, error: String(err) });
-          }
-        });
+      if (shouldRun && claimJob.run(nowStr, nowStr, job.id).changes === 1) {
+        claimed.push({ ...job, status: "running", claimedAt: nowStr });
       }
     }
-
-    if (pending.length > 0) {
-      await Promise.allSettled(pending.map((fn) => fn()));
-    }
-  }
+    return claimed;
+  });
+  return claim();
 }
 
 /** Add a cron job */
@@ -197,6 +266,18 @@ export function addCronJob(
   },
 ): number {
   migrateLegacyCronTimezones(db);
+  const prompt = opts.prompt.trim();
+  if (!prompt) throw new Error("Cron 任务不能为空");
+  if (opts.maxTimes !== undefined && (!Number.isInteger(opts.maxTimes) || opts.maxTimes <= 0)) {
+    throw new Error("Cron 次数必须是正整数");
+  }
+  if ((opts.cronExpr ? 1 : 0) + (opts.runAt ? 1 : 0) !== 1) {
+    throw new Error("must provide exactly one of cronExpr or runAt");
+  }
+  if (opts.runAt && opts.maxTimes !== undefined && opts.maxTimes !== 1) {
+    throw new Error("一次性 Cron 只能执行 1 次");
+  }
+  if (opts.cronExpr) validateCronExpression(opts.cronExpr);
   const timeZone = opts.timeZone ?? TZ;
   const runAt = opts.runAt ? userDateTimeToUtcSql(opts.runAt, timeZone) : null;
   const untilTime = opts.untilTime ? userDateTimeToUtcSql(opts.untilTime, timeZone) : null;
@@ -209,23 +290,79 @@ export function addCronJob(
     }
   }
 
-  const result = db.prepare(`
-    INSERT INTO cron_jobs (
-      chat_id, creator_user_id, cron_expr, run_at, prompt, description, max_times, until_time, timezone
-    )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    opts.chatId,
-    opts.creatorUserId,
-    opts.cronExpr ?? null,
-    runAt,
-    opts.prompt,
-    opts.description ?? "",
-    opts.maxTimes ?? null,
-    untilTime,
-    timeZone,
-  );
-  return Number(result.lastInsertRowid);
+  // Validate: untilTime must be in the future and not earlier than a one-time runAt,
+  // otherwise the job is created only to be marked completed on the next tick.
+  if (untilTime) {
+    const untilTimeDate = new Date(untilTime.replace(" ", "T") + "Z");
+    if (untilTimeDate.getTime() <= Date.now()) {
+      throw new Error("until_time must be in the future");
+    }
+    if (runAt && untilTime < runAt) {
+      throw new Error("until_time must not be earlier than run_at");
+    }
+  }
+
+  const insert = db.transaction(() => {
+    const activeCount = db.prepare(`
+      SELECT COUNT(*) AS count FROM cron_jobs
+      WHERE chat_id = ? AND status IN ('active', 'running', 'paused')
+    `).get(opts.chatId) as { count: number };
+    if (activeCount.count >= MAX_ACTIVE_CRON_JOBS_PER_CHAT) {
+      throw new Error(`每个聊天最多保留 ${MAX_ACTIVE_CRON_JOBS_PER_CHAT} 个 Cron`);
+    }
+    const result = db.prepare(`
+      INSERT INTO cron_jobs (
+        chat_id, creator_user_id, cron_expr, run_at, prompt, description, max_times, until_time, timezone
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      opts.chatId,
+      opts.creatorUserId,
+      opts.cronExpr ?? null,
+      runAt,
+      prompt,
+      opts.description ?? "",
+      opts.maxTimes ?? null,
+      untilTime,
+      timeZone,
+    );
+    return Number(result.lastInsertRowid);
+  });
+  return insert();
+}
+
+/** Validate the five-field Cron subset implemented by matchesCron(). */
+export function validateCronExpression(expression: string): void {
+  const fields = expression.trim().split(/\s+/);
+  const ranges: Array<[number, number]> = [[0, 59], [0, 23], [1, 31], [1, 12], [0, 7]];
+  if (fields.length !== ranges.length) {
+    throw new Error("cron expression must contain exactly 5 fields");
+  }
+  for (let index = 0; index < fields.length; index++) {
+    const field = fields[index]!;
+    const [minimum, maximum] = ranges[index]!;
+    for (const part of field.split(",")) {
+      if (part === "*") continue;
+      const step = /^\*\/(\d+)$/.exec(part);
+      if (step) {
+        const value = Number(step[1]);
+        if (value >= 1 && value <= maximum - minimum + 1) continue;
+        throw new Error(`invalid cron field: ${field}`);
+      }
+      const range = /^(\d+)-(\d+)$/.exec(part);
+      if (range) {
+        const start = Number(range[1]);
+        const end = Number(range[2]);
+        if (start >= minimum && end <= maximum && start <= end) continue;
+        throw new Error(`invalid cron field: ${field}`);
+      }
+      if (/^\d+$/.test(part)) {
+        const value = Number(part);
+        if (value >= minimum && value <= maximum) continue;
+      }
+      throw new Error(`unsupported cron field: ${field}`);
+    }
+  }
 }
 
 /** List active cron jobs for a chat */
@@ -234,7 +371,7 @@ export function listCronJobs(
   chatId?: string,
 ): Array<CronJob & { createdAt: string }> {
   migrateLegacyCronTimezones(db);
-  let sql = "SELECT * FROM cron_jobs WHERE status = 'active'";
+  let sql = "SELECT * FROM cron_jobs WHERE status IN ('active', 'running', 'paused')";
   const params: unknown[] = [];
   if (chatId) {
     sql += " AND chat_id = ?";
@@ -311,31 +448,29 @@ function matchesCron(expr: string, date: Date, timeZone: string): boolean {
   if (parts.length < 5) return false;
 
   const local = getZonedDateTimeParts(date, timeZone);
-  const fields = [
-    local.minute,
-    local.hour,
-    local.day,
-    local.month,
-    new Date(Date.UTC(local.year, local.month - 1, local.day)).getUTCDay(),
-  ];
+  if (!matchesCronField(parts[0]!, local.minute, 0)) return false;
+  if (!matchesCronField(parts[1]!, local.hour, 0)) return false;
+  if (!matchesCronField(parts[3]!, local.month, 1)) return false;
 
-  for (let i = 0; i < 5; i++) {
-    if (!matchesCronField(parts[i]!, fields[i]!)) return false;
-  }
-  return true;
+  const dayOfMonthMatches = matchesCronField(parts[2]!, local.day, 1);
+  const weekday = new Date(Date.UTC(local.year, local.month - 1, local.day)).getUTCDay();
+  const weekdayMatches = matchesCronField(parts[4]!, weekday, 0)
+    || (weekday === 0 && matchesCronField(parts[4]!, 7, 0));
+  const dayOfMonthAny = parts[2] === "*";
+  const weekdayAny = parts[4] === "*";
+  if (dayOfMonthAny) return weekdayMatches;
+  if (weekdayAny) return dayOfMonthMatches;
+  return dayOfMonthMatches || weekdayMatches;
 }
 
-function matchesCronField(field: string, value: number): boolean {
-  if (field === "*") return true;
-
-  // Handle */n step values
-  if (field.startsWith("*/")) {
-    const step = Number(field.slice(2));
-    return !Number.isNaN(step) && step > 0 && value % step === 0;
-  }
-
-  // Handle comma-separated values and ranges
+function matchesCronField(field: string, value: number, minimum: number): boolean {
   for (const part of field.split(",")) {
+    if (part === "*") return true;
+    if (part.startsWith("*/")) {
+      const step = Number(part.slice(2));
+      if (!Number.isNaN(step) && step > 0 && (value - minimum) % step === 0) return true;
+      continue;
+    }
     if (part.includes("-")) {
       const [start, end] = part.split("-").map(Number);
       if (value >= start! && value <= end!) return true;

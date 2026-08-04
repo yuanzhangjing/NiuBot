@@ -35,6 +35,7 @@ import { handleMessages } from "./cli/messages.js";
 import { handleContacts } from "./cli/contacts.js";
 import { handleSend } from "./cli/send.js";
 import { handleCron } from "./cli/cron.js";
+import { handleSchedule } from "./cli/schedule.js";
 import { handleTask } from "./cli/task.js";
 import { handleSessions } from "./cli/session.js";
 import { handleWorker } from "./cli/worker.js";
@@ -53,6 +54,7 @@ const sessionCommands = new Set([
   "contacts",
   "send",
   "cron",
+  "schedule",
   "task",
   "worker",
   "whoami",
@@ -164,7 +166,10 @@ async function main(): Promise<void> {
       handleSend(args.slice(1), CHAT_ID, parseArgs);
       break;
     case "cron":
-      handleCron(openDb(), args.slice(1), CHAT_ID, CHAT_TYPE, USER_ID, parseArgs);
+      await handleCron(openDb(), args.slice(1), CHAT_ID, CHAT_TYPE, USER_ID, parseArgs);
+      break;
+    case "schedule":
+      await handleSchedule(openDb(), args.slice(1), CHAT_ID, CHAT_TYPE, USER_ID, parseArgs);
       break;
     case "task":
       handleTask(args.slice(1), WORK_DIR, CHAT_ID, CHAT_TYPE, USER_ID, parseArgs);
@@ -441,6 +446,7 @@ Commands:
                Manage users and chats directory
   send          <text>                      Send text, card, or file
   cron          add|list|del                Manage scheduled tasks
+  schedule      create|list|cancel          Manage Loop and Cron schedules
   task          create|list|update|delete   Manage task projects
   system-rules                             Show NiuBot Engine system rules
   whoami                                    Show current scene info

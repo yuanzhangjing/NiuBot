@@ -13,6 +13,11 @@ import {
   type LocalIpcEndpoint,
 } from "../platform/ipc.js";
 import type { WorkerAgentCommand, WorkerAgentCommandResult } from "../worker/agent-command.js";
+import {
+  parseScheduleAgentCommand,
+  type ScheduleAgentCommand,
+  type ScheduleAgentCommandResult,
+} from "./schedule-command.js";
 
 const log = createLogger("api");
 
@@ -27,8 +32,10 @@ export interface ApiHandler {
   resolveChatPlatformId(chatIdOrShort: string): string | undefined;
   /** Get the default platform chat ID (from current session context) */
   getDefaultPlatformChatId(sessionId?: string): string | undefined;
-  /** 主 Agent Worker 写操作；由 Pipeline 校验活动回合、权限和状态。 */
-  executeWorkerCommand?(chatId: string, command: WorkerAgentCommand): Promise<WorkerAgentCommandResult>;
+  /** 主 Agent Worker 写操作；由 Pipeline 校验活动回合、权限和状态。token 证明请求来自当前回合。 */
+  executeWorkerCommand?(chatId: string, command: WorkerAgentCommand, token?: string): Promise<WorkerAgentCommandResult>;
+  /** 主 Agent 调度写操作；由 Pipeline 使用当前回合身份鉴权。token 证明请求来自当前回合。 */
+  executeScheduleCommand?(chatId: string, command: ScheduleAgentCommand, token?: string): Promise<ScheduleAgentCommandResult>;
 }
 
 export class ApiServer {
@@ -140,7 +147,30 @@ export class ApiServer {
         res.end(JSON.stringify({ error: "Missing chat_id or command" }));
         return;
       }
-      const result = await this.handler.executeWorkerCommand(chatId, command as WorkerAgentCommand);
+      const result = await this.handler.executeWorkerCommand(chatId, command as WorkerAgentCommand, data.schedule_token);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(result));
+    } else if (url === "/schedule" && req.method === "POST") {
+      if (!this.handler.executeScheduleCommand) {
+        res.writeHead(503);
+        res.end(JSON.stringify({ error: "Schedule command API unavailable" }));
+        return;
+      }
+      const chatId = data.chat_id;
+      if (typeof chatId !== "string") {
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: "Missing chat_id or command" }));
+        return;
+      }
+      let command: ScheduleAgentCommand;
+      try {
+        command = parseScheduleAgentCommand(data.command);
+      } catch (error) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }));
+        return;
+      }
+      const result = await this.handler.executeScheduleCommand(chatId, command, data.schedule_token);
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(result));
     } else if (url === "/ping") {

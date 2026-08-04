@@ -106,7 +106,11 @@ export default class ClaudeBackend extends CliAgentBackend<ClaudeSession> {
     }
 
     if (!resultEvent) {
-      return { text: "（Claude 无输出）" };
+      return {
+        text: "",
+        turnCompleted: false,
+        incompleteReason: "未收到 result 终态事件",
+      };
     }
 
     let contextTokens: number | undefined;
@@ -135,6 +139,8 @@ export default class ClaudeBackend extends CliAgentBackend<ClaudeSession> {
 
     return {
       text: resultEvent.is_error ? "" : (resultEvent.result ?? "").trim(),
+      turnCompleted: true,
+      lastMessage: (resultEvent.result ?? "").trim(),
       agentSessionId,
       contextTokens,
       model,

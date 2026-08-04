@@ -260,7 +260,7 @@ describe("TraeCliBackend", () => {
     expect(parsed.failed).toBe(true);
   });
 
-  it("keeps a completed agent message when an error event also appears", () => {
+  it("keeps the error when a partial agent message appears before completion", () => {
     const backend = new TraeCliBackend();
     const session = backend.buildSession({ workingDirectory: "/tmp" });
 
@@ -276,7 +276,9 @@ describe("TraeCliBackend", () => {
     ].join("\n"), session);
 
     expect(parsed.text).toBe("already generated reply");
-    expect(parsed.error).toBeUndefined();
+    expect(parsed.turnCompleted).toBe(false);
+    expect(parsed.error).toBe("stream disconnected");
+    expect(parsed.failed).toBe(true);
   });
 
   it("waits for turn.completed instead of finishing on the first agent message", () => {

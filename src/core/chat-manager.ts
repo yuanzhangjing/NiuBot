@@ -22,7 +22,7 @@ export class ChatManager {
     this.queue = new MessageQueue(bufferMs);
     this.queue.onStateChange((chatId, snapshot) => this.syncRuntimeQueueState(chatId, snapshot));
     this.queue.onProcess((chatId, mergedText, messages, signal) => {
-      const userMessages = messages.filter((m) => m.triggerKind !== "worker_continuation");
+      const userMessages = messages.filter((m) => !m.triggerKind || m.triggerKind === "user");
       const run = this.runtimeState.createRun({
         chatId,
         triggerMessageIds: userMessages.map((m) => m.dbMsgId).filter((id): id is number => id != null),
@@ -94,6 +94,28 @@ export class ChatManager {
     log.info("worker continuation enqueued", {
       chatId,
       continuationIds,
+      pending,
+      queueState: this.runtimeState.getChatState(chatId).state,
+    });
+    return pending;
+  }
+
+  /** 入队一个 Session 续接 Loop；任务内容由 Pipeline 处理时从 DB 读取。 */
+  enqueueLoop(chatId: string, loopJobId: number): boolean {
+    if (this.queue.isStopped()) {
+      throw new Error("message queue is stopped");
+    }
+    const msg: QueuedMessage = {
+      chatId,
+      text: `[loop continuation: ${loopJobId}]`,
+      timestamp: Date.now(),
+      triggerKind: "loop_continuation",
+      loopJobId,
+    };
+    const pending = this.queue.push(msg);
+    log.info("loop continuation enqueued", {
+      chatId,
+      loopJobId,
       pending,
       queueState: this.runtimeState.getChatState(chatId).state,
     });

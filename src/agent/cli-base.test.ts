@@ -32,7 +32,7 @@ class FailingCliBackend extends CliAgentBackend<BaseCliSession> {
   }
 
   parseOutput(stdout: string): ParsedOutput {
-    return { text: stdout.trim() };
+    return { text: stdout.trim(), turnCompleted: true };
   }
 }
 
@@ -102,7 +102,7 @@ describe("CliAgentBackend diagnostic logging", () => {
     vi.stubEnv("NIUBOT_DEBUG_AGENT_STDOUT", "1");
     mkdirSync(join(tempHome, "logs"), { recursive: true });
 
-    const backend = new ThrowingHookBackend({ text: "ok" });
+    const backend = new ThrowingHookBackend({ text: "ok", turnCompleted: true });
     const entries: Array<{ level: string; msg: string; data?: Record<string, unknown> }> = [];
     (backend as any).log = {
       debug: (msg: string, data?: Record<string, unknown>) => entries.push({ level: "debug", msg, data }),
@@ -160,7 +160,7 @@ describe("CliAgentBackend diagnostic logging", () => {
   });
 
   test("uses a neutral backend fallback when parsed output marks failure without an error message", async () => {
-    const backend = new ParsedOutputBackend({ text: "", failed: true });
+    const backend = new ParsedOutputBackend({ text: "", turnCompleted: true, failed: true });
     const session = await backend.createSession({ workingDirectory: process.cwd() });
 
     await expect(backend.sendMessage(session as AgentSession, "ping")).rejects.toMatchObject({
@@ -169,7 +169,7 @@ describe("CliAgentBackend diagnostic logging", () => {
   });
 
   test("keeps activity readable when backend refreshActivity throws", async () => {
-    const backend = new ThrowingRefreshBackend({ text: "ok" });
+    const backend = new ThrowingRefreshBackend({ text: "ok", turnCompleted: true });
     const entries: Array<{ level: string; msg: string; data?: Record<string, unknown> }> = [];
     (backend as any).log = {
       debug: (msg: string, data?: Record<string, unknown>) => entries.push({ level: "debug", msg, data }),
@@ -197,7 +197,7 @@ describe("CliAgentBackend diagnostic logging", () => {
   });
 
   test("does not let stdout hook errors escape readline callbacks", async () => {
-    const backend = new ThrowingHookBackend({ text: "ok" });
+    const backend = new ThrowingHookBackend({ text: "ok", turnCompleted: true });
     const entries: Array<{ level: string; msg: string; data?: Record<string, unknown> }> = [];
     (backend as any).log = {
       debug: (msg: string, data?: Record<string, unknown>) => entries.push({ level: "debug", msg, data }),
@@ -223,7 +223,7 @@ describe("CliAgentBackend diagnostic logging", () => {
   test("truncates oversized stdout instead of throwing RangeError", async () => {
     const backend = new (class extends ParsedOutputBackend {
       constructor() {
-        super({ text: "ok" });
+        super({ text: "ok", turnCompleted: true });
       }
 
       buildInput(_session: BaseCliSession, _message: string): { args: string[]; stdin?: string } {
@@ -258,5 +258,19 @@ describe("CliAgentBackend diagnostic logging", () => {
       msg: "completion detected, resolving immediately",
       data: expect.objectContaining({ stdoutTruncated: true }),
     }));
+  });
+
+  test("rejects a zero-exit turn without a terminal event and includes the last message", async () => {
+    const backend = new ParsedOutputBackend({
+      text: "开始修复关闭竞态",
+      turnCompleted: false,
+      lastMessage: "开始修复关闭竞态",
+      incompleteReason: "未收到 agent_end",
+    });
+    const session = await backend.createSession({ workingDirectory: process.cwd() });
+
+    await expect(backend.sendMessage(session as AgentSession, "ping")).rejects.toMatchObject({
+      message: "test-cli 回合异常结束：未收到 agent_end\n最后一条消息：\n开始修复关闭竞态",
+    });
   });
 });

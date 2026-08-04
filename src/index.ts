@@ -351,22 +351,38 @@ async function main(): Promise<void> {
 
     log.info("shutting down...");
 
+    const schedulerStopPromises: Array<Promise<void>> = [];
     for (const bot of bots) {
       try { await bot.transport.stop(); } catch (e) { log.error("transport.stop failed", { bot: bot.id, error: String(e) }); }
-      bot.cronScheduler.stop();
+      // 只清理 timer 并开始等当前 tick；真正等 tick 结束放到取消独立 session 之后，避免长 Agent 回合阻塞关闭。
+      schedulerStopPromises.push(bot.cronScheduler.stop(), bot.loopScheduler.stop());
       bot.pipeline.stop();
       bot.apiServer.stop();
     }
 
+    let schedulerStopSettled = false;
+    const schedulerStopWait = Promise.all(schedulerStopPromises).then(() => { schedulerStopSettled = true; }).catch((err) => {
+      log.error("scheduler drain failed", { error: String(err) });
+      schedulerStopSettled = true;
+    });
     for (const bot of bots) {
       await bot.pipeline.shutdown();
     }
+
+    // Cron drain、独立 session 完成与 busy wait 共用同一截止时间，超时即强制退出，
+    // 避免在有超时保护的等待之前无界 await（tick 卡在 createAgentSession 等不可取消阶段时）。
     const busyCount = bots.reduce((n, b) => n + (b.pipeline.hasBusyChats() ? 1 : 0), 0);
     if (busyCount > 0) log.info("waiting for in-flight tasks", { busyBots: busyCount });
     const inFlightTimeoutMs = resolveInFlightShutdownTimeoutMs();
     const deadline = Date.now() + inFlightTimeoutMs;
-    while (bots.some((b) => b.pipeline.hasBusyChats()) && Date.now() < deadline) {
+    while (Date.now() < deadline && (!schedulerStopSettled || bots.some((b) => b.pipeline.hasBusyChats()))) {
       await new Promise((r) => setTimeout(r, 500));
+    }
+    if (!schedulerStopSettled) {
+      log.warn("scheduler drain timed out, forcing exit", { timeoutMs: inFlightTimeoutMs });
+    } else {
+      // 已 settle，await 立即返回（不能无条件 await：卡死的 tick 会让关闭永久阻塞）。
+      await schedulerStopWait;
     }
     if (bots.some((b) => b.pipeline.hasBusyChats())) {
       log.warn("in-flight wait timed out, forcing exit", { timeoutMs: inFlightTimeoutMs });

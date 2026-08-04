@@ -5,7 +5,7 @@
 
 import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
-import { AgentSessionNotStartedError, type AgentBackend, type AgentSession, type AgentResponse, type SessionConfig, type AgentSessionActivity, type ExecHooks, type SessionTranscript } from "./types.js";
+import { AgentSessionNotStartedError, ERROR_DISPLAY_MAX_LEN, type AgentBackend, type AgentSession, type AgentResponse, type SessionConfig, type AgentSessionActivity, type ExecHooks, type SessionTranscript } from "./types.js";
 import { NIUBOT_HOME } from "../config.js";
 import { createLogger } from "../logger.js";
 import { prependNiubotBinToPath } from "../platform/cli-runtime.js";
@@ -35,6 +35,12 @@ export interface BaseCliSession {
 /** 子类解析输出后返回的结构 */
 export interface ParsedOutput {
   text: string;
+  /** 是否收到 backend 原生的正式终态事件；进程退出不等于回合完成。 */
+  turnCompleted: boolean;
+  /** 回合异常结束时用于诊断的最后一段 assistant 文本。 */
+  lastMessage?: string;
+  /** backend 给出的未完成原因，如缺少 agent_end / turn.completed。 */
+  incompleteReason?: string;
   /** agent 侧的 session ID（用于 resume） */
   agentSessionId?: string;
   /** 本次调用的上下文 token 总数 */
@@ -262,6 +268,10 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
         s.agentSessionId = parsed.agentSessionId;
       }
 
+      if (!parsed.turnCompleted) {
+        throw this.buildIncompleteTurnError(parsed, stdout);
+      }
+
       const parsedError = this.getParsedError(parsed);
       if (parsedError) {
         const err: Error & { stdout?: string } = new Error(parsedError);
@@ -313,6 +323,19 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
     if (message) return message;
     if (parsed.failed) return `${this.name} 执行失败`;
     return undefined;
+  }
+
+  private buildIncompleteTurnError(parsed: ParsedOutput, stdout: string): Error & { stdout?: string } {
+    const reason = parsed.incompleteReason?.trim() || "未收到正式终态事件";
+    const cause = parsed.error?.trim();
+    const lastMessage = (parsed.lastMessage ?? parsed.text).trim();
+    const parts = [`${this.name} 回合异常结束：${reason}`];
+    if (cause) parts.push(`原因：${cause}`);
+    parts.push(`最后一条消息：\n${lastMessage || "（无可用文本）"}`);
+    const message = parts.join("\n").slice(0, ERROR_DISPLAY_MAX_LEN);
+    const error: Error & { stdout?: string } = new Error(message);
+    error.stdout = stdout;
+    return error;
   }
 
   async closeSession(session: AgentSession): Promise<void> {
@@ -814,6 +837,7 @@ export function buildNiubotEnv(config: SessionConfig): Record<string, string> {
   if (config.isAdmin) env["NIUBOT_IS_ADMIN"] = "true";
   if (config.isAdmin && config.botProfilePath) env["NIUBOT_BOT_PROFILE_PATH"] = config.botProfilePath;
   if (config.workingDirectory) env["NIUBOT_WORK_DIR"] = config.workingDirectory;
+  if (config.scheduleToken) env["NIUBOT_SCHEDULE_TOKEN"] = config.scheduleToken;
   env["NIUBOT_AGENT_SESSION"] = "1";
   return env;
 }

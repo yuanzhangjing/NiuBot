@@ -87,7 +87,7 @@ export default class OpencodeBackend extends CliAgentBackend<OpencodeSession> {
           const e = JSON.parse(line);
           // step_finish with reason="stop" or "end_turn" = 真正结束
           // reason="tool-calls" = 中间 step，还有后续
-          return e.type === "step_finish" && e.part?.reason !== "tool-calls";
+          return e.type === "step_finish" && isTerminalStepReason(e.part?.reason);
         } catch { return false; }
       },
     };
@@ -129,6 +129,8 @@ export default class OpencodeBackend extends CliAgentBackend<OpencodeSession> {
     let contextTokens = 0;
     let errorMsg: string | undefined;
     let failed = false;
+    let sawTerminalStep = false;
+    let lastStepReason: string | undefined;
 
     for (const line of stdout.split("\n")) {
       if (!line.trim()) continue;
@@ -139,6 +141,7 @@ export default class OpencodeBackend extends CliAgentBackend<OpencodeSession> {
           part?: {
             type?: string;
             text?: string;
+            reason?: string;
             tokens?: {
               total?: number;
             };
@@ -164,6 +167,10 @@ export default class OpencodeBackend extends CliAgentBackend<OpencodeSession> {
         if (event.type === "step_finish" && event.part?.tokens?.total) {
           contextTokens = event.part.tokens.total;
         }
+        if (event.type === "step_finish") {
+          lastStepReason = event.part?.reason;
+          if (isTerminalStepReason(event.part?.reason)) sawTerminalStep = true;
+        }
       } catch { /* skip non-JSON lines */ }
     }
 
@@ -172,6 +179,11 @@ export default class OpencodeBackend extends CliAgentBackend<OpencodeSession> {
 
     return {
       text: text.trim(),
+      turnCompleted: sawTerminalStep,
+      lastMessage: text.trim(),
+      incompleteReason: sawTerminalStep
+        ? undefined
+        : `未收到最终 step_finish${lastStepReason ? `（reason=${lastStepReason}）` : ""}`,
       agentSessionId: sessionId,
       contextTokens: contextTokens > 0 ? contextTokens : undefined,
       model,
@@ -216,4 +228,8 @@ export default class OpencodeBackend extends CliAgentBackend<OpencodeSession> {
       return undefined;
     }
   }
+}
+
+function isTerminalStepReason(reason: unknown): boolean {
+  return reason === "stop" || reason === "end_turn";
 }

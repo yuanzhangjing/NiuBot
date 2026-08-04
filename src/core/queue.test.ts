@@ -124,3 +124,69 @@ describe("MessageQueue worker continuation FIFO", () => {
     expect(seen).toEqual(["user", "worker_continuation"]);
   });
 });
+
+describe("MessageQueue loop continuation FIFO", () => {
+  function loopMsg(id: number): QueuedMessage {
+    return message({
+      text: `[loop continuation: ${id}]`,
+      triggerKind: "loop_continuation",
+      loopJobId: id,
+    });
+  }
+
+  test("keeps user, loop, user in arrival order and never merges the loop", async () => {
+    const queue = new MessageQueue(0);
+    const seen: Array<{ kind: string; count: number }> = [];
+    const resolvers: Array<() => void> = [];
+    queue.onProcess(async (_chatId, _text, messages) => {
+      seen.push({ kind: messages[0]?.triggerKind ?? "user", count: messages.length });
+      await new Promise<void>((resolve) => resolvers.push(resolve));
+    });
+
+    queue.push(message({ text: "first", dbMsgId: 1 }));
+    queue.push(loopMsg(7));
+    queue.push(message({ text: "second", dbMsgId: 2 }));
+    expect(seen).toEqual([{ kind: "user", count: 1 }]);
+
+    resolvers.shift()?.();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(seen).toEqual([
+      { kind: "user", count: 1 },
+      { kind: "loop_continuation", count: 1 },
+    ]);
+
+    resolvers.shift()?.();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(seen).toEqual([
+      { kind: "user", count: 1 },
+      { kind: "loop_continuation", count: 1 },
+      { kind: "user", count: 1 },
+    ]);
+    resolvers.shift()?.();
+  });
+});
+
+describe("MessageQueue schedule command isolation", () => {
+  test("never merges a schedule command with another user or schedule command", async () => {
+    const queue = new MessageQueue(0);
+    const seen: Array<Array<{ senderId?: string; scheduleCommand?: boolean }>> = [];
+    const resolvers: Array<() => void> = [];
+    queue.onProcess(async (_chatId, _text, messages) => {
+      seen.push(messages.map(({ senderId, scheduleCommand }) => ({ senderId, scheduleCommand })));
+      await new Promise<void>((resolve) => resolvers.push(resolve));
+    });
+
+    queue.push(message({ text: "/loop first", senderId: "u1", scheduleCommand: true }));
+    queue.push(message({ text: "ordinary", senderId: "u2" }));
+    queue.push(message({ text: "/cron second", senderId: "u2", scheduleCommand: true }));
+    expect(seen).toEqual([[{ senderId: "u1", scheduleCommand: true }]]);
+
+    resolvers.shift()?.();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(seen[1]).toEqual([{ senderId: "u2", scheduleCommand: undefined }]);
+    resolvers.shift()?.();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(seen[2]).toEqual([{ senderId: "u2", scheduleCommand: true }]);
+    resolvers.shift()?.();
+  });
+});

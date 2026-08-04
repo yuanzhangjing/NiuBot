@@ -192,6 +192,8 @@ beforeEach(() => {
       teamConfigStore: teamConfig,
     },
   );
+  // 集成测试不经过真实 agent 环境注入，直接预置主会话能力令牌。
+  (pipeline as any).chatScheduleTokens.set(CHAT_ID, "integration-token");
 });
 
 afterEach(async () => {
@@ -436,16 +438,19 @@ test("主 Agent 的 Worker 写操作由 Pipeline 活动回合统一校验和执�
     if (!message.includes("请通过 Pipeline 派工") || message.includes("<worker-continuation>")) return;
     const work = await pipeline.executeWorkerAgentCommand({
       chatId: CHAT_ID,
+      scheduleToken: "integration-token",
       command: { type: "work.create", request: "统一写入口验证" },
     });
     workId = work.output;
     const duplicateWork = await pipeline.executeWorkerAgentCommand({
       chatId: CHAT_ID,
+      scheduleToken: "integration-token",
       command: { type: "work.create", request: "统一写入口验证" },
     });
     expect(duplicateWork.output).toBe(workId);
     const job = await pipeline.executeWorkerAgentCommand({
       chatId: CHAT_ID,
+      scheduleToken: "integration-token",
       command: {
         type: "job.create",
         workId,
@@ -483,6 +488,7 @@ test("主 Agent 的 Worker 写操作由 Pipeline 活动回合统一校验和执�
 test("Pipeline 拒绝活动回合外写入和提升 Worker 工作区权限", async () => {
   await expect(pipeline.executeWorkerAgentCommand({
     chatId: CHAT_ID,
+      scheduleToken: "integration-token",
     command: { type: "work.create", request: "绕过活动回合" },
   })).rejects.toThrow(/活动 Agent 回合/);
 
@@ -501,12 +507,14 @@ test("Pipeline 拒绝活动回合外写入和提升 Worker 工作区权限", asy
     if (!message.includes("测试权限提升") || message.includes("<worker-continuation>")) return;
     const work = await pipeline.executeWorkerAgentCommand({
       chatId: CHAT_ID,
+      scheduleToken: "integration-token",
       command: { type: "work.create", request: "权限边界验证" },
     });
     policyWorkId = work.output;
     try {
       await pipeline.executeWorkerAgentCommand({
         chatId: CHAT_ID,
+      scheduleToken: "integration-token",
         command: {
           type: "job.create",
           workId: work.output,
@@ -522,6 +530,7 @@ test("Pipeline 拒绝活动回合外写入和提升 Worker 工作区权限", asy
     try {
       await pipeline.executeWorkerAgentCommand({
         chatId: CHAT_ID,
+      scheduleToken: "integration-token",
         command: { type: "cancel", id: foreignWork.id },
       });
     } catch (error) {
@@ -556,11 +565,13 @@ test("Pipeline 人工完成入口必须在服务端再次确认 force", async ()
     if (!message.includes("测试人工完成确认") || message.includes("<worker-continuation>")) return;
     const work = await pipeline.executeWorkerAgentCommand({
       chatId: CHAT_ID,
+      scheduleToken: "integration-token",
       command: { type: "work.create", request: "人工完成确认" },
     });
     try {
       await pipeline.executeWorkerAgentCommand({
         chatId: CHAT_ID,
+      scheduleToken: "integration-token",
         command: { type: "work.complete_recovery", workId: work.output, conclusion: "不应完成" } as any,
       });
     } catch (error) {
@@ -605,6 +616,7 @@ test("Pipeline 取消排队 Job 时立即确认终态，不等待调度轮询", 
     if (!message.includes("取消后台任务")) return;
     await pipeline.executeWorkerAgentCommand({
       chatId: CHAT_ID,
+      scheduleToken: "integration-token",
       command: { type: "cancel", id: work.id },
     });
   };

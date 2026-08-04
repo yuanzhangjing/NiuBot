@@ -109,10 +109,14 @@ export default class PiBackend extends CliAgentBackend<PiSession> {
   parseOutput(stdout: string, session: PiSession): ParsedOutput {
     let agentSessionId = session.agentSessionId;
     let lastAssistantText = "";
+    let lastAssistantDiagnosticText = "";
     let model: string | undefined = session.model;
     let contextTokens: number | undefined;
     let genericErrorMsg: string | undefined;
     let sawError = false;
+    let sawAgentEnd = false;
+    let agentEndHasFinalText = false;
+    let lastStopReason: string | undefined;
 
     for (const line of stdout.split("\n")) {
       if (!line.trim()) continue;
@@ -134,8 +138,12 @@ export default class PiBackend extends CliAgentBackend<PiSession> {
         if (event.type === "message_end" || event.type === "turn_end") {
           const msg = event.message;
           if (msg?.role === "assistant") {
+            lastStopReason = msg.stopReason;
             const text = extractPiMessageText(msg);
-            if (text) lastAssistantText = text;
+            if (text) {
+              lastAssistantText = text;
+              lastAssistantDiagnosticText = text;
+            }
             if (msg.model) model = msg.model;
             const tokens = estimatePiContextTokens(msg.usage);
             if (tokens > 0) contextTokens = tokens;
@@ -148,11 +156,15 @@ export default class PiBackend extends CliAgentBackend<PiSession> {
         }
 
         if (event.type === "agent_end") {
+          sawAgentEnd = true;
           const messages = event.messages ?? [];
-          for (const msg of messages) {
-            if (msg.role !== "assistant") continue;
+          const assistantMessages = messages.filter((msg) => msg.role === "assistant");
+          for (const msg of assistantMessages) {
             const text = extractPiMessageText(msg);
-            if (text) lastAssistantText = text;
+            if (text) {
+              lastAssistantText = text;
+              lastAssistantDiagnosticText = text;
+            }
             if (msg.model) model = msg.model;
             const tokens = estimatePiContextTokens(msg.usage);
             if (tokens > 0) contextTokens = tokens;
@@ -161,6 +173,15 @@ export default class PiBackend extends CliAgentBackend<PiSession> {
               sawError = true;
               genericErrorMsg ??= assistantError;
             }
+          }
+          // 回合以纯工具调用收尾（最后一条 assistant 无文本）：模型没有产出最终总结。
+          // 此时 lastAssistantText 只是回合中途的碎片文本，不能当最终回复发送给用户
+          // （会导致无上下文的半截话），清空交给上层 fallback/重试处理。
+          const lastAssistant = assistantMessages[assistantMessages.length - 1];
+          lastStopReason = lastAssistant?.stopReason;
+          agentEndHasFinalText = !!lastAssistant && !!extractPiMessageText(lastAssistant).trim();
+          if (!agentEndHasFinalText) {
+            lastAssistantText = "";
           }
         }
 
@@ -183,14 +204,24 @@ export default class PiBackend extends CliAgentBackend<PiSession> {
       if (meta.contextTokens !== undefined) contextTokens = meta.contextTokens;
     }
 
+    const successfulFinal = sawAgentEnd && agentEndHasFinalText && lastStopReason === "stop";
+    const terminalFailure = sawAgentEnd && sawError && lastStopReason === "error";
+    const turnCompleted = successfulFinal || terminalFailure;
+    const unresolvedError = sawError && !successfulFinal;
+
     return {
       text: lastAssistantText.trim(),
+      turnCompleted,
+      lastMessage: lastAssistantDiagnosticText.trim(),
+      incompleteReason: !sawAgentEnd
+        ? `未收到 agent_end${lastStopReason ? `（最后 stopReason=${lastStopReason}）` : ""}`
+        : `agent_end 没有正式最终结果${lastStopReason ? `（stopReason=${lastStopReason}）` : "（缺少 stopReason）"}`,
       agentSessionId,
       model,
       contextTokens,
       compactCount: session.compactCount > 0 ? session.compactCount : undefined,
-      error: lastAssistantText ? undefined : genericErrorMsg,
-      failed: !lastAssistantText && sawError,
+      error: unresolvedError ? genericErrorMsg : undefined,
+      failed: unresolvedError,
     };
   }
 

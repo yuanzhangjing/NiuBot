@@ -14,10 +14,14 @@ export interface QueuedMessage {
   senderId?: string;
   /** 消息在 DB 中的 ID，用于 runtime 事件关联 */
   dbMsgId?: number;
-  /** 触发来源：用户消息（默认）或 Worker Continuation */
-  triggerKind?: "user" | "worker_continuation";
+  /** 触发来源：用户消息（默认）或内部续接事件 */
+  triggerKind?: "user" | "worker_continuation" | "loop_continuation";
   /** triggerKind 为 worker_continuation 时携带的 Continuation ID 列表（内部事件，不写库） */
   continuationIds?: string[];
+  /** triggerKind 为 loop_continuation 时携带的 Loop Job ID（内部事件，不写库） */
+  loopJobId?: number;
+  /** 原始用户文本是否以 /loop 或 /cron 开头；回复渲染后仍保留调度意图。 */
+  scheduleCommand?: boolean;
 }
 
 interface ChatQueue {
@@ -127,7 +131,7 @@ export class MessageQueue {
 
     q.buffer.push(msg);
     this.emitState(msg.chatId, q);
-    if (msg.triggerKind === "worker_continuation") {
+    if (msg.triggerKind === "worker_continuation" || msg.triggerKind === "loop_continuation" || msg.scheduleCommand) {
       void this.flush(q, msg.chatId).catch((err) => {
         log.error("flush failed", { chatId: msg.chatId, error: String(err) });
       });
@@ -151,6 +155,10 @@ export class MessageQueue {
       }
       this.emitState(chatId, q);
     }
+  }
+
+  isStopped(): boolean {
+    return this.stopped;
   }
 
   /** 清空指定 chat 的等待队列（buffer + pending），返回丢弃的消息数 */
@@ -237,11 +245,15 @@ export class MessageQueue {
     if (q.pending.length > 0) {
       const kind = queueKind(q.pending[0]!);
       let count = 1;
-      while (count < q.pending.length && queueKind(q.pending[count]!) === kind) count++;
+      // 用户消息仍可合并；同一 Work 的 Worker 结果也可一起验收。
+      // Loop 每轮必须保持独立，避免多个任务共用一次结算和回复。
+      if (kind !== "loop_continuation" && kind !== "schedule_command") {
+        while (count < q.pending.length && queueKind(q.pending[count]!) === kind) count++;
+      }
       const next = q.pending.splice(0, count);
       q.buffer = next;
       this.emitState(chatId, q);
-      if (kind === "worker_continuation") {
+      if (kind === "worker_continuation" || kind === "loop_continuation" || kind === "schedule_command") {
         void this.flush(q, chatId).catch((err) => {
           log.error("flush failed", { chatId, error: String(err) });
         });
@@ -297,6 +309,9 @@ export class MessageQueue {
 
 }
 
-function queueKind(message: QueuedMessage): "user" | "worker_continuation" {
-  return message.triggerKind === "worker_continuation" ? "worker_continuation" : "user";
+function queueKind(message: QueuedMessage): "user" | "schedule_command" | "worker_continuation" | "loop_continuation" {
+  if (message.triggerKind === "worker_continuation") return "worker_continuation";
+  if (message.triggerKind === "loop_continuation") return "loop_continuation";
+  if (message.scheduleCommand) return "schedule_command";
+  return "user";
 }

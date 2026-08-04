@@ -168,7 +168,12 @@ export default class CursorAgentBackend extends CliAgentBackend<CursorAgentSessi
     }
 
     if (!resultEvent) {
-      return { text: stdout.trim() };
+      return {
+        text: "",
+        turnCompleted: false,
+        lastMessage: lastAssistantText,
+        incompleteReason: "未收到 result 终态事件",
+      };
     }
 
     // 有 stream 中间 usage 时优先用之；否则 result.usage
@@ -181,6 +186,8 @@ export default class CursorAgentBackend extends CliAgentBackend<CursorAgentSessi
     const model = session.model ?? stdoutModel ?? session.resolvedModel;
     const parsed: ParsedOutput = {
       text: resultEvent.is_error ? "" : responseText,
+      turnCompleted: true,
+      lastMessage: responseText,
       agentSessionId: resultEvent.session_id ?? session.agentSessionId,
       contextTokens: contextTokens > 0 ? contextTokens : undefined,
       model,

@@ -19,6 +19,16 @@ describe("stripInternalWorkerTags", () => {
     expect(output).toContain("最终回复");
   });
 
+  test("剥离调度工具说明", () => {
+    const input = "<schedule-skill>内部调度说明</schedule-skill>\n\n已经创建每天执行的任务。";
+    expect(stripInternalWorkerTags(input)).toBe("已经创建每天执行的任务。");
+  });
+
+  test("剥离 Loop 续接标签", () => {
+    const input = "<loop-continuation>{\"loopId\":1}</loop-continuation>\n\n部署状态正常。";
+    expect(stripInternalWorkerTags(input)).toBe("部署状态正常。");
+  });
+
   test("剥离残留裸标签", () => {
     const input = "内容</worker-role>结尾";
     expect(stripInternalWorkerTags(input)).toBe("内容结尾");

@@ -217,12 +217,13 @@ test("默认写路径通过 IPC 交给 Pipeline，不直接修改数据库", asy
   await server.start();
   vi.stubEnv("NIUBOT_HOME", tempRoot);
   vi.stubEnv("NIUBOT_API_SOCKET", endpoint.address);
+  vi.stubEnv("NIUBOT_SCHEDULE_TOKEN", "cli-token");
 
   try {
     const workFile = writeDoc("ipc-work.md", "只走 Pipeline");
     const out = await capture(() => handleWorker(db, ["work", "create", "--file", workFile]));
     expect(out).toEqual(["wrk_from_pipeline"]);
-    expect(executeWorkerCommand).toHaveBeenCalledWith(CHAT_ID, { type: "work.create", request: "只走 Pipeline" });
+    expect(executeWorkerCommand).toHaveBeenCalledWith(CHAT_ID, { type: "work.create", request: "只走 Pipeline" }, "cli-token");
     expect((db.prepare("SELECT COUNT(*) AS count FROM worker_works").get() as { count: number }).count).toBe(0);
   } finally {
     server.stop();

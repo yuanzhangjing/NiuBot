@@ -33,6 +33,8 @@ export interface SessionConfig {
   botProfilePath?: string;
   /** Agent 侧 session ID（用于 recover 时 resume） */
   agentSessionId?: string;
+  /** 主会话调度/派工能力令牌：仅主 Agent 回合注入，独立 session 不注入，防止身份借用 */
+  scheduleToken?: string;
 }
 
 export interface AgentSession {

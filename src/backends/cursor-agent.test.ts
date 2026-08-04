@@ -110,6 +110,8 @@ describe("CursorAgentBackend", () => {
 
     expect(parsed).toEqual({
       text: "hello from cursor",
+      turnCompleted: true,
+      lastMessage: "hello from cursor",
       agentSessionId: "session-1",
       model: "composer-2.5",
       contextTokens: 19,

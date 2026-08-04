@@ -4,7 +4,16 @@ import path from "node:path";
 import type Database from "better-sqlite3";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { initDatabase } from "../database/schema.js";
-import { addCronJob, CronScheduler, migrateLegacyCronTimezones } from "./cron.js";
+import {
+  addCronJob,
+  claimDueCronJobs,
+  CRON_FAILURE_LIMIT,
+  CronScheduler,
+  MAX_ACTIVE_CRON_JOBS_PER_CHAT,
+  migrateLegacyCronTimezones,
+  recoverInterruptedCronJobs,
+  validateCronExpression,
+} from "./cron.js";
 
 const tempDirs: string[] = [];
 const databases: Database.Database[] = [];
@@ -28,6 +37,57 @@ function setupDatabase(): Database.Database {
 }
 
 describe("CronScheduler", () => {
+  test("validates exactly the five-field Cron subset the scheduler implements", () => {
+    for (const expression of [
+      "0 9 * * 1-5",
+      "*/5 * * * *",
+      "0 9,18 * * 1,3,5",
+      "0 9 * * 7",
+    ]) {
+      expect(() => validateCronExpression(expression)).not.toThrow();
+    }
+
+    for (const expression of [
+      "0 0 9 * * 1-5",
+      "0 9 L * *",
+      "0 9 ? * *",
+      "0 9 * JAN *",
+      "60 9 * * *",
+      "0 9 * * 5-1",
+    ]) {
+      expect(() => validateCronExpression(expression)).toThrow();
+    }
+  });
+
+  test("rejects invalid Cron expressions before inserting a job", () => {
+    const db = setupDatabase();
+    expect(() => addCronJob(db, {
+      chatId: "c1",
+      creatorUserId: "u2",
+      cronExpr: "0 9 * * MON",
+      prompt: "invalid",
+    })).toThrow();
+    expect(db.prepare("SELECT COUNT(*) AS count FROM cron_jobs").get()).toEqual({ count: 0 });
+  });
+
+  test("rejects an untilTime that is in the past or earlier than runAt", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-20T02:00:00Z"));
+    const db = setupDatabase();
+    expect(() => addCronJob(db, {
+      chatId: "c1", creatorUserId: "u2",
+      cronExpr: "0 9 * * *", prompt: "past-until",
+      untilTime: "2026-07-20 01:00:00", timeZone: "UTC",
+    })).toThrow("until_time");
+    expect(() => addCronJob(db, {
+      chatId: "c1", creatorUserId: "u2",
+      runAt: "2026-07-21 09:00:00", prompt: "until-before-runat",
+      untilTime: "2026-07-21 08:00:00", timeZone: "UTC",
+    })).toThrow("until_time");
+    expect(db.prepare("SELECT COUNT(*) AS count FROM cron_jobs").get()).toEqual({ count: 0 });
+    vi.useRealTimers();
+  });
+
   test("stores one-time instants as UTC and executes them in the job timezone", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-20T01:59:00Z"));
@@ -68,6 +128,62 @@ describe("CronScheduler", () => {
     vi.setSystemTime(new Date("2026-07-20T02:00:00Z"));
     await (scheduler as any).tick();
     expect(calls).toBe(1);
+  });
+
+  test("matches comma combinations containing steps and wildcard parts", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-20T00:07:00Z"));
+    const db = setupDatabase();
+    let calls = 0;
+    const scheduler = new CronScheduler(db, async () => { calls++; });
+    addCronJob(db, {
+      chatId: "c1",
+      creatorUserId: "u2",
+      cronExpr: "*/5,7 * * * *",
+      timeZone: "UTC",
+      prompt: "combined cron field",
+    });
+
+    await (scheduler as any).tick();
+    expect(calls).toBe(1);
+  });
+
+  test("starts day and month steps at 1 instead of 0", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2027-01-01T00:00:00Z"));
+    const db = setupDatabase();
+    let calls = 0;
+    const scheduler = new CronScheduler(db, async () => { calls++; });
+    addCronJob(db, {
+      chatId: "c1", creatorUserId: "u2",
+      cronExpr: "0 0 */2 */2 *", timeZone: "UTC", prompt: "odd days and months",
+    });
+
+    await (scheduler as any).tick();
+    expect(calls).toBe(1);
+  });
+
+  test("uses standard day-of-month/weekday OR semantics and accepts Sunday as 7", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-20T00:00:00Z")); // Monday, not the first day of month
+    const db = setupDatabase();
+    const calls: string[] = [];
+    const scheduler = new CronScheduler(db, async (_chatId, _userId, prompt) => { calls.push(prompt); });
+    addCronJob(db, {
+      chatId: "c1", creatorUserId: "u2",
+      cronExpr: "0 0 1 * 1", timeZone: "UTC", prompt: "monday or first",
+    });
+    addCronJob(db, {
+      chatId: "c1", creatorUserId: "u2",
+      cronExpr: "0 0 * * 7", timeZone: "UTC", prompt: "sunday",
+    });
+
+    await (scheduler as any).tick();
+    expect(calls).toEqual(["monday or first"]);
+
+    vi.setSystemTime(new Date("2026-07-26T00:00:00Z")); // Sunday
+    await (scheduler as any).tick();
+    expect(calls).toEqual(["monday or first", "sunday"]);
   });
 
   test("migrates legacy local cron timestamps to UTC once", () => {
@@ -195,5 +311,117 @@ describe("CronScheduler", () => {
       status: "active",
       run_count: 1,
     });
+  });
+
+  test("atomically claims a due job once across schedulers", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-20T00:00:00Z"));
+    const db = setupDatabase();
+    addCronJob(db, {
+      chatId: "c1", creatorUserId: "u2", cronExpr: "* * * * *", timeZone: "UTC", prompt: "once",
+    });
+
+    expect(claimDueCronJobs(db).map((job) => job.prompt)).toEqual(["once"]);
+    expect(claimDueCronJobs(db)).toEqual([]);
+  });
+
+  test("limits concurrent Cron executions", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-20T00:00:00Z"));
+    const db = setupDatabase();
+    let active = 0;
+    let peak = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const scheduler = new CronScheduler(db, async () => {
+      active++;
+      peak = Math.max(peak, active);
+      await gate;
+      active--;
+    }, { maxConcurrent: 2 });
+    for (let i = 0; i < 5; i++) {
+      addCronJob(db, {
+        chatId: "c1", creatorUserId: "u2", cronExpr: "* * * * *", timeZone: "UTC", prompt: `job ${i}`,
+      });
+    }
+
+    const tick = (scheduler as any).tick();
+    await vi.waitFor(() => expect(active).toBe(2));
+    release();
+    await tick;
+    expect(peak).toBe(2);
+  });
+
+  test("pauses after repeated failures and reports the terminal failure", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-20T00:00:00Z"));
+    const db = setupDatabase();
+    const reports: boolean[] = [];
+    const scheduler = new CronScheduler(db, async () => {
+      throw new Error("backend unavailable");
+    }, {
+      reportFailure: (_chatId, _description, _error, paused) => { reports.push(paused); },
+    });
+    const id = addCronJob(db, {
+      chatId: "c1", creatorUserId: "u2", cronExpr: "* * * * *", timeZone: "UTC", prompt: "fail",
+    });
+
+    for (let attempt = 0; attempt < CRON_FAILURE_LIMIT; attempt++) {
+      vi.setSystemTime(new Date(`2026-07-20T00:0${attempt}:00Z`));
+      await (scheduler as any).tick();
+    }
+    expect(reports).toEqual([false, false, true]);
+    expect(db.prepare("SELECT status, consecutive_failures, last_error FROM cron_jobs WHERE id = ?").get(id)).toEqual({
+      status: "paused",
+      consecutive_failures: CRON_FAILURE_LIMIT,
+      last_error: "Error: backend unavailable",
+    });
+  });
+
+  test("caps active Cron jobs per chat and recovers interrupted claims", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-20T00:00:00Z"));
+    const db = setupDatabase();
+    for (let i = 0; i < MAX_ACTIVE_CRON_JOBS_PER_CHAT; i++) {
+      addCronJob(db, {
+        chatId: "c1", creatorUserId: "u2", cronExpr: "0 0 * * *", timeZone: "UTC", prompt: `job ${i}`,
+      });
+    }
+    expect(() => addCronJob(db, {
+      chatId: "c1", creatorUserId: "u2", cronExpr: "0 0 * * *", timeZone: "UTC", prompt: "overflow",
+    })).toThrow("最多保留");
+
+    db.prepare("UPDATE cron_jobs SET status = 'running', claimed_at = datetime('now') WHERE id = 1").run();
+    expect(recoverInterruptedCronJobs(db)).toBe(1);
+    expect(db.prepare("SELECT status, claimed_at FROM cron_jobs WHERE id = 1").get()).toEqual({
+      status: "active",
+      claimed_at: null,
+    });
+  });
+
+  test("stop releases claimed jobs that have not started", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-20T00:00:00Z"));
+    const db = setupDatabase();
+    for (const prompt of ["first", "second"]) {
+      addCronJob(db, {
+        chatId: "c1", creatorUserId: "u2", cronExpr: "* * * * *", timeZone: "UTC", prompt,
+      });
+    }
+    let release!: () => void;
+    let started = 0;
+    const scheduler = new CronScheduler(db, async () => {
+      started++;
+      await new Promise<void>((resolve) => { release = resolve; });
+    }, { maxConcurrent: 1 });
+    const tick = (scheduler as any).tick();
+    (scheduler as any).currentTick = tick;
+    await vi.waitFor(() => expect(started).toBe(1));
+
+    const stop = scheduler.stop();
+    release();
+    await stop;
+    expect(started).toBe(1);
+    expect(db.prepare("SELECT status FROM cron_jobs WHERE prompt = 'second'").get()).toEqual({ status: "active" });
   });
 });
