@@ -105,7 +105,7 @@ export function parseTeamConfig(yamlText: string): TeamConfig {
       throw new Error(`profile ${id} 缺少 prompt`);
     }
     const access = p["access"] ?? "read_only";
-    if (!["read_only", "scratch", "git_worktree"].includes(access as string)) {
+    if (!["read_only", "scratch"].includes(access as string)) {
       throw new Error(`profile ${id} 的 access 非法: ${String(access)}`);
     }
     const maxConcurrent = p["maxConcurrent"] === undefined ? undefined : toPositiveInt(p["maxConcurrent"], 1, `profiles.${id}.maxConcurrent`);

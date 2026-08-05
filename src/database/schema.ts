@@ -393,7 +393,7 @@ const migrations: Migration[] = [
           claim_token           TEXT,
           claimed_at            TEXT,
           workspace_policy      TEXT NOT NULL DEFAULT 'read_only'
-                                CHECK(workspace_policy IN ('read_only', 'scratch', 'git_worktree')),
+                                CHECK(workspace_policy IN ('read_only', 'scratch')),
           depends_on_json       TEXT NOT NULL DEFAULT '[]',
           created_at            TEXT NOT NULL DEFAULT (datetime('now')),
           updated_at            TEXT NOT NULL DEFAULT (datetime('now')),

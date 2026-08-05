@@ -9,7 +9,7 @@
 - 任务较长或耗时（调研、审查、实现），不需要用户实时确认；
 - 可以拆成独立子任务（如"调研 A"、"审查 B"）；
 - 适合让 Worker 在后台执行，主 Agent 先结束回合；
-- 只读任务（调研/审查/分析）随时可用；写任务（开发）使用 `git_worktree`（已废弃自动 worktree，按 scratch 独立工作目录处理，git 操作由 Worker 按任务指引自行执行，base 提交/分支写进任务内容）。
+- 只读任务（调研/审查/分析）随时可用；写任务（开发）使用 `scratch` 独立工作目录（git 操作由 Worker 按任务指引自行执行，base 提交/分支写进任务内容）。
 
 不派工的情况：普通聊天、需要立即交互确认、涉及外部副作用（发布、部署、发送消息）的需求。
 
@@ -26,12 +26,12 @@ nbt worker work create --file /tmp/work.md
 ### 2. 创建 Job
 
 ```bash
-nbt worker job create --work <work-id> --worker <profile> --file /tmp/job.md [--workspace read_only|scratch|git_worktree] [--workdir <dir>]
+nbt worker job create --work <work-id> --worker <profile> --file /tmp/job.md [--workspace read_only|scratch] [--workdir <dir>]
 ```
 
-- `--worker`：`general` / `researcher` / `reviewer`（只读），`developer`（写，使用 `git_worktree` 独立工作目录；git 操作由 Worker 自行执行，base 提交/分支约束写进 job 内容）；
+- `--worker`：`general` / `researcher` / `reviewer`（只读），`developer`（写，使用 `scratch` 独立工作目录；git 操作由 Worker 自行执行，base 提交/分支约束写进 job 内容）；
 - `/tmp/job.md` 内容 = 明确任务 + 完成标准 + 必要上下文（自由 Markdown）；
-- `--workdir`：目标目录（git_worktree 时为目标 git 仓库路径）；
+- `--workdir`：目标目录（写任务时为目标 git 仓库路径，供 Worker 参考）；
 - 输出 Job ID（`job_...`）。
 
 可以一次创建多个 Job（并行执行，受并发上限约束）。

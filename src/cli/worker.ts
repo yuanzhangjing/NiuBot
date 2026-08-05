@@ -120,8 +120,8 @@ async function handleJobCreate(ctx: WorkerCliContext, execute: WorkerCommandExec
   const workdir = workdirIndex >= 0 ? args[workdirIndex + 1]! : ctx.workDir;
   const workspaceIndex = args.indexOf("--workspace");
   const workspacePolicy = workspaceIndex >= 0 ? args[workspaceIndex + 1] : undefined;
-  if (workspacePolicy && !["read_only", "scratch", "git_worktree"].includes(workspacePolicy)) {
-    fail(`--workspace 必须是 read_only / scratch / git_worktree，收到: ${workspacePolicy}`);
+  if (workspacePolicy && !["read_only", "scratch"].includes(workspacePolicy)) {
+    fail(`--workspace 必须是 read_only / scratch，收到: ${workspacePolicy}`);
   }
   const dependsOn = args
     .map((a, i) => (args[i - 1] === "--depends-on" ? a : undefined))
@@ -134,7 +134,7 @@ async function handleJobCreate(ctx: WorkerCliContext, execute: WorkerCommandExec
       workerProfileId: workerId,
       prompt: prompt.trim(),
       workdir,
-      workspacePolicy: workspacePolicy as "read_only" | "scratch" | "git_worktree" | undefined,
+      workspacePolicy: workspacePolicy as "read_only" | "scratch" | undefined,
       dependsOn: dependsOn.length > 0 ? dependsOn : undefined,
       idempotencyKey: idempotencyKey(
         `job:${workId}:${workerId}:${workspacePolicy ?? "default"}:${dependsOn.join(",")}:${path.resolve(workdir)}`,

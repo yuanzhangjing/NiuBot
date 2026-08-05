@@ -747,7 +747,7 @@ export class Pipeline {
           throw new Error(`未知 Worker Profile: ${request.command.workerProfileId}（可用: ${this.workerConfig.registry.list().map((item) => item.id).join(", ")}）`);
         }
         const requestedPolicy = request.command.workspacePolicy ?? profile.access;
-        const accessRank = { read_only: 0, scratch: 1, git_worktree: 2 } as const;
+        const accessRank = { read_only: 0, scratch: 1 } as const;
         if (typeof requestedPolicy !== "string" || !Object.hasOwn(accessRank, requestedPolicy)) {
           throw new Error(`未知 Worker 工作区策略: ${String(requestedPolicy)}`);
         }
@@ -2438,8 +2438,7 @@ export class Pipeline {
         const profiles = this.workerConfig?.registry.list() ?? [];
         const accessNames: Record<string, string> = {
           read_only: "只读",
-          scratch: "临时目录",
-          git_worktree: "隔离开发",
+          scratch: "独立工作目录",
         };
         const profileLines = profiles.map((p) => {
           const parts = [`**${p.displayName}**`];
@@ -2617,7 +2616,7 @@ export class Pipeline {
   /**
    * 组装 Worker 的上下文：稳定系统规则 + Profile 角色说明 + Job 目标。
    * 第一版不注入主会话 transcript 和用户记忆。
-   * git_worktree Job 的 execDir 是独立 worktree，提示 Worker 只能在该目录写入。
+   * scratch Job 的 execDir 是独立工作目录，git 操作由 Worker 按指引自行执行。
    */
   private buildWorkerPrompt(job: Job, execDir: string, artifactDir?: string): string {
     // 角色内容（定义/原则/工作流）已在 system prompt 注入；这里只组装任务详情
@@ -2626,13 +2625,13 @@ export class Pipeline {
     const parts: string[] = [];
     if (stable) parts.push(stable);
     let writeRule: string;
-    if (job.workspacePolicy === "git_worktree") {
-      // git_worktree 已废弃自动 worktree：独立工作目录 + Worker 自行执行 git 操作。
-      // 目标仓库在 job.workdir；base 提交/分支由任务内容（job.prompt）指定。
-      writeRule = `当前目录是独立工作区（不自动创建 worktree）。目标仓库：${job.workdir}。需要 git 操作时由你自行执行：clone/checkout 目标仓库到当前目录（或使用现有副本），按任务要求从指定提交创建分支、修改、提交；不 push、不发布、不碰目标仓库主工作区。`;
-    } else if (artifactDir) {
+    if (artifactDir) {
       // 只读 + 产物目录：工作目录只读，落盘内容（报告/生成文件）写产物目录
       writeRule = `工作目录（${execDir}）是只读的：不要修改其中的任何文件。如需落盘（报告、生成的文件等），写到产物目录：${artifactDir}。不要提交、不要发布、不要对用户直接发送消息。`;
+    } else if (job.workspacePolicy === "scratch") {
+      // 写任务（独立工作目录）：git 操作由 Worker 自行执行。
+      // 目标仓库在 job.workdir；base 提交/分支由任务内容（job.prompt）指定。
+      writeRule = `当前目录是独立工作区。目标仓库：${job.workdir}。需要 git 操作时由你自行执行：clone/checkout 目标仓库到当前目录（或使用现有副本），按任务要求从指定提交创建分支、修改、提交；不 push、不发布、不碰目标仓库主工作区。`;
     } else {
       writeRule = `不要修改代码、不要提交、不要发布、不要对用户直接发送消息。`;
     }

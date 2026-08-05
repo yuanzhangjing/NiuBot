@@ -256,7 +256,7 @@ export class WorkerRuntime {
       // 解析期间用户可能已取消：job 已进入 cancelling 则放弃执行（确认终态由 cancel 流程负责）
       ensureNotCancelled();
 
-      // 工作区准备（§12）：read_only 直接用目标目录；scratch/git_worktree 用独立工作目录
+      // 工作区准备（§12）：read_only 直接用目标目录；scratch 用独立工作目录
       const { workspaceProvider } = this.options;
       if (job.workspacePolicy === "read_only" || !workspaceProvider) {
         prepared = await workspaceProvider?.prepare(job.id, job.workspacePolicy, job.workdir)

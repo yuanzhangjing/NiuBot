@@ -3,10 +3,8 @@
  *
  * 策略：
  * - read_only：直接使用目标目录（校验存在且是目录），不做任何写操作；
- * - scratch：在 scratchRoot 下创建独立临时目录（带 marker）；
- * - git_worktree：已废弃自动 worktree（base 硬编码 HEAD、非 git 目录直接失败等
- *   问题），按 scratch 处理——独立工作目录，git 操作（clone/checkout/分支）由
- *   Worker 按任务指引自行执行，base 提交由任务内容指定。
+ * - scratch：在 scratchRoot 下创建独立临时目录（带 marker）。写任务的 git 操作
+ *   （clone/checkout/分支）由 Worker 按任务指引自行执行，base 提交由任务内容指定。
  *
  * 保留策略：失败/取消/完成后工作区默认保留（marker 标记来源），安全确认前不自动删除。
  */
@@ -42,7 +40,7 @@ export class WorkspaceProvider {
 
   /**
    * 准备 Job 工作区。目标路径必须存在且为绝对路径。
-   * git_worktree（废弃）与 scratch 相同：独立工作目录，git 操作由 Worker 自行执行。
+   * 未知/非法策略（存量数据）按 scratch 处理，避免静默落到目标目录。
    */
   async prepare(jobId: string, policy: WorkspacePolicy, targetDir: string): Promise<PreparedWorkspace> {
     switch (policy) {
@@ -55,7 +53,7 @@ export class WorkspaceProvider {
         return { execDir: real, artifactDir, managed: false };
       }
       case "scratch":
-      case "git_worktree": {
+      default: {
         const dir = path.join(this.options.rootDir, `job-${jobId}`);
         mkdirSync(dir, { recursive: true });
         writeMarker(dir, { jobId, policy, createdAt: new Date().toISOString() });

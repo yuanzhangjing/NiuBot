@@ -520,7 +520,7 @@ test("Pipeline 拒绝活动回合外写入和提升 Worker 工作区权限", asy
           workId: work.output,
           workerProfileId: "reviewer",
           prompt: "不应获得写权限",
-          workspacePolicy: "git_worktree",
+          workspacePolicy: "scratch",
           idempotencyKey: `test:${work.output}:escalation`,
         },
       });
@@ -552,7 +552,7 @@ test("Pipeline 拒绝活动回合外写入和提升 Worker 工作区权限", asy
   } as any);
 
   await waitFor(() => !!policyError && !!accessError);
-  expect(policyError).toMatch(/不能使用 git_worktree/);
+  expect(policyError).toMatch(/不能使用 scratch/);
   expect(accessError).toMatch(/不属于当前会话/);
   await waitFor(() => service.getWork(policyWorkId!)?.status === "failed");
   expect(service.getWork(policyWorkId!)?.finalConclusion).toContain("空 Work");
@@ -963,7 +963,7 @@ test("写任务：developer 在独立工作目录修改代码，不污染目标�
     workerProfileId: "developer",
     prompt: "新增 b.txt 文件",
     workdir: repo,
-    workspacePolicy: "git_worktree",
+    workspacePolicy: "scratch",
   });
 
   await waitFor(() => service.getJob(job.id)?.status === "completed");
@@ -972,7 +972,7 @@ test("写任务：developer 在独立工作目录修改代码，不污染目标�
   // 目标仓库主工作区没有 b.txt（写入发生在独立工作目录）
   expect(existsSync(path.join(repo, "b.txt"))).toBe(false);
 
-  // 独立工作目录保留且包含写入的文件 + marker（git_worktree 已废弃自动 worktree，按 scratch 处理）
+  // 独立工作目录保留且包含写入的文件 + marker
   const workDir = path.join(tempRoot, "ws", `job-${job.id}`);
   expect(existsSync(path.join(workDir, "b.txt"))).toBe(true);
   expect(existsSync(path.join(workDir, ".niubot-worker"))).toBe(true);
@@ -995,14 +995,14 @@ test("两个写 Job 在独立工作目录并行执行，互不污染目标仓库
     workerProfileId: "developer",
     prompt: "任务 A",
     workdir: repo,
-    workspacePolicy: "git_worktree",
+    workspacePolicy: "scratch",
   });
   const jobB = service.createJob({
     workId: work.id,
     workerProfileId: "developer",
     prompt: "任务 B",
     workdir: repo,
-    workspacePolicy: "git_worktree",
+    workspacePolicy: "scratch",
   });
 
   // 各自独立工作目录，可并行执行，均正常完成

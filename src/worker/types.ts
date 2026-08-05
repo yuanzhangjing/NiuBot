@@ -40,8 +40,8 @@ export const JOB_TERMINAL_STATUSES: readonly JobStatus[] = [
 
 export type WorkVisibility = "private" | "public";
 
-/** 工作空间策略（§12）：read_only 直接访问目标目录；scratch 独立临时目录；git_worktree 已废弃自动 worktree，按 scratch 处理。 */
-export type WorkspacePolicy = "read_only" | "scratch" | "git_worktree";
+/** 工作空间策略（§12）：read_only 直接访问目标目录；scratch 独立临时目录（写任务：git 操作由 Worker 按任务指引自行执行）。 */
+export type WorkspacePolicy = "read_only" | "scratch";
 
 export interface ArtifactEntry {
   kind: string;
@@ -199,7 +199,7 @@ export interface CreateJobInput {
   workId: string;
   workerProfileId: string;
   prompt: string;
-  /** 目标目录（git_worktree 时为目标 repo 路径，供 Worker git 操作参考；scratch 时忽略） */
+  /** 目标目录（写任务时为目标 repo 路径，供 Worker git 操作参考；scratch 时忽略） */
   workdir: string;
   workspacePolicy?: WorkspacePolicy;
   /** 依赖的 Job ID（同一 Work 内；全部完成后本 Job 才能执行） */

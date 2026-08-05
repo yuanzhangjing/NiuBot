@@ -40,16 +40,10 @@ describe("WorkspaceProvider", () => {
     expect(existsSync(path.join(prepared.execDir, WORKER_MARKER_FILENAME))).toBe(true);
   });
 
-  test("git_worktree：已废弃自动 worktree——按 scratch 处理，创建独立工作目录带 marker", async () => {
-    const prepared = await provider().prepare("job-wt", "git_worktree", "/ignored");
-    expect(prepared.managed).toBe(true);
-    expect(prepared.execDir).toBe(path.join(tempRoot, "ws", "job-job-wt"));
-    expect(existsSync(path.join(prepared.execDir, WORKER_MARKER_FILENAME))).toBe(true);
-  });
-
-  test("git_worktree：非 git 目录不再拒绝（不再自动建 worktree，git 操作由 Worker 自行执行）", async () => {
+  test("未知策略（存量数据防御）：按 scratch 处理，不静默落到目标目录", async () => {
     const dir = mkdtempSync(path.join(tempRoot, "not-repo-"));
-    const prepared = await provider().prepare("job-x", "git_worktree", dir);
+    const prepared = await provider().prepare("job-x", "git_worktree" as never, dir);
     expect(prepared.managed).toBe(true);
+    expect(prepared.execDir).toBe(path.join(tempRoot, "ws", "job-job-x"));
   });
 });
