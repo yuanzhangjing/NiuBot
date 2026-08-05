@@ -62,6 +62,22 @@ export function describeCronSchedule(expr: string | null, runAt: string | null, 
   return "未设置";
 }
 
+/** 把相对间隔（秒）转成 cron 表达式；秒级或无法整分/整时/整天表达时返回 undefined。 */
+export function everyToCronExpr(seconds: number): string | undefined {
+  if (!Number.isInteger(seconds) || seconds < 60 || seconds % 60 !== 0) return undefined;
+  const minutes = seconds / 60;
+  if (minutes < 60) return `*/${minutes} * * * *`;
+  if (minutes % 60 === 0) {
+    const hours = minutes / 60;
+    if (hours < 24) return hours === 1 ? "0 * * * *" : `0 */${hours} * * *`;
+    if (hours % 24 === 0) {
+      const days = hours / 24;
+      return `0 0 */${days} * *`;
+    }
+  }
+  return undefined;
+}
+
 /** Check interval: 60 seconds */
 const CHECK_INTERVAL_MS = 60_000;
 export const MAX_ACTIVE_CRON_JOBS_PER_CHAT = 20;

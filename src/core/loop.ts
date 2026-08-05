@@ -110,6 +110,8 @@ export function addLoopJob(
     prompt: string;
     maxTimes?: number;
     durationSeconds?: number;
+    /** 覆盖 next_run_at（UTC SQL 时间），用于一次性定时/延迟任务；缺省为 now + interval */
+    runAt?: string;
     now?: Date;
   },
 ): number {
@@ -150,7 +152,7 @@ export function addLoopJob(
     prompt,
     options.maxTimes ?? null,
     addSeconds(now, durationSeconds),
-    addSeconds(now, options.intervalSeconds),
+    options.runAt ?? addSeconds(now, options.intervalSeconds),
   );
   return Number(result.lastInsertRowid);
 }

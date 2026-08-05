@@ -7,9 +7,9 @@ import {
   listLoopJobs,
   parseLoopDuration,
 } from "../core/loop.js";
-import type { ScheduleAgentCommand, ScheduleAgentCommandResult } from "../core/schedule-command.js";
+import type { CreateScheduleCommand, ScheduleAgentCommand, ScheduleAgentCommandResult, ScheduleTrigger } from "../core/schedule-command.js";
 import { localApiRequest } from "../local-api/client.js";
-import { dateTimeInTimeZone, formatLocalDateTimeWithTZ, labelLocalTime, TZ } from "../tz.js";
+import { formatLocalDateTimeWithTZ, labelLocalTime, TZ } from "../tz.js";
 import { resolveSendEndpoint } from "./send.js";
 
 type ParseArgs = (args: string[]) => { positional: string[]; flags: Record<string, string> };
@@ -90,52 +90,61 @@ async function createSchedule(
   const { flags } = parseArgs(args);
   if (!chatId) fail("Error: NIUBOT_CHAT_ID not set");
   const mode = flags["mode"]?.toLowerCase();
+  if (mode !== "loop" && mode !== "cron") fail("Error: --mode must be loop or cron");
   const prompt = flags["prompt"]?.trim();
   if (!prompt) fail("Error: --prompt is required");
   const maxTimes = optionalPositiveInteger(flags["times"], "--times");
 
+  // 触发参数与 mode 正交：--every / --at / --after / --cron 四选一
+  const triggers = ["every", "at", "after", "cron"].filter((t) => flags[t] !== undefined);
+  if (triggers.length !== 1) {
+    fail("Error: 需要且只能指定一个触发参数：--every / --at / --after / --cron");
+  }
+  const trigger = triggers[0]! as ScheduleTrigger;
+  if (mode === "loop" && trigger === "cron") {
+    fail("Error: Loop 模式不支持 --cron 日历表达式，请用 --every / --at / --after");
+  }
+
+  const command: CreateScheduleCommand = {
+    type: "create.schedule",
+    mode,
+    trigger,
+    prompt,
+    maxTimes,
+    timeZone: TZ,
+  };
+  switch (trigger) {
+    case "every": {
+      const intervalSeconds = flags["every"] ? parseLoopDuration(flags["every"]!) : undefined;
+      if (intervalSeconds === undefined) fail("Error: --every must look like 5m, 2h, or 1d");
+      command.intervalSeconds = intervalSeconds;
+      break;
+    }
+    case "at":
+      command.at = flags["at"];
+      break;
+    case "after": {
+      const afterSeconds = flags["after"] ? parseLoopDuration(flags["after"]!) : undefined;
+      if (afterSeconds === undefined) fail("Error: --after must look like 30m, 2h, or 1d");
+      command.afterSeconds = afterSeconds;
+      break;
+    }
+    case "cron":
+      command.cronExpr = flags["cron"];
+      break;
+  }
   if (mode === "loop") {
-    const every = flags["every"];
-    const intervalSeconds = every ? parseLoopDuration(every) : undefined;
-    if (intervalSeconds === undefined) fail("Error: Loop requires --every, for example 5m");
     const duration = flags["duration"];
     const durationSeconds = duration ? parseLoopDuration(duration) : undefined;
     if (duration && durationSeconds === undefined) fail("Error: --duration must look like 30m, 2h, or 1d");
-    const result = await execute(chatId, {
-      type: "create.loop",
-      intervalSeconds,
-      prompt,
-      maxTimes,
-      durationSeconds,
-    });
-    console.log(result.output);
-    return;
+    command.durationSeconds = durationSeconds;
+  } else {
+    command.untilTime = flags["until"];
+    command.description = flags["description"] ?? flags["desc"];
   }
 
-  if (mode === "cron") {
-    const scheduleInputs = [flags["cron"], flags["at"], flags["after"]].filter(Boolean);
-    if (scheduleInputs.length !== 1) fail("Error: Cron requires exactly one of --cron, --at, or --after");
-    const after = flags["after"];
-    const afterSeconds = after ? parseLoopDuration(after) : undefined;
-    if (after && afterSeconds === undefined) fail("Error: --after must look like 30m, 2h, or 1d");
-    const runAt = afterSeconds === undefined
-      ? flags["at"]
-      : dateTimeInTimeZone(new Date(Date.now() + afterSeconds * 1_000), TZ);
-    const result = await execute(chatId, {
-      type: "create.cron",
-      cronExpr: flags["cron"],
-      runAt,
-      prompt,
-      description: flags["description"] ?? flags["desc"],
-      maxTimes,
-      untilTime: flags["until"],
-      timeZone: TZ,
-    });
-    console.log(result.output);
-    return;
-  }
-
-  fail("Error: --mode must be loop or cron");
+  const result = await execute(chatId, command);
+  console.log(result.output);
 }
 
 function listSchedules(
@@ -201,14 +210,23 @@ function fail(message: string): never {
 function printHelp(): void {
   console.log(`Manage conversation loops and independent cron schedules.
 
-Commands:
+模式（决定上下文）：
+  --mode loop    复用当前聊天主会话
+  --mode cron    每次使用独立会话
+
+触发参数（四选一，与 mode 正交）：
+  --every 5m    循环执行（cron 模式转为表达式，最小 1 分钟）
+  --at "2026-08-05 09:00"   指定本地时间执行一次
+  --after 30m   延迟多久后执行一次
+  --cron "0 9 * * *"   日历表达式定时（仅 cron 模式）
+
+示例：
   create --mode loop --every 5m --prompt "..." [--times 4] [--duration 2h]
+  create --mode loop --at "2026-08-05 18:00" --prompt "..."
   create --mode cron --cron "0 9 * * *" --prompt "..." [--times 5] [--until "2026-08-10 18:00"]
-  create --mode cron --at "2026-08-05 09:00" --prompt "..."
   create --mode cron --after 30m --prompt "..."
   list [--mode loop|cron]
   cancel <loop:id|cron:id>
 
-Loop reuses the current conversation for its chat. Cron runs in an independent session.
-Local calendar times use NIUBOT_TZ (${TZ}).`);
+时长使用 5m、2h、1d。Local calendar times use NIUBOT_TZ (${TZ}).`);
 }

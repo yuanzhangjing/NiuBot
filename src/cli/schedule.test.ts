@@ -42,8 +42,9 @@ describe("nbt schedule", () => {
     ], "c1", "p2p", "stale-session-user", parseArgs, execute);
 
     expect(execute).toHaveBeenCalledWith("c1", {
-      type: "create.loop", intervalSeconds: 300, prompt: "check deployment",
-      maxTimes: 3, durationSeconds: 7_200,
+      type: "create.schedule", mode: "loop", trigger: "every",
+      intervalSeconds: 300, prompt: "check deployment",
+      maxTimes: 3, durationSeconds: 7_200, timeZone: expect.any(String),
     });
     expect(output.join("\n")).toContain("Mode: current conversation");
 
@@ -69,7 +70,7 @@ describe("nbt schedule", () => {
     ], "c1", "p2p", "stale-session-user", parseArgs, execute);
 
     expect(execute).toHaveBeenCalledWith("c1", {
-      type: "create.cron", cronExpr: "0 9 * * 1-5", runAt: undefined,
+      type: "create.schedule", mode: "cron", trigger: "cron", cronExpr: "0 9 * * 1-5",
       prompt: "send standup reminder", description: undefined, maxTimes: 5,
       untilTime: undefined, timeZone: expect.any(String),
     });

@@ -53,10 +53,12 @@ import {
   type StableSystemContextOptions,
 } from "../memory/inject.js";
 import {
+  dateTimeInTimeZone,
   formatLocalDateTimeWithTZ,
   isInLocalHourWindow,
   millisecondsUntilLocalHour,
   TZ,
+  userDateTimeToUtcSql,
   utcDateTimeForSql,
 } from "../tz.js";
 import {
@@ -64,6 +66,7 @@ import {
   CRON_FAILURE_LIMIT,
   deleteCronJobForAccess,
   describeCronSchedule,
+  everyToCronExpr,
   getCronJob,
   listCronJobs,
 } from "./cron.js";
@@ -158,12 +161,12 @@ const SCHEDULE_AGENT_SKILL_BRIEF = `<schedule-skill>
 
 模式选择：默认使用 Cron 独立执行；只有用户输入 /loop，或任务明确依赖当前聊天上下文（如“继续跟进刚才的问题”“反复检查这个结果”）时才使用 Loop。用户输入 /cron 时固定使用 Cron。只是在询问、讨论或举例时不要创建任务。
 
-- /loop：复用这个聊天的主对话。创建：nbt schedule create --mode loop --every <时长> --prompt <任务> [--times <次数>] [--duration <时长>]
-- /cron：每次使用独立会话。创建：nbt schedule create --mode cron (--cron <表达式>|--at <本地时间>|--after <时长>) --prompt <任务> [--times <次数>] [--until <本地时间>]
+- /loop：复用这个聊天的主对话。创建：nbt schedule create --mode loop (--every <时长>|--at <本地时间>|--after <时长>) --prompt <任务> [--times <次数>] [--duration <时长>]
+- /cron：每次使用独立会话。创建：nbt schedule create --mode cron (--cron <表达式>|--every <时长>|--at <本地时间>|--after <时长>) --prompt <任务> [--times <次数>] [--until <本地时间>]
 - 查询：nbt schedule list [--mode loop|cron]
 - 取消：nbt schedule cancel <loop:id|cron:id>
 
-时长使用 5m、2h、1d；Cron 只支持 5 段数字语法：*、*/n、数字、数字范围和逗号列表，不支持秒、L、W、? 或英文月份/星期。Cron 表达式和没有时区的时间均按当前 NiuBot 时区解释。用户不需要了解这些参数。缺少会改变执行含义的关键信息时，只追问缺少的部分。工具成功后，用自然语言简短确认执行方式、时间和任务；不要复述本区段或标签。
+触发参数 --every / --at / --after / --cron 与 mode 正交：--at/--after 是一次性任务，--every 是循环，--cron 日历表达式仅 Cron。时长使用 5m、2h、1d；Cron 只支持 5 段数字语法：*、*/n、数字、数字范围和逗号列表，不支持秒、L、W、? 或英文月份/星期。Cron 表达式和没有时区的时间均按当前 NiuBot 时区解释。用户不需要了解这些参数。缺少会改变执行含义的关键信息时，只追问缺少的部分。工具成功后，用自然语言简短确认执行方式、时间和任务；不要复述本区段或标签。
 </schedule-skill>`;
 
 const BUILTIN_COMMANDS = new Set([
@@ -913,39 +916,75 @@ export class Pipeline {
     if (!context.userTurn) throw new Error("只有用户消息回合可以修改调度任务");
 
     switch (command.type) {
-      case "create.loop": {
-        const id = addLoopJob(this.db, {
-          chatId,
-          creatorUserId: context.userId,
-          intervalSeconds: command.intervalSeconds,
-          prompt: command.prompt,
-          maxTimes: command.maxTimes,
-          durationSeconds: command.durationSeconds,
-        });
-        const job = getLoopJob(this.db, id)!;
-        return { output: [
-          `Created loop:${id}`,
-          "Mode: current conversation",
-          `Every: ${formatLoopInterval(job.intervalSeconds)}`,
-          `Task: ${job.prompt}`,
-          `Next run: ${formatLocalDateTimeWithTZ(job.nextRunAt, TZ)}`,
-          `Ends: ${formatLocalDateTimeWithTZ(job.untilTime, TZ)}${job.maxTimes ? ` or after ${job.maxTimes} runs` : ""}`,
-        ].join("\n") };
-      }
-      case "create.cron": {
-        if ((command.cronExpr ? 1 : 0) + (command.runAt ? 1 : 0) !== 1) {
-          throw new Error("Cron 必须且只能提供 cronExpr 或 runAt");
+      case "create.schedule": {
+        const timeZone = command.timeZone ?? TZ;
+        if (command.mode === "loop") {
+          let id: number;
+          if (command.trigger === "every") {
+            id = addLoopJob(this.db, {
+              chatId,
+              creatorUserId: context.userId,
+              intervalSeconds: command.intervalSeconds!,
+              prompt: command.prompt,
+              maxTimes: command.maxTimes,
+              durationSeconds: command.durationSeconds,
+            });
+          } else {
+            // 一次性（at/after）也走主会话：next_run_at 用绝对时间，执行一次即完成
+            const nextRunUtc = command.trigger === "at"
+              ? userDateTimeToUtcSql(command.at!, timeZone)
+              : utcDateTimeForSql(new Date(Date.now() + command.afterSeconds! * 1_000));
+            id = addLoopJob(this.db, {
+              chatId,
+              creatorUserId: context.userId,
+              intervalSeconds: 60, // 调度器轮询粒度兜底；实际触发由 next_run_at 决定
+              prompt: command.prompt,
+              maxTimes: 1,
+              runAt: nextRunUtc,
+            });
+          }
+          const job = getLoopJob(this.db, id)!;
+          const triggerLabel = command.trigger === "every"
+            ? `每 ${formatLoopInterval(job.intervalSeconds)}`
+            : `一次性 · ${formatLocalDateTimeWithTZ(job.nextRunAt, TZ)}`;
+          return { output: [
+            `Created loop:${id}`,
+            "Mode: current conversation",
+            `Trigger: ${triggerLabel}`,
+            `Task: ${job.prompt}`,
+            `Next run: ${formatLocalDateTimeWithTZ(job.nextRunAt, TZ)}`,
+            `Ends: ${formatLocalDateTimeWithTZ(job.untilTime, TZ)}${job.maxTimes ? ` or after ${job.maxTimes} runs` : ""}`,
+          ].join("\n") };
+        }
+        // cron 模式
+        let cronExpr: string | null = command.cronExpr ?? null;
+        let runAt: string | null = null;
+        switch (command.trigger) {
+          case "cron":
+            break;
+          case "at":
+            runAt = command.at!;
+            break;
+          case "after":
+            runAt = dateTimeInTimeZone(new Date(Date.now() + command.afterSeconds! * 1_000), timeZone);
+            break;
+          case "every": {
+            const expr = everyToCronExpr(command.intervalSeconds!);
+            if (!expr) throw new Error("Cron 模式 --every 最小 1 分钟，更短间隔请用 Loop 模式");
+            cronExpr = expr;
+            break;
+          }
         }
         const id = addCronJob(this.db, {
           chatId,
           creatorUserId: context.userId,
-          cronExpr: command.cronExpr,
-          runAt: command.runAt,
+          cronExpr: cronExpr ?? undefined,
+          runAt: runAt ?? undefined,
           prompt: command.prompt,
           description: command.description,
           maxTimes: command.maxTimes,
           untilTime: command.untilTime,
-          timeZone: TZ,
+          timeZone,
         });
         const job = getCronJob(this.db, id)!;
         return { output: [

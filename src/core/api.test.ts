@@ -74,7 +74,22 @@ test("/schedule 把结构化调度命令转交给当前 Pipeline 回合", async 
 
   expect(response.statusCode).toBe(200);
   expect(JSON.parse(response.body)).toEqual({ output: "Created loop:1" });
-  expect(executeScheduleCommand).toHaveBeenCalledWith("chat-1", command, "tok-2");
+  // 旧格式 create.loop 被归一化为统一的 create.schedule
+  expect(executeScheduleCommand).toHaveBeenCalledWith("chat-1", {
+    type: "create.schedule",
+    mode: "loop",
+    trigger: "every",
+    intervalSeconds: 300,
+    prompt: "检查部署状态",
+    maxTimes: undefined,
+    durationSeconds: undefined,
+    at: undefined,
+    afterSeconds: undefined,
+    cronExpr: undefined,
+    description: undefined,
+    untilTime: undefined,
+    timeZone: "Asia/Shanghai",
+  }, "tok-2");
 });
 
 test("/schedule 在 API 边界拒绝未知操作和非法字段", async () => {

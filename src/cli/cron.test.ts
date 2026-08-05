@@ -59,9 +59,10 @@ describe("cron access rules", () => {
       "add", "--cron", "0 9 * * *", "--prompt", "standup", "--times", "2",
     ], "c1", "group", "stale-session-user", parseArgs, execute);
     expect(execute).toHaveBeenCalledWith("c1", {
-      type: "create.cron",
+      type: "create.schedule",
+      mode: "cron",
+      trigger: "cron",
       cronExpr: "0 9 * * *",
-      runAt: undefined,
       prompt: "standup",
       description: undefined,
       maxTimes: 2,

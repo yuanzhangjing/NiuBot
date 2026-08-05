@@ -642,6 +642,50 @@ describe("Pipeline Loop integration", () => {
     }, "tok-b")).rejects.toThrow("own loop jobs");
   });
 
+  test("create.schedule unifies triggers across loop/cron modes", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-schedule-unified-test-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u3', 'later user', 'feishu', 'pu3')").run();
+    db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c1', 'group', 'feishu', 'pc1')").run();
+    const pipeline = new Pipeline(
+      db, createImStub(), new RecordingAgent(), createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex",
+    );
+    const run = (pipeline as any).runtimeState.createRun({
+      chatId: "c1", triggerMessageIds: [], triggerPlatformMsgIds: [], mergedText: "/loop",
+    });
+    (pipeline as any).runtimeState.markRunStage(run.runId, "agent_running");
+    (pipeline as any).activeScheduleAgentCommands.set("c1", {
+      runId: run.runId, userId: "u3", chatType: "group", userTurn: true, token: "tok-a",
+    });
+
+    // loop + at：一次性任务走主会话，max_times=1，next_run_at 用指定本地时间
+    const loopResult = await pipeline.executeScheduleAgentCommand("c1", {
+      type: "create.schedule", mode: "loop", trigger: "at", at: "2026-08-05 18:00",
+      prompt: "晚上提醒我", timeZone: "Asia/Shanghai",
+    }, "tok-a");
+    expect(loopResult.output).toContain("Created loop:1");
+    expect(db.prepare("SELECT max_times, next_run_at, interval_seconds FROM loop_jobs WHERE id = 1").get()).toEqual({
+      max_times: 1, next_run_at: "2026-08-05 10:00:00", interval_seconds: 60,
+    });
+
+    // cron + every：相对间隔转日历表达式
+    const cronResult = await pipeline.executeScheduleAgentCommand("c1", {
+      type: "create.schedule", mode: "cron", trigger: "every", intervalSeconds: 300,
+      prompt: "每5分钟检查", timeZone: "Asia/Shanghai",
+    }, "tok-a");
+    expect(cronResult.output).toContain("Created cron:1");
+    expect(db.prepare("SELECT cron_expr FROM cron_jobs WHERE id = 1").get()).toEqual({
+      cron_expr: "*/5 * * * *",
+    });
+
+    // loop + cron 表达式：拒绝（loop 无日历语义）
+    await expect(pipeline.executeScheduleAgentCommand("c1", {
+      type: "create.schedule", mode: "loop", trigger: "cron", cronExpr: "0 8 * * *",
+      prompt: "x", timeZone: "Asia/Shanghai",
+    }, "tok-a")).rejects.toThrow("不支持");
+  });
+
   test("disables schedule writes when one merged group turn contains multiple senders", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-multi-sender-schedule-test-"));
     tempDirs.push(dir);

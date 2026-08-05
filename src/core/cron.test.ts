@@ -12,6 +12,7 @@ import {
   deleteCronJob,
   describeCronExpr,
   describeCronSchedule,
+  everyToCronExpr,
   MAX_ACTIVE_CRON_JOBS_PER_CHAT,
   migrateLegacyCronTimezones,
   recoverInterruptedCronJobs,
@@ -58,6 +59,22 @@ describe("describeCronSchedule", () => {
   test("one-off cron shows local time, missing schedule shows placeholder", () => {
     expect(describeCronSchedule(null, "2026-08-05 07:38:00", "Asia/Shanghai")).toContain("一次性");
     expect(describeCronSchedule(null, null)).toBe("未设置");
+  });
+});
+
+describe("everyToCronExpr", () => {
+  test("converts relative intervals to cron expressions", () => {
+    expect(everyToCronExpr(60)).toBe("*/1 * * * *");
+    expect(everyToCronExpr(5 * 60)).toBe("*/5 * * * *");
+    expect(everyToCronExpr(3_600)).toBe("0 * * * *");
+    expect(everyToCronExpr(2 * 3_600)).toBe("0 */2 * * *");
+    expect(everyToCronExpr(86_400)).toBe("0 0 */1 * *");
+  });
+
+  test("rejects sub-minute and non-uniform intervals", () => {
+    expect(everyToCronExpr(30)).toBeUndefined();
+    expect(everyToCronExpr(90)).toBeUndefined();
+    expect(everyToCronExpr(7_200 + 60)).toBeUndefined();
   });
 });
 
