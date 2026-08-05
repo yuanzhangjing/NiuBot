@@ -8,7 +8,6 @@
 /** 剥离完整内部区段和残留裸标签。 */
 export function stripInternalWorkerTags(text: string): string {
   return text
-    .replace(/<tool-briefs>[\s\S]*?<\/tool-briefs>/g, "")
     .replace(/<schedule-skill>[\s\S]*?<\/schedule-skill>/g, "")
     .replace(/<loop-continuation>[\s\S]*?<\/loop-continuation>/g, "")
     .replace(/<worker-skill>[\s\S]*?<\/worker-skill>/g, "")
