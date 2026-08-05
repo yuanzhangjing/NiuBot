@@ -553,8 +553,8 @@ describe("Pipeline Loop integration", () => {
       platformMsgId: "natural-loop",
     }));
     await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(1));
-    expect(agent.sendMessageCalls[0]).toContain("nbt schedule create --mode main");
-    expect(agent.sendMessageCalls[0]).toContain("默认使用 Cron 独立执行");
+    expect(agent.sendMessageCalls[0]).toContain("「/loop <任务与时间>」→ mode=main");
+    expect(agent.sendMessageCalls[0]).toContain("默认 mode=isolated");
     expect(agent.sendMessageCalls[0]).toContain("/loop 每5分钟帮我检查部署状态，持续2小时");
 
     (pipeline as any).handleMessage(createMessage({
@@ -592,7 +592,7 @@ describe("Pipeline Loop integration", () => {
       platformMsgId: "reply-parent",
     }));
     await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(1));
-    expect(agent.sendMessageCalls[0]).toContain("nbt schedule create --mode main");
+    expect(agent.sendMessageCalls[0]).toContain("「/loop <任务与时间>」→ mode=main");
     (pipeline as any).handleMessage(createMessage({
       contentText: "/loop 每5分钟检查一次这个状态",
       platformMsgId: "reply-loop",

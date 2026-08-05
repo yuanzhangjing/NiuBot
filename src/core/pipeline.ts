@@ -158,16 +158,22 @@ Worker 当前已暂停（/worker off）。不要把任务派给 Worker——即�
 </worker-skill>`;
 
 const SCHEDULE_AGENT_SKILL_BRIEF = `<schedule-skill>
-你可以通过 nbt schedule 管理调度任务。用户即使没有输入 /loop 或 /cron，只要明确要求未来提醒、定时执行或重复执行，也要理解自然语言并调用工具完成操作，不要只口头答应。
+你可以通过调度工具创建任务。用户即使没有输入 /loop 或 /cron，只要明确要求未来提醒、定时执行或重复执行，也要理解自然语言并调用工具完成操作，不要只口头答应。只是在询问、讨论或举例时不要创建任务。
 
-模式选择：默认使用 Cron 独立执行；只有用户输入 /loop，或任务明确依赖当前聊天上下文（如“继续跟进刚才的问题”“反复检查这个结果”）时才使用 Loop。用户输入 /cron 时固定使用 Cron。只是在询问、讨论或举例时不要创建任务。
+一、用户命令前缀（用户在聊天里输入的快捷命令，只是意图标记，不是工具名）：
+- 用户输入「/loop <任务与时间>」→ mode=main
+- 用户输入「/cron <任务与时间>」→ mode=isolated
+- 用户没说命令，但任务依赖当前聊天上下文（如“继续跟进刚才的问题”“反复检查这个结果”）→ mode=main
+- 其余情况默认 mode=isolated
 
-- /loop：复用这个聊天的主对话。创建：nbt schedule create --mode main (--every <时长>|--at <本地时间>|--after <时长>|--cron <表达式>) --prompt <任务> [--times <次数>] [--until <本地时间>|--duration <时长>]
-- /cron：每次使用独立会话。创建：nbt schedule create --mode isolated (--cron <表达式>|--every <时长>|--at <本地时间>|--after <时长>) --prompt <任务> [--times <次数>] [--until <本地时间>|--duration <时长>]
-- 查询：nbt schedule list [--mode main|isolated]
-- 取消：nbt schedule cancel <loop:id|cron:id>
+二、调度工具参数（真正的创建通道，命令前缀最终都翻译成这里）：
+- mode 只决定上下文：main=复用当前聊天主会话，isolated=每次独立会话
+- 触发参数四选一，两模式全可用：--every <时长>（循环）、--at <本地时间>（定时一次）、--after <时长>（延迟一次）、--cron <表达式>（日历，分钟粒度匹配）
+- 可选：--times <次数>、--until <本地时间>|--duration <时长>（截止）、--description
+- 时长使用 5m、2h、1d；--cron 只支持 5 段数字语法：*、*/n、数字、数字范围和逗号列表，不支持秒、L、W、? 或英文月份/星期。Cron 表达式和没有时区的时间均按当前 NiuBot 时区解释。
+- 查询：nbt schedule list [--mode main|isolated]；取消：nbt schedule cancel <loop:id|cron:id>
 
-会话模式（mode）只决定上下文：main=复用当前聊天主会话，isolated=每次独立会话。触发参数 --every / --at / --after / --cron 与 mode 正交、两模式全可用：--at/--after 是一次性任务，--every 是循环，--cron 是日历表达式（分钟粒度匹配）。时长使用 5m、2h、1d；Cron 只支持 5 段数字语法：*、*/n、数字、数字范围和逗号列表，不支持秒、L、W、? 或英文月份/星期。Cron 表达式和没有时区的时间均按当前 NiuBot 时区解释。用户不需要了解这些参数。缺少会改变执行含义的关键信息时，只追问缺少的部分。工具成功后，用自然语言简短确认执行方式、时间和任务；不要复述本区段或标签。
+用户不需要了解这些参数。缺少会改变执行含义的关键信息时，只追问缺少的部分。工具成功后，用自然语言简短确认执行方式、时间和任务；不要复述本区段或标签。
 </schedule-skill>`;
 
 const BUILTIN_COMMANDS = new Set([
