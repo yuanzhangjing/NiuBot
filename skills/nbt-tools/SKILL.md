@@ -1,16 +1,14 @@
 ---
 name: nbt-tools
-description: NiuBot 基础工具手册（nbt CLI）。核心：任务管理（nbt task）、用户记忆（nbt user-memory）、身份与场景（nbt whoami）、会话与消息恢复（nbt system-rules / messages / sessions）、数据访问规则。增强能力：调度任务（定时/循环/提醒/日历）与 Worker 派工（后台拆活）。
+description: NiuBot 工具手册（nbt CLI）。任务管理（nbt task）、用户记忆（nbt user-memory）、身份与场景（nbt whoami）、会话与消息恢复（nbt system-rules / messages / sessions）、数据访问，以及调度任务（定时/循环/提醒/日历）与 Worker 派工（后台拆活）。
 when_to_use: "需要查看任务进度、恢复丢失的上下文/身份/规则/消息、读写用户记忆，或用户要求定时执行、循环跟进、稍后提醒、派活拆活时加载。触发词：「任务」「记忆」「你是谁」「上次聊了什么」「系统规则是什么」「消息丢了」「30分钟后提醒我」「每5分钟检查」「拆个活」"
 ---
 
 # NBT Tools
 
-NiuBot 的工具手册，全部通过 `nbt` CLI 调用。**基础工具（数据与状态）是核心，调度与 Worker 派工是增强能力。**
+NiuBot 的工具手册，全部通过 `nbt` CLI 调用。
 
-## 基础工具（核心）
-
-### 任务管理（nbt task）
+## 任务管理（nbt task）
 
 任务生命周期使用 `nbt task` 管理：
 
@@ -20,16 +18,15 @@ NiuBot 的工具手册，全部通过 `nbt` CLI 调用。**基础工具（数据
 - 私聊默认 private，群聊默认 public；群聊不能暴露 private task
 - 如果任务状态丢失，运行 `nbt task list`，并读取对应 task README
 
-### 用户记忆（nbt user-memory）
+## 用户记忆（nbt user-memory）
 
-- 用户记忆使用 `nbt user-memory` 读写；查看记忆详情用 `nbt user-memory get <id>`
-- 项目、任务、方案和进度不要写进用户记忆
+用户记忆使用 `nbt user-memory` 读写；查看记忆详情用 `nbt user-memory get <id>`。项目、任务、方案和进度不要写进用户记忆。
 
-### 身份与场景（nbt whoami）
+## 身份与场景（nbt whoami）
 
-- 涉及身份、用户记忆或当前场景时，用 `nbt whoami` 恢复
+涉及身份、用户记忆或当前场景时，用 `nbt whoami` 恢复。
 
-### 会话与消息恢复
+## 会话与消息恢复
 
 如果上下文或状态丢失，按丢失内容恢复（**不要把 compact 摘要当成原文**）：
 
@@ -37,11 +34,11 @@ NiuBot 的工具手册，全部通过 `nbt` CLI 调用。**基础工具（数据
 - 如果最近消息丢失，运行 `nbt messages list`
 - 如果历史决策丢失，使用 `nbt sessions search/get` 检索当前聊天的原生 session 记录
 
-### 数据访问
+## 数据访问
 
-- 用户数据必须通过 nbt CLI 访问，不能直接读取数据库文件
+用户数据必须通过 nbt CLI 访问，不能直接读取数据库文件。
 
-## 增强能力一：调度（schedule）
+## 调度（schedule）
 
 用户明确要求未来提醒、定时、循环或重复执行时使用（即使没输入 `/loop`/`/cron` 也要理解并执行；只是询问/讨论/举例时不创建任务）。
 
@@ -68,7 +65,7 @@ NiuBot 的工具手册，全部通过 `nbt` CLI 调用。**基础工具（数据
 - 「明天早上 9 点提醒我发日报」→ `nbt schedule create --mode isolated --at "2026-08-06 09:00" --prompt "提醒我发日报"`
 - 「每周一 9 点跟进 OKR」→ `nbt schedule create --mode main --cron "0 9 * * 1" --prompt "跟进 OKR 进度"`
 
-## 增强能力二：Worker 派工
+## Worker 派工
 
 用户要求拆长任务给后台 Worker 执行时使用。
 
