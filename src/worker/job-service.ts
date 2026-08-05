@@ -155,7 +155,6 @@ export class SqliteJobService implements JobService {
         workerProfileId: input.workerProfileId,
         prompt: input.prompt,
         workdir: input.workdir,
-        workspacePolicy: input.workspacePolicy ?? "read_only",
         dependsOn: input.dependsOn,
       });
       appendWorkJobId(this.db, input.workId, row.id);

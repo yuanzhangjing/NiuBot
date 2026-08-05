@@ -20,7 +20,6 @@ import type {
   WorkerEvent,
   WorkerEventName,
   WorkVisibility,
-  WorkspacePolicy,
 } from "./types.js";
 
 export type { ArtifactEntry };
@@ -63,7 +62,6 @@ export interface JobRow {
   ended_at: string | null;
   claim_token: string | null;
   claimed_at: string | null;
-  workspace_policy: WorkspacePolicy;
   depends_on_json: string;
   created_at: string;
   updated_at: string;
@@ -147,7 +145,6 @@ export function jobRowToJob(row: JobRow): Job {
     endedAt: row.ended_at ?? undefined,
     claimToken: row.claim_token ?? undefined,
     claimedAt: row.claimed_at ?? undefined,
-    workspacePolicy: row.workspace_policy,
     dependsOn: parseJsonArray(row.depends_on_json),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -287,21 +284,19 @@ export function insertJob(
     workerProfileId: string;
     prompt: string;
     workdir: string;
-    workspacePolicy: WorkspacePolicy;
     dependsOn?: string[];
   },
 ): JobRow {
   const id = `job_${randomUUID()}`;
   db.prepare(`
-    INSERT INTO worker_jobs (id, work_id, worker_profile_id, prompt, workdir, workspace_policy, depends_on_json)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO worker_jobs (id, work_id, worker_profile_id, prompt, workdir, depends_on_json)
+    VALUES (?, ?, ?, ?, ?, ?)
   `).run(
     id,
     input.workId,
     input.workerProfileId,
     input.prompt,
     input.workdir,
-    input.workspacePolicy,
     JSON.stringify(input.dependsOn ?? []),
   );
   return getJob(db, id)!;

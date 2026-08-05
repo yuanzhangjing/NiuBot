@@ -285,8 +285,8 @@ export interface WorkerPipelineConfig {
   maxConcurrent?: number;
   /** Scheduler 扫描周期（默认 5000ms；测试可调小） */
   tickMs?: number;
-  /** scratch/worktree 根目录（默认 $NIUBOT_HOME/worker-workspaces） */
-  workspaceRoot?: string;
+  /** 产物/临时文件根目录（默认 $NIUBOT_HOME/<bot>/tmp） */
+  artifactRoot?: string;
   /** /worker 配置体系（启用开关、配置版本、草案） */
   teamConfigStore?: TeamConfigStore;
   /** 按类型解析专属 backend（角色配置 backend 时使用；未配置则复用主 Agent backend） */
@@ -518,9 +518,9 @@ export class Pipeline {
     // Worker：启动 Scheduler 并恢复非终态 Job
     if (this.workerConfig) {
       const {
-        jobService, registry, maxConcurrent, tickMs, workspaceRoot: configuredWorkspaceRoot, teamConfigStore,
+        jobService, registry, maxConcurrent, tickMs, artifactRoot: configuredArtifactRoot, teamConfigStore,
       } = this.workerConfig;
-      const workspaceRoot = configuredWorkspaceRoot ?? path.join(NIUBOT_HOME, "worker-workspaces");
+      const artifactRoot = configuredArtifactRoot ?? path.join(NIUBOT_HOME, this.botIdentity.name, "tmp");
       // 配置驱动：有生效配置时用配置的 profiles 与并发上限（无则内置默认）
       const active = teamConfigStore?.getActiveConfig();
       if (active && active.config.profiles.length > 0) {
@@ -544,7 +544,7 @@ export class Pipeline {
           botProfilePath: this.stableContextOptions.botProfilePath,
         },
         buildPrompt: (job, execDir, artifactDir) => this.buildWorkerPrompt(job, execDir, artifactDir),
-        workspaceProvider: new WorkspaceProvider({ rootDir: workspaceRoot }),
+        workspaceProvider: new WorkspaceProvider({ tmpRoot: artifactRoot }),
         resolveBackend: this.workerConfig.resolveBackend,
       });
       this.workerScheduler = new WorkerScheduler({
@@ -746,14 +746,7 @@ export class Pipeline {
         if (!profile) {
           throw new Error(`未知 Worker Profile: ${request.command.workerProfileId}（可用: ${this.workerConfig.registry.list().map((item) => item.id).join(", ")}）`);
         }
-        const requestedPolicy = request.command.workspacePolicy ?? profile.access;
-        const accessRank = { read_only: 0, scratch: 1 } as const;
-        if (typeof requestedPolicy !== "string" || !Object.hasOwn(accessRank, requestedPolicy)) {
-          throw new Error(`未知 Worker 工作区策略: ${String(requestedPolicy)}`);
-        }
-        if (accessRank[requestedPolicy] > accessRank[profile.access]) {
-          throw new Error(`Worker ${profile.id} 只允许 ${profile.access}，不能使用 ${requestedPolicy}`);
-        }
+        // 工作区访问方式由 Profile 决定（read_only 只读 / direct 直接修改），Job 不再携带
         const requestedWorkdir = path.resolve(request.command.workdir ?? this.workingDirectory);
         let workspaceRootReal: string;
         let requestedWorkdirReal: string;
@@ -777,7 +770,6 @@ export class Pipeline {
           workerProfileId: profile.id,
           prompt,
           workdir: requestedWorkdirReal,
-          workspacePolicy: requestedPolicy,
           dependsOn: request.command.dependsOn,
         }, request.command.idempotencyKey);
         this.workerScheduler?.kick();
@@ -2438,7 +2430,7 @@ export class Pipeline {
         const profiles = this.workerConfig?.registry.list() ?? [];
         const accessNames: Record<string, string> = {
           read_only: "只读",
-          scratch: "独立工作目录",
+          direct: "直接修改",
         };
         const profileLines = profiles.map((p) => {
           const parts = [`**${p.displayName}**`];
@@ -2624,14 +2616,15 @@ export class Pipeline {
     const work = this.workerConfig?.jobService.getWork(job.workId);
     const parts: string[] = [];
     if (stable) parts.push(stable);
+    const profile = this.workerConfig?.registry.get(job.workerProfileId);
     let writeRule: string;
-    if (artifactDir) {
+    if (profile?.access === "direct") {
+      // 写任务：直接在目标目录（目标仓库）修改，git 操作由 Worker 自行执行。
+      // base 提交/分支由任务内容（job.prompt）指定。
+      writeRule = `当前目录就是目标仓库（${job.workdir}）本身，直接在仓库内修改。git 操作由你自行执行：按任务要求 checkout 目标提交、创建独立分支、修改、提交；不 push、不发布。`;
+    } else if (artifactDir) {
       // 只读 + 产物目录：工作目录只读，落盘内容（报告/生成文件）写产物目录
       writeRule = `工作目录（${execDir}）是只读的：不要修改其中的任何文件。如需落盘（报告、生成的文件等），写到产物目录：${artifactDir}。不要提交、不要发布、不要对用户直接发送消息。`;
-    } else if (job.workspacePolicy === "scratch") {
-      // 写任务（独立工作目录）：git 操作由 Worker 自行执行。
-      // 目标仓库在 job.workdir；base 提交/分支由任务内容（job.prompt）指定。
-      writeRule = `当前目录是独立工作区。目标仓库：${job.workdir}。需要 git 操作时由你自行执行：clone/checkout 目标仓库到当前目录（或使用现有副本），按任务要求从指定提交创建分支、修改、提交；不 push、不发布、不碰目标仓库主工作区。`;
     } else {
       writeRule = `不要修改代码、不要提交、不要发布、不要对用户直接发送消息。`;
     }
@@ -2641,7 +2634,7 @@ export class Pipeline {
 Work 目标（用户原始需求）：${esc(work?.request ?? "(未知)")}
 Job 任务：${esc(job.prompt)}
 工作目录：${execDir}
-工作区策略：${job.workspacePolicy}
+工作区访问方式：${profile?.access ?? "read_only"}
 ${writeRule}
 完成标准：以自由 Markdown 输出结果：做了什么、发现了什么、未完成内容、风险和测试证据。
 </job-target>`);

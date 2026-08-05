@@ -188,7 +188,7 @@ beforeEach(() => {
       registry,
       maxConcurrent: 2,
       tickMs: 50,
-      workspaceRoot: path.join(tempRoot, "ws"),
+      artifactRoot: path.join(tempRoot, "tmp"),
       teamConfigStore: teamConfig,
     },
   );
@@ -480,7 +480,6 @@ test("主 Agent 的 Worker 写操作由 Pipeline 活动回合统一校验和执�
   expect(service.getJob(jobId!)).toMatchObject({
     workId,
     workerProfileId: "reviewer",
-    workspacePolicy: "read_only",
   });
   await waitFor(() => transport.sent.some((message) => message.text.includes("⚙️ 已交由 Worker 后台执行")));
 }, 15_000);
@@ -493,7 +492,6 @@ test("Pipeline 拒绝活动回合外写入和提升 Worker 工作区权限", asy
   })).rejects.toThrow(/活动 Agent 回合/);
 
   await pipeline.start();
-  let policyError: string | undefined;
   let accessError: string | undefined;
   let policyWorkId: string | undefined;
   const foreignWork = service.createWork({
@@ -514,23 +512,7 @@ test("Pipeline 拒绝活动回合外写入和提升 Worker 工作区权限", asy
     try {
       await pipeline.executeWorkerAgentCommand({
         chatId: CHAT_ID,
-      scheduleToken: "integration-token",
-        command: {
-          type: "job.create",
-          workId: work.output,
-          workerProfileId: "reviewer",
-          prompt: "不应获得写权限",
-          workspacePolicy: "scratch",
-          idempotencyKey: `test:${work.output}:escalation`,
-        },
-      });
-    } catch (error) {
-      policyError = String(error);
-    }
-    try {
-      await pipeline.executeWorkerAgentCommand({
-        chatId: CHAT_ID,
-      scheduleToken: "integration-token",
+        scheduleToken: "integration-token",
         command: { type: "cancel", id: foreignWork.id },
       });
     } catch (error) {
@@ -551,8 +533,7 @@ test("Pipeline 拒绝活动回合外写入和提升 Worker 工作区权限", asy
     raw: {},
   } as any);
 
-  await waitFor(() => !!policyError && !!accessError);
-  expect(policyError).toMatch(/不能使用 scratch/);
+  await waitFor(() => !!accessError);
   expect(accessError).toMatch(/不属于当前会话/);
   await waitFor(() => service.getWork(policyWorkId!)?.status === "failed");
   expect(service.getWork(policyWorkId!)?.finalConclusion).toContain("空 Work");
@@ -911,7 +892,7 @@ test("重启恢复：running Job 标记 interrupted，claimed Continuation 重�
     false,
     undefined,
     undefined,
-    { jobService: service, registry, maxConcurrent: 2, tickMs: 50, workspaceRoot: path.join(tempRoot, "ws") },
+    { jobService: service, registry, maxConcurrent: 2, tickMs: 50, artifactRoot: path.join(tempRoot, "tmp") },
   );
   await pipeline2.start();
 
@@ -946,7 +927,7 @@ function makeGitRepo(): string {
   return repo;
 }
 
-test("写任务：developer 在独立工作目录修改代码，不污染目标仓库", async () => {
+test("写任务：developer 直接在目标仓库修改", async () => {
   const repo = makeGitRepo();
   backend.writeFileOnSend = "b.txt";
   await pipeline.start();
@@ -963,22 +944,18 @@ test("写任务：developer 在独立工作目录修改代码，不污染目标�
     workerProfileId: "developer",
     prompt: "新增 b.txt 文件",
     workdir: repo,
-    workspacePolicy: "scratch",
   });
 
   await waitFor(() => service.getJob(job.id)?.status === "completed");
   expect(service.getJob(job.id)?.responseText).toBeTruthy();
 
-  // 目标仓库主工作区没有 b.txt（写入发生在独立工作目录）
-  expect(existsSync(path.join(repo, "b.txt"))).toBe(false);
-
-  // 独立工作目录保留且包含写入的文件 + marker
-  const workDir = path.join(tempRoot, "ws", `job-${job.id}`);
-  expect(existsSync(path.join(workDir, "b.txt"))).toBe(true);
-  expect(existsSync(path.join(workDir, ".niubot-worker"))).toBe(true);
+  // developer（direct 访问）：直接在目标仓库修改，写入落在 repo 里
+  expect(existsSync(path.join(repo, "b.txt"))).toBe(true);
+  // 目标仓库保持 git 仓库状态（git 操作由 Worker 自行执行）
+  execFileSync("git", ["rev-parse", "--is-inside-work-tree"], { cwd: repo });
 }, 15000);
 
-test("两个写 Job 在独立工作目录并行执行，互不污染目标仓库", async () => {
+test("两个写 Job 并行直接修改同一仓库，均正常完成", async () => {
   const repo = makeGitRepo();
   backend.delayMs = 3000;
   await pipeline.start();
@@ -995,21 +972,17 @@ test("两个写 Job 在独立工作目录并行执行，互不污染目标仓库
     workerProfileId: "developer",
     prompt: "任务 A",
     workdir: repo,
-    workspacePolicy: "scratch",
   });
   const jobB = service.createJob({
     workId: work.id,
     workerProfileId: "developer",
     prompt: "任务 B",
     workdir: repo,
-    workspacePolicy: "scratch",
   });
 
-  // 各自独立工作目录，可并行执行，均正常完成
+  // 并行执行，均正常完成（修改直接落在目标仓库，冲突由 Worker 的 git 操作自行处理）
   await waitFor(() => service.getJob(jobA.id)?.status === "completed");
   await waitFor(() => service.getJob(jobB.id)?.status === "completed");
-  // 目标仓库主工作区不受污染
-  expect(existsSync(path.join(repo, "b.txt"))).toBe(false);
 }, 15000);
 
 test("Worker 暂停时 queued Job 不调度，开启后执行", async () => {
@@ -1154,7 +1127,7 @@ test("角色配置 backend 时使用专属 backend，否则复用主 Agent backe
       registry,
       maxConcurrent: 2,
       tickMs: 50,
-      workspaceRoot: path.join(tempRoot, "ws"),
+      artifactRoot: path.join(tempRoot, "tmp"),
       teamConfigStore: teamConfig,
       resolveBackend: async (type) => (type === "special" ? specialBackend : backend),
     },
@@ -1231,7 +1204,7 @@ test("未知 backend 类型：Job 失败且错误带角色上下文", async () =
       registry,
       maxConcurrent: 2,
       tickMs: 50,
-      workspaceRoot: path.join(tempRoot, "ws"),
+      artifactRoot: path.join(tempRoot, "tmp"),
       teamConfigStore: teamConfig,
       resolveBackend: async (type) => {
         throw new Error(`Backend '${type}' is unavailable`);

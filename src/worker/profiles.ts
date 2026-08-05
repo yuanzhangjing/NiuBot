@@ -18,8 +18,8 @@ export interface WorkerProfile {
   workflow?: string;
   /** profile 级并发上限；未设置时只受全局 maxConcurrent 约束 */
   maxConcurrent?: number;
-  /** 工作区访问方式：read_only 直接访问目标目录；scratch 独立工作目录（写任务） */
-  access: "read_only" | "scratch";
+  /** 工作区访问方式：read_only 只读参考目标目录；direct 直接在目标目录修改（写任务，git 操作由 Worker 自行执行） */
+  access: "read_only" | "direct";
   /** skill 声明（Phase 5；内置 profile 无声明时用默认行为） */
   skills?: TeamProfileSkills;
   /** 专属 backend 类型（如 "claude"）；未设置时复用主 Agent 的 backend */
@@ -36,7 +36,7 @@ export function teamProfileToWorkerProfile(p: {
   prompt: string;
   principles?: string;
   workflow?: string;
-  access: "read_only" | "scratch";
+  access: "read_only" | "direct";
   maxConcurrent?: number;
   skills?: TeamProfileSkills;
   backend?: string;
@@ -150,7 +150,7 @@ export const STATIC_WORKER_PROFILES: Record<string, WorkerProfile> = {
       "2. 小步实现，遵循现有代码风格和结构；\n" +
       "3. 编译/测试验证改动（跑相关测试）；\n" +
       "4. 输出：改了什么、为什么、如何验证、风险与未覆盖项。",
-    access: "scratch",
+    access: "direct",
   },
   tester: {
     id: "tester",

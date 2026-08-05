@@ -256,14 +256,12 @@ export class WorkerRuntime {
       // 解析期间用户可能已取消：job 已进入 cancelling 则放弃执行（确认终态由 cancel 流程负责）
       ensureNotCancelled();
 
-      // 工作区准备（§12）：read_only 直接用目标目录；scratch 用独立工作目录
+      // 工作区准备（§12）：访问方式由 Profile 决定——read_only 目标目录只读 + 产物目录；
+      // direct 直接在目标目录修改（git 操作由 Worker 自行执行）
       const { workspaceProvider } = this.options;
-      if (job.workspacePolicy === "read_only" || !workspaceProvider) {
-        prepared = await workspaceProvider?.prepare(job.id, job.workspacePolicy, job.workdir)
-          ?? { execDir: job.workdir, managed: false };
-      } else {
-        prepared = await workspaceProvider.prepare(job.id, job.workspacePolicy, job.workdir);
-      }
+      prepared = workspaceProvider
+        ? await workspaceProvider.prepare(job.id, profile.access, job.workdir)
+        : { execDir: job.workdir, managed: false };
       ensureNotCancelled();
 
       // 角色完整内容（定义 + 原则 + 工作流）作为 system prompt 注入，静态固定；

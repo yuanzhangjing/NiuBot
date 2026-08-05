@@ -23,7 +23,7 @@ profiles:
       你是代码审查 Worker。
   - id: developer
     description: 开发
-    access: scratch
+    access: direct
     maxConcurrent: 1
     prompt: |
       你是开发 Worker。
@@ -46,7 +46,7 @@ describe("parseTeamConfig", () => {
     expect(config.maxJobsPerWork).toBe(8);
     expect(config.profiles).toHaveLength(2);
     expect(config.profiles[0]!.id).toBe("reviewer");
-    expect(config.profiles[1]!.access).toBe("scratch");
+    expect(config.profiles[1]!.access).toBe("direct");
   });
 
   test("拒绝非法配置", () => {

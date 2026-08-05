@@ -40,9 +40,6 @@ export const JOB_TERMINAL_STATUSES: readonly JobStatus[] = [
 
 export type WorkVisibility = "private" | "public";
 
-/** 工作空间策略（§12）：read_only 直接访问目标目录；scratch 独立临时目录（写任务：git 操作由 Worker 按任务指引自行执行）。 */
-export type WorkspacePolicy = "read_only" | "scratch";
-
 export interface ArtifactEntry {
   kind: string;
   relativePath: string;
@@ -102,7 +99,6 @@ export interface Job {
   /** 调度认领令牌（fencing），Phase 2 起用于确认结果提交者是最新持有者 */
   claimToken?: string;
   claimedAt?: string;
-  workspacePolicy: WorkspacePolicy;
   /** 依赖的 Job ID（全部 completed 后才能被认领；任一依赖 failed 则本 Job 自动 failed） */
   dependsOn: string[];
   createdAt: string;
@@ -199,9 +195,8 @@ export interface CreateJobInput {
   workId: string;
   workerProfileId: string;
   prompt: string;
-  /** 目标目录（写任务时为目标 repo 路径，供 Worker git 操作参考；scratch 时忽略） */
+  /** 目标目录（read_only 角色为只读参考目录；direct 角色为直接修改的仓库路径） */
   workdir: string;
-  workspacePolicy?: WorkspacePolicy;
   /** 依赖的 Job ID（同一 Work 内；全部完成后本 Job 才能执行） */
   dependsOn?: string[];
 }

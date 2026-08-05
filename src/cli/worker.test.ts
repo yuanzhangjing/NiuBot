@@ -76,7 +76,6 @@ beforeEach(() => {
           workerProfileId: command.workerProfileId,
           prompt: command.prompt,
           workdir: command.workdir ?? tempRoot,
-          workspacePolicy: command.workspacePolicy,
           dependsOn: command.dependsOn,
         }, command.idempotencyKey);
         return { output: job.id };

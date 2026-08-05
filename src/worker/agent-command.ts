@@ -1,5 +1,3 @@
-import type { WorkspacePolicy } from "./types.js";
-
 /**
  * 主 Agent 在一次 Pipeline 回合内可以请求的 Worker 写操作。
  * CLI 只负责解析参数；身份、权限、资源归属和状态流转由 Pipeline 决定。
@@ -15,7 +13,6 @@ export type WorkerAgentCommand =
       workerProfileId: string;
       prompt: string;
       workdir?: string;
-      workspacePolicy?: WorkspacePolicy;
       dependsOn?: string[];
       idempotencyKey: string;
     }

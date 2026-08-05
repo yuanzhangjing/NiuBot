@@ -15,7 +15,8 @@ import { createHash, randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import yaml from "yaml";
 
-import type { WorkspacePolicy } from "./types.js";
+/** 工作区访问方式：read_only 只读参考；direct 直接在目标目录修改（git 操作由 Worker 自行执行） */
+export type WorkspaceAccess = "read_only" | "direct";
 
 export interface TeamProfileSkills {
   sharedSets?: string[];
@@ -33,7 +34,7 @@ export interface TeamProfileConfig {
   principles?: string;
   /** 典型工作流（system prompt；与内置角色一致的分层注入） */
   workflow?: string;
-  access: WorkspacePolicy;
+  access: WorkspaceAccess;
   maxConcurrent?: number;
   skills?: TeamProfileSkills;
   /** 专属 backend 类型（如 "claude"）；未设置时复用主 Agent 的 backend */
@@ -105,7 +106,7 @@ export function parseTeamConfig(yamlText: string): TeamConfig {
       throw new Error(`profile ${id} 缺少 prompt`);
     }
     const access = p["access"] ?? "read_only";
-    if (!["read_only", "scratch"].includes(access as string)) {
+    if (!["read_only", "direct"].includes(access as string)) {
       throw new Error(`profile ${id} 的 access 非法: ${String(access)}`);
     }
     const maxConcurrent = p["maxConcurrent"] === undefined ? undefined : toPositiveInt(p["maxConcurrent"], 1, `profiles.${id}.maxConcurrent`);
@@ -138,7 +139,7 @@ export function parseTeamConfig(yamlText: string): TeamConfig {
       prompt,
       principles: typeof p["principles"] === "string" ? p["principles"] : undefined,
       workflow: typeof p["workflow"] === "string" ? p["workflow"] : undefined,
-      access: access as WorkspacePolicy,
+      access: access as WorkspaceAccess,
       maxConcurrent,
       skills,
       // 空串视为未配置（避免 backend: "" 静默回退主 backend 但 model 仍覆盖生效）

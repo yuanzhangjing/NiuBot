@@ -118,11 +118,6 @@ async function handleJobCreate(ctx: WorkerCliContext, execute: WorkerCommandExec
   const prompt = readFileOrFail(fileIndex >= 0 ? args[fileIndex + 1] : undefined, "job 文件");
   const workdirIndex = args.indexOf("--workdir");
   const workdir = workdirIndex >= 0 ? args[workdirIndex + 1]! : ctx.workDir;
-  const workspaceIndex = args.indexOf("--workspace");
-  const workspacePolicy = workspaceIndex >= 0 ? args[workspaceIndex + 1] : undefined;
-  if (workspacePolicy && !["read_only", "scratch"].includes(workspacePolicy)) {
-    fail(`--workspace 必须是 read_only / scratch，收到: ${workspacePolicy}`);
-  }
   const dependsOn = args
     .map((a, i) => (args[i - 1] === "--depends-on" ? a : undefined))
     .filter((a): a is string => !!a)
@@ -134,10 +129,9 @@ async function handleJobCreate(ctx: WorkerCliContext, execute: WorkerCommandExec
       workerProfileId: workerId,
       prompt: prompt.trim(),
       workdir,
-      workspacePolicy: workspacePolicy as "read_only" | "scratch" | undefined,
       dependsOn: dependsOn.length > 0 ? dependsOn : undefined,
       idempotencyKey: idempotencyKey(
-        `job:${workId}:${workerId}:${workspacePolicy ?? "default"}:${dependsOn.join(",")}:${path.resolve(workdir)}`,
+        `job:${workId}:${workerId}:${dependsOn.join(",")}:${path.resolve(workdir)}`,
         prompt,
         ctx.chatId,
       ),
@@ -271,7 +265,7 @@ export async function handleWorker(
 
 用法：
   nbt worker work create --file <work.md>       创建 Work（来源自动绑定当前会话）
-  nbt worker job create --work <id> --worker <profile> --file <job.md> [--workdir <dir>] [--workspace read_only|scratch|git_worktree] [--depends-on <job-id>[,<job-id>...]]
+  nbt worker job create --work <id> --worker <profile> --file <job.md> [--workdir <dir>] [--depends-on <job-id>[,<job-id>...]]
   nbt worker list [--status <status>]           列出当前会话的 Work 和 Job
   nbt worker get <work-or-job-id>               查看详情
   nbt sessions get <job-id>                     查看 Worker 运行中或已结束的 session 日志
