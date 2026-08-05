@@ -7,8 +7,9 @@
 
 import type Database from "better-sqlite3";
 import { createLogger } from "../logger.js";
-import { utcDateTimeForSql } from "../tz.js";
+import { TZ, utcDateTimeForSql } from "../tz.js";
 import { assertChatAccess, type ChatAccessContext } from "./access.js";
+import { matchesCron, normalizeDatetime } from "./cron.js";
 
 const log = createLogger("loop");
 
@@ -36,6 +37,10 @@ export interface LoopJob {
   runStartedAt: string | null;
   lastError: string | null;
   consecutiveFailures: number;
+  /** 日历表达式触发（与 cron 模式同构）：非空时触发由 matchesCron + 分钟级防重决定 */
+  cronExpr: string | null;
+  timezone: string;
+  description: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -55,6 +60,9 @@ interface RawLoopRow {
   run_started_at: string | null;
   last_error: string | null;
   consecutive_failures: number;
+  cron_expr: string | null;
+  timezone: string | null;
+  description: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -75,6 +83,9 @@ function toLoopJob(row: RawLoopRow): LoopJob {
     runStartedAt: row.run_started_at,
     lastError: row.last_error,
     consecutiveFailures: row.consecutive_failures,
+    cronExpr: row.cron_expr,
+    timezone: row.timezone ?? TZ,
+    description: row.description,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -110,8 +121,14 @@ export function addLoopJob(
     prompt: string;
     maxTimes?: number;
     durationSeconds?: number;
+    /** 绝对截止时间（UTC SQL），覆盖 durationSeconds 推导；用于 --until */
+    untilTime?: string;
     /** 覆盖 next_run_at（UTC SQL 时间），用于一次性定时/延迟任务；缺省为 now + interval */
     runAt?: string;
+    /** 日历表达式触发（如 "0 9 * * 1"）：next_run_at 退化为检查点，触发由表达式匹配决定 */
+    cronExpr?: string;
+    timezone?: string;
+    description?: string;
     now?: Date;
   },
 ): number {
@@ -124,12 +141,17 @@ export function addLoopJob(
   if (options.maxTimes !== undefined && (!Number.isInteger(options.maxTimes) || options.maxTimes <= 0)) {
     throw new Error("Loop 次数必须是正整数");
   }
-  const durationSeconds = options.durationSeconds ?? DEFAULT_LOOP_DURATION_SECONDS;
-  if (!Number.isInteger(durationSeconds) || durationSeconds <= 0 || durationSeconds > MAX_LOOP_DURATION_SECONDS) {
-    throw new Error(`Loop 最长只能运行 ${formatLoopInterval(MAX_LOOP_DURATION_SECONDS)}`);
-  }
-  if (durationSeconds < options.intervalSeconds) {
-    throw new Error("Loop 运行时限不能短于执行间隔");
+  // 日历触发的任务天然低频（可能每周一次），默认时限放宽到最长值；相对间隔任务保持 24h
+  const durationSeconds = options.untilTime
+    ? undefined
+    : options.durationSeconds ?? (options.cronExpr ? MAX_LOOP_DURATION_SECONDS : DEFAULT_LOOP_DURATION_SECONDS);
+  if (durationSeconds !== undefined) {
+    if (!Number.isInteger(durationSeconds) || durationSeconds <= 0 || durationSeconds > MAX_LOOP_DURATION_SECONDS) {
+      throw new Error(`Loop 最长只能运行 ${formatLoopInterval(MAX_LOOP_DURATION_SECONDS)}`);
+    }
+    if (durationSeconds < options.intervalSeconds) {
+      throw new Error("Loop 运行时限不能短于执行间隔");
+    }
   }
 
   const activeCount = db.prepare(`
@@ -143,16 +165,20 @@ export function addLoopJob(
   const result = db.prepare(`
     INSERT INTO loop_jobs (
       chat_id, creator_user_id, interval_seconds, prompt,
-      max_times, until_time, next_run_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      max_times, until_time, next_run_at, cron_expr, timezone, description
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     options.chatId,
     options.creatorUserId,
     options.intervalSeconds,
     prompt,
     options.maxTimes ?? null,
-    addSeconds(now, durationSeconds),
-    options.runAt ?? addSeconds(now, options.intervalSeconds),
+    options.untilTime ?? addSeconds(now, durationSeconds!),
+    // cron 型：检查点立即生效（触发由表达式匹配决定）；其余按 runAt 或间隔
+    options.runAt ?? (options.cronExpr ? utcDateTimeForSql(now) : addSeconds(now, options.intervalSeconds)),
+    options.cronExpr ?? null,
+    options.timezone ?? TZ,
+    options.description ?? null,
   );
   return Number(result.lastInsertRowid);
 }
@@ -231,8 +257,23 @@ export function claimDueLoopJobs(db: Database.Database, now: Date = new Date()):
       UPDATE loop_jobs SET status = 'queued', updated_at = ?
       WHERE id = ? AND status = 'active'
     `);
+    // cron 型在 claim 时记 last_run_at：同一分钟内的重复检查会被防重逻辑挡掉
+    const updateCron = db.prepare(`
+      UPDATE loop_jobs SET status = 'queued', last_run_at = ?, updated_at = ?
+      WHERE id = ? AND status = 'active'
+    `);
     const claimed: LoopJob[] = [];
     for (const row of rows) {
+      const job = toLoopJob(row);
+      if (job.cronExpr) {
+        const nowMinute = nowStr.slice(0, 16);
+        if (job.lastRunAt && normalizeDatetime(job.lastRunAt).slice(0, 16) === nowMinute) continue;
+        if (!matchesCron(job.cronExpr, now, job.timezone)) continue;
+        if (updateCron.run(nowStr, nowStr, row.id).changes === 1) {
+          claimed.push(toLoopJob({ ...row, status: "queued", last_run_at: nowStr, updated_at: nowStr }));
+        }
+        continue;
+      }
       if (update.run(nowStr, row.id).changes === 1) {
         claimed.push(toLoopJob({ ...row, status: "queued", updated_at: nowStr }));
       }
@@ -265,6 +306,11 @@ export function startLoopRun(
   return start() === 1 ? getLoopJob(db, id) : undefined;
 }
 
+/** cron 型 loop 的 next_run_at 退化为检查点：每 60s 重新评估一次表达式匹配 */
+function nextLoopRunAt(job: LoopJob, now: Date): string {
+  return job.cronExpr ? addSeconds(now, 60) : addSeconds(now, job.intervalSeconds);
+}
+
 export function completeLoopRun(
   db: Database.Database,
   id: number,
@@ -280,7 +326,7 @@ export function completeLoopRun(
       UPDATE loop_jobs
       SET status = 'active', next_run_at = ?, run_started_at = NULL, updated_at = ?
       WHERE id = ? AND status = 'running'
-    `).run(addSeconds(now, job.intervalSeconds), nowStr, id);
+    `).run(nextLoopRunAt(job, now), nowStr, id);
     return getLoopJob(db, id);
   }
 
@@ -288,6 +334,22 @@ export function completeLoopRun(
     const nextCount = job.runCount + 1;
     const completed = (job.maxTimes !== null && nextCount >= job.maxTimes)
       || nowStr >= job.untilTime;
+    if (job.cronExpr) {
+      // 保持 last_run_at（claim 时已写入，用于分钟级防重）
+      db.prepare(`
+        UPDATE loop_jobs
+        SET status = ?, run_count = ?, next_run_at = ?,
+            run_started_at = NULL, last_error = NULL, consecutive_failures = 0, updated_at = ?
+        WHERE id = ? AND status = 'running'
+      `).run(
+        completed ? "completed" : "active",
+        nextCount,
+        nextLoopRunAt(job, now),
+        nowStr,
+        id,
+      );
+      return getLoopJob(db, id);
+    }
     db.prepare(`
       UPDATE loop_jobs
       SET status = ?, run_count = ?, last_run_at = ?, next_run_at = ?,
@@ -297,7 +359,7 @@ export function completeLoopRun(
       completed ? "completed" : "active",
       nextCount,
       nowStr,
-      addSeconds(now, job.intervalSeconds),
+      nextLoopRunAt(job, now),
       nowStr,
       id,
     );
@@ -312,7 +374,7 @@ export function completeLoopRun(
     WHERE id = ? AND status = 'running'
   `).run(
     failures >= LOOP_FAILURE_LIMIT ? "paused" : "active",
-    addSeconds(now, job.intervalSeconds),
+    nextLoopRunAt(job, now),
     (result.error ?? "Loop execution failed").slice(0, 2_000),
     failures,
     nowStr,
@@ -330,7 +392,7 @@ export function releaseQueuedLoopJob(db: Database.Database, id: number, now: Dat
     UPDATE loop_jobs
     SET status = 'active', next_run_at = ?, updated_at = ?
     WHERE id = ? AND status = 'queued'
-  `).run(addSeconds(now, job.intervalSeconds), nowStr, id).changes === 1;
+  `).run(nextLoopRunAt(job, now), nowStr, id).changes === 1;
 }
 
 export type LoopExecutor = (job: LoopJob) => Promise<void> | void;

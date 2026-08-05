@@ -679,11 +679,17 @@ describe("Pipeline Loop integration", () => {
       cron_expr: "*/5 * * * *",
     });
 
-    // loop + cron 表达式：拒绝（loop 无日历语义）
-    await expect(pipeline.executeScheduleAgentCommand("c1", {
+    // loop + cron 表达式：日历触发也走主会话（表达式 + 时区落库，检查点立即生效）
+    const loopCronResult = await pipeline.executeScheduleAgentCommand("c1", {
       type: "create.schedule", mode: "loop", trigger: "cron", cronExpr: "0 8 * * *",
       prompt: "x", timeZone: "Asia/Shanghai",
-    }, "tok-a")).rejects.toThrow("不支持");
+    }, "tok-a");
+    expect(loopCronResult.output).toContain("Created loop:2");
+    expect(loopCronResult.output).toContain("每天 08:00");
+    expect(db.prepare("SELECT cron_expr, timezone FROM loop_jobs WHERE id = 2").get()).toEqual({
+      cron_expr: "0 8 * * *",
+      timezone: "Asia/Shanghai",
+    });
   });
 
   test("disables schedule writes when one merged group turn contains multiple senders", async () => {

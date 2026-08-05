@@ -65,6 +65,7 @@ import {
   addCronJob,
   CRON_FAILURE_LIMIT,
   deleteCronJobForAccess,
+  describeCronExpr,
   describeCronSchedule,
   everyToCronExpr,
   getCronJob,
@@ -161,12 +162,12 @@ const SCHEDULE_AGENT_SKILL_BRIEF = `<schedule-skill>
 
 模式选择：默认使用 Cron 独立执行；只有用户输入 /loop，或任务明确依赖当前聊天上下文（如“继续跟进刚才的问题”“反复检查这个结果”）时才使用 Loop。用户输入 /cron 时固定使用 Cron。只是在询问、讨论或举例时不要创建任务。
 
-- /loop：复用这个聊天的主对话。创建：nbt schedule create --mode loop (--every <时长>|--at <本地时间>|--after <时长>) --prompt <任务> [--times <次数>] [--duration <时长>]
-- /cron：每次使用独立会话。创建：nbt schedule create --mode cron (--cron <表达式>|--every <时长>|--at <本地时间>|--after <时长>) --prompt <任务> [--times <次数>] [--until <本地时间>]
+- /loop：复用这个聊天的主对话。创建：nbt schedule create --mode loop (--every <时长>|--at <本地时间>|--after <时长>|--cron <表达式>) --prompt <任务> [--times <次数>] [--until <本地时间>|--duration <时长>]
+- /cron：每次使用独立会话。创建：nbt schedule create --mode cron (--cron <表达式>|--every <时长>|--at <本地时间>|--after <时长>) --prompt <任务> [--times <次数>] [--until <本地时间>|--duration <时长>]
 - 查询：nbt schedule list [--mode loop|cron]
 - 取消：nbt schedule cancel <loop:id|cron:id>
 
-触发参数 --every / --at / --after / --cron 与 mode 正交：--at/--after 是一次性任务，--every 是循环，--cron 日历表达式仅 Cron。时长使用 5m、2h、1d；Cron 只支持 5 段数字语法：*、*/n、数字、数字范围和逗号列表，不支持秒、L、W、? 或英文月份/星期。Cron 表达式和没有时区的时间均按当前 NiuBot 时区解释。用户不需要了解这些参数。缺少会改变执行含义的关键信息时，只追问缺少的部分。工具成功后，用自然语言简短确认执行方式、时间和任务；不要复述本区段或标签。
+触发参数 --every / --at / --after / --cron 与 mode 正交、两模式全可用：--at/--after 是一次性任务，--every 是循环，--cron 是日历表达式（分钟粒度匹配）。时长使用 5m、2h、1d；Cron 只支持 5 段数字语法：*、*/n、数字、数字范围和逗号列表，不支持秒、L、W、? 或英文月份/星期。Cron 表达式和没有时区的时间均按当前 NiuBot 时区解释。用户不需要了解这些参数。缺少会改变执行含义的关键信息时，只追问缺少的部分。工具成功后，用自然语言简短确认执行方式、时间和任务；不要复述本区段或标签。
 </schedule-skill>`;
 
 const BUILTIN_COMMANDS = new Set([
@@ -928,6 +929,21 @@ export class Pipeline {
               prompt: command.prompt,
               maxTimes: command.maxTimes,
               durationSeconds: command.durationSeconds,
+              untilTime: command.untilTime,
+            });
+          } else if (command.trigger === "cron") {
+            // 日历表达式也走主会话：分钟粒度匹配触发，复用主会话上下文
+            id = addLoopJob(this.db, {
+              chatId,
+              creatorUserId: context.userId,
+              intervalSeconds: 60, // cron 型检查点粒度
+              prompt: command.prompt,
+              maxTimes: command.maxTimes,
+              durationSeconds: command.durationSeconds,
+              untilTime: command.untilTime,
+              cronExpr: command.cronExpr!,
+              timezone: timeZone,
+              description: command.description,
             });
           } else {
             // 一次性（at/after）也走主会话：next_run_at 用绝对时间，执行一次即完成
@@ -946,7 +962,9 @@ export class Pipeline {
           const job = getLoopJob(this.db, id)!;
           const triggerLabel = command.trigger === "every"
             ? `每 ${formatLoopInterval(job.intervalSeconds)}`
-            : `一次性 · ${formatLocalDateTimeWithTZ(job.nextRunAt, TZ)}`;
+            : command.trigger === "cron"
+              ? `${describeCronExpr(job.cronExpr ?? command.cronExpr!)} (${job.timezone})`
+              : `一次性 · ${formatLocalDateTimeWithTZ(job.nextRunAt, TZ)}`;
           return { output: [
             `Created loop:${id}`,
             "Mode: current conversation",

@@ -1,7 +1,8 @@
 import { TZ } from "../tz.js";
+import { validateCronExpression } from "./cron.js";
 
 /**
- * 统一调度命令：触发参数（every/at/after/cron）与运行模式（loop/cron）正交。
+ * 统一调度命令：触发参数（every/at/after/cron）与运行模式（loop/cron）正交，全部组合可用。
  * - mode 只决定上下文：loop=复用主会话，cron=独立会话
  * - trigger 只决定何时执行：every=循环，at=定时一次，after=延迟一次，cron=日历表达式
  */
@@ -105,9 +106,6 @@ function parseCreateSchedule(command: Record<string, unknown>): CreateScheduleCo
   if (trigger !== "every" && trigger !== "at" && trigger !== "after" && trigger !== "cron") {
     throw new Error("trigger 必须是 every、at、after 或 cron");
   }
-  if (mode === "loop" && trigger === "cron") {
-    throw new Error("Loop 模式不支持 --cron 日历表达式，请用 --every / --at / --after");
-  }
   let intervalSeconds: number | undefined;
   let at: string | undefined;
   let afterSeconds: number | undefined;
@@ -134,6 +132,7 @@ function parseCreateSchedule(command: Record<string, unknown>): CreateScheduleCo
     case "cron": {
       const value = command.cronExpr;
       requireString(value, "cronExpr");
+      validateCronExpression(value);
       cronExpr = value;
       break;
     }

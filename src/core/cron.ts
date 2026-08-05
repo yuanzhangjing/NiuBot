@@ -522,7 +522,7 @@ export function getCronJob(db: Database.Database, id: number): (CronJob & { crea
  * Supports: minute hour day month weekday
  * Each field: number, *, or comma-separated values
  */
-function matchesCron(expr: string, date: Date, timeZone: string): boolean {
+export function matchesCron(expr: string, date: Date, timeZone: string): boolean {
   const parts = expr.trim().split(/\s+/);
   if (parts.length < 5) return false;
 
@@ -561,7 +561,7 @@ function matchesCronField(field: string, value: number, minimum: number): boolea
 }
 
 /** Normalize datetime string: replace 'T' separator with space for consistent comparison */
-function normalizeDatetime(s: string): string {
+export function normalizeDatetime(s: string): string {
   return s.replace("T", " ");
 }
 

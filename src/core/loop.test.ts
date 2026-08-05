@@ -174,4 +174,55 @@ describe("Loop state machine", () => {
     expect(stopped).toBe(true);
     expect(getLoopJob(db, 2)?.status).toBe("active");
   });
+
+  test("calendar-expression loops claim on minute match with same-minute dedupe", () => {
+    const db = fixture();
+    const id = addLoopJob(db, {
+      chatId: "c1", creatorUserId: "u1", intervalSeconds: 60,
+      prompt: "daily check", cronExpr: "30 8 * * *", timezone: "UTC",
+      now: new Date("2026-01-01T00:00:00Z"),
+    });
+
+    // 检查点立即生效；08:29 不匹配
+    expect(claimDueLoopJobs(db, new Date("2026-01-01T08:29:00Z"))).toEqual([]);
+    // 08:30 匹配，claim 并写入 last_run_at（分钟级防重）
+    const claimed = claimDueLoopJobs(db, new Date("2026-01-01T08:30:00Z"));
+    expect(claimed.map((job) => job.id)).toEqual([id]);
+    expect(claimDueLoopJobs(db, new Date("2026-01-01T08:30:30Z"))).toEqual([]);
+    startLoopRun(db, id, new Date("2026-01-01T08:30:30Z"));
+
+    // 完成后保持 active：next_run_at 退化为 +60s 检查点，last_run_at 保持 claim 值
+    completeLoopRun(db, id, { success: true, now: new Date("2026-01-01T08:30:45Z") });
+    const job = getLoopJob(db, id)!;
+    expect(job.status).toBe("active");
+    expect(job.runCount).toBe(1);
+    expect(job.nextRunAt).toBe("2026-01-01 08:31:45");
+    expect(job.lastRunAt).toBe("2026-01-01 08:30:00");
+
+    // 完成后的同一分钟不重复触发；次日同一时刻再次触发
+    expect(claimDueLoopJobs(db, new Date("2026-01-01T08:31:00Z"))).toEqual([]);
+    expect(claimDueLoopJobs(db, new Date("2026-01-02T08:30:00Z")).map((job) => job.id)).toEqual([id]);
+  });
+
+  test("calendar-expression loops skip weekend matches and respect maxTimes", () => {
+    const db = fixture();
+    // 周一至周五 09:00
+    const id = addLoopJob(db, {
+      chatId: "c1", creatorUserId: "u1", intervalSeconds: 60,
+      prompt: "weekday check", cronExpr: "0 9 * * 1-5", timezone: "UTC",
+      maxTimes: 2, now: new Date("2026-01-01T00:00:00Z"),
+    });
+    // 2026-01-03 是周六，不匹配
+    expect(claimDueLoopJobs(db, new Date("2026-01-03T09:00:00Z"))).toEqual([]);
+    // 周一 01-05 匹配；完成后 run_count=1，再完成一次达到 maxTimes 收尾
+    expect(claimDueLoopJobs(db, new Date("2026-01-05T09:00:00Z")).map((job) => job.id)).toEqual([id]);
+    startLoopRun(db, id, new Date("2026-01-05T09:00:30Z"));
+    completeLoopRun(db, id, { success: true, now: new Date("2026-01-05T09:00:30Z") });
+    expect(claimDueLoopJobs(db, new Date("2026-01-05T09:01:00Z"))).toEqual([]);
+    expect(claimDueLoopJobs(db, new Date("2026-01-06T09:00:00Z")).map((job) => job.id)).toEqual([id]);
+    startLoopRun(db, id, new Date("2026-01-06T09:00:30Z"));
+    completeLoopRun(db, id, { success: true, now: new Date("2026-01-06T09:00:30Z") });
+    expect(claimDueLoopJobs(db, new Date("2026-01-07T09:00:00Z"))).toEqual([]);
+    expect(getLoopJob(db, id)?.status).toBe("completed");
+  });
 });

@@ -1,7 +1,7 @@
 /** Unified model-facing scheduler tool for chat-scoped Loop and independent Cron jobs. */
 
 import type Database from "better-sqlite3";
-import { listCronJobsForAccess } from "../core/cron.js";
+import { describeCronExpr, listCronJobsForAccess } from "../core/cron.js";
 import {
   formatLoopInterval,
   listLoopJobs,
@@ -95,15 +95,12 @@ async function createSchedule(
   if (!prompt) fail("Error: --prompt is required");
   const maxTimes = optionalPositiveInteger(flags["times"], "--times");
 
-  // 触发参数与 mode 正交：--every / --at / --after / --cron 四选一
+  // 触发参数与 mode 正交、两模式全可用：--every / --at / --after / --cron 四选一
   const triggers = ["every", "at", "after", "cron"].filter((t) => flags[t] !== undefined);
   if (triggers.length !== 1) {
     fail("Error: 需要且只能指定一个触发参数：--every / --at / --after / --cron");
   }
   const trigger = triggers[0]! as ScheduleTrigger;
-  if (mode === "loop" && trigger === "cron") {
-    fail("Error: Loop 模式不支持 --cron 日历表达式，请用 --every / --at / --after");
-  }
 
   const command: CreateScheduleCommand = {
     type: "create.schedule",
@@ -133,15 +130,15 @@ async function createSchedule(
       command.cronExpr = flags["cron"];
       break;
   }
-  if (mode === "loop") {
-    const duration = flags["duration"];
-    const durationSeconds = duration ? parseLoopDuration(duration) : undefined;
-    if (duration && durationSeconds === undefined) fail("Error: --duration must look like 30m, 2h, or 1d");
+  // 截止参数两模式通用：--until 绝对截止，--duration 相对时长（二者都给了时以 --until 为准）
+  if (flags["until"]) command.untilTime = flags["until"];
+  const duration = flags["duration"];
+  if (duration) {
+    const durationSeconds = parseLoopDuration(duration);
+    if (durationSeconds === undefined) fail("Error: --duration must look like 30m, 2h, or 1d");
     command.durationSeconds = durationSeconds;
-  } else {
-    command.untilTime = flags["until"];
-    command.description = flags["description"] ?? flags["desc"];
   }
+  command.description = flags["description"] ?? flags["desc"];
 
   const result = await execute(chatId, command);
   console.log(result.output);
@@ -161,7 +158,10 @@ function listSchedules(
   let count = 0;
   if (!mode || mode === "loop") {
     for (const job of listLoopJobs(db, chatId)) {
-      console.log(`loop:${job.id} [${job.status}] every ${formatLoopInterval(job.intervalSeconds)} (${job.runCount}${job.maxTimes ? `/${job.maxTimes}` : " runs"})`);
+      const schedule = job.cronExpr
+        ? `${describeCronExpr(job.cronExpr)} (${job.timezone})`
+        : `every ${formatLoopInterval(job.intervalSeconds)}`;
+      console.log(`loop:${job.id} [${job.status}] ${schedule} (${job.runCount}${job.maxTimes ? `/${job.maxTimes}` : " runs"})`);
       console.log(`  Task: ${truncate(job.prompt, 100)}`);
       count++;
     }
@@ -214,14 +214,21 @@ function printHelp(): void {
   --mode loop    复用当前聊天主会话
   --mode cron    每次使用独立会话
 
-触发参数（四选一，与 mode 正交）：
+触发参数（四选一，两模式通用）：
   --every 5m    循环执行（cron 模式转为表达式，最小 1 分钟）
   --at "2026-08-05 09:00"   指定本地时间执行一次
   --after 30m   延迟多久后执行一次
-  --cron "0 9 * * *"   日历表达式定时（仅 cron 模式）
+  --cron "0 9 * * *"   日历表达式定时（分钟粒度匹配）
+
+通用选项：
+  --times <n>          最多执行 n 次
+  --until "2026-08-10 18:00"   绝对截止时间
+  --duration 2h        相对运行时长（--until 优先级更高）
+  --description "..."  任务描述（cron 模式用于独立会话）
 
 示例：
-  create --mode loop --every 5m --prompt "..." [--times 4] [--duration 2h]
+  create --mode loop --every 5m --prompt "..." [--times 4] [--until "18:00"]
+  create --mode loop --cron "0 9 * * 1" --prompt "..." [--until "2026-09-01 09:00"]
   create --mode loop --at "2026-08-05 18:00" --prompt "..."
   create --mode cron --cron "0 9 * * *" --prompt "..." [--times 5] [--until "2026-08-10 18:00"]
   create --mode cron --after 30m --prompt "..."

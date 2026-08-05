@@ -685,6 +685,19 @@ const migrations: Migration[] = [
       }
     },
   },
+  {
+    version: 25,
+    description: "Allow calendar expressions (cron) in Loop jobs with timezone",
+    up: (db) => {
+      const columns = new Set(
+        (db.prepare("PRAGMA table_info(loop_jobs)").all() as Array<{ name: string }>)
+          .map((column) => column.name),
+      );
+      if (!columns.has("cron_expr")) db.exec("ALTER TABLE loop_jobs ADD COLUMN cron_expr TEXT");
+      if (!columns.has("timezone")) db.exec("ALTER TABLE loop_jobs ADD COLUMN timezone TEXT");
+      if (!columns.has("description")) db.exec("ALTER TABLE loop_jobs ADD COLUMN description TEXT");
+    },
+  },
 ];
 
 const transportMigrations: Migration[] = [
@@ -806,7 +819,7 @@ const transportMigrations: Migration[] = [
 export const LATEST_SCHEMA_VERSION = migrations[migrations.length - 1]!.version;
 // Loop v22 保留了旧 session_id 列作为回滚兼容占位，当前运行时不再读取或写入它。
 // 因此这些版本升级后仍可由原版本打开；新建 Loop 在旧代码中不会继续执行。
-export const ROLLBACK_COMPATIBLE_SCHEMA_VERSIONS = [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24] as const;
+export const ROLLBACK_COMPATIBLE_SCHEMA_VERSIONS = [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25] as const;
 export const LATEST_TRANSPORT_SCHEMA_VERSION = transportMigrations[transportMigrations.length - 1]!.version;
 const CORE_SCHEMA_COMPONENT = "core";
 
