@@ -43,10 +43,7 @@ active 任务会注入新 session；inactive 和 archived 不注入。
 bot profile 只放 bot 级长期人格、语气和抽象行为规则，不放具体项目、目录结构、任务进度或实现细节。
 
 ## Compact Recovery
-如果系统规则丢失，运行 nbt system-rules。
-如果最近消息丢失，运行 nbt messages list。
-如果历史决策丢失，使用 nbt sessions search/get 检索当前聊天的原生 session 记录。
-如果任务状态丢失，运行 nbt task list，并读取对应 task README。
+系统规则、最近消息、历史决策或任务状态丢失时，按 nbt-tools 技能的恢复指引处理（规则入口命令 nbt system-rules）。
 不要把 compact 摘要当成原文。
 
 ## Workspace Rules Boundary
