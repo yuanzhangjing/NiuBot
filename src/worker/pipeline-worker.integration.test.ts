@@ -1084,7 +1084,7 @@ test("延续性 Job 自动注入同 Work 前序结果和检索入口", async () 
   expect(jobBPrompt!.text).toContain("nbt sessions search");
 });
 
-test("Worker 开启时注入派工 Skill，暂停时注入停用指令", async () => {
+test("Worker 暂停时注入停用指令；开启时派工说明走技能不再注入", async () => {
   teamConfig.setEnabled(false);
   await pipeline.start();
 
@@ -1095,13 +1095,13 @@ test("Worker 开启时注入派工 Skill，暂停时注入停用指令", async (
   expect(first.text).toContain("Worker 当前已暂停");
   expect(first.text).not.toContain("nbt worker job create");
 
-  // 开启：注入派工 Skill
+  // 开启：派工说明已 skill 化（skills/nbt-tools），不注入，由 agent CLI 按需加载
   teamConfig.setEnabled(true);
   pipeline.handleInbound(userDelivery(CHAT_ID, "帮我调研一下", 2));
   await waitFor(() => backend.messages.some((m) => m.text.includes("帮我调研一下")));
   const second = backend.messages.find((m) => m.text.includes("帮我调研一下"))!;
-  expect(second.text).toContain("<tool-briefs>");
-  expect(second.text).toContain("nbt worker job create");
+  expect(second.text).not.toContain("nbt worker job create");
+  expect(second.text).not.toContain("Worker 当前已暂停");
 });
 
 test("配置应用后 registry 热更新（新 profile 可用）", async () => {

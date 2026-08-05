@@ -537,7 +537,7 @@ describe("Pipeline Loop integration", () => {
     expect(agent.sendMessageCalls[1]).toContain("continue in whichever main conversation is current");
   });
 
-  test("/loop and /cron natural language are interpreted by the main model with the scheduling tool", async () => {
+  test("/loop and /cron natural language pass through to the model (schedule instructions are skill-based now)", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-natural-schedule-test-"));
     tempDirs.push(dir);
     const db = initDatabase(path.join(dir, "niubot.db"));
@@ -553,8 +553,8 @@ describe("Pipeline Loop integration", () => {
       platformMsgId: "natural-loop",
     }));
     await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(1));
-    expect(agent.sendMessageCalls[0]).toContain("「/loop <任务与时间>」→ mode=main");
-    expect(agent.sendMessageCalls[0]).toContain("默认 mode=isolated");
+    // 调度说明已 skill 化（skills/nbt-tools），不再强制注入，/loop 消息原样交给模型
+    expect(agent.sendMessageCalls[0]).not.toContain("mode=main");
     expect(agent.sendMessageCalls[0]).toContain("/loop 每5分钟帮我检查部署状态，持续2小时");
 
     (pipeline as any).handleMessage(createMessage({
@@ -562,7 +562,6 @@ describe("Pipeline Loop integration", () => {
       platformMsgId: "natural-cron",
     }));
     await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(2));
-    expect(agent.sendMessageCalls[1]).not.toContain("<tool-briefs>");
     expect(agent.sendMessageCalls[1]).toContain("/cron 每天上午9点提醒我提交日报");
 
     (pipeline as any).handleMessage(createMessage({
@@ -570,13 +569,12 @@ describe("Pipeline Loop integration", () => {
       platformMsgId: "natural-default-cron",
     }));
     await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(3));
-    expect(agent.sendMessageCalls[2]).not.toContain("<tool-briefs>");
     expect(agent.sendMessageCalls[2]).toContain("每天上午9点提醒我提交日报");
     expect(db.prepare("SELECT COUNT(*) AS count FROM loop_jobs").get()).toEqual({ count: 0 });
     expect(db.prepare("SELECT COUNT(*) AS count FROM cron_jobs").get()).toEqual({ count: 0 });
   });
 
-  test("reply-form /loop keeps quoted context after the scheduling tool instructions were injected", async () => {
+  test("reply-form /loop keeps quoted context and reaches the model unchanged", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-reply-schedule-test-"));
     tempDirs.push(dir);
     const db = initDatabase(path.join(dir, "niubot.db"));
@@ -592,7 +590,6 @@ describe("Pipeline Loop integration", () => {
       platformMsgId: "reply-parent",
     }));
     await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(1));
-    expect(agent.sendMessageCalls[0]).toContain("「/loop <任务与时间>」→ mode=main");
     (pipeline as any).handleMessage(createMessage({
       contentText: "/loop 每5分钟检查一次这个状态",
       platformMsgId: "reply-loop",
@@ -600,7 +597,6 @@ describe("Pipeline Loop integration", () => {
     }));
 
     await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(2));
-    expect(agent.sendMessageCalls[1]).not.toContain("<tool-briefs>");
     expect(agent.sendMessageCalls[1]).toContain("quoted:");
     expect(db.prepare("SELECT COUNT(*) AS count FROM loop_jobs").get()).toEqual({ count: 0 });
   });
@@ -728,7 +724,6 @@ describe("Pipeline Loop integration", () => {
     await vi.waitFor(() => expect(sentCards).toHaveLength(1));
     expect(sentCards[0]!.content).toContain("safe response");
     expect(sentCards[0]!.content).not.toContain("internal secret");
-    expect(sentCards[0]!.content).not.toContain("<tool-briefs>");
   });
 
   test("stopping a Loop turn before Agent execution keeps the Session and reschedules the Loop", async () => {
@@ -3340,16 +3335,12 @@ describe("Pipeline.recover", () => {
 
     expect(agent.sendMessageCalls).toHaveLength(4);
     expect(agent.sendMessageCalls[0]).not.toContain(COMPACT_RECOVERY_REMINDER);
-    expect(agent.sendMessageCalls[0]).toContain("<tool-briefs>");
     expect(agent.sendMessageCalls[1]).toContain(COMPACT_RECOVERY_REMINDER);
-    expect(agent.sendMessageCalls[1]).toContain("<tool-briefs>");
     expect(agent.sendMessageCalls[1]).not.toContain("<niubot-system-rules>");
     expect(agent.sendMessageCalls[1]).toContain("<session-profile");
     expect(agent.sendMessageCalls[1]).toContain("second");
     expect(agent.sendMessageCalls[2]).not.toContain(COMPACT_RECOVERY_REMINDER);
-    expect(agent.sendMessageCalls[2]).not.toContain("<tool-briefs>");
     expect(agent.sendMessageCalls[3]).toContain(COMPACT_RECOVERY_REMINDER);
-    expect(agent.sendMessageCalls[3]).toContain("<tool-briefs>");
     expect(agent.sendMessageCalls[3]).not.toContain("<niubot-system-rules>");
     expect(agent.sendMessageCalls[3]).toContain("fourth");
     for (const call of agent.sendMessageCalls) {
