@@ -12,17 +12,17 @@ NiuBot 的工具手册，全部通过 `nbt` CLI 调用。**基础工具（数据
 
 ### 任务管理（nbt task）
 
-任务生命周期用 `nbt task` 管理：
+任务生命周期使用 `nbt task` 管理：
 
 - 不要手动创建 tasks/ 目录
 - 任务 README 是任务的长期索引和状态文件，记录目标、状态、关键入口、重要决策和下一步，不记录聊天流水
 - active 任务会注入新 session；inactive 和 archived 不注入
 - 私聊默认 private，群聊默认 public；群聊不能暴露 private task
-- 任务状态丢失时：`nbt task list`，并读取对应任务 README
+- 如果任务状态丢失，运行 `nbt task list`，并读取对应 task README
 
 ### 用户记忆（nbt user-memory）
 
-- 用户记忆用 `nbt user-memory` 读写
+- 用户记忆使用 `nbt user-memory` 读写；查看记忆详情用 `nbt user-memory get <id>`
 - 项目、任务、方案和进度不要写进用户记忆
 
 ### 身份与场景（nbt whoami）
@@ -31,15 +31,13 @@ NiuBot 的工具手册，全部通过 `nbt` CLI 调用。**基础工具（数据
 
 ### 会话与消息恢复
 
-上下文或状态丢失时按需恢复（**不要把 compact 摘要当成原文**）：
+如果上下文或状态丢失，按丢失内容恢复（**不要把 compact 摘要当成原文**）：
 
-| 丢失了什么 | 做什么 |
-|---|---|
-| 系统规则 | `nbt system-rules` |
-| 最近消息 | `nbt messages list` |
-| 历史决策 | `nbt sessions search/get` 检索当前聊天所在 chat 的历史 session 记录 |
+- 如果系统规则丢失，运行 `nbt system-rules`
+- 如果最近消息丢失，运行 `nbt messages list`
+- 如果历史决策丢失，使用 `nbt sessions search/get` 检索当前聊天的原生 session 记录
 
-### 数据访问规则
+### 数据访问
 
 - 用户数据必须通过 nbt CLI 访问，不能直接读取数据库文件
 
