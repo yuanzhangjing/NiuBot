@@ -87,16 +87,6 @@ export interface ContinuationRow {
   created_at: string;
 }
 
-export interface ResourceLeaseRow {
-  id: number;
-  bot_id: string;
-  resource_key: string;
-  job_id: string;
-  token: string;
-  expires_at: string | null;
-  created_at: string;
-}
-
 export interface WorkerEventRow {
   id: number;
   bot_id: string;
@@ -616,47 +606,6 @@ export function markContinuationCompleted(
     WHERE id = ? AND status = 'claimed'
   `).run(agentTurnId, id);
   return result.changes === 1;
-}
-
-// ---------------------------------------------------------------------------
-// 资源租约（§12 写任务互斥：同 repo/目录的冲突写操作不得并行）
-// ---------------------------------------------------------------------------
-
-export type AcquireLeaseResult =
-  | { ok: true; token: string }
-  | { ok: false; reason: "held"; holderJobId: string };
-
-/** 尝试获取租约；resource_key UNIQUE 保证并发安全。 */
-export function acquireLease(
-  db: Database.Database,
-  input: { botId: string; resourceKey: string; jobId: string; token: string; expiresAt?: string },
-): AcquireLeaseResult {
-  const existing = db.prepare("SELECT * FROM worker_resource_leases WHERE resource_key = ?").get(input.resourceKey) as
-    | ResourceLeaseRow
-    | undefined;
-  if (existing) {
-    return { ok: false, reason: "held", holderJobId: existing.job_id };
-  }
-  db.prepare(`
-    INSERT INTO worker_resource_leases (bot_id, resource_key, job_id, token, expires_at)
-    VALUES (?, ?, ?, ?, ?)
-  `).run(input.botId, input.resourceKey, input.jobId, input.token, input.expiresAt ?? null);
-  return { ok: true, token: input.token };
-}
-
-export function releaseLeaseByJob(db: Database.Database, jobId: string): boolean {
-  const result = db.prepare("DELETE FROM worker_resource_leases WHERE job_id = ?").run(jobId);
-  return result.changes > 0;
-}
-
-export function getLeaseByJob(db: Database.Database, jobId: string): ResourceLeaseRow | undefined {
-  return db.prepare("SELECT * FROM worker_resource_leases WHERE job_id = ?").get(jobId) as ResourceLeaseRow | undefined;
-}
-
-/** 清理过期租约（Scheduler tick 调用；返回清理数量）。 */
-export function cleanupExpiredLeases(db: Database.Database, nowIso: string): number {
-  const result = db.prepare("DELETE FROM worker_resource_leases WHERE expires_at IS NOT NULL AND expires_at < ?").run(nowIso);
-  return result.changes;
 }
 
 /** 重启恢复：claimed Continuation 重置为 pending，允许重新投递（§7.5）。 */

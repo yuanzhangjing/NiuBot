@@ -40,7 +40,7 @@ export const JOB_TERMINAL_STATUSES: readonly JobStatus[] = [
 
 export type WorkVisibility = "private" | "public";
 
-/** 工作空间策略（§12）：read_only 直接访问目标目录；scratch 独立临时目录；git_worktree 独立 worktree。 */
+/** 工作空间策略（§12）：read_only 直接访问目标目录；scratch 独立临时目录；git_worktree 已废弃自动 worktree，按 scratch 处理。 */
 export type WorkspacePolicy = "read_only" | "scratch" | "git_worktree";
 
 export interface ArtifactEntry {
@@ -199,7 +199,7 @@ export interface CreateJobInput {
   workId: string;
   workerProfileId: string;
   prompt: string;
-  /** 目标目录（git_worktree 时为目标 repo 路径；scratch 时忽略） */
+  /** 目标目录（git_worktree 时为目标 repo 路径，供 Worker git 操作参考；scratch 时忽略） */
   workdir: string;
   workspacePolicy?: WorkspacePolicy;
   /** 依赖的 Job ID（同一 Work 内；全部完成后本 Job 才能执行） */
@@ -247,8 +247,8 @@ export interface JobService {
   completeJob(jobId: string, record: JobExecutionRecord): Job | undefined;
   /** running → failed */
   failJob(jobId: string, record: JobExecutionRecord): Job | undefined;
-  /** running → interrupted（崩溃恢复专用） */
-  interruptJob(jobId: string): Job | undefined;
+  /** running → interrupted（崩溃恢复/执行丢失：进程已随旧进程消失） */
+  interruptJob(jobId: string, reason?: string): Job | undefined;
   /** queued Job 因依赖失败直接终态（不经过执行；连续失败预算照常累计） */
   failQueuedJob(jobId: string, error: string): Job | undefined;
   /** queued/running → cancelling */

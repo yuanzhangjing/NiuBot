@@ -946,7 +946,7 @@ function makeGitRepo(): string {
   return repo;
 }
 
-test("写任务：developer 在独立 worktree 修改代码，不污染目标仓库", async () => {
+test("写任务：developer 在独立工作目录修改代码，不污染目标仓库", async () => {
   const repo = makeGitRepo();
   backend.writeFileOnSend = "b.txt";
   await pipeline.start();
@@ -969,16 +969,16 @@ test("写任务：developer 在独立 worktree 修改代码，不污染目标仓
   await waitFor(() => service.getJob(job.id)?.status === "completed");
   expect(service.getJob(job.id)?.responseText).toBeTruthy();
 
-  // 目标仓库主工作区没有 b.txt（写入发生在 worktree）
+  // 目标仓库主工作区没有 b.txt（写入发生在独立工作目录）
   expect(existsSync(path.join(repo, "b.txt"))).toBe(false);
 
-  // worktree 目录保留且包含写入的文件 + marker
-  const worktreeDir = path.join(tempRoot, "ws", `worktree-${job.id}`);
-  expect(existsSync(path.join(worktreeDir, "b.txt"))).toBe(true);
-  expect(existsSync(path.join(worktreeDir, ".niubot-worker"))).toBe(true);
+  // 独立工作目录保留且包含写入的文件 + marker（git_worktree 已废弃自动 worktree，按 scratch 处理）
+  const workDir = path.join(tempRoot, "ws", `job-${job.id}`);
+  expect(existsSync(path.join(workDir, "b.txt"))).toBe(true);
+  expect(existsSync(path.join(workDir, ".niubot-worker"))).toBe(true);
 }, 15000);
 
-test("同一 repo 的两个写 Job 互斥：第二个 resource busy", async () => {
+test("两个写 Job 在独立工作目录并行执行，互不污染目标仓库", async () => {
   const repo = makeGitRepo();
   backend.delayMs = 3000;
   await pipeline.start();
@@ -1005,10 +1005,11 @@ test("同一 repo 的两个写 Job 互斥：第二个 resource busy", async () =
     workspacePolicy: "git_worktree",
   });
 
-  await waitFor(() => service.getJob(jobA.id)?.status === "running");
-  // jobB 应因租约冲突失败（不并行写同一 repo）
-  await waitFor(() => service.getJob(jobB.id)?.status === "failed");
-  expect(service.getJob(jobB.id)?.error).toMatch(/resource busy/);
+  // 各自独立工作目录，可并行执行，均正常完成
+  await waitFor(() => service.getJob(jobA.id)?.status === "completed");
+  await waitFor(() => service.getJob(jobB.id)?.status === "completed");
+  // 目标仓库主工作区不受污染
+  expect(existsSync(path.join(repo, "b.txt"))).toBe(false);
 }, 15000);
 
 test("Worker 暂停时 queued Job 不调度，开启后执行", async () => {
@@ -1329,4 +1330,65 @@ test("active continuation 回合按 FIFO 完成后再处理用户消息", async 
     const q = (pipeline as any).queue as { isBusy: (c: string) => boolean };
     return !q.isBusy(CHAT_ID);
   }, 8000);
+}, 20000);
+
+test("准备阶段取消：createSession 挂起时取消，job 收敛为 cancelled", async () => {
+  backend.createSessionDelayMs = 3000;
+  await pipeline.start();
+
+  const work = service.createWork({
+    botId: BOT_ID,
+    ownerUserId: OWNER,
+    sourceChatId: CHAT_ID,
+    visibility: "private",
+    request: "准备阶段取消测试",
+  });
+  const job = service.createJob({
+    workId: work.id,
+    workerProfileId: "developer",
+    prompt: "任务内容",
+    workdir: tempRoot,
+  });
+
+  // job 被认领进入准备阶段（session 创建中，createSession 挂起）
+  await waitFor(() => service.getJob(job.id)?.status === "running");
+  service.requestCancel(job.id);
+  expect(service.getJob(job.id)?.status).toBe("cancelling");
+
+  // 不等待 10 分钟兜底：abort 后 runJob 在检查点收敛为 cancelled
+  await waitFor(() => service.getJob(job.id)?.status === "cancelled", 8000);
+  expect(service.getJob(job.id)?.error).toMatch(/cancelled during preparation/);
+  // 终态生成验收 Continuation（可能已被 scheduler 抢先投递为 claimed）
+  expect(service.listEvents(work.id).some((e) => e.event === "continuation_created")).toBe(true);
+}, 20000);
+
+test("验收回合异常：释放认领重新投递（不卡 claimed）", async () => {
+  // 验收回合消息（含 <worker-continuation>）抛异常，模拟主 Agent backend 故障
+  backend.onSendMessage = (_session, message) => {
+    if (message.includes("<worker-continuation>")) {
+      throw new Error("acceptance boom");
+    }
+  };
+  await pipeline.start();
+
+  const work = service.createWork({
+    botId: BOT_ID,
+    ownerUserId: OWNER,
+    sourceChatId: CHAT_ID,
+    visibility: "private",
+    request: "验收异常测试",
+  });
+  const job = service.createJob({
+    workId: work.id,
+    workerProfileId: "developer",
+    prompt: "任务内容",
+    workdir: tempRoot,
+  });
+
+  await waitFor(() => service.getJob(job.id)?.status === "completed");
+
+  // 验收投递后主 Agent 回合抛错 → 认领被释放回 pending（可再次投递，不卡 claimed）
+  await waitFor(() => service.listPendingContinuations().some((c) => c.workId === work.id), 8000);
+  // 至少有一次验收尝试（消息已发给主 Agent）
+  expect(backend.messages.some((m) => m.text.includes("<worker-continuation>"))).toBe(true);
 }, 20000);

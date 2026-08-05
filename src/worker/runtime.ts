@@ -16,10 +16,16 @@ import { terminateSpawnedProcessTree, waitForProcessExit } from "../platform/pro
 import type { ArtifactEntry, Job, JobExecutionRecord, JobService } from "./types.js";
 import { WorkerProfileRegistry } from "./profiles.js";
 import { WORKER_MARKER_FILENAME, WorkspaceProvider, type PreparedWorkspace } from "./workspace.js";
-import { ResourceLeaseManager } from "./lease.js";
 import { SkillResolver } from "./skills.js";
 
 const log = createLogger("worker-runtime");
+
+/** 准备阶段被取消（用户取消/进程取消）时抛出的内部错误：终态按 cancelled 处理。 */
+class JobCancelledError extends Error {
+  constructor() {
+    super("job cancelled during preparation");
+  }
+}
 
 /** 收集产物目录下的文件列表（排除 marker，递归收集相对路径）。 */
 function collectArtifacts(artifactDir?: string): ArtifactEntry[] {
@@ -76,8 +82,6 @@ export interface WorkerRuntimeOptions {
   buildPrompt: (job: Job, execDir: string, artifactDir?: string) => string | Promise<string>;
   /** 工作区准备（read_only Job 可不提供） */
   workspaceProvider?: WorkspaceProvider;
-  /** 写任务资源互斥（git_worktree Job 必须提供） */
-  leaseManager?: ResourceLeaseManager;
   /** Skill 校验（Phase 5；默认内置 resolver） */
   skillResolver?: SkillResolver;
   /** 按类型解析专属 backend（角色配置 backend 时使用；未配置则用 options.backend） */
@@ -88,12 +92,19 @@ export class WorkerRuntime {
   private readonly running = new Map<string, RunningJobExecution>();
   /** 已认领但可能仍在 backend/workspace/session 准备阶段的完整执行集合。 */
   private readonly inFlight = new Set<string>();
+  /** 准备阶段的取消信号：cancel() 对尚未进入 running 的 job 通过它中止准备流程。 */
+  private readonly inFlightAborts = new Map<string, AbortController>();
 
   constructor(private readonly options: WorkerRuntimeOptions) {}
 
   /** 当前运行中的 Job 数 */
   runningCount(): number {
     return this.inFlight.size;
+  }
+
+  /** Job 是否仍在准备阶段（已认领、session 尚未创建完成）。 */
+  hasInFlight(jobId: string): boolean {
+    return this.inFlight.has(jobId);
   }
 
   /**
@@ -118,10 +129,20 @@ export class WorkerRuntime {
    * 取消：温和终止进程树 → 等待退出确认 → 超时后强制 SIGKILL。
    * 幂等：同一 Job 的重复取消复用同一个 Promise，避免并发重复 kill。
    * 真实退出由 sendMessage 的 cancelled 结果最终确认（终态由确认后提交）。
+   * 准备阶段（inFlight）的 Job：abort 准备流程，由 runJob 在检查点收敛终态。
    */
   async cancel(jobId: string, reason: string): Promise<boolean> {
     const exec = this.running.get(jobId);
-    if (!exec) return false;
+    if (!exec) {
+      // 准备阶段：中止准备流程（runJob 在各 await 后检查并收敛为 cancelled）
+      const controller = this.inFlightAborts.get(jobId);
+      if (controller) {
+        controller.abort();
+        log.info("worker job preparation cancelled", { jobId, reason });
+        return true;
+      }
+      return false;
+    }
     if (exec.cancelPromise) {
       log.info("worker cancel already in flight, reusing", { jobId, reason });
       return exec.cancelPromise;
@@ -212,13 +233,14 @@ export class WorkerRuntime {
     let session: AgentSession | undefined;
     let jobBackend: AgentBackend | undefined;
     let prepared: PreparedWorkspace | undefined;
-    let leaseHeld = false;
     const controller = new AbortController();
     const startedAt = Date.now();
     const work = jobService.getWork(job.workId);
     this.inFlight.add(jobId);
+    // 准备阶段（session 创建前）的取消信号：cancel() 通过它中止准备流程
+    this.inFlightAborts.set(jobId, controller);
     try {
-      // 先解析 backend（冷解析可能耗时秒级），再准备工作区——避免解析期间占用 repo 写租约
+      // 先解析 backend（冷解析可能耗时秒级），再准备工作区
       try {
         jobBackend = await this.resolveJobBackend(profile.backend);
       } catch (err) {
@@ -226,33 +248,20 @@ export class WorkerRuntime {
         throw new Error(`profile ${profile.id} 的 backend 解析失败: ${String(err)}`);
       }
       // 解析期间用户可能已取消：job 已进入 cancelling 则放弃执行（确认终态由 cancel 流程负责）
-      if (jobService.getJob(jobId)?.status === "cancelling") {
-        return;
+      if (controller.signal.aborted || jobService.getJob(jobId)?.status === "cancelling") {
+        throw new JobCancelledError();
       }
 
-      // 工作区准备（§12）：read_only 直接用目标目录；scratch/git_worktree 由 Runtime 管理
-      const { workspaceProvider, leaseManager } = this.options;
+      // 工作区准备（§12）：read_only 直接用目标目录；scratch/git_worktree 用独立工作目录
+      const { workspaceProvider } = this.options;
       if (job.workspacePolicy === "read_only" || !workspaceProvider) {
         prepared = await workspaceProvider?.prepare(job.id, job.workspacePolicy, job.workdir)
           ?? { execDir: job.workdir, managed: false };
       } else {
         prepared = await workspaceProvider.prepare(job.id, job.workspacePolicy, job.workdir);
-        if (prepared.repoPath && leaseManager) {
-          const lease = leaseManager.acquire(`repo-write:${prepared.repoPath}`, job.id);
-          if (!lease.ok) {
-            jobService.failJob(jobId, {
-              status: "failed",
-              responseText: "",
-              error: `resource busy: repo ${prepared.repoPath} held by job ${lease.holderJobId}`,
-              changedFiles: [],
-              artifacts: [],
-              startedAt: new Date(startedAt).toISOString(),
-              endedAt: new Date().toISOString(),
-            });
-            return;
-          }
-          leaseHeld = true;
-        }
+      }
+      if (controller.signal.aborted || jobService.getJob(jobId)?.status === "cancelling") {
+        throw new JobCancelledError();
       }
 
       // 角色完整内容（定义 + 原则 + 工作流）作为 system prompt 注入，静态固定；
@@ -265,6 +274,10 @@ export class WorkerRuntime {
         importantContext,
         model: profile.model ?? sessionConfig.model,
       });
+      // session 创建期间用户可能已取消：进入 running 前最后检查一次
+      if (controller.signal.aborted || jobService.getJob(jobId)?.status === "cancelling") {
+        throw new JobCancelledError();
+      }
       this.running.set(jobId, {
         jobId,
         session,
@@ -350,7 +363,7 @@ export class WorkerRuntime {
       }
     } catch (err) {
       const record: JobExecutionRecord = {
-        status: "failed",
+        status: err instanceof JobCancelledError ? "cancelled" : "failed",
         responseText: "",
         error: String(err),
         changedFiles: [],
@@ -358,9 +371,16 @@ export class WorkerRuntime {
         startedAt: new Date(startedAt).toISOString(),
         endedAt: new Date().toISOString(),
       };
-      jobService.failJob(jobId, record);
+      if (err instanceof JobCancelledError) {
+        // 准备阶段被取消：按取消确认终态（cancelling → cancelled）
+        jobService.confirmCancelled(jobId, record);
+        log.info("worker job cancelled during preparation", { jobId });
+      } else {
+        jobService.failJob(jobId, record);
+      }
     } finally {
       this.inFlight.delete(jobId);
+      this.inFlightAborts.delete(jobId);
       this.running.delete(jobId);
       if (session && jobBackend) {
         try {
@@ -368,10 +388,6 @@ export class WorkerRuntime {
         } catch {
           // session 清理失败不阻断主流程
         }
-      }
-      // 释放写租约（工作区保留，marker 标记来源，不自动删除）
-      if (leaseHeld) {
-        this.options.leaseManager?.release(jobId);
       }
     }
   }

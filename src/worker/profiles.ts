@@ -18,7 +18,7 @@ export interface WorkerProfile {
   workflow?: string;
   /** profile 级并发上限；未设置时只受全局 maxConcurrent 约束 */
   maxConcurrent?: number;
-  /** 工作区访问方式；git_worktree 允许在目标仓库的独立 worktree 中写入 */
+  /** 工作区访问方式；git_worktree 已废弃自动 worktree，按 scratch（独立工作目录）处理 */
   access: "read_only" | "scratch" | "git_worktree";
   /** skill 声明（Phase 5；内置 profile 无声明时用默认行为） */
   skills?: TeamProfileSkills;
@@ -131,10 +131,10 @@ export const STATIC_WORKER_PROFILES: Record<string, WorkerProfile> = {
   developer: {
     id: "developer",
     displayName: "Developer",
-    description: "在隔离 worktree 中实现和修改代码",
+    description: "在独立工作目录中实现和修改代码",
     prompt:
       "你是当前 Bot 内部的开发 Worker。你的职责：\n" +
-      "- 只在当前 Job 的工作目录（独立 Git worktree）内修改代码；\n" +
+      "- 只在当前 Job 的工作目录（独立工作区）内修改代码；git 操作（clone/checkout/分支）按任务指引自行执行；\n" +
       "- 不 push、不发布、不操作生产环境；\n" +
       "- 修改前先阅读相关文件，修改后给出变更摘要和测试建议；\n" +
       "- 输出 Markdown：改了什么、为什么、如何验证、风险。",

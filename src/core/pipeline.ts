@@ -18,9 +18,9 @@ import { ChatManager } from "./chat-manager.js";
 import type { QueuedMessage } from "./queue.js";
 import { WorkerRuntime } from "../worker/runtime.js";
 import { WorkerScheduler } from "../worker/scheduler.js";
+
 import { stripInternalWorkerTags } from "../worker/redact.js";
 import { WorkspaceProvider } from "../worker/workspace.js";
-import { ResourceLeaseManager } from "../worker/lease.js";
 import type { Job, JobService, Work } from "../worker/types.js";
 import { WorkerProfileRegistry, teamProfileToWorkerProfile, type WorkerProfile } from "../worker/profiles.js";
 import { TeamConfigStore, type TeamConfig } from "../worker/team-config.js";
@@ -407,7 +407,6 @@ export class Pipeline {
   private readonly workerConfig?: WorkerPipelineConfig;
   private workerRuntime?: WorkerRuntime;
   private workerScheduler?: WorkerScheduler;
-  private workerLeaseManager?: ResourceLeaseManager;
 
   /** 仅在主 Agent 的 runAgent 调用期间存在；Worker 写命令必须绑定到这里的活动回合。 */
   private activeWorkerAgentCommands = new Map<string, ActiveWorkerAgentCommandContext>();
@@ -522,7 +521,6 @@ export class Pipeline {
         jobService, registry, maxConcurrent, tickMs, workspaceRoot: configuredWorkspaceRoot, teamConfigStore,
       } = this.workerConfig;
       const workspaceRoot = configuredWorkspaceRoot ?? path.join(NIUBOT_HOME, "worker-workspaces");
-      this.workerLeaseManager = new ResourceLeaseManager(this.db, this.botIdentity.platformBotId ?? "bot");
       // 配置驱动：有生效配置时用配置的 profiles 与并发上限（无则内置默认）
       const active = teamConfigStore?.getActiveConfig();
       if (active && active.config.profiles.length > 0) {
@@ -547,7 +545,6 @@ export class Pipeline {
         },
         buildPrompt: (job, execDir, artifactDir) => this.buildWorkerPrompt(job, execDir, artifactDir),
         workspaceProvider: new WorkspaceProvider({ rootDir: workspaceRoot }),
-        leaseManager: this.workerLeaseManager,
         resolveBackend: this.workerConfig.resolveBackend,
       });
       this.workerScheduler = new WorkerScheduler({
@@ -556,7 +553,6 @@ export class Pipeline {
         maxConcurrent: effectiveMaxConcurrent,
         tickMs,
         onContinuations: (chatId, ids) => this.enqueueWorkerContinuations(chatId, ids),
-        leaseManager: this.workerLeaseManager,
         isSchedulingEnabled: () => (this.workerConfig?.teamConfigStore?.isEnabled() ?? true),
       });
       this.recoverInterruptedWorkerJobs();
@@ -2596,7 +2592,6 @@ export class Pipeline {
     }
     for (const job of jobService.listJobsByStatus("running")) {
       jobService.interruptJob(job.id);
-      this.workerLeaseManager?.release(job.id);
       this.log.warn("worker job interrupted by restart", { jobId: job.id, workId: job.workId });
     }
     for (const job of jobService.listJobsByStatus("cancelling")) {
@@ -2609,7 +2604,6 @@ export class Pipeline {
         startedAt: new Date().toISOString(),
         endedAt: new Date().toISOString(),
       });
-      this.workerLeaseManager?.release(job.id);
       this.log.warn("worker job cancel confirmed during restart", { jobId: job.id });
     }
   }
@@ -2627,7 +2621,9 @@ export class Pipeline {
     if (stable) parts.push(stable);
     let writeRule: string;
     if (job.workspacePolicy === "git_worktree") {
-      writeRule = `当前目录是独立 Git worktree（目标仓库：${job.workdir}）。只能修改当前目录内的文件；不要提交、不要 push、不要发布、不要碰目标仓库主工作区。`;
+      // git_worktree 已废弃自动 worktree：独立工作目录 + Worker 自行执行 git 操作。
+      // 目标仓库在 job.workdir；base 提交/分支由任务内容（job.prompt）指定。
+      writeRule = `当前目录是独立工作区（不自动创建 worktree）。目标仓库：${job.workdir}。需要 git 操作时由你自行执行：clone/checkout 目标仓库到当前目录（或使用现有副本），按任务要求从指定提交创建分支、修改、提交；不 push、不发布、不碰目标仓库主工作区。`;
     } else if (artifactDir) {
       // 只读 + 产物目录：工作目录只读，落盘内容（报告/生成文件）写产物目录
       writeRule = `工作目录（${execDir}）是只读的：不要修改其中的任何文件。如需落盘（报告、生成的文件等），写到产物目录：${artifactDir}。不要提交、不要发布、不要对用户直接发送消息。`;
@@ -4071,6 +4067,11 @@ ${jobParts.join("\n\n")}
             message: messageToSend,
             signal,
           });
+        } catch (err) {
+          // 验收回合异常（非用户取消）：释放认领，允许后续重新投递。
+          // 否则 claimed 悬挂 → 「验收中」卡死（只有 stopped 才释放）。
+          releaseContinuationClaims();
+          throw err;
         } finally {
           const commandContext = this.activeWorkerAgentCommands.get(chatId);
           if (commandContext && commandContext.runId === runId) {

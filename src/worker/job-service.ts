@@ -232,7 +232,7 @@ export class SqliteJobService implements JobService {
     return this.finishJob(jobId, record, "failed");
   }
 
-  interruptJob(jobId: string): Job | undefined {
+  interruptJob(jobId: string, reason?: string): Job | undefined {
     return this.db.transaction(() => {
       const job = this.getJobDomain(jobId);
       if (!job || job.status !== "running") return undefined;
@@ -244,7 +244,7 @@ export class SqliteJobService implements JobService {
         version: job.version,
         fields: {
           endedAt: new Date().toISOString(),
-          error: "interrupted by engine restart",
+          error: reason ?? "interrupted by engine restart",
         },
       });
       if (!updated) return undefined;

@@ -9,7 +9,6 @@
 import { createLogger } from "../logger.js";
 import type { JobService } from "./types.js";
 import { WorkerRuntime } from "./runtime.js";
-import { ResourceLeaseManager } from "./lease.js";
 
 const log = createLogger("worker-scheduler");
 
@@ -22,6 +21,10 @@ export const JOB_CANCEL_CONFIRM_TIMEOUT_MS = 10 * 60 * 1000;
  * 进程重启会立即 resetClaimedContinuations，不依赖此兜底。
  */
 export const CLAIMED_CONTINUATION_STALE_MS = 150 * 60 * 1000;
+/** DB running 但 Runtime 无执行（进程丢失/确认链路断裂）超过该时间后强制打断 */
+export const JOB_ORPHAN_TIMEOUT_MS = 30 * 60 * 1000;
+/** pending Continuation 停留超时（投递失效）告警阈值 */
+export const PENDING_CONTINUATION_STALE_MS = 15 * 60 * 1000;
 
 export interface WorkerSchedulerOptions {
   runtime: WorkerRuntime;
@@ -31,8 +34,6 @@ export interface WorkerSchedulerOptions {
   tickMs?: number;
   /** pending Continuation 投递回调（Pipeline 提供：入队主 Agent 队列，内存去重） */
   onContinuations?: (chatId: string, continuationIds: string[]) => void;
-  /** 写任务租约管理（存在时定期清理过期租约） */
-  leaseManager?: ResourceLeaseManager;
   /** 是否允许调度新 Job（/worker off 时返回 false；watchdog 和投递继续） */
   isSchedulingEnabled?: () => boolean;
 }
@@ -97,12 +98,6 @@ export class WorkerScheduler {
   private async tick(): Promise<void> {
     const { runtime, jobService, maxConcurrent } = this.options;
 
-    // 0. 清理过期写租约（进程残留不会永久占住资源）
-    const expired = this.options.leaseManager?.cleanupExpired() ?? 0;
-    if (expired > 0) {
-      log.info("expired worker leases cleaned", { count: expired });
-    }
-
     // 0b. claimed 超时兜底：主 Agent 回合进程被杀等导致认领悬挂 → 重置 pending 重新投递
     const staleClaimed = this.options.jobService.resetStaleClaimedContinuations(
       Math.floor(CLAIMED_CONTINUATION_STALE_MS / 60_000),
@@ -111,8 +106,43 @@ export class WorkerScheduler {
       log.warn("stale claimed continuations reset for redelivery", { count: staleClaimed });
     }
 
-    // 1. watchdog：超时运行中 Job 强制取消
+    // 1. 投递：pending Continuation 按 chat 分组交给主 Agent 队列（调用方去重）。
+    // 放在 tick 最前：即使后续（取消等待等）慢操作阻塞 tick 防重入，投递也不受影响。
+    if (this.options.onContinuations) {
+      const now = Date.now();
+      for (const continuation of jobService.listPendingContinuations()) {
+        const createdAt = parseUtcDatetime(continuation.createdAt);
+        if (createdAt !== undefined && now - createdAt > PENDING_CONTINUATION_STALE_MS) {
+          log.warn("pending continuation has been undelivered for a long time", {
+            continuationId: continuation.id,
+            workId: continuation.workId,
+          });
+        }
+      }
+      const byChat = new Map<string, string[]>();
+      for (const continuation of jobService.listPendingContinuations()) {
+        const list = byChat.get(continuation.chatId) ?? [];
+        list.push(continuation.id);
+        byChat.set(continuation.chatId, list);
+      }
+      for (const [chatId, ids] of byChat) {
+        this.options.onContinuations(chatId, ids);
+      }
+    }
+
+    // 2. 孤儿 Job 兜底：DB running 但 Runtime 无执行（进程丢失/确认链路断裂、
+    // 重启后未恢复）→ 超时强制打断，防止「运行中」永远残留。
     const now = Date.now();
+    for (const job of jobService.listJobsByStatus("running")) {
+      if (runtime.inspect(job.id)) continue;
+      if (runtime.hasInFlight(job.id)) continue;
+      const updatedAt = parseUtcDatetime(job.updatedAt);
+      if (updatedAt === undefined || now - updatedAt <= JOB_ORPHAN_TIMEOUT_MS) continue;
+      log.warn("orphaned running job interrupted (no runtime execution)", { jobId: job.id, workId: job.workId });
+      jobService.interruptJob(job.id, "execution lost: no runtime execution found");
+    }
+
+    // 3. watchdog：超时运行中 Job 强制取消（不阻塞 tick，取消在后台完成）
     for (const jobId of [...runtime.inspectAll()]) {
       const exec = runtime.inspect(jobId);
       if (!exec) continue;
@@ -124,26 +154,33 @@ export class WorkerScheduler {
           idleMs,
           wallMs,
         });
-        await runtime.cancel(jobId, idleMs > JOB_IDLE_TIMEOUT_MS ? "idle_timeout" : "wall_timeout");
+        void runtime.cancel(jobId, idleMs > JOB_IDLE_TIMEOUT_MS ? "idle_timeout" : "wall_timeout");
       }
     }
 
-    // 1b. cancelling 立即处理：用户取消（requestCancel/cancelWork）只改 DB 状态，
+    // 4. cancelling 处理：用户取消（requestCancel/cancelWork）只改 DB 状态，
     // 这里把“取消意图”转化为实际进程取消。不等 10 分钟兜底。
-    // - running 且有 runtime exec → 立即 runtime.cancel（幂等）
+    // - running 且有 runtime exec → 立即 runtime.cancel（幂等，后台完成）
+    // - 准备阶段（inFlight）→ 已通过 cancel abort，交给 runJob 收敛，跳过
     // - queued（从未启动，无 startedAt）→ 直接确认终态
     // - running 但 runtime 已丢（Engine 重启等）→ 超时兜底确认
     for (const job of jobService.listJobsByStatus("cancelling")) {
       const exec = runtime.inspect(job.id);
+      const inFlight = !exec && runtime.hasInFlight(job.id);
       if (exec) {
         // 有活动进程：立即取消（幂等，重复 tick 复用同一个 cancel Promise）
-        await runtime.cancel(job.id, "user_cancel");
+        void runtime.cancel(job.id, "user_cancel");
         continue;
+      }
+      if (inFlight) {
+        // 准备阶段：abort 准备流程，runJob 将在检查点收敛为 cancelled。
+        // 不立即确认（runJob 正在收敛）；runJob 卡在准备阶段（backend 挂起）时走下方超时兜底。
+        void runtime.cancel(job.id, "user_cancel");
       }
       const updatedAt = job.updatedAt.replace(" ", "T") + "Z";
       const cancelDeadline = new Date(Date.now() - JOB_CANCEL_CONFIRM_TIMEOUT_MS).toISOString();
-      if (!job.startedAt) {
-        // 从未启动（queued 阶段被取消）：没有进程，直接确认终态
+      if (!job.startedAt && !inFlight) {
+        // 从未启动（queued 阶段被取消）且不在准备中：没有进程，直接确认终态
         const ok = jobService.confirmCancelled(job.id, {
           status: "cancelled",
           responseText: "",
@@ -172,7 +209,7 @@ export class WorkerScheduler {
       // 已启动且有 startedAt、runtime 暂时不在（进程刚退出，sendMessage 正要确认）→ 交给 sendMessage 的 cancelled 结果确认
     }
 
-    // 1c. 依赖失败传播：queued Job 的任一依赖已失败/中断/取消 → 本 Job 自动失败。
+    // 5. 依赖失败传播：queued Job 的任一依赖已失败/中断/取消 → 本 Job 自动失败。
     // 依赖 queued/running 是正常等待态，不判失败（running 是调度中常见中间态）。
     for (const job of jobService.listJobsByStatus("queued")) {
       const failedDep = job.dependsOn.find((depId) => {
@@ -185,7 +222,7 @@ export class WorkerScheduler {
       }
     }
 
-    // 2. 调度：/worker off 时不认领新 Job（running 继续，watchdog 和投递不受影响）
+    // 6. 调度：/worker off 时不认领新 Job（running 继续，watchdog 和投递不受影响）
     const schedulingEnabled = this.options.isSchedulingEnabled?.() ?? true;
     if (!schedulingEnabled) return;
     const freeSlots = Math.max(0, maxConcurrent - runtime.runningCount());
@@ -201,18 +238,11 @@ export class WorkerScheduler {
         });
       }
     }
-
-    // 3. 投递：pending Continuation 按 chat 分组交给主 Agent 队列（调用方去重）
-    if (this.options.onContinuations) {
-      const byChat = new Map<string, string[]>();
-      for (const continuation of jobService.listPendingContinuations()) {
-        const list = byChat.get(continuation.chatId) ?? [];
-        list.push(continuation.id);
-        byChat.set(continuation.chatId, list);
-      }
-      for (const [chatId, ids] of byChat) {
-        this.options.onContinuations(chatId, ids);
-      }
-    }
   }
+}
+
+function parseUtcDatetime(value: string): number | undefined {
+  const normalized = value.includes("T") ? value : value.replace(" ", "T") + "Z";
+  const timestamp = Date.parse(normalized);
+  return Number.isFinite(timestamp) ? timestamp : undefined;
 }

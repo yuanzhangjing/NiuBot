@@ -359,7 +359,7 @@ function workerSessionForAccess(
   const item = db.prepare(`
     SELECT j.id, j.worker_profile_id, j.status, j.backend_session_id, j.backend_type,
            j.transcript_sources_json, j.started_at, j.ended_at, j.created_at,
-           w.source_chat_id, w.owner_user_id
+           j.error, w.source_chat_id, w.owner_user_id
     FROM worker_jobs j
     JOIN worker_works w ON w.id = j.work_id
     WHERE j.id = ? AND w.bot_id = ?
@@ -373,6 +373,7 @@ function workerSessionForAccess(
     started_at: string | null;
     ended_at: string | null;
     created_at: string;
+    error: string | null;
     source_chat_id: string;
     owner_user_id: string;
   } | undefined;
@@ -388,7 +389,8 @@ function workerSessionForAccess(
     if (item.status === "running" || item.status === "cancelling") {
       throw new Error(`Worker session 正在启动，暂无日志: ${jobId}`);
     }
-    throw new Error(`Worker session 没有可用日志: ${jobId}`);
+    const errorDetail = item.error ? `，错误：${item.error}` : "";
+    throw new Error(`Worker session 没有可用日志: ${jobId}（job 状态 ${item.status}${errorDetail}）`);
   }
   let sources: SessionArchiveSource[];
   try {
