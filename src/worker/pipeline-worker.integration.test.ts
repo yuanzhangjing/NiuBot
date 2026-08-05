@@ -1100,7 +1100,7 @@ test("Worker 开启时注入派工 Skill，暂停时注入停用指令", async (
   pipeline.handleInbound(userDelivery(CHAT_ID, "帮我调研一下", 2));
   await waitFor(() => backend.messages.some((m) => m.text.includes("帮我调研一下")));
   const second = backend.messages.find((m) => m.text.includes("帮我调研一下"))!;
-  expect(second.text).toContain("<worker-skill>");
+  expect(second.text).toContain("<tool-briefs>");
   expect(second.text).toContain("nbt worker job create");
 });
 

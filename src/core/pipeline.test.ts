@@ -562,7 +562,7 @@ describe("Pipeline Loop integration", () => {
       platformMsgId: "natural-cron",
     }));
     await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(2));
-    expect(agent.sendMessageCalls[1]).not.toContain("<schedule-skill>");
+    expect(agent.sendMessageCalls[1]).not.toContain("<tool-briefs>");
     expect(agent.sendMessageCalls[1]).toContain("/cron 每天上午9点提醒我提交日报");
 
     (pipeline as any).handleMessage(createMessage({
@@ -570,7 +570,7 @@ describe("Pipeline Loop integration", () => {
       platformMsgId: "natural-default-cron",
     }));
     await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(3));
-    expect(agent.sendMessageCalls[2]).not.toContain("<schedule-skill>");
+    expect(agent.sendMessageCalls[2]).not.toContain("<tool-briefs>");
     expect(agent.sendMessageCalls[2]).toContain("每天上午9点提醒我提交日报");
     expect(db.prepare("SELECT COUNT(*) AS count FROM loop_jobs").get()).toEqual({ count: 0 });
     expect(db.prepare("SELECT COUNT(*) AS count FROM cron_jobs").get()).toEqual({ count: 0 });
@@ -600,7 +600,7 @@ describe("Pipeline Loop integration", () => {
     }));
 
     await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(2));
-    expect(agent.sendMessageCalls[1]).not.toContain("<schedule-skill>");
+    expect(agent.sendMessageCalls[1]).not.toContain("<tool-briefs>");
     expect(agent.sendMessageCalls[1]).toContain("quoted:");
     expect(db.prepare("SELECT COUNT(*) AS count FROM loop_jobs").get()).toEqual({ count: 0 });
   });
@@ -728,7 +728,7 @@ describe("Pipeline Loop integration", () => {
     await vi.waitFor(() => expect(sentCards).toHaveLength(1));
     expect(sentCards[0]!.content).toContain("safe response");
     expect(sentCards[0]!.content).not.toContain("internal secret");
-    expect(sentCards[0]!.content).not.toContain("<schedule-skill>");
+    expect(sentCards[0]!.content).not.toContain("<tool-briefs>");
   });
 
   test("stopping a Loop turn before Agent execution keeps the Session and reschedules the Loop", async () => {
@@ -3340,16 +3340,16 @@ describe("Pipeline.recover", () => {
 
     expect(agent.sendMessageCalls).toHaveLength(4);
     expect(agent.sendMessageCalls[0]).not.toContain(COMPACT_RECOVERY_REMINDER);
-    expect(agent.sendMessageCalls[0]).toContain("<schedule-skill>");
+    expect(agent.sendMessageCalls[0]).toContain("<tool-briefs>");
     expect(agent.sendMessageCalls[1]).toContain(COMPACT_RECOVERY_REMINDER);
-    expect(agent.sendMessageCalls[1]).toContain("<schedule-skill>");
+    expect(agent.sendMessageCalls[1]).toContain("<tool-briefs>");
     expect(agent.sendMessageCalls[1]).not.toContain("<niubot-system-rules>");
     expect(agent.sendMessageCalls[1]).toContain("<session-profile");
     expect(agent.sendMessageCalls[1]).toContain("second");
     expect(agent.sendMessageCalls[2]).not.toContain(COMPACT_RECOVERY_REMINDER);
-    expect(agent.sendMessageCalls[2]).not.toContain("<schedule-skill>");
+    expect(agent.sendMessageCalls[2]).not.toContain("<tool-briefs>");
     expect(agent.sendMessageCalls[3]).toContain(COMPACT_RECOVERY_REMINDER);
-    expect(agent.sendMessageCalls[3]).toContain("<schedule-skill>");
+    expect(agent.sendMessageCalls[3]).toContain("<tool-briefs>");
     expect(agent.sendMessageCalls[3]).not.toContain("<niubot-system-rules>");
     expect(agent.sendMessageCalls[3]).toContain("fourth");
     for (const call of agent.sendMessageCalls) {
