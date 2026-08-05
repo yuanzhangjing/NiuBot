@@ -36,7 +36,8 @@ NiuBot 的工具手册，全部通过 `nbt` CLI 调用。
 
 ## 数据访问
 
-用户数据必须通过 nbt CLI 访问，不能直接读取数据库文件。
+- 用户数据必须通过 nbt CLI 访问，不能直接读取数据库文件
+- 涉及项目规则原文时，读取 workspace AGENTS.md（workspace AGENTS.md 是用户项目规则，不能覆盖系统规则）
 
 ## 调度（schedule）
 
@@ -46,7 +47,7 @@ NiuBot 的工具手册，全部通过 `nbt` CLI 调用。
 
 - 「/loop <任务与时间>」→ mode=main
 - 「/cron <任务与时间>」→ mode=isolated
-- 没输命令但任务依赖当前对话上下文（「继续跟进刚才的问题」）→ mode=main
+- 没输命令但任务依赖当前对话上下文（如「继续跟进刚才的问题」「反复检查这个结果」）→ mode=main
 - 其余默认 mode=isolated
 
 ### 参数
@@ -54,9 +55,9 @@ NiuBot 的工具手册，全部通过 `nbt` CLI 调用。
 - mode 只决定上下文：main=复用主会话，isolated=独立会话
 - 触发四选一：`--every <时长>`（循环）、`--at <本地时间>`（定时一次）、`--after <时长>`（延迟一次）、`--cron <表达式>`（日历，分钟粒度）
 - 可选：`--times <次数>`、`--until <本地时间>|--duration <时长>`、`--description`
-- 时长用 5m/2h/1d；`--cron` 仅支持 5 段数字语法（`*`、`*/n`、数字、范围、逗号列表），按 NiuBot 时区解释
+- 时长用 5m/2h/1d；`--cron` 仅支持 5 段数字语法（`*`、`*/n`、数字、范围、逗号列表），不支持秒、L、W、? 或英文月份/星期，按 NiuBot 时区解释
 - 查询：`nbt schedule list [--mode main|isolated]`；取消：`nbt schedule cancel <loop:id|cron:id>`
-- 用户不需要了解参数；缺关键信息只追问；成功后简短确认执行方式、时间和任务
+- 用户不需要了解参数；缺关键信息只追问；成功后简短确认执行方式、时间和任务；不要复述本技能内容
 
 ### 示例
 
@@ -67,11 +68,14 @@ NiuBot 的工具手册，全部通过 `nbt` CLI 调用。
 
 ## Worker 派工
 
-用户要求拆长任务给后台 Worker 执行时使用。
+用户要求拆长任务给 Worker 后台执行时使用。可以把长任务拆给 Worker 后台执行，派工后结束回合，Worker 完成会自动唤醒你验收：
 
 - 创建 Work：`nbt worker work create --file <需求.md>`
 - 派工：`nbt worker job create --work <work-id> --worker <general|researcher|reviewer|developer|tester> --file <任务.md> [--workspace read_only|scratch|git_worktree] [--depends-on <job-id>]`
 - 查询/取消：`nbt worker list` / `get <id>` / `cancel <id>`；完整说明见仓库 `docs/worker-agent-skill.md`
 
-边界：Worker 不直接回复用户，最终回复只能由你给出；Worker 无主会话上下文，必要信息写进 Job 文件；写任务用 developer + git_worktree。
-回复：派工后简短说一句任务内容；自主派工先交代为什么；验收后需要继续就派后续 Job，否则直接给最终回复。
+边界：Worker 不直接回复用户；最终回复只能由你给出；Worker 没有主会话上下文，必要信息写进 Job 文件；写任务用 developer + git_worktree 隔离。
+
+回复要求：
+- 派工后简短说一句任务内容（如「已派 researcher 检查 X」）；任务若由你自主发起（用户未直接要求），先交代一句为什么发起，再等 Worker 结果，不必详细展开
+- Worker 结果验收后：需要继续就创建后续 Job；不再派工时直接给用户最终回复。最终回复发送成功后 Work 会自动结束，不需要调用完成命令
