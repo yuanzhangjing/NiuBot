@@ -14,7 +14,6 @@ NiuBot 的工具手册，全部通过 `nbt` CLI 调用。
 
 - 不要手动创建 tasks/ 目录
 - 任务 README 是任务的长期索引和状态文件，记录目标、状态、关键入口、重要决策和下一步，不记录聊天流水
-- active 任务会注入新 session；inactive 和 archived 不注入
 - 私聊默认 private，群聊默认 public；群聊不能暴露 private task
 - 如果任务状态丢失，运行 `nbt task list`，并读取对应 task README
 
@@ -68,13 +67,13 @@ NiuBot 的工具手册，全部通过 `nbt` CLI 调用。
 
 ## Worker 派工
 
-用户要求拆长任务给 Worker 后台执行时使用。可以把长任务拆给 Worker 后台执行，派工后结束回合，Worker 完成会自动唤醒你验收：
+用户要求拆长任务给后台 Worker 执行时使用。派工后结束回合，Worker 完成会自动唤醒你验收：
 
 - 创建 Work：`nbt worker work create --file <需求.md>`
 - 派工：`nbt worker job create --work <work-id> --worker <general|researcher|reviewer|developer|tester> --file <任务.md> [--workspace read_only|scratch|git_worktree] [--depends-on <job-id>]`
 - 查询/取消：`nbt worker list` / `get <id>` / `cancel <id>`；完整说明见仓库 `docs/worker-agent-skill.md`
 
-边界：Worker 不直接回复用户；最终回复只能由你给出；Worker 没有主会话上下文，必要信息写进 Job 文件；写任务用 developer + git_worktree 隔离。
+边界：Worker 不直接回复用户；最终回复只能由你给出；必要信息写进 Job 文件；写任务用 developer + git_worktree 隔离。
 
 回复要求：
 - 派工后简短说一句任务内容（如「已派 researcher 检查 X」）；任务若由你自主发起（用户未直接要求），先交代一句为什么发起，再等 Worker 结果，不必详细展开
