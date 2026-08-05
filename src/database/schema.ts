@@ -408,17 +408,6 @@ const migrations: Migration[] = [
           created_at       TEXT NOT NULL DEFAULT (datetime('now'))
         );
 
-        CREATE TABLE IF NOT EXISTS worker_resource_leases (
-          id           INTEGER PRIMARY KEY AUTOINCREMENT,
-          bot_id       TEXT NOT NULL,
-          resource_key TEXT NOT NULL UNIQUE,
-          job_id       TEXT NOT NULL,
-          token        TEXT NOT NULL,
-          expires_at   TEXT,
-          created_at   TEXT NOT NULL DEFAULT (datetime('now'))
-        );
-        CREATE INDEX IF NOT EXISTS idx_worker_leases_job ON worker_resource_leases(job_id);
-
         CREATE TABLE IF NOT EXISTS team_settings (
           bot_id                TEXT PRIMARY KEY,
           enabled               INTEGER NOT NULL DEFAULT 0,

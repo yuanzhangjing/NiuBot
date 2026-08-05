@@ -806,6 +806,12 @@ export class Pipeline {
             void this.workerRuntime.cancel(job.id, "agent_cancel").catch((error) => {
               this.log.error("worker cancel request failed", { jobId: job.id, error: String(error) });
             });
+          } else if (this.workerRuntime?.hasInFlight(job.id)) {
+            // 准备阶段：abort 准备流程，runJob 在检查点收敛为 cancelled。
+            // 不能直接确认终态——否则 runJob 检查点看不到 cancelling，Worker 会完整执行（幽灵执行）。
+            void this.workerRuntime.cancel(job.id, "agent_cancel").catch((error) => {
+              this.log.error("worker cancel request failed", { jobId: job.id, error: String(error) });
+            });
           } else if (!job.startedAt) {
             service.confirmCancelled(job.id, {
               status: "cancelled",
@@ -4067,11 +4073,6 @@ ${jobParts.join("\n\n")}
             message: messageToSend,
             signal,
           });
-        } catch (err) {
-          // 验收回合异常（非用户取消）：释放认领，允许后续重新投递。
-          // 否则 claimed 悬挂 → 「验收中」卡死（只有 stopped 才释放）。
-          releaseContinuationClaims();
-          throw err;
         } finally {
           const commandContext = this.activeWorkerAgentCommands.get(chatId);
           if (commandContext && commandContext.runId === runId) {

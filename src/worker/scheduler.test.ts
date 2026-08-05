@@ -326,3 +326,68 @@ test("pending Continuation 长时间未投递时告警（B 兜底可见性）", 
   await waitFor(() => delivered.some((ids) => ids.includes(contId!)), 2000);
   scheduler.stop();
 });
+
+test("watchdog 超时取消：先落 DB cancelling，confirmCancelled 链路成立", async () => {
+  const { job } = makeWorkAndJob();
+  service.claimJob({ jobId: job.id, claimToken: "l" });
+  // 模拟无输出超时（lastActivity 很久前）
+  const runningExec = {
+    jobId: job.id,
+    session: { id: "s1" } as const,
+    backend: {} as never,
+    startedAt: Date.now() - 60 * 60 * 1000,
+    lastActivity: Date.now() - 31 * 60 * 1000,
+    controller: new AbortController(),
+  };
+  runtime.running.set(job.id, runningExec);
+  const cancelSpy = vi.spyOn(runtime, "cancel");
+
+  scheduler.start();
+  // watchdog 应触发进程取消（先 requestCancel 落 DB，再 cancel 进程）
+  await waitFor(() => cancelSpy.mock.calls.length >= 1);
+  expect(cancelSpy.mock.calls[0]?.[0]).toBe(job.id);
+  // DB 已离开 running（cancelling 瞬态或被后续 tick 确认终态）
+  expect(["cancelling", "cancelled"]).toContain(service.getJob(job.id)?.status);
+  // 终态链路：cancelling 存在时 confirmCancelled 可成功（模拟 runJob 在 sendMessage 返回 cancelled 后确认）
+  if (service.getJob(job.id)?.status === "cancelling") {
+    service.confirmCancelled(job.id, {
+      status: "cancelled",
+      responseText: "",
+      error: "cancelled by watchdog",
+      changedFiles: [],
+      artifacts: [],
+      startedAt: new Date().toISOString(),
+      endedAt: new Date().toISOString(),
+    });
+    expect(service.getJob(job.id)?.status).toBe("cancelled");
+  }
+  scheduler.stop();
+});
+
+test("孤儿 inFlight Job（准备阶段挂起）超时后打断：interrupted + abort 触发", async () => {
+  const { job } = makeWorkAndJob();
+  service.claimJob({ jobId: job.id, claimToken: "l" });
+  runtime.inFlight.add(job.id);
+  // updated_at 改到孤儿阈值之前（claim 后 30+ 分钟仍未进入 running = 准备阶段挂死）
+  db.prepare(
+    `UPDATE worker_jobs SET started_at = datetime('now', '-31 minutes'), updated_at = datetime('now', '-${Math.floor(JOB_ORPHAN_TIMEOUT_MS / 1000) + 60} seconds') WHERE id = ?`,
+  ).run(job.id);
+  const cancelSpy = vi.spyOn(runtime, "cancel");
+
+  scheduler.start();
+  await waitFor(() => service.getJob(job.id)?.status === "interrupted");
+  // 准备阶段挂起被 abort（进程收敛路径触发）
+  await waitFor(() => cancelSpy.mock.calls.length >= 1);
+  expect(service.getJob(job.id)?.error).toMatch(/execution lost/);
+  scheduler.stop();
+});
+
+test("孤儿 inFlight Job 未超时不被误打断（正常准备窗口保护）", async () => {
+  const { job } = makeWorkAndJob();
+  service.claimJob({ jobId: job.id, claimToken: "l" });
+  runtime.inFlight.add(job.id);
+  scheduler.start();
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  expect(service.getJob(job.id)?.status).toBe("running");
+  scheduler.stop();
+});

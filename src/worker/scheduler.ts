@@ -25,6 +25,8 @@ export const CLAIMED_CONTINUATION_STALE_MS = 150 * 60 * 1000;
 export const JOB_ORPHAN_TIMEOUT_MS = 30 * 60 * 1000;
 /** pending Continuation 停留超时（投递失效）告警阈值 */
 export const PENDING_CONTINUATION_STALE_MS = 15 * 60 * 1000;
+/** pending 滞留告警冷却：同一 Continuation 至少间隔该时间才再次告警（防日志风暴） */
+export const PENDING_WARN_COOLDOWN_MS = 60 * 60 * 1000;
 
 export interface WorkerSchedulerOptions {
   runtime: WorkerRuntime;
@@ -45,6 +47,8 @@ export class WorkerScheduler {
   private tickInFlight = false;
   /** tick 执行期间收到 kick 时记账，当前 tick 结束后立即再跑一次。 */
   private kickPending = false;
+  /** pending 滞留告警冷却表：continuationId → 上次告警时间戳 */
+  private readonly pendingWarnedAt = new Map<string, number>();
 
   constructor(private readonly options: WorkerSchedulerOptions) {
     this.tickMs = options.tickMs ?? 5_000;
@@ -97,6 +101,7 @@ export class WorkerScheduler {
 
   private async tick(): Promise<void> {
     const { runtime, jobService, maxConcurrent } = this.options;
+    const now = Date.now();
 
     // 0b. claimed 超时兜底：主 Agent 回合进程被杀等导致认领悬挂 → 重置 pending 重新投递
     const staleClaimed = this.options.jobService.resetStaleClaimedContinuations(
@@ -107,20 +112,22 @@ export class WorkerScheduler {
     }
 
     // 1. 投递：pending Continuation 按 chat 分组交给主 Agent 队列（调用方去重）。
-    // 放在 tick 最前：即使后续（取消等待等）慢操作阻塞 tick 防重入，投递也不受影响。
+    // 放在 tick 最前：即使后续慢操作耗时，投递也不受影响。
     if (this.options.onContinuations) {
-      const now = Date.now();
-      for (const continuation of jobService.listPendingContinuations()) {
-        const createdAt = parseUtcDatetime(continuation.createdAt);
-        if (createdAt !== undefined && now - createdAt > PENDING_CONTINUATION_STALE_MS) {
-          log.warn("pending continuation has been undelivered for a long time", {
-            continuationId: continuation.id,
-            workId: continuation.workId,
-          });
-        }
-      }
       const byChat = new Map<string, string[]>();
       for (const continuation of jobService.listPendingContinuations()) {
+        // 滞留告警（带冷却，避免持续故障时日志风暴）
+        const createdAt = parseUtcDatetime(continuation.createdAt);
+        if (createdAt !== undefined && now - createdAt > PENDING_CONTINUATION_STALE_MS) {
+          const lastWarn = this.pendingWarnedAt.get(continuation.id);
+          if (lastWarn === undefined || now - lastWarn > PENDING_WARN_COOLDOWN_MS) {
+            this.pendingWarnedAt.set(continuation.id, now);
+            log.warn("pending continuation has been undelivered for a long time", {
+              continuationId: continuation.id,
+              workId: continuation.workId,
+            });
+          }
+        }
         const list = byChat.get(continuation.chatId) ?? [];
         list.push(continuation.id);
         byChat.set(continuation.chatId, list);
@@ -131,18 +138,25 @@ export class WorkerScheduler {
     }
 
     // 2. 孤儿 Job 兜底：DB running 但 Runtime 无执行（进程丢失/确认链路断裂、
-    // 重启后未恢复）→ 超时强制打断，防止「运行中」永远残留。
-    const now = Date.now();
+    // 准备阶段挂起、重启后未恢复）→ 超时强制打断，防止「运行中」永远残留。
+    // 正常准备中的 job 由 30 分钟阈值保护（claim 时 updatedAt 已刷新）。
     for (const job of jobService.listJobsByStatus("running")) {
       if (runtime.inspect(job.id)) continue;
-      if (runtime.hasInFlight(job.id)) continue;
       const updatedAt = parseUtcDatetime(job.updatedAt);
       if (updatedAt === undefined || now - updatedAt <= JOB_ORPHAN_TIMEOUT_MS) continue;
+      if (runtime.hasInFlight(job.id)) {
+        // 准备阶段挂起超时：abort 让 runJob 在检查点收敛（进程清理）；终态由 interruptJob 落库
+        void runtime.cancel(job.id, "orphan_timeout").catch((err) => {
+          log.error("orphan cancel failed", { jobId: job.id, error: String(err) });
+        });
+      }
       log.warn("orphaned running job interrupted (no runtime execution)", { jobId: job.id, workId: job.workId });
       jobService.interruptJob(job.id, "execution lost: no runtime execution found");
     }
 
-    // 3. watchdog：超时运行中 Job 强制取消（不阻塞 tick，取消在后台完成）
+    // 3. watchdog：超时运行中 Job 强制取消（不阻塞 tick，取消在后台完成）。
+    // 必须先 requestCancel（DB running→cancelling）：终态确认（confirmCancelled）要求
+    // 状态为 cancelling，否则 sendMessage 返回 cancelled 时确认被拒、job 卡 running。
     for (const jobId of [...runtime.inspectAll()]) {
       const exec = runtime.inspect(jobId);
       if (!exec) continue;
@@ -154,31 +168,38 @@ export class WorkerScheduler {
           idleMs,
           wallMs,
         });
-        void runtime.cancel(jobId, idleMs > JOB_IDLE_TIMEOUT_MS ? "idle_timeout" : "wall_timeout");
+        if (jobService.requestCancel(jobId)) {
+          void runtime.cancel(jobId, idleMs > JOB_IDLE_TIMEOUT_MS ? "idle_timeout" : "wall_timeout").catch((err) => {
+            log.error("worker job cancel failed", { jobId, error: String(err) });
+          });
+        }
       }
     }
 
     // 4. cancelling 处理：用户取消（requestCancel/cancelWork）只改 DB 状态，
     // 这里把“取消意图”转化为实际进程取消。不等 10 分钟兜底。
     // - running 且有 runtime exec → 立即 runtime.cancel（幂等，后台完成）
-    // - 准备阶段（inFlight）→ 已通过 cancel abort，交给 runJob 收敛，跳过
-    // - queued（从未启动，无 startedAt）→ 直接确认终态
+    // - 准备阶段（inFlight）→ cancel abort，runJob 收敛；卡死走超时兜底
+    // - queued（从未启动，无 startedAt，不在准备中）→ 直接确认终态
     // - running 但 runtime 已丢（Engine 重启等）→ 超时兜底确认
     for (const job of jobService.listJobsByStatus("cancelling")) {
       const exec = runtime.inspect(job.id);
       const inFlight = !exec && runtime.hasInFlight(job.id);
       if (exec) {
         // 有活动进程：立即取消（幂等，重复 tick 复用同一个 cancel Promise）
-        void runtime.cancel(job.id, "user_cancel");
+        void runtime.cancel(job.id, "user_cancel").catch((err) => {
+          log.error("worker job cancel failed", { jobId: job.id, error: String(err) });
+        });
         continue;
       }
       if (inFlight) {
         // 准备阶段：abort 准备流程，runJob 将在检查点收敛为 cancelled。
         // 不立即确认（runJob 正在收敛）；runJob 卡在准备阶段（backend 挂起）时走下方超时兜底。
-        void runtime.cancel(job.id, "user_cancel");
+        void runtime.cancel(job.id, "user_cancel").catch((err) => {
+          log.error("worker job cancel failed", { jobId: job.id, error: String(err) });
+        });
       }
-      const updatedAt = job.updatedAt.replace(" ", "T") + "Z";
-      const cancelDeadline = new Date(Date.now() - JOB_CANCEL_CONFIRM_TIMEOUT_MS).toISOString();
+      const updatedAtMs = parseUtcDatetime(job.updatedAt);
       if (!job.startedAt && !inFlight) {
         // 从未启动（queued 阶段被取消）且不在准备中：没有进程，直接确认终态
         const ok = jobService.confirmCancelled(job.id, {
@@ -193,8 +214,8 @@ export class WorkerScheduler {
         if (ok) {
           log.info("worker job cancelled before execution", { jobId: job.id });
         }
-      } else if (updatedAt < cancelDeadline) {
-        // 已启动但 runtime 丢失（Engine 重启等）：超时兜底确认终态
+      } else if (updatedAtMs !== undefined && now - updatedAtMs > JOB_CANCEL_CONFIRM_TIMEOUT_MS) {
+        // 已启动但 runtime 丢失（Engine 重启等），或准备阶段超时未收敛：强制确认终态
         log.warn("worker job cancel confirmation timed out, forcing terminal state", { jobId: job.id });
         jobService.confirmCancelled(job.id, {
           status: "cancelled",
@@ -242,7 +263,11 @@ export class WorkerScheduler {
 }
 
 function parseUtcDatetime(value: string): number | undefined {
-  const normalized = value.includes("T") ? value : value.replace(" ", "T") + "Z";
+  // SQLite datetime('now') 产出 "YYYY-MM-DD HH:MM:SS"（UTC，无时区后缀）；
+  // 兼容 "T" 分隔但缺 "Z" 的写法——无时区 ISO 会被 Date.parse 按本地时区解析，必须补 Z。
+  const normalized = value.includes("T")
+    ? (value.endsWith("Z") ? value : `${value}Z`)
+    : value.replace(" ", "T") + "Z";
   const timestamp = Date.parse(normalized);
   return Number.isFinite(timestamp) ? timestamp : undefined;
 }

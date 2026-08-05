@@ -1392,3 +1392,89 @@ test("验收回合异常：释放认领重新投递（不卡 claimed）", async 
   // 至少有一次验收尝试（消息已发给主 Agent）
   expect(backend.messages.some((m) => m.text.includes("<worker-continuation>"))).toBe(true);
 }, 20000);
+
+test("运行中取消：sendMessage 正常返回时按取消确认（不落 completed）", async () => {
+  backend.delayMs = 2000; // 执行中挂起
+  await pipeline.start();
+
+  const work = service.createWork({
+    botId: BOT_ID,
+    ownerUserId: OWNER,
+    sourceChatId: CHAT_ID,
+    visibility: "private",
+    request: "运行中取消测试",
+  });
+  const job = service.createJob({
+    workId: work.id,
+    workerProfileId: "developer",
+    prompt: "任务内容",
+    workdir: tempRoot,
+  });
+
+  await waitFor(() => service.getJob(job.id)?.status === "running");
+  service.requestCancel(job.id);
+  expect(service.getJob(job.id)?.status).toBe("cancelling");
+
+  // sendMessage 正常返回（进程未 spawn 时 cancelSession 是 no-op）→ 终态必须是 cancelled 而非 completed
+  await waitFor(() => ["cancelled", "completed"].includes(service.getJob(job.id)?.status ?? ""), 8000);
+  expect(service.getJob(job.id)?.status).toBe("cancelled");
+}, 20000);
+
+test("CLI cancel 准备中的 Job：abort 而非幽灵执行", async () => {
+  backend.createSessionDelayMs = 3000; // 准备阶段挂起
+  await pipeline.start();
+
+  const work = service.createWork({
+    botId: BOT_ID,
+    ownerUserId: OWNER,
+    sourceChatId: CHAT_ID,
+    visibility: "private",
+    request: "CLI 取消准备中测试",
+  });
+  const job = service.createJob({
+    workId: work.id,
+    workerProfileId: "developer",
+    prompt: "幽灵执行检测任务内容",
+    workdir: tempRoot,
+  });
+
+  // job 已认领进入准备阶段（createSession 挂起）
+  await waitFor(() => service.getJob(job.id)?.status === "running");
+  const messagesBefore = backend.messages.length;
+  // 伪造主会话活动 Agent 回合（executeWorkerAgentCommand 要求）
+  const rs = (pipeline as any).runtimeState;
+  const run = rs.createRun({
+    chatId: CHAT_ID,
+    triggerMessageIds: [],
+    triggerPlatformMsgIds: [],
+    mergedText: "test turn",
+  });
+  rs.markRunStage(run.runId, "agent_running");
+  const token = "integration-token";
+  (pipeline as any).activeWorkerAgentCommands.set(CHAT_ID, {
+    runId: run.runId,
+    userId: OWNER,
+    chatType: "p2p",
+    continuationTurn: false,
+    createdWorkIds: [],
+    token,
+  });
+  const result = await (pipeline as any).executeWorkerAgentCommand({
+    command: { type: "cancel", id: job.id },
+    chatId: CHAT_ID,
+    userId: OWNER,
+    chatType: "p2p",
+    scheduleToken: token,
+  });
+  expect(result.output).toContain("已");
+  (pipeline as any).activeWorkerAgentCommands.delete(CHAT_ID);
+
+  // 收敛为 cancelled（不等待 10 分钟兜底）
+  await waitFor(() => service.getJob(job.id)?.status === "cancelled", 8000);
+  // 无幽灵执行：job prompt 从未发给 backend
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  const ghostExecuted = backend.messages
+    .slice(messagesBefore)
+    .some((m) => m.text.includes("幽灵执行检测任务内容"));
+  expect(ghostExecuted).toBe(false);
+}, 20000);

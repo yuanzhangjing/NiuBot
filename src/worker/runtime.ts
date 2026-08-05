@@ -239,6 +239,12 @@ export class WorkerRuntime {
     this.inFlight.add(jobId);
     // 准备阶段（session 创建前）的取消信号：cancel() 通过它中止准备流程
     this.inFlightAborts.set(jobId, controller);
+    // 准备阶段取消检查点：controller 已 abort，或 DB 已进入 cancelling → 按取消收敛终态
+    const ensureNotCancelled = (): void => {
+      if (controller.signal.aborted || jobService.getJob(jobId)?.status === "cancelling") {
+        throw new JobCancelledError();
+      }
+    };
     try {
       // 先解析 backend（冷解析可能耗时秒级），再准备工作区
       try {
@@ -248,9 +254,7 @@ export class WorkerRuntime {
         throw new Error(`profile ${profile.id} 的 backend 解析失败: ${String(err)}`);
       }
       // 解析期间用户可能已取消：job 已进入 cancelling 则放弃执行（确认终态由 cancel 流程负责）
-      if (controller.signal.aborted || jobService.getJob(jobId)?.status === "cancelling") {
-        throw new JobCancelledError();
-      }
+      ensureNotCancelled();
 
       // 工作区准备（§12）：read_only 直接用目标目录；scratch/git_worktree 用独立工作目录
       const { workspaceProvider } = this.options;
@@ -260,9 +264,7 @@ export class WorkerRuntime {
       } else {
         prepared = await workspaceProvider.prepare(job.id, job.workspacePolicy, job.workdir);
       }
-      if (controller.signal.aborted || jobService.getJob(jobId)?.status === "cancelling") {
-        throw new JobCancelledError();
-      }
+      ensureNotCancelled();
 
       // 角色完整内容（定义 + 原则 + 工作流）作为 system prompt 注入，静态固定；
       // user prompt 只装任务详情（由 buildPrompt 组装）
@@ -275,9 +277,7 @@ export class WorkerRuntime {
         model: profile.model ?? sessionConfig.model,
       });
       // session 创建期间用户可能已取消：进入 running 前最后检查一次
-      if (controller.signal.aborted || jobService.getJob(jobId)?.status === "cancelling") {
-        throw new JobCancelledError();
-      }
+      ensureNotCancelled();
       this.running.set(jobId, {
         jobId,
         session,
@@ -355,7 +355,9 @@ export class WorkerRuntime {
         endedAt: new Date().toISOString(),
       };
 
-      if (response.cancelled) {
+      // 取消语义优先：response 标记取消，或运行期间用户已取消（DB 进入 cancelling——
+      // 进程未 spawn 时 cancelSession 可能是 no-op，sendMessage 会正常返回）→ 按取消确认终态
+      if (response.cancelled || jobService.getJob(jobId)?.status === "cancelling") {
         // 取消确认：Job 处于 cancelling 才允许终态
         jobService.confirmCancelled(jobId, record);
       } else {
