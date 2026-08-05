@@ -1,22 +1,49 @@
 ---
 name: nbt-tools
-description: NiuBot 内部工具手册（nbt CLI）。调度任务（定时/循环/提醒/日历）、Worker 派工（后台拆活执行）、数据与状态恢复（任务/记忆/会话/消息/身份/系统规则）。用户要求定时执行、循环跟进、稍后提醒、派活拆活、查看任务，或需要恢复丢失的上下文/身份/规则时使用。
-when_to_use: "触发词：「30分钟后提醒我」「每5分钟检查」「明天9点执行」「/loop」「/cron」「拆个活」「派个researcher」「后台跑」「查任务进度」「你还记得我吗」「上次聊了什么」「消息丢了」「系统规则是什么」"
+description: NiuBot 基础工具手册（nbt CLI）。核心：任务管理（nbt task）、用户记忆（nbt user-memory）、身份与场景（nbt whoami）、会话与消息恢复（nbt system-rules / messages / sessions）、数据访问规则。增强能力：调度任务（定时/循环/提醒/日历）与 Worker 派工（后台拆活）。
+when_to_use: "需要查看任务进度、恢复丢失的上下文/身份/规则/消息、读写用户记忆，或用户要求定时执行、循环跟进、稍后提醒、派活拆活时加载。触发词：「任务」「记忆」「你是谁」「上次聊了什么」「系统规则是什么」「消息丢了」「30分钟后提醒我」「每5分钟检查」「拆个活」"
 ---
 
 # NBT Tools
 
-NiuBot 内部工具全部通过 `nbt` CLI 调用。
+NiuBot 的工具手册，全部通过 `nbt` CLI 调用。**基础工具（数据与状态）是核心，调度与 Worker 派工是增强能力。**
 
-## 索引：用户说了什么 → 读哪一节
+## 基础工具（核心）
 
-| 用户说了什么 / 遇到了什么 | 读哪一节 |
+### 任务管理（nbt task）
+
+任务生命周期用 `nbt task` 管理：
+
+- 不要手动创建 tasks/ 目录
+- 任务 README 是任务的长期索引和状态文件，记录目标、状态、关键入口、重要决策和下一步，不记录聊天流水
+- active 任务会注入新 session；inactive 和 archived 不注入
+- 私聊默认 private，群聊默认 public；群聊不能暴露 private task
+- 任务状态丢失时：`nbt task list`，并读取对应任务 README
+
+### 用户记忆（nbt user-memory）
+
+- 用户记忆用 `nbt user-memory` 读写
+- 项目、任务、方案和进度不要写进用户记忆
+
+### 身份与场景（nbt whoami）
+
+- 涉及身份、用户记忆或当前场景时，用 `nbt whoami` 恢复
+
+### 会话与消息恢复
+
+上下文或状态丢失时按需恢复（**不要把 compact 摘要当成原文**）：
+
+| 丢失了什么 | 做什么 |
 |---|---|
-| 「30 分钟后提醒我」「每 5 分钟检查」「明天 9 点执行」「/loop」「/cron」 | 调度 |
-| 「拆个活」「派个 researcher」「后台跑这个长任务」 | Worker 派工 |
-| 「查任务进度」「你还记得我吗」「上次聊了什么」「系统规则是什么」 | 基础工具 |
+| 系统规则 | `nbt system-rules` |
+| 最近消息 | `nbt messages list` |
+| 历史决策 | `nbt sessions search/get` 检索当前聊天所在 chat 的历史 session 记录 |
 
-## 调度
+### 数据访问规则
+
+- 用户数据必须通过 nbt CLI 访问，不能直接读取数据库文件
+
+## 增强能力一：调度（schedule）
 
 用户明确要求未来提醒、定时、循环或重复执行时使用（即使没输入 `/loop`/`/cron` 也要理解并执行；只是询问/讨论/举例时不创建任务）。
 
@@ -43,7 +70,7 @@ NiuBot 内部工具全部通过 `nbt` CLI 调用。
 - 「明天早上 9 点提醒我发日报」→ `nbt schedule create --mode isolated --at "2026-08-06 09:00" --prompt "提醒我发日报"`
 - 「每周一 9 点跟进 OKR」→ `nbt schedule create --mode main --cron "0 9 * * 1" --prompt "跟进 OKR 进度"`
 
-## Worker 派工
+## 增强能力二：Worker 派工
 
 用户要求拆长任务给后台 Worker 执行时使用。
 
@@ -53,18 +80,3 @@ NiuBot 内部工具全部通过 `nbt` CLI 调用。
 
 边界：Worker 不直接回复用户，最终回复只能由你给出；Worker 无主会话上下文，必要信息写进 Job 文件；写任务用 developer + git_worktree。
 回复：派工后简短说一句任务内容；自主派工先交代为什么；验收后需要继续就派后续 Job，否则直接给最终回复。
-
-## 基础工具（数据与状态恢复）
-
-上下文或状态丢失、需要查历史/任务/记忆时使用：
-
-| 丢失了什么 | 做什么 |
-|---|---|
-| 系统规则 | `nbt system-rules` |
-| 最近消息 | `nbt messages list` |
-| 历史决策/会话 | `nbt sessions search/get`（当前聊天所在 chat 的历史） |
-| 任务状态 | `nbt task list` + 对应任务 README（目标/状态/决策/下一步，不记流水） |
-| 身份/场景 | `nbt whoami` |
-| 用户记忆 | `nbt user-memory`（项目、任务、方案、进度不要写进用户记忆） |
-
-规则：任务用 `nbt task` 管理，不手动建 tasks/ 目录；用户数据必须通过 nbt CLI 访问；不要把 compact 摘要当原文。
