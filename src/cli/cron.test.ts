@@ -60,7 +60,7 @@ describe("cron access rules", () => {
     ], "c1", "group", "stale-session-user", parseArgs, execute);
     expect(execute).toHaveBeenCalledWith("c1", {
       type: "create.schedule",
-      mode: "cron",
+      mode: "isolated",
       trigger: "cron",
       cronExpr: "0 9 * * *",
       prompt: "standup",

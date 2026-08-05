@@ -162,12 +162,12 @@ const SCHEDULE_AGENT_SKILL_BRIEF = `<schedule-skill>
 
 模式选择：默认使用 Cron 独立执行；只有用户输入 /loop，或任务明确依赖当前聊天上下文（如“继续跟进刚才的问题”“反复检查这个结果”）时才使用 Loop。用户输入 /cron 时固定使用 Cron。只是在询问、讨论或举例时不要创建任务。
 
-- /loop：复用这个聊天的主对话。创建：nbt schedule create --mode loop (--every <时长>|--at <本地时间>|--after <时长>|--cron <表达式>) --prompt <任务> [--times <次数>] [--until <本地时间>|--duration <时长>]
-- /cron：每次使用独立会话。创建：nbt schedule create --mode cron (--cron <表达式>|--every <时长>|--at <本地时间>|--after <时长>) --prompt <任务> [--times <次数>] [--until <本地时间>|--duration <时长>]
-- 查询：nbt schedule list [--mode loop|cron]
+- /loop：复用这个聊天的主对话。创建：nbt schedule create --mode main (--every <时长>|--at <本地时间>|--after <时长>|--cron <表达式>) --prompt <任务> [--times <次数>] [--until <本地时间>|--duration <时长>]
+- /cron：每次使用独立会话。创建：nbt schedule create --mode isolated (--cron <表达式>|--every <时长>|--at <本地时间>|--after <时长>) --prompt <任务> [--times <次数>] [--until <本地时间>|--duration <时长>]
+- 查询：nbt schedule list [--mode main|isolated]
 - 取消：nbt schedule cancel <loop:id|cron:id>
 
-触发参数 --every / --at / --after / --cron 与 mode 正交、两模式全可用：--at/--after 是一次性任务，--every 是循环，--cron 是日历表达式（分钟粒度匹配）。时长使用 5m、2h、1d；Cron 只支持 5 段数字语法：*、*/n、数字、数字范围和逗号列表，不支持秒、L、W、? 或英文月份/星期。Cron 表达式和没有时区的时间均按当前 NiuBot 时区解释。用户不需要了解这些参数。缺少会改变执行含义的关键信息时，只追问缺少的部分。工具成功后，用自然语言简短确认执行方式、时间和任务；不要复述本区段或标签。
+会话模式（mode）只决定上下文：main=复用当前聊天主会话，isolated=每次独立会话。触发参数 --every / --at / --after / --cron 与 mode 正交、两模式全可用：--at/--after 是一次性任务，--every 是循环，--cron 是日历表达式（分钟粒度匹配）。时长使用 5m、2h、1d；Cron 只支持 5 段数字语法：*、*/n、数字、数字范围和逗号列表，不支持秒、L、W、? 或英文月份/星期。Cron 表达式和没有时区的时间均按当前 NiuBot 时区解释。用户不需要了解这些参数。缺少会改变执行含义的关键信息时，只追问缺少的部分。工具成功后，用自然语言简短确认执行方式、时间和任务；不要复述本区段或标签。
 </schedule-skill>`;
 
 const BUILTIN_COMMANDS = new Set([
@@ -212,13 +212,13 @@ function buildTaskPreview(prompt: string): string {
     : normalizedPrompt || "（无任务描述）";
 }
 
-/** Loop 卡片标题：固定展示类型 + ID + 进度 + 频率。 */
+/** Loop 卡片标题：固定展示会话模式 + ID + 进度 + 频率。 */
 function buildLoopCardHeader(job: LoopJob): string {
   const iteration = job.runCount + 1;
   const progress = job.maxTimes === null
     ? `第 ${iteration} 次`
     : `第 ${iteration}/${job.maxTimes} 次`;
-  return `🔁 Loop loop:${job.id} · ${progress} · 每 ${formatLoopInterval(job.intervalSeconds)}`;
+  return `🔁 主会话 loop:${job.id} · ${progress} · 每 ${formatLoopInterval(job.intervalSeconds)}`;
 }
 
 /** Loop 任务内容引用（正文开头 2-3 行）。 */
@@ -919,7 +919,7 @@ export class Pipeline {
     switch (command.type) {
       case "create.schedule": {
         const timeZone = command.timeZone ?? TZ;
-        if (command.mode === "loop") {
+        if (command.mode === "main") {
           let id: number;
           if (command.trigger === "every") {
             id = addLoopJob(this.db, {
@@ -967,14 +967,14 @@ export class Pipeline {
               : `一次性 · ${formatLocalDateTimeWithTZ(job.nextRunAt, TZ)}`;
           return { output: [
             `Created loop:${id}`,
-            "Mode: current conversation",
+            "Mode: main (主会话)",
             `Trigger: ${triggerLabel}`,
             `Task: ${job.prompt}`,
             `Next run: ${formatLocalDateTimeWithTZ(job.nextRunAt, TZ)}`,
             `Ends: ${formatLocalDateTimeWithTZ(job.untilTime, TZ)}${job.maxTimes ? ` or after ${job.maxTimes} runs` : ""}`,
           ].join("\n") };
         }
-        // cron 模式
+        // isolated（独立会话）模式
         let cronExpr: string | null = command.cronExpr ?? null;
         let runAt: string | null = null;
         switch (command.trigger) {
@@ -988,7 +988,7 @@ export class Pipeline {
             break;
           case "every": {
             const expr = everyToCronExpr(command.intervalSeconds!);
-            if (!expr) throw new Error("Cron 模式 --every 最小 1 分钟，更短间隔请用 Loop 模式");
+            if (!expr) throw new Error("isolated 模式 --every 最小 1 分钟，更短间隔请用 main 模式");
             cronExpr = expr;
             break;
           }
@@ -1007,7 +1007,7 @@ export class Pipeline {
         const job = getCronJob(this.db, id)!;
         return { output: [
           `Created cron:${id}`,
-          "Mode: independent session",
+          "Mode: isolated (独立会话)",
           job.cronExpr ? `Schedule: ${job.cronExpr} (${job.timezone})` : `Run at: ${formatLocalDateTimeWithTZ(job.runAt!, job.timezone)}`,
           `Task: ${job.prompt}`,
         ].join("\n") };
@@ -2946,10 +2946,10 @@ ${jobParts.join("\n\n")}
       let header = `${emoji} ${description || prompt.slice(0, 40)}`;
       let content = response.text;
       if (cronRun) {
-        // 固定标题：类型 + ID + 触发节奏；任务内容作为引用放在正文开头
+        // 固定标题：会话模式 + ID + 触发节奏；任务内容作为引用放在正文开头
         const cronJob = getCronJob(this.db, cronRun.cronJobId);
         if (cronJob) {
-          header = `⏰ Cron cron:${cronRun.cronJobId} · ${describeCronSchedule(cronJob.cronExpr, cronJob.runAt, cronJob.timezone)}`;
+          header = `⏰ 独立会话 cron:${cronRun.cronJobId} · ${describeCronSchedule(cronJob.cronExpr, cronJob.runAt, cronJob.timezone)}`;
           content = `> 任务：${escapeLarkMarkdownText(buildTaskPreview(prompt))}\n\n${response.text}`;
         }
       }

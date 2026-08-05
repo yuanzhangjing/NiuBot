@@ -35,18 +35,18 @@ describe("nbt schedule", () => {
     const output: string[] = [];
     vi.spyOn(console, "log").mockImplementation((line) => output.push(String(line)));
 
-    const execute = vi.fn(async () => ({ output: "Created loop:1\nMode: current conversation" }));
+    const execute = vi.fn(async () => ({ output: "Created loop:1\nMode: main (主会话)" }));
     await handleSchedule(db, [
-      "create", "--mode", "loop", "--every", "5m", "--prompt", "check deployment",
+      "create", "--mode", "main", "--every", "5m", "--prompt", "check deployment",
       "--times", "3", "--duration", "2h",
     ], "c1", "p2p", "stale-session-user", parseArgs, execute);
 
     expect(execute).toHaveBeenCalledWith("c1", {
-      type: "create.schedule", mode: "loop", trigger: "every",
+      type: "create.schedule", mode: "main", trigger: "every",
       intervalSeconds: 300, prompt: "check deployment",
       maxTimes: 3, durationSeconds: 7_200, timeZone: expect.any(String),
     });
-    expect(output.join("\n")).toContain("Mode: current conversation");
+    expect(output.join("\n")).toContain("Mode: main (主会话)");
 
     addLoopJob(db, { chatId: "c1", creatorUserId: "u1", intervalSeconds: 300, prompt: "check deployment" });
     output.length = 0;
@@ -63,17 +63,31 @@ describe("nbt schedule", () => {
     const output: string[] = [];
     vi.spyOn(console, "log").mockImplementation((line) => output.push(String(line)));
 
-    const execute = vi.fn(async () => ({ output: "Created cron:1\nMode: independent session" }));
+    const execute = vi.fn(async () => ({ output: "Created cron:1\nMode: isolated (独立会话)" }));
     await handleSchedule(db, [
-      "create", "--mode", "cron", "--cron", "0 9 * * 1-5",
+      "create", "--mode", "isolated", "--cron", "0 9 * * 1-5",
       "--prompt", "send standup reminder", "--times", "5",
     ], "c1", "p2p", "stale-session-user", parseArgs, execute);
 
     expect(execute).toHaveBeenCalledWith("c1", {
-      type: "create.schedule", mode: "cron", trigger: "cron", cronExpr: "0 9 * * 1-5",
+      type: "create.schedule", mode: "isolated", trigger: "cron", cronExpr: "0 9 * * 1-5",
       prompt: "send standup reminder", description: undefined, maxTimes: 5,
       untilTime: undefined, timeZone: expect.any(String),
     });
-    expect(output.join("\n")).toContain("Mode: independent session");
+    expect(output.join("\n")).toContain("Mode: isolated (独立会话)");
+  });
+
+  test("accepts legacy --mode loop|cron names as compatibility aliases", async () => {
+    const db = fixture();
+    const execute = vi.fn(async () => ({ output: "ok" }));
+    await handleSchedule(db, [
+      "create", "--mode", "loop", "--every", "5m", "--prompt", "legacy",
+    ], "c1", "p2p", "stale-session-user", parseArgs, execute);
+    expect(execute).toHaveBeenCalledWith("c1", expect.objectContaining({ mode: "main" }));
+
+    await handleSchedule(db, [
+      "create", "--mode", "cron", "--after", "30m", "--prompt", "legacy",
+    ], "c1", "p2p", "stale-session-user", parseArgs, execute);
+    expect(execute).toHaveBeenLastCalledWith("c1", expect.objectContaining({ mode: "isolated" }));
   });
 });

@@ -7,7 +7,7 @@ import {
   listLoopJobs,
   parseLoopDuration,
 } from "../core/loop.js";
-import type { CreateScheduleCommand, ScheduleAgentCommand, ScheduleAgentCommandResult, ScheduleTrigger } from "../core/schedule-command.js";
+import { normalizeScheduleMode, type CreateScheduleCommand, type ScheduleAgentCommand, type ScheduleAgentCommandResult, type ScheduleMode, type ScheduleTrigger } from "../core/schedule-command.js";
 import { localApiRequest } from "../local-api/client.js";
 import { formatLocalDateTimeWithTZ, labelLocalTime, TZ } from "../tz.js";
 import { resolveSendEndpoint } from "./send.js";
@@ -89,8 +89,7 @@ async function createSchedule(
 ): Promise<void> {
   const { flags } = parseArgs(args);
   if (!chatId) fail("Error: NIUBOT_CHAT_ID not set");
-  const mode = flags["mode"]?.toLowerCase();
-  if (mode !== "loop" && mode !== "cron") fail("Error: --mode must be loop or cron");
+  const mode = parseScheduleMode(flags["mode"]);
   const prompt = flags["prompt"]?.trim();
   if (!prompt) fail("Error: --prompt is required");
   const maxTimes = optionalPositiveInteger(flags["times"], "--times");
@@ -153,10 +152,9 @@ function listSchedules(
 ): void {
   const { flags } = parseArgs(args);
   if (!chatId) fail("Error: NIUBOT_CHAT_ID not set");
-  const mode = flags["mode"]?.toLowerCase();
-  if (mode && mode !== "loop" && mode !== "cron") fail("Error: --mode must be loop or cron");
+  const mode = flags["mode"] ? parseScheduleMode(flags["mode"]) : undefined;
   let count = 0;
-  if (!mode || mode === "loop") {
+  if (!mode || mode === "main") {
     for (const job of listLoopJobs(db, chatId)) {
       const schedule = job.cronExpr
         ? `${describeCronExpr(job.cronExpr)} (${job.timezone})`
@@ -166,7 +164,7 @@ function listSchedules(
       count++;
     }
   }
-  if (!mode || mode === "cron") {
+  if (!mode || mode === "isolated") {
     for (const job of listCronJobsForAccess(db, { currentChatId: chatId, targetChatId: chatId, chatType })) {
       const schedule = job.cronExpr ? labelLocalTime(job.cronExpr, job.timezone) : formatLocalDateTimeWithTZ(job.runAt!, job.timezone);
       console.log(`cron:${job.id} [${schedule}] (${job.runCount}${job.maxTimes ? `/${job.maxTimes}` : " runs"})`);
@@ -191,6 +189,14 @@ async function cancelSchedule(
   console.log(result.output);
 }
 
+function parseScheduleMode(value: string | undefined): ScheduleMode {
+  try {
+    return normalizeScheduleMode(value?.toLowerCase());
+  } catch {
+    fail("Error: --mode must be main (主会话) or isolated (独立会话)");
+  }
+}
+
 function optionalPositiveInteger(value: string | undefined, name: string): number | undefined {
   if (value === undefined) return undefined;
   const parsed = Number(value);
@@ -208,14 +214,14 @@ function fail(message: string): never {
 }
 
 function printHelp(): void {
-  console.log(`Manage conversation loops and independent cron schedules.
+  console.log(`Manage Loop schedules.
 
-模式（决定上下文）：
-  --mode loop    复用当前聊天主会话
-  --mode cron    每次使用独立会话
+会话模式（决定上下文）：
+  --mode main       复用当前聊天主会话（旧名 loop）
+  --mode isolated   每次使用独立会话（旧名 cron）
 
 触发参数（四选一，两模式通用）：
-  --every 5m    循环执行（cron 模式转为表达式，最小 1 分钟）
+  --every 5m    循环执行（isolated 模式转为表达式，最小 1 分钟）
   --at "2026-08-05 09:00"   指定本地时间执行一次
   --after 30m   延迟多久后执行一次
   --cron "0 9 * * *"   日历表达式定时（分钟粒度匹配）
@@ -224,15 +230,15 @@ function printHelp(): void {
   --times <n>          最多执行 n 次
   --until "2026-08-10 18:00"   绝对截止时间
   --duration 2h        相对运行时长（--until 优先级更高）
-  --description "..."  任务描述（cron 模式用于独立会话）
+  --description "..."  任务描述（isolated 模式用于独立会话）
 
 示例：
-  create --mode loop --every 5m --prompt "..." [--times 4] [--until "18:00"]
-  create --mode loop --cron "0 9 * * 1" --prompt "..." [--until "2026-09-01 09:00"]
-  create --mode loop --at "2026-08-05 18:00" --prompt "..."
-  create --mode cron --cron "0 9 * * *" --prompt "..." [--times 5] [--until "2026-08-10 18:00"]
-  create --mode cron --after 30m --prompt "..."
-  list [--mode loop|cron]
+  create --mode main --every 5m --prompt "..." [--times 4] [--until "18:00"]
+  create --mode main --cron "0 9 * * 1" --prompt "..." [--until "2026-09-01 09:00"]
+  create --mode main --at "2026-08-05 18:00" --prompt "..."
+  create --mode isolated --cron "0 9 * * *" --prompt "..." [--times 5] [--until "2026-08-10 18:00"]
+  create --mode isolated --after 30m --prompt "..."
+  list [--mode main|isolated]
   cancel <loop:id|cron:id>
 
 时长使用 5m、2h、1d。Local calendar times use NIUBOT_TZ (${TZ}).`);

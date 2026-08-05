@@ -2,15 +2,16 @@ import { TZ } from "../tz.js";
 import { validateCronExpression } from "./cron.js";
 
 /**
- * 统一调度命令：触发参数（every/at/after/cron）与运行模式（loop/cron）正交，全部组合可用。
- * - mode 只决定上下文：loop=复用主会话，cron=独立会话
+ * 统一调度命令：触发参数（every/at/after/cron）与会话模式（main/isolated）正交，全部组合可用。
+ * - mode 只决定上下文：main=复用当前聊天主会话，isolated=每次独立会话
  * - trigger 只决定何时执行：every=循环，at=定时一次，after=延迟一次，cron=日历表达式
  */
 export type ScheduleTrigger = "every" | "at" | "after" | "cron";
+export type ScheduleMode = "main" | "isolated";
 
 export interface CreateScheduleCommand {
   type: "create.schedule";
-  mode: "loop" | "cron";
+  mode: ScheduleMode;
   trigger: ScheduleTrigger;
   prompt: string;
   /** trigger=every：循环间隔（秒） */
@@ -19,7 +20,7 @@ export interface CreateScheduleCommand {
   at?: string;
   /** trigger=after：延迟秒数 */
   afterSeconds?: number;
-  /** trigger=cron：5 段表达式（仅 cron 模式） */
+  /** trigger=cron：5 段表达式 */
   cronExpr?: string;
   description?: string;
   maxTimes?: number;
@@ -49,14 +50,14 @@ export function parseScheduleAgentCommand(value: unknown): ScheduleAgentCommand 
     case "create.schedule":
       return parseCreateSchedule(command);
     case "create.loop": {
-      // 兼容旧格式：等价于 mode=loop + trigger=every
+      // 兼容旧格式：等价于 mode=main + trigger=every
       requireString(command.prompt, "prompt");
       requirePositiveInteger(command.intervalSeconds, "intervalSeconds");
       optionalPositiveInteger(command.maxTimes, "maxTimes");
       optionalPositiveInteger(command.durationSeconds, "durationSeconds");
       return {
         type: "create.schedule",
-        mode: "loop",
+        mode: "main",
         trigger: "every",
         intervalSeconds: command.intervalSeconds,
         prompt: command.prompt,
@@ -66,7 +67,7 @@ export function parseScheduleAgentCommand(value: unknown): ScheduleAgentCommand 
       };
     }
     case "create.cron": {
-      // 兼容旧格式：等价于 mode=cron + trigger=cron|at
+      // 兼容旧格式：等价于 mode=isolated + trigger=cron|at
       requireString(command.prompt, "prompt");
       optionalString(command.cronExpr, "cronExpr");
       optionalString(command.runAt, "runAt");
@@ -79,7 +80,7 @@ export function parseScheduleAgentCommand(value: unknown): ScheduleAgentCommand 
       }
       return {
         type: "create.schedule",
-        mode: "cron",
+        mode: "isolated",
         trigger: command.cronExpr ? "cron" : "at",
         cronExpr: command.cronExpr,
         at: command.runAt,
@@ -98,10 +99,16 @@ export function parseScheduleAgentCommand(value: unknown): ScheduleAgentCommand 
   }
 }
 
+/** 归一化会话模式：新名 main/isolated，旧名 loop/cron 兼容。 */
+export function normalizeScheduleMode(value: unknown): ScheduleMode {
+  if (value === "main" || value === "loop") return "main";
+  if (value === "isolated" || value === "cron") return "isolated";
+  throw new Error("mode 必须是 main（主会话）或 isolated（独立会话）");
+}
+
 function parseCreateSchedule(command: Record<string, unknown>): CreateScheduleCommand {
   requireString(command.prompt, "prompt");
-  const mode = command.mode;
-  if (mode !== "loop" && mode !== "cron") throw new Error("mode 必须是 loop 或 cron");
+  const mode = normalizeScheduleMode(command.mode);
   const trigger = command.trigger;
   if (trigger !== "every" && trigger !== "at" && trigger !== "after" && trigger !== "cron") {
     throw new Error("trigger 必须是 every、at、after 或 cron");

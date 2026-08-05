@@ -33,7 +33,7 @@ export async function handleCron(
     case "add":
       await handleSchedule(
         db,
-        ["create", "--mode", "cron", ...args.slice(1)],
+        ["create", "--mode", "isolated", ...args.slice(1)],
         chatId,
         chatType,
         userId,

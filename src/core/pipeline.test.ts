@@ -435,8 +435,8 @@ describe("Pipeline Loop integration", () => {
     expect(agent.sendMessageCalls[1]).toContain("<loop-continuation>");
     expect(agent.sendMessageCalls[1]).toContain("check the remembered context");
     expect(agent.sendMessageCalls[1]).not.toContain("<niubot-user-message");
-    const deliveredCard = sentCards.find((card) => card.header.includes("Loop loop:"));
-    expect(deliveredCard?.header).toBe(`🔁 Loop loop:${id} · 第 1/1 次 · 每 1 分钟`);
+    const deliveredCard = sentCards.find((card) => card.header.includes("loop:"));
+    expect(deliveredCard?.header).toBe(`🔁 主会话 loop:${id} · 第 1/1 次 · 每 1 分钟`);
     expect(deliveredCard?.content).toContain("loop reply");
     expect(deliveredCard?.content).toContain(`> 任务：check the remembered context \\_status\\_`);
     expect(deliveredCard?.content).not.toContain("hidden");
@@ -473,7 +473,7 @@ describe("Pipeline Loop integration", () => {
     expect(await scheduler.tick(new Date())).toBe(1);
 
     await vi.waitFor(() => expect(getLoopJob(db, id)?.consecutiveFailures).toBe(1));
-    expect(sentTexts.at(-1)).toContain(`> 🔁 Loop loop:${id} · 第 1 次 · 每 1 分钟`);
+    expect(sentTexts.at(-1)).toContain(`> 🔁 主会话 loop:${id} · 第 1 次 · 每 1 分钟`);
     expect(sentTexts.at(-1)).toContain("> 任务：keep checking");
     expect(sentTexts.at(-1)).toContain("发送失败：card blocked");
     expect(getLoopJob(db, id)).toMatchObject({ status: "active", runCount: 0 });
@@ -499,7 +499,7 @@ describe("Pipeline Loop integration", () => {
     expect(await scheduler.tick(new Date())).toBe(1);
 
     await vi.waitFor(() => expect(getLoopJob(db, id)?.consecutiveFailures).toBe(1));
-    expect(sentTexts.at(-1)).toContain(`> 🔁 Loop loop:${id} · 第 1 次 · 每 1 分钟`);
+    expect(sentTexts.at(-1)).toContain(`> 🔁 主会话 loop:${id} · 第 1 次 · 每 1 分钟`);
     expect(sentTexts.at(-1)).toContain("> 任务：check error source");
     expect(sentTexts.at(-1)).toContain("处理出错了");
   });
@@ -553,7 +553,7 @@ describe("Pipeline Loop integration", () => {
       platformMsgId: "natural-loop",
     }));
     await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(1));
-    expect(agent.sendMessageCalls[0]).toContain("nbt schedule create --mode loop");
+    expect(agent.sendMessageCalls[0]).toContain("nbt schedule create --mode main");
     expect(agent.sendMessageCalls[0]).toContain("默认使用 Cron 独立执行");
     expect(agent.sendMessageCalls[0]).toContain("/loop 每5分钟帮我检查部署状态，持续2小时");
 
@@ -592,7 +592,7 @@ describe("Pipeline Loop integration", () => {
       platformMsgId: "reply-parent",
     }));
     await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(1));
-    expect(agent.sendMessageCalls[0]).toContain("nbt schedule create --mode loop");
+    expect(agent.sendMessageCalls[0]).toContain("nbt schedule create --mode main");
     (pipeline as any).handleMessage(createMessage({
       contentText: "/loop 每5分钟检查一次这个状态",
       platformMsgId: "reply-loop",
@@ -659,9 +659,9 @@ describe("Pipeline Loop integration", () => {
       runId: run.runId, userId: "u3", chatType: "group", userTurn: true, token: "tok-a",
     });
 
-    // loop + at：一次性任务走主会话，max_times=1，next_run_at 用指定本地时间
+    // main + at：一次性任务走主会话，max_times=1，next_run_at 用指定本地时间
     const loopResult = await pipeline.executeScheduleAgentCommand("c1", {
-      type: "create.schedule", mode: "loop", trigger: "at", at: "2026-08-05 18:00",
+      type: "create.schedule", mode: "main", trigger: "at", at: "2026-08-05 18:00",
       prompt: "晚上提醒我", timeZone: "Asia/Shanghai",
     }, "tok-a");
     expect(loopResult.output).toContain("Created loop:1");
@@ -669,9 +669,9 @@ describe("Pipeline Loop integration", () => {
       max_times: 1, next_run_at: "2026-08-05 10:00:00", interval_seconds: 60,
     });
 
-    // cron + every：相对间隔转日历表达式
+    // isolated + every：相对间隔转日历表达式
     const cronResult = await pipeline.executeScheduleAgentCommand("c1", {
-      type: "create.schedule", mode: "cron", trigger: "every", intervalSeconds: 300,
+      type: "create.schedule", mode: "isolated", trigger: "every", intervalSeconds: 300,
       prompt: "每5分钟检查", timeZone: "Asia/Shanghai",
     }, "tok-a");
     expect(cronResult.output).toContain("Created cron:1");
@@ -679,9 +679,9 @@ describe("Pipeline Loop integration", () => {
       cron_expr: "*/5 * * * *",
     });
 
-    // loop + cron 表达式：日历触发也走主会话（表达式 + 时区落库，检查点立即生效）
+    // main + cron 表达式：日历触发也走主会话（表达式 + 时区落库，检查点立即生效）
     const loopCronResult = await pipeline.executeScheduleAgentCommand("c1", {
-      type: "create.schedule", mode: "loop", trigger: "cron", cronExpr: "0 8 * * *",
+      type: "create.schedule", mode: "main", trigger: "cron", cronExpr: "0 8 * * *",
       prompt: "x", timeZone: "Asia/Shanghai",
     }, "tok-a");
     expect(loopCronResult.output).toContain("Created loop:2");
@@ -1867,7 +1867,7 @@ describe("Pipeline.recover", () => {
     await pipeline.processCronJob("c1", "u2", claimed.prompt, "check weather", id, claimed.claimToken!);
 
     expect(sentCards).toHaveLength(1);
-    expect(sentCards[0]?.header).toBe(`⏰ Cron cron:${id} · 每 5 分钟`);
+    expect(sentCards[0]?.header).toBe(`⏰ 独立会话 cron:${id} · 每 5 分钟`);
     expect(sentCards[0]?.content).toContain("> 任务：check weather");
     expect(sentCards[0]?.content).toContain("cron card result");
   });

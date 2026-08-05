@@ -77,7 +77,7 @@ test("/schedule 把结构化调度命令转交给当前 Pipeline 回合", async 
   // 旧格式 create.loop 被归一化为统一的 create.schedule
   expect(executeScheduleCommand).toHaveBeenCalledWith("chat-1", {
     type: "create.schedule",
-    mode: "loop",
+    mode: "main",
     trigger: "every",
     intervalSeconds: 300,
     prompt: "检查部署状态",
