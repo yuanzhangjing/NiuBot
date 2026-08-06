@@ -354,6 +354,8 @@ test("存在运行中的 Work 时，普通用户消息回复不带 Worker 交付
 test("普通用户回合中给已有 Work 新建 Job 时，派工回复带派工标识", async () => {
   // 本测试只验证出站识别；暂停 Scheduler，避免新 Job 在断言期间异步执行。
   teamConfig.setEnabled(false);
+  await pipeline.start();
+  // 重启重置语义：Work/Job 需在 Pipeline 启动后创建（启动时清理会终止遗留数据）
   const existingWork = service.createWork({
     botId: BOT_ID,
     ownerUserId: OWNER,
@@ -367,7 +369,6 @@ test("普通用户回合中给已有 Work 新建 Job 时，派工回复带派工
     prompt: "已有 Job",
     workdir: tempRoot,
   });
-  await pipeline.start();
   backend.onSendMessage = (_session, message) => {
     if (!message.includes("<worker-continuation>")) {
       service.createJob({
@@ -848,72 +849,40 @@ test("Work 完成后不再调度新 Job", async () => {
   ).toThrow(/not active/);
 });
 
-test("重启恢复：running Job 标记 interrupted，claimed Continuation 重新投递", async () => {
-  backend.delayMs = 5000;
-  await pipeline.start();
-
+test("重启清理：非终态 Job/Work 置 failed 带原因，Continuation 不再投递", async () => {
+  // 重启前的遗留数据：running Job + claimed Continuation
   const work = service.createWork({
     botId: BOT_ID,
     ownerUserId: OWNER,
     sourceChatId: CHAT_ID,
     visibility: "private",
-    request: "重启恢复任务",
+    request: "重启清理任务",
   });
   const job = service.createJob({ workId: work.id, workerProfileId: "general", prompt: "慢任务", workdir: tempRoot });
-
-  // 等 Job 进入 running（Fake 挂起 5s，保证 Engine "重启" 时仍 running）
-  await waitFor(() => service.getJob(job.id)?.status === "running");
-  // 模拟主 Agent 回合被中断：伪造一条 claimed 状态的 Continuation
+  service.claimJob({ jobId: job.id, claimToken: "l" });
+  db.prepare(
+    "UPDATE worker_jobs SET started_at = datetime('now', '-1 minutes') WHERE id = ?",
+  ).run(job.id);
   db.prepare(`
     INSERT INTO agent_continuations (id, bot_id, chat_id, dedupe_key, kind, work_id, job_ids_json, status, created_at)
     VALUES (?, ?, ?, ?, 'job_terminal', ?, ?, 'claimed', datetime('now'))
-  `).run("ctn_interrupted", BOT_ID, CHAT_ID, `work:${work.id}:job:${job.id}:terminal`, work.id, JSON.stringify([job.id]));
-  const messagesBefore = backend.messages.length;
+  `).run("ctn_restart", BOT_ID, CHAT_ID, `work:${work.id}:job:${job.id}:terminal`, work.id, JSON.stringify([job.id]));
 
-  // 模拟重启：停掉第一个 Pipeline（挂着的 worker 回合仍会完成，但终态已被 recover 接管）
-  pipeline.stop();
-  backend.delayMs = 0;
+  // Pipeline 启动时执行重启清理（重启重置：不恢复、不重投）
+  await pipeline.start();
 
-  // 新 Pipeline 实例（同一数据库）→ 启动恢复
-  const pipeline2 = new Pipeline(
-    db,
-    transport as unknown as TransportClient,
-    backend as unknown as AgentBackend,
-    { name: BOT_ID, platform: "feishu", platformBotId: "bot" },
-    tempRoot,
-    path.join(tempRoot, "niubot.db"),
-    10,
-    "test",
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    false,
-    undefined,
-    undefined,
-    { jobService: service, registry, maxConcurrent: 2, tickMs: 50, artifactRoot: path.join(tempRoot, "tmp") },
-  );
-  await pipeline2.start();
+  // 非终态 Job → failed + 原因落库（Agent 按需查询可见）
+  expect(service.getJob(job.id)?.status).toBe("failed");
+  expect(service.getJob(job.id)?.error).toMatch(/Engine 重启，任务已终止/);
+  // Work → failed
+  expect(service.getWork(work.id)?.status).toBe("failed");
+  // Continuation 失效（不再向主 Agent 投递旧结果）
+  expect(service.getContinuation("ctn_restart")?.status).toBe("completed");
+  // 无验收回合被唤醒
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  expect(backend.messages.some((m) => m.text.includes("<worker-continuation>"))).toBe(false);
+}, 15000);
 
-  try {
-    // running Job → interrupted，Work 计数 +1
-    await waitFor(() => service.getJob(job.id)?.status === "interrupted");
-    expect(service.getWork(work.id)?.interruptedCount).toBe(1);
-
-    // claimed Continuation → pending → 重新投递 → 主 Agent 验收回合
-    await waitFor(() => backend.messages.length > messagesBefore);
-    const redelivered = backend.messages
-      .slice(messagesBefore)
-      .some((m) => m.text.includes("<worker-continuation>"));
-    expect(redelivered).toBe(true);
-
-    // 验收完成后 Continuation 被标记完成
-    await waitFor(() => service.claimContinuations(CHAT_ID, "final").length === 0);
-  } finally {
-    pipeline2.stop();
-  }
-}, 20000);
 
 function makeGitRepo(): string {
   mkdirSync(path.join(tempRoot, "repo"), { recursive: true });

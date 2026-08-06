@@ -69,7 +69,6 @@ describe("Work / Job 创建", () => {
     expect(work.id).toMatch(/^wrk_/);
     expect(work.status).toBe("active");
     expect(work.jobIds).toEqual([]);
-    expect(work.interruptedCount).toBe(0);
     expect(service.getWork(work.id)?.request).toBe("调研登录模块现状");
     expect(service.listEvents(work.id).map((e) => e.event)).toContain("work_created");
   });
@@ -248,41 +247,6 @@ describe("Work 终态", () => {
     service.cancelWork(work2.id);
     service.failWork(work2.id, "用户放弃");
     expect(service.getWork(work2.id)?.status).toBe("failed");
-  });
-
-  test("重启恢复只结束没有 Job 的 active Work", () => {
-    const empty = makeWork();
-    const activeWithJob = makeWork();
-    makeJob(activeWithJob.id);
-
-    expect(service.failOrphanedEmptyWorks("重启恢复空 Work")).toBe(1);
-    expect(service.getWork(empty.id)).toMatchObject({ status: "failed", finalConclusion: "重启恢复空 Work" });
-    expect(service.getWork(activeWithJob.id)?.status).toBe("active");
-  });
-});
-
-describe("interruptJob 与防循环上限", () => {
-  test("interrupt 计数并生成 Continuation", () => {
-    const work = makeWork();
-    const job = makeJob(work.id);
-    service.claimJob({ jobId: job.id, claimToken: "l" });
-
-    const interrupted = service.interruptJob(job.id);
-    expect(interrupted?.status).toBe("interrupted");
-    expect(service.getWork(work.id)?.interruptedCount).toBe(1);
-    expect(service.claimContinuations(CHAT_ID, "t")).toHaveLength(1);
-  });
-
-  test(`累计 ${MAX_WORK_INTERRUPTED_COUNT} 次后 Work 直接 failed`, () => {
-    const work = makeWork();
-    for (let i = 0; i < MAX_WORK_INTERRUPTED_COUNT; i++) {
-      const job = makeJob(work.id);
-      service.claimJob({ jobId: job.id, claimToken: `l${i}` });
-      service.interruptJob(job.id);
-    }
-    expect(service.getWork(work.id)?.status).toBe("failed");
-    expect(service.getWork(work.id)?.interruptedCount).toBe(MAX_WORK_INTERRUPTED_COUNT);
-    expect(service.getWork(work.id)?.finalConclusion).toMatch(/中断/);
   });
 });
 
@@ -483,42 +447,6 @@ describe("Continuation 死循环防护", () => {
     service.claimContinuations(CHAT_ID, "t");
     const reset = service.resetStaleClaimedContinuations(30);
     expect(reset).toBe(0);
-  });
-});
-
-describe("Work 终态后的 Continuation 仍以实际交付状态为准", () => {
-  test("Work 已终态：claimed continuation 重启后重置并重新投递", () => {
-    const work = makeWork();
-    const job = makeJob(work.id);
-    service.claimJob({ jobId: job.id, claimToken: "l" });
-    service.completeJob(job.id, record());
-    const continuation = service.claimContinuations(CHAT_ID, "t")[0]!;
-    expect(continuation.status).toBe("claimed");
-
-    // 主 Agent 验收完成 Work
-    service.completeWork(work.id, { conclusion: "完成" });
-
-    // Work completed 不代表最终回复已经发出；重启后必须重投，不能静默丢结果
-    const reset = service.resetClaimedContinuations();
-    expect(service.getContinuation(continuation.id)?.status).toBe("pending");
-    expect(reset).toBe(1);
-    expect(service.listPendingContinuations()).toHaveLength(1);
-  });
-
-  test("Work 终态后 pending continuation 仍会投递", () => {
-    const work = makeWork();
-    const job = makeJob(work.id);
-    service.claimJob({ jobId: job.id, claimToken: "l" });
-    service.completeJob(job.id, record());
-    // 不认领（保持 pending），主 Agent 直接完成 Work
-    service.completeWork(work.id, { conclusion: "完成" });
-
-    const pending = service.listPendingContinuations();
-    expect(pending).toHaveLength(1);
-    const continuations = service.claimContinuations(CHAT_ID, "t");
-    expect(continuations).toHaveLength(1);
-    service.markContinuationCompleted(continuations[0]!.id, "agent-turn");
-    expect(service.getContinuation(continuations[0]!.id)?.status).toBe("completed");
   });
 });
 

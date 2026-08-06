@@ -27,7 +27,7 @@ export async function startBotRuntime(
     ?? DEFAULT_TRANSPORT_START_TIMEOUT_MS;
 
   await bot.pipeline.start();
-  await bot.pipeline.recover();
+  // 重启重置：不恢复主会话（不 resume），chat 在用户发消息时自然创建
   await bot.transport.recover();
 
   await bot.apiServer.start();

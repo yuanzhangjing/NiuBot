@@ -208,7 +208,7 @@ test("超过并发上限不认领", async () => {
   expect(service.getJob(job.id)?.status).toBe("queued");
 });
 
-test("孤儿 running Job（runtime 无执行）超时后强制 interrupted", async () => {
+test("孤儿 running Job（runtime 无执行）超时后强制 failed", async () => {
   const { job } = makeWorkAndJob();
   service.claimJob({ jobId: job.id, claimToken: "l" });
   // 模拟进程丢失/确认链路断裂：DB running 但 runtime 无执行，且长时间未更新
@@ -217,9 +217,9 @@ test("孤儿 running Job（runtime 无执行）超时后强制 interrupted", asy
   ).run(job.id);
 
   scheduler.start();
-  await waitFor(() => service.getJob(job.id)?.status === "interrupted");
+  await waitFor(() => service.getJob(job.id)?.status === "failed");
   expect(service.getJob(job.id)?.error).toMatch(/execution lost/);
-  // 打断后生成验收 Continuation
+  // 失败后生成验收 Continuation
   expect(service.claimContinuations("chat-1", "t")).toHaveLength(1);
 });
 
@@ -364,7 +364,7 @@ test("watchdog 超时取消：先落 DB cancelling，confirmCancelled 链路成�
   scheduler.stop();
 });
 
-test("孤儿 inFlight Job（准备阶段挂起）超时后打断：interrupted + abort 触发", async () => {
+test("孤儿 inFlight Job（准备阶段挂起）超时后打断：failed + abort 触发", async () => {
   const { job } = makeWorkAndJob();
   service.claimJob({ jobId: job.id, claimToken: "l" });
   runtime.inFlight.add(job.id);
@@ -375,7 +375,7 @@ test("孤儿 inFlight Job（准备阶段挂起）超时后打断：interrupted +
   const cancelSpy = vi.spyOn(runtime, "cancel");
 
   scheduler.start();
-  await waitFor(() => service.getJob(job.id)?.status === "interrupted");
+  await waitFor(() => service.getJob(job.id)?.status === "failed");
   // 准备阶段挂起被 abort（进程收敛路径触发）
   await waitFor(() => cancelSpy.mock.calls.length >= 1);
   expect(service.getJob(job.id)?.error).toMatch(/execution lost/);

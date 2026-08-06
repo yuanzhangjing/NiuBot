@@ -138,20 +138,28 @@ export class WorkerScheduler {
     }
 
     // 2. 孤儿 Job 兜底：DB running 但 Runtime 无执行（进程丢失/确认链路断裂、
-    // 准备阶段挂起、重启后未恢复）→ 超时强制打断，防止「运行中」永远残留。
+    // 准备阶段挂起）→ 超时强制失败，防止「运行中」永远残留。
     // 正常准备中的 job 由 30 分钟阈值保护（claim 时 updatedAt 已刷新）。
     for (const job of jobService.listJobsByStatus("running")) {
       if (runtime.inspect(job.id)) continue;
       const updatedAt = parseUtcDatetime(job.updatedAt);
       if (updatedAt === undefined || now - updatedAt <= JOB_ORPHAN_TIMEOUT_MS) continue;
       if (runtime.hasInFlight(job.id)) {
-        // 准备阶段挂起超时：abort 让 runJob 在检查点收敛（进程清理）；终态由 interruptJob 落库
+        // 准备阶段挂起超时：abort 让 runJob 在检查点收敛（进程清理）；终态由 failJob 落库
         void runtime.cancel(job.id, "orphan_timeout").catch((err) => {
           log.error("orphan cancel failed", { jobId: job.id, error: String(err) });
         });
       }
-      log.warn("orphaned running job interrupted (no runtime execution)", { jobId: job.id, workId: job.workId });
-      jobService.interruptJob(job.id, "execution lost: no runtime execution found");
+      log.warn("orphaned running job failed (no runtime execution)", { jobId: job.id, workId: job.workId });
+      jobService.failJob(job.id, {
+        status: "failed",
+        responseText: "",
+        error: "execution lost: no runtime execution found",
+        changedFiles: [],
+        artifacts: [],
+        startedAt: job.startedAt ?? new Date().toISOString(),
+        endedAt: new Date().toISOString(),
+      });
     }
 
     // 3. watchdog：超时运行中 Job 强制取消（不阻塞 tick，取消在后台完成）。
@@ -253,7 +261,7 @@ export class WorkerScheduler {
         // runJob 内部 claim 失败会静默返回（并发安全），无需额外处理
         void runtime.runJob(job.id).finally(() => {
           const status = jobService.getJob(job.id)?.status;
-          if (status === "completed" || status === "failed" || status === "interrupted" || status === "cancelled") {
+          if (status === "completed" || status === "failed" || status === "cancelled") {
             this.kick();
           }
         });

@@ -382,7 +382,7 @@ const migrations: Migration[] = [
           workdir               TEXT NOT NULL,
           backend_session_id    TEXT,
           status                TEXT NOT NULL DEFAULT 'queued'
-                                CHECK(status IN ('queued', 'running', 'completed', 'failed', 'interrupted', 'cancelling', 'cancelled')),
+                                CHECK(status IN ('queued', 'running', 'completed', 'failed', 'cancelling', 'cancelled')),
           response_text         TEXT,
           exit_code             INTEGER,
           error                 TEXT,

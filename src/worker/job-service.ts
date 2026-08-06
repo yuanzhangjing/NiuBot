@@ -45,7 +45,6 @@ import {
   getJobByJobIdempotencyKey,
   getWork,
   incrementWorkConsecutiveFailures,
-  incrementWorkInterruptedCount,
   insertContinuation,
   insertJob,
   insertJobIdempotencyKey,
@@ -58,7 +57,6 @@ import {
   listWorkerEvents,
   listWorks as listWorkRows,
   markContinuationCompleted,
-  resetClaimedContinuations,
   resetWorkConsecutiveFailures,
   updateJobStatus,
   updateRunningJobSession,
@@ -231,48 +229,6 @@ export class SqliteJobService implements JobService {
     return this.finishJob(jobId, record, "failed");
   }
 
-  interruptJob(jobId: string, reason?: string): Job | undefined {
-    return this.db.transaction(() => {
-      const job = this.getJobDomain(jobId);
-      if (!job || job.status !== "running") return undefined;
-      const work = getWork(this.db, job.workId);
-      if (!work) return undefined;
-      const updated = updateJobStatus(this.db, jobId, {
-        from: "running",
-        to: "interrupted",
-        version: job.version,
-        fields: {
-          endedAt: new Date().toISOString(),
-          error: reason ?? "interrupted by engine restart",
-        },
-      });
-      if (!updated) return undefined;
-      incrementWorkInterruptedCount(this.db, work.id);
-      this.recordEvent({ workId: work.id, jobId, event: "job_interrupted" });
-      // 达到上限后 Work 直接 failed，通知用户而不是无限重建
-      const workAfter = getWork(this.db, work.id)!;
-      if (workAfter.interrupted_count >= MAX_WORK_INTERRUPTED_COUNT && workAfter.status === "active") {
-        updateWorkStatus(this.db, work.id, {
-          from: "active",
-          to: "failed",
-          version: workAfter.version,
-        });
-        updateWorkConclusion(
-          this.db,
-          work.id,
-          `该任务已 ${workAfter.interrupted_count} 次因 Engine 重启中断，已达到上限，需用户重新发起。`,
-        );
-        this.recordEvent({
-          workId: work.id,
-          event: "work_failed",
-          detail: `interrupted_count=${workAfter.interrupted_count}`,
-        });
-      }
-      this.createTerminalContinuation(this.db, jobId);
-      return this.getJobDomain(jobId);
-    })();
-  }
-
   requestCancel(jobId: string, reason?: string): Job | undefined {
     return this.db.transaction(() => {
       const job = this.getJobDomain(jobId);
@@ -433,31 +389,6 @@ export class SqliteJobService implements JobService {
 
   claimContinuations(chatId: string, claimToken: string): AgentContinuation[] {
     return claimPendingContinuations(this.db, chatId, claimToken).map(continuationRowToContinuation);
-  }
-
-  resetClaimedContinuations(): number {
-    return resetClaimedContinuations(this.db);
-  }
-
-  failOrphanedEmptyWorks(reason: string): number {
-    return this.db.transaction(() => {
-      const rows = this.db.prepare(`
-        SELECT w.id
-        FROM worker_works w
-        WHERE w.bot_id = ? AND w.status = 'active'
-          AND NOT EXISTS (SELECT 1 FROM worker_jobs j WHERE j.work_id = w.id)
-      `).all(this.botId) as Array<{ id: string }>;
-      let failed = 0;
-      for (const row of rows) {
-        const work = getWork(this.db, row.id);
-        if (!work) continue;
-        if (!updateWorkStatus(this.db, row.id, { from: "active", to: "failed", version: work.version })) continue;
-        updateWorkConclusion(this.db, row.id, reason);
-        this.recordEvent({ workId: row.id, event: "work_failed", detail: reason });
-        failed += 1;
-      }
-      return failed;
-    })();
   }
 
   markContinuationCompleted(id: string, agentTurnId: string): void {

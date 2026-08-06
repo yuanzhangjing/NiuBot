@@ -116,7 +116,6 @@ export function workRowToWork(row: WorkRow): Work {
     status: row.status,
     jobIds: parseJsonArray(row.job_ids_json),
     finalConclusion: row.final_conclusion ?? undefined,
-    interruptedCount: row.interrupted_count,
     consecutiveFailures: row.consecutive_failures,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -338,18 +337,6 @@ export function insertJobIdempotencyKey(db: Database.Database, idempotencyKey: s
     idempotencyKey,
     jobId,
   );
-}
-
-// ---------------------------------------------------------------------------
-// Work 计数（interrupted 防静默循环）
-// ---------------------------------------------------------------------------
-
-export function incrementWorkInterruptedCount(db: Database.Database, workId: string): void {
-  db.prepare(`
-    UPDATE worker_works
-    SET interrupted_count = interrupted_count + 1, updated_at = datetime('now')
-    WHERE id = ?
-  `).run(workId);
 }
 
 /** 连续失败计数（防失控上限，§6 maxConsecutiveFailures） */
@@ -603,12 +590,3 @@ export function markContinuationCompleted(
   return result.changes === 1;
 }
 
-/** 重启恢复：claimed Continuation 重置为 pending，允许重新投递（§7.5）。 */
-export function resetClaimedContinuations(db: Database.Database): number {
-  const result = db.prepare(`
-    UPDATE agent_continuations
-    SET status = 'pending', claim_token = NULL, claimed_at = NULL, agent_turn_id = NULL
-    WHERE status = 'claimed'
-  `).run();
-  return result.changes;
-}

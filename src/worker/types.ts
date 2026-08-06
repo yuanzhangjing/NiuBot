@@ -25,16 +25,14 @@ export type JobStatus =
   | "running"
   | "completed"
   | "failed"
-  | "interrupted"
   | "cancelling"
   | "cancelled";
 
-/** 终态判断；interrupted 是崩溃恢复专用的失败终态，语义与 failed 分开只用于诊断。 */
+/** 终态判断。 */
 export const WORK_TERMINAL_STATUSES: readonly WorkStatus[] = ["completed", "failed", "cancelled"];
 export const JOB_TERMINAL_STATUSES: readonly JobStatus[] = [
   "completed",
   "failed",
-  "interrupted",
   "cancelled",
 ];
 
@@ -63,8 +61,6 @@ export interface Work {
   jobIds: string[];
   /** 主 Agent 验收后的最终结论（终态时填写） */
   finalConclusion?: string;
-  /** 因重启/崩溃产生 interrupted 的累计次数，达到上限后 Work 直接 failed（防静默循环） */
-  interruptedCount: number;
   /** 连续失败次数（Job failed 时 +1，completed 时清零；达到上限 Work 直接 failed） */
   consecutiveFailures: number;
   createdAt: string;
@@ -245,8 +241,6 @@ export interface JobService {
   completeJob(jobId: string, record: JobExecutionRecord): Job | undefined;
   /** running → failed */
   failJob(jobId: string, record: JobExecutionRecord): Job | undefined;
-  /** running → interrupted（崩溃恢复/执行丢失：进程已随旧进程消失） */
-  interruptJob(jobId: string, reason?: string): Job | undefined;
   /** queued Job 因依赖失败直接终态（不经过执行；连续失败预算照常累计） */
   failQueuedJob(jobId: string, error: string): Job | undefined;
   /** queued/running → cancelling；reason 写入 job.error（终态保留，供查询） */
@@ -287,11 +281,6 @@ export interface JobService {
     conclusion: string;
     workerEventCursor?: number;
   }): { completedWorkIds: string[]; continuedWorkIds: string[] };
-  /** 重启恢复：claimed Continuation 重置为 pending（§7.5 重新投递） */
-  resetClaimedContinuations(): number;
-  /** 重启恢复：关闭创建后尚未来得及添加 Job 的孤立 Work。 */
-  failOrphanedEmptyWorks(reason: string): number;
-
   recordEvent(event: Omit<WorkerEvent, "id" | "createdAt" | "botId">): void;
   listEvents(workId: string): WorkerEvent[];
 }

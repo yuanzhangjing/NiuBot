@@ -555,7 +555,7 @@ export class Pipeline {
         onContinuations: (chatId, ids) => this.enqueueWorkerContinuations(chatId, ids),
         isSchedulingEnabled: () => (this.workerConfig?.teamConfigStore?.isEnabled() ?? true),
       });
-      this.recoverInterruptedWorkerJobs();
+      this.cleanupWorkerJobsAfterRestart();
       this.workerScheduler.start();
     }
     if (this.autoUpdateNotificationsEnabled) {
@@ -1147,135 +1147,6 @@ export class Pipeline {
       }
     } catch (err) {
       this.log.warn("failed to mark unfinished runtime runs after restart", { error: String(err) });
-    }
-  }
-
-  /** 进程恢复：从 DB 恢复 active sessions，重建 backend session */
-  async recover(): Promise<void> {
-    const rows = this.db.prepare(`
-      SELECT s.id, s.chat_id, s.user_id, s.agent_session_id, s.backend_type, c.platform_id, c.type
-      FROM sessions s
-      JOIN chats c ON s.chat_id = c.id
-      WHERE s.status = 'active'
-      ORDER BY s.last_active_at DESC
-    `).all() as Array<{
-      id: string;
-      chat_id: string;
-      user_id: string | null;
-      agent_session_id: string | null;
-      backend_type: AgentBackendType | null;
-      platform_id: string;
-      type: string;
-    }>;
-
-    if (rows.length === 0) return;
-
-    // 每个 chat 只恢复最近的一个 session，跳过重复
-    const seen = new Set<string>();
-    const uniqueRows = rows.filter((r) => {
-      if (seen.has(r.chat_id)) return false;
-      seen.add(r.chat_id);
-      return true;
-    });
-
-    this.log.info("recovering active sessions", { count: uniqueRows.length });
-
-    for (const row of uniqueRows) {
-      const chatType = (row.type ?? "p2p") as "p2p" | "group";
-      const storedBackendType = normalizeBackend(row.backend_type ?? undefined);
-      const canResumeRecoveredSession = storedBackendType !== undefined && storedBackendType === this.backendType;
-
-      if (!canResumeRecoveredSession && storedBackendType !== this.backendType) {
-        this.db.prepare(`
-          UPDATE sessions
-          SET status = 'archive_failed',
-              ended_at = datetime('now'),
-              last_active_at = datetime('now')
-          WHERE id = ?
-        `).run(row.id);
-        this.log.warn("resetting unrecoverable active session during startup", {
-          chatId: row.chat_id,
-          sessionId: row.id,
-          storedBackendType: storedBackendType ?? "unknown",
-          activeBackendType: this.backendType,
-        });
-        continue;
-      }
-
-      // 重建 stable system context
-      // 群聊：只注入 bot + chat 信息，不注入用户身份
-      const isGroup = chatType === "group";
-      const userRow = (!isGroup && row.user_id)
-        ? this.db.prepare("SELECT name FROM users WHERE id = ?").get(row.user_id) as { name: string | null } | undefined
-        : undefined;
-      const isAdmin = row.user_id ? this.adminRoles.has(row.user_id) : false;
-      const sessionProfile = buildImportantContext(this.db, {
-        botName: this.botIdentity.name,
-        botLabel: this.botUserId ? getUserShortLabel(this.db, this.botUserId) : undefined,
-        platform: this.botIdentity.platform,
-        userName: userRow?.name ?? undefined,
-        userId: isGroup ? undefined : (row.user_id ?? undefined),
-        chatId: row.chat_id,
-        chatLabel: getChatShortLabel(this.db, row.chat_id),
-        chatType,
-        isAdmin,
-        botProfilePath: this.stableContextOptions.botProfilePath,
-      });
-      const stableContext = this.buildStableSystemContext();
-      const scheduleToken = randomUUID();
-      this.chatScheduleTokens.set(row.chat_id, scheduleToken);
-
-      try {
-        const agentSession = await this.createAgentSession({
-          workingDirectory: this.workingDirectory,
-          importantContext: stableContext || undefined,
-          userId: row.user_id ?? undefined,
-          chatId: row.chat_id,
-          chatType,
-          dbPath: this.dbPath,
-          botId: this.botIdentity.platformBotId,
-          botName: this.botIdentity.name,
-          platform: this.botIdentity.platform,
-          model: this.botIdentity.model,
-          isAdmin,
-          botProfilePath: this.stableContextOptions.botProfilePath,
-          agentSessionId: canResumeRecoveredSession ? (row.agent_session_id ?? undefined) : undefined,
-          scheduleToken,
-        });
-
-        // fallback 模式下：仅新建 session 时需要注入（resume 的 session 已有上下文）
-        const isResuming = canResumeRecoveredSession && !!row.agent_session_id;
-        if (!isResuming) {
-          this.pendingMessageContext.set(row.chat_id, sessionProfile);
-        }
-        if (this.agent.needsStableUserPrefix() && stableContext && !isResuming) {
-          this.pendingStableContext.set(row.chat_id, stableContext);
-        }
-
-        this.chatSessions.set(row.chat_id, {
-          agentSession,
-          sessionId: row.id,
-          platformChatId: row.platform_id,
-          userId: row.user_id ?? "",
-          hasReplied: true, // recovered sessions skip reply-to
-        });
-        this.platformChatIds.set(row.chat_id, row.platform_id);
-        if (row.user_id) this.chatUserIds.set(row.chat_id, row.user_id);
-
-        this.log.info("session recovered", {
-          chatId: row.chat_id,
-          sessionId: row.id,
-          resumed: canResumeRecoveredSession && !!row.agent_session_id,
-          storedBackendType: storedBackendType ?? "unknown",
-          activeBackendType: this.backendType,
-        });
-      } catch (err) {
-        this.log.error("failed to recover session", {
-          chatId: row.chat_id,
-          sessionId: row.id,
-          error: String(err),
-        });
-      }
     }
   }
 
@@ -2579,34 +2450,36 @@ export class Pipeline {
     }
   }
 
-  /** 崩溃恢复（§14）：Engine 重启后把 running Job 标记 interrupted（进程已随旧进程消失）。 */
-  private recoverInterruptedWorkerJobs(): void {
-    const jobService = this.workerConfig?.jobService;
-    if (!jobService) return;
-    // claimed 但未完成的 Continuation（主 Agent 回合中断）重置为 pending 重新投递
-    const resetCount = jobService.resetClaimedContinuations();
-    if (resetCount > 0) {
-      this.log.info("worker continuations reset for redelivery after restart", { count: resetCount });
-    }
-    const emptyWorkCount = jobService.failOrphanedEmptyWorks("Engine 重启时发现 Work 尚未创建任何 Job，已自动结束。");
-    if (emptyWorkCount > 0) {
-      this.log.warn("orphaned empty worker works failed during restart recovery", { count: emptyWorkCount });
-    }
-    for (const job of jobService.listJobsByStatus("running")) {
-      jobService.interruptJob(job.id);
-      this.log.warn("worker job interrupted by restart", { jobId: job.id, workId: job.workId });
-    }
-    for (const job of jobService.listJobsByStatus("cancelling")) {
-      jobService.confirmCancelled(job.id, {
-        status: "cancelled",
-        responseText: "",
-        error: "engine restarted while cancelling",
-        changedFiles: [],
-        artifacts: [],
-        startedAt: new Date().toISOString(),
-        endedAt: new Date().toISOString(),
-      });
-      this.log.warn("worker job cancel confirmed during restart", { jobId: job.id });
+  /** 重启清理（重启重置）：进行中的 Worker 状态全部终止，不恢复、不重投。
+   * 原因写入 error/conclusion（Agent 按需查询 nbt worker get/list 可见）；
+   * 未交付的 Continuation 一并失效（不向主 Agent 投递旧结果）。 */
+  private cleanupWorkerJobsAfterRestart(): void {
+    if (!this.workerConfig) return;
+    try {
+      const jobResult = this.db.prepare(`
+        UPDATE worker_jobs
+        SET status = 'failed', error = 'Engine 重启，任务已终止', ended_at = datetime('now')
+        WHERE status IN ('queued', 'running', 'cancelling')
+      `).run();
+      const workResult = this.db.prepare(`
+        UPDATE worker_works
+        SET status = 'failed', final_conclusion = 'Engine 重启，未完成任务已终止', updated_at = datetime('now')
+        WHERE status IN ('active', 'cancelling')
+      `).run();
+      const contResult = this.db.prepare(`
+        UPDATE agent_continuations
+        SET status = 'completed', completed_at = datetime('now')
+        WHERE status IN ('pending', 'claimed')
+      `).run();
+      if (jobResult.changes > 0 || workResult.changes > 0 || contResult.changes > 0) {
+        this.log.warn("worker state cleaned up after restart", {
+          jobs: jobResult.changes,
+          works: workResult.changes,
+          continuations: contResult.changes,
+        });
+      }
+    } catch (err) {
+      this.log.error("failed to clean up worker state after restart", { error: String(err) });
     }
   }
 
