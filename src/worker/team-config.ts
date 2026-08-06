@@ -15,8 +15,10 @@ import { createHash, randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import yaml from "yaml";
 
-/** 工作区访问方式：read_only 只读参考；direct 直接在目标目录修改（git 操作由 Worker 自行执行） */
-export type WorkspaceAccess = "read_only" | "direct";
+import { createLogger } from "../logger.js";
+import type { WorkspaceAccess } from "./types.js";
+
+const log = createLogger("worker-team-config");
 
 export interface TeamProfileSkills {
   sharedSets?: string[];
@@ -105,9 +107,14 @@ export function parseTeamConfig(yamlText: string): TeamConfig {
     if (!prompt.trim()) {
       throw new Error(`profile ${id} 缺少 prompt`);
     }
-    const access = p["access"] ?? "read_only";
+    let access = p["access"] ?? "read_only";
     if (!["read_only", "direct"].includes(access as string)) {
-      throw new Error(`profile ${id} 的 access 非法: ${String(access)}`);
+      // 兼容旧值：git_worktree/scratch 已废弃（写任务现在直接在目标目录修改），映射为 direct
+      if (access === "git_worktree" || access === "scratch") {
+        access = "direct";
+      } else {
+        throw new Error(`profile ${id} 的 access 非法: ${String(access)}`);
+      }
     }
     const maxConcurrent = p["maxConcurrent"] === undefined ? undefined : toPositiveInt(p["maxConcurrent"], 1, `profiles.${id}.maxConcurrent`);
     const rawSkills = p["skills"];
@@ -205,7 +212,13 @@ export class TeamConfigStore {
     if (!versionRow) return { config: DEFAULT_TEAM_CONFIG };
     try {
       return { version, config: parseTeamConfig(versionRow.config_yaml) };
-    } catch {
+    } catch (err) {
+      // 显式记录解析失败：静默回退内置默认会让自定义角色无声消失，必须可排查
+      log.error("active team config failed to parse, falling back to defaults", {
+        botId: this.botId,
+        version,
+        error: err instanceof Error ? err.message : String(err),
+      });
       return { config: DEFAULT_TEAM_CONFIG };
     }
   }

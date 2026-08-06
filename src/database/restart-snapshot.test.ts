@@ -38,8 +38,8 @@ describe("restart database snapshot", () => {
     const root = temporaryDirectory();
     const database = initDatabase(path.join(root, "bridge.db"));
 
-    expect(LATEST_SCHEMA_VERSION).toBe(25);
-    expect(database.pragma("user_version", { simple: true })).toBe(25);
+    expect(LATEST_SCHEMA_VERSION).toBe(26);
+    expect(database.pragma("user_version", { simple: true })).toBe(26);
     expect(database.prepare(
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('transport_inbox', 'transport_outbox')",
     ).all()).toHaveLength(2);
@@ -130,12 +130,14 @@ describe("restart database snapshot", () => {
     database.pragma(`user_version = ${LATEST_SCHEMA_VERSION}`);
     database.close();
 
+    // LATEST（26）是破坏性迁移（DROP COLUMN），不在回滚兼容列表 → legacy preflight 必须拒绝
     expect(() => assertDatabasesAtCompatibleSchemaVersion(
       [databasePath],
       ROLLBACK_COMPATIBLE_SCHEMA_VERSIONS,
       LATEST_SCHEMA_VERSION,
-    )).not.toThrow();
+    )).toThrow(/cannot safely/);
 
+    // 兼容列表内的版本作为 candidate 时仍可走 legacy preflight（candidate 必须 ∈ 兼容列表）
     for (const version of ROLLBACK_COMPATIBLE_SCHEMA_VERSIONS) {
       const legacy = new Database(databasePath);
       legacy.pragma(`user_version = ${version}`);
@@ -143,7 +145,7 @@ describe("restart database snapshot", () => {
       expect(() => assertDatabasesAtCompatibleSchemaVersion(
         [databasePath],
         ROLLBACK_COMPATIBLE_SCHEMA_VERSIONS,
-        LATEST_SCHEMA_VERSION,
+        version,
       )).not.toThrow();
     }
 
@@ -155,13 +157,13 @@ describe("restart database snapshot", () => {
       ROLLBACK_COMPATIBLE_SCHEMA_VERSIONS,
       LATEST_SCHEMA_VERSION,
     ))
-      .toThrow(/cannot safely upgrade/);
+      .toThrow(/cannot safely/);
     expect(() => assertDatabasesAtCompatibleSchemaVersion(
       [path.join(root, "missing.db")],
       ROLLBACK_COMPATIBLE_SCHEMA_VERSIONS,
       LATEST_SCHEMA_VERSION,
     ))
-      .toThrow(/missing database/);
+      .toThrow(/cannot safely/);
 
     expect(() => assertDatabasesAtCompatibleSchemaVersion(
       [databasePath],

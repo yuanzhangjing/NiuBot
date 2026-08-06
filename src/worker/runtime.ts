@@ -7,7 +7,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { readdirSync, statSync } from "node:fs";
+import { readdirSync, rmSync, statSync } from "node:fs";
 import path from "node:path";
 
 import type { AgentBackend, AgentSession, SessionConfig } from "../agent/types.js";
@@ -15,7 +15,7 @@ import { createLogger } from "../logger.js";
 import { terminateSpawnedProcessTree, waitForProcessExit } from "../platform/process.js";
 import type { ArtifactEntry, Job, JobExecutionRecord, JobService } from "./types.js";
 import { WorkerProfileRegistry } from "./profiles.js";
-import { WORKER_MARKER_FILENAME, WorkspaceProvider, type PreparedWorkspace } from "./workspace.js";
+import { WorkspaceProvider, type PreparedWorkspace } from "./workspace.js";
 import { SkillResolver } from "./skills.js";
 
 const log = createLogger("worker-runtime");
@@ -27,7 +27,7 @@ class JobCancelledError extends Error {
   }
 }
 
-/** 收集产物目录下的文件列表（排除 marker，递归收集相对路径）。 */
+/** 收集产物目录下的文件列表（递归收集相对路径）。 */
 function collectArtifacts(artifactDir?: string): ArtifactEntry[] {
   if (!artifactDir) return [];
   const entries: ArtifactEntry[] = [];
@@ -39,7 +39,6 @@ function collectArtifacts(artifactDir?: string): ArtifactEntry[] {
       return;
     }
     for (const name of names) {
-      if (name === WORKER_MARKER_FILENAME) continue;
       const full = path.join(dir, name);
       const rel = prefix ? `${prefix}/${name}` : name;
       let isDir = false;
@@ -80,8 +79,8 @@ export interface WorkerRuntimeOptions {
   sessionConfig: Omit<SessionConfig, "workingDirectory" | "chatId">;
   /** Job 上下文组装（由 Pipeline 注入：stable context + job prompt + 实际执行目录 + 产物目录；角色内容已在 system prompt） */
   buildPrompt: (job: Job, execDir: string, artifactDir?: string) => string | Promise<string>;
-  /** 工作区准备（read_only Job 可不提供） */
-  workspaceProvider?: WorkspaceProvider;
+  /** 工作区准备（read_only 建产物目录；direct 直接用目标目录） */
+  workspaceProvider: WorkspaceProvider;
   /** Skill 校验（Phase 5；默认内置 resolver） */
   skillResolver?: SkillResolver;
   /** 按类型解析专属 backend（角色配置 backend 时使用；未配置则用 options.backend） */
@@ -258,10 +257,7 @@ export class WorkerRuntime {
 
       // 工作区准备（§12）：访问方式由 Profile 决定——read_only 目标目录只读 + 产物目录；
       // direct 直接在目标目录修改（git 操作由 Worker 自行执行）
-      const { workspaceProvider } = this.options;
-      prepared = workspaceProvider
-        ? await workspaceProvider.prepare(job.id, profile.access, job.workdir)
-        : { execDir: job.workdir, managed: false };
+      prepared = await this.options.workspaceProvider.prepare(job.id, profile.access, job.workdir);
       ensureNotCancelled();
 
       // 角色完整内容（定义 + 原则 + 工作流）作为 system prompt 注入，静态固定；
@@ -387,6 +383,15 @@ export class WorkerRuntime {
           jobBackend.closeSession?.(session);
         } catch {
           // session 清理失败不阻断主流程
+        }
+      }
+      // 终态已落库（成功/失败/取消路径都在 finally 前完成）：删除 tmp 产物目录，
+      // 产物清单已随 Job 记录入库，目录不再需要保留。删除失败不阻断主流程。
+      if (prepared?.artifactDir) {
+        try {
+          rmSync(prepared.artifactDir, { recursive: true, force: true });
+        } catch {
+          log.warn("failed to remove job artifact directory", { jobId, artifactDir: prepared.artifactDir });
         }
       }
     }

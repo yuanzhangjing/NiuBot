@@ -40,6 +40,9 @@ export const JOB_TERMINAL_STATUSES: readonly JobStatus[] = [
 
 export type WorkVisibility = "private" | "public";
 
+/** 工作区访问方式：read_only 只读参考；direct 直接在目标目录修改（git 操作由 Worker 自行执行） */
+export type WorkspaceAccess = "read_only" | "direct";
+
 export interface ArtifactEntry {
   kind: string;
   relativePath: string;

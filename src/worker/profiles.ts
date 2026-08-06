@@ -5,6 +5,7 @@
  */
 
 import type { TeamProfileSkills } from "./team-config.js";
+import type { WorkspaceAccess } from "./types.js";
 
 export interface WorkerProfile {
   id: string;
@@ -19,7 +20,7 @@ export interface WorkerProfile {
   /** profile 级并发上限；未设置时只受全局 maxConcurrent 约束 */
   maxConcurrent?: number;
   /** 工作区访问方式：read_only 只读参考目标目录；direct 直接在目标目录修改（写任务，git 操作由 Worker 自行执行） */
-  access: "read_only" | "direct";
+  access: WorkspaceAccess;
   /** skill 声明（Phase 5；内置 profile 无声明时用默认行为） */
   skills?: TeamProfileSkills;
   /** 专属 backend 类型（如 "claude"）；未设置时复用主 Agent 的 backend */
@@ -36,7 +37,7 @@ export function teamProfileToWorkerProfile(p: {
   prompt: string;
   principles?: string;
   workflow?: string;
-  access: "read_only" | "direct";
+  access: WorkspaceAccess;
   maxConcurrent?: number;
   skills?: TeamProfileSkills;
   backend?: string;
@@ -131,10 +132,10 @@ export const STATIC_WORKER_PROFILES: Record<string, WorkerProfile> = {
   developer: {
     id: "developer",
     displayName: "Developer",
-    description: "在独立工作目录中实现和修改代码",
+    description: "在目标仓库中直接实现和修改代码",
     prompt:
       "你是当前 Bot 内部的开发 Worker。你的职责：\n" +
-      "- 只在当前 Job 的工作目录（独立工作区）内修改代码；git 操作（clone/checkout/分支）按任务指引自行执行；\n" +
+      "- 当前 Job 的工作目录就是目标仓库本身，直接在仓库内修改；git 操作（checkout 目标提交/建独立分支/提交）按任务指引自行执行；\n" +
       "- 不 push、不发布、不操作生产环境；\n" +
       "- 修改前先阅读相关文件，修改后给出变更摘要和测试建议；\n" +
       "- 输出 Markdown：改了什么、为什么、如何验证、风险。",

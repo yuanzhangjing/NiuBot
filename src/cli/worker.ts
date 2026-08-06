@@ -102,7 +102,17 @@ function printWork(ctx: WorkerCliContext, service: SqliteJobService, workId: str
   }
 }
 
+/** 校验未知 flag：已删除的参数（如旧版 --workspace）显式报错，避免静默忽略造成行为误解。 */
+function rejectUnknownFlags(args: string[], known: string[], command: string): void {
+  for (const arg of args) {
+    if (arg.startsWith("--") && !known.includes(arg)) {
+      fail(`${command} 收到未知参数: ${arg}`);
+    }
+  }
+}
+
 async function handleWorkCreate(ctx: WorkerCliContext, execute: WorkerCommandExecutor, args: string[]): Promise<void> {
+  rejectUnknownFlags(args, ["--file"], "work create");
   const fileIndex = args.indexOf("--file");
   const content = readFileOrFail(fileIndex >= 0 ? args[fileIndex + 1] : undefined, "work 文件");
   const result = await execute(ctx.chatId, { type: "work.create", request: content.trim() });
@@ -110,6 +120,7 @@ async function handleWorkCreate(ctx: WorkerCliContext, execute: WorkerCommandExe
 }
 
 async function handleJobCreate(ctx: WorkerCliContext, execute: WorkerCommandExecutor, args: string[]): Promise<void> {
+  rejectUnknownFlags(args, ["--work", "--worker", "--file", "--workdir", "--depends-on"], "job create");
   const workId = args.find((a, i) => args[i - 1] === "--work");
   if (!workId) fail("job create 需要 --work <work-id>");
   const workerId = args.find((a, i) => args[i - 1] === "--worker");

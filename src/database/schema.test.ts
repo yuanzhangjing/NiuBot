@@ -337,7 +337,8 @@ describe("cron timezone schema", () => {
     const migrated = initDatabase(dbPath);
     const columns = migrated.prepare("PRAGMA table_info(cron_jobs)").all() as Array<{ name: string }>;
     expect(columns.map((column) => column.name)).toContain("timezone");
-    expect(migrated.pragma("user_version", { simple: true })).toBe(15);
+    // LATEST（26）是破坏性迁移（DROP COLUMN）：升级后 user_version 推进到最新，旧二进制被拒绝启动
+    expect(migrated.pragma("user_version", { simple: true })).toBe(LATEST_SCHEMA_VERSION);
   });
 });
 
@@ -360,7 +361,8 @@ describe("public upgrade rollback compatibility", () => {
       fixture.close();
 
       const upgraded = initDatabase(dbPath);
-      expect(upgraded.pragma("user_version", { simple: true })).toBe(legacyVersion);
+      // LATEST（26）为破坏性迁移：升级后 user_version 推进到最新（旧二进制拒绝启动，而非崩溃）
+      expect(upgraded.pragma("user_version", { simple: true })).toBe(LATEST_SCHEMA_VERSION);
       expect(upgraded.prepare(
         "SELECT version FROM niubot_component_schema_versions WHERE component = 'transport'",
       ).pluck().get()).toBe(2);
@@ -375,10 +377,10 @@ describe("public upgrade rollback compatibility", () => {
       `).run();
       upgraded.close();
 
-      // 模拟回滚到升级前的同一公开版本：旧代码看到原 user_version，
-      // 忽略新增表和 nullable 列，并继续使用原有 SQL。
+      // 26 为破坏性迁移，user_version 已推进到 LATEST：旧二进制会被拒绝启动（而非崩溃）。
+      // 这里模拟「旧代码忽略新版本号继续操作」的 SQL 兼容性（表结构仍允许旧 SQL）。
       const rolledBack = new Database(dbPath);
-      expect(rolledBack.pragma("user_version", { simple: true })).toBe(legacyVersion);
+      expect(rolledBack.pragma("user_version", { simple: true })).toBe(LATEST_SCHEMA_VERSION);
       expect(() => rolledBack.prepare(`
         INSERT INTO cron_jobs (
           chat_id, creator_user_id, cron_expr, run_at, prompt,
@@ -388,7 +390,7 @@ describe("public upgrade rollback compatibility", () => {
       rolledBack.close();
 
       const reupgraded = initDatabase(dbPath);
-      expect(reupgraded.pragma("user_version", { simple: true })).toBe(legacyVersion);
+      expect(reupgraded.pragma("user_version", { simple: true })).toBe(LATEST_SCHEMA_VERSION);
       expect(reupgraded.prepare(
         "SELECT prompt FROM cron_jobs ORDER BY id",
       ).pluck().all()).toEqual(["before-upgrade", "during-rollback"]);
@@ -423,7 +425,8 @@ describe("public upgrade rollback compatibility", () => {
     fixture.close();
 
     const resumed = initDatabase(dbPath);
-    expect(resumed.pragma("user_version", { simple: true })).toBe(10);
+    // LATEST（26）为破坏性迁移：升级后 user_version 推进到最新
+    expect(resumed.pragma("user_version", { simple: true })).toBe(LATEST_SCHEMA_VERSION);
     expect((resumed.prepare("PRAGMA table_info(bot_runtime_state)").all() as Array<{ name: string }>)
       .map((column) => column.name)).toEqual(expect.arrayContaining(["model", "lite_model"]));
     expect(resumed.prepare(
@@ -523,7 +526,7 @@ describe("transport inbox claim schema", () => {
       claim_token: null,
       claimed_at: null,
     });
-    expect(migrated.pragma("user_version", { simple: true })).toBe(16);
+    expect(migrated.pragma("user_version", { simple: true })).toBe(LATEST_SCHEMA_VERSION);
     expect(migrated.prepare(
       "SELECT version FROM niubot_component_schema_versions WHERE component = 'transport'",
     ).pluck().get()).toBe(2);

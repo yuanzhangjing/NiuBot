@@ -747,6 +747,10 @@ export class Pipeline {
           throw new Error(`未知 Worker Profile: ${request.command.workerProfileId}（可用: ${this.workerConfig.registry.list().map((item) => item.id).join(", ")}）`);
         }
         // 工作区访问方式由 Profile 决定（read_only 只读 / direct 直接修改），Job 不再携带
+        if (profile.access === "direct" && !request.command.workdir) {
+          // direct 写任务必须显式指定目标目录：缺省（workspace 根）等于授权 Worker 直写整个工作区
+          throw new Error("direct 写任务必须显式指定 workdir（目标目录），不能省略");
+        }
         const requestedWorkdir = path.resolve(request.command.workdir ?? this.workingDirectory);
         let workspaceRootReal: string;
         let requestedWorkdirReal: string;
@@ -2608,7 +2612,7 @@ export class Pipeline {
   /**
    * 组装 Worker 的上下文：稳定系统规则 + Profile 角色说明 + Job 目标。
    * 第一版不注入主会话 transcript 和用户记忆。
-   * scratch Job 的 execDir 是独立工作目录，git 操作由 Worker 按指引自行执行。
+   * direct Job 的 execDir 即目标仓库本身，git 操作由 Worker 按指引自行执行。
    */
   private buildWorkerPrompt(job: Job, execDir: string, artifactDir?: string): string {
     // 角色内容（定义/原则/工作流）已在 system prompt 注入；这里只组装任务详情

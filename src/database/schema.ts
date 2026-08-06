@@ -392,6 +392,8 @@ const migrations: Migration[] = [
           ended_at              TEXT,
           claim_token           TEXT,
           claimed_at            TEXT,
+          workspace_policy      TEXT NOT NULL DEFAULT 'read_only'
+                                CHECK(workspace_policy IN ('read_only', 'scratch', 'git_worktree')),
           depends_on_json       TEXT NOT NULL DEFAULT '[]',
           created_at            TEXT NOT NULL DEFAULT (datetime('now')),
           updated_at            TEXT NOT NULL DEFAULT (datetime('now')),
@@ -683,6 +685,18 @@ const migrations: Migration[] = [
       if (!columns.has("cron_expr")) db.exec("ALTER TABLE loop_jobs ADD COLUMN cron_expr TEXT");
       if (!columns.has("timezone")) db.exec("ALTER TABLE loop_jobs ADD COLUMN timezone TEXT");
       if (!columns.has("description")) db.exec("ALTER TABLE loop_jobs ADD COLUMN description TEXT");
+    },
+  },
+  {
+    version: 26,
+    description: "Drop deprecated worker_jobs.workspace_policy (workspace access is now determined by profile)",
+    up: (db) => {
+      // 列由 migration 17 引入，现已被废弃（访问方式由 Profile 决定）。
+      // 存量库执行 DROP COLUMN 对齐新库结构；PRAGMA 防御幂等。
+      const columns = db.prepare("PRAGMA table_info(worker_jobs)").all() as Array<{ name: string }>;
+      if (columns.some((column) => column.name === "workspace_policy")) {
+        db.exec("ALTER TABLE worker_jobs DROP COLUMN workspace_policy");
+      }
     },
   },
 ];
