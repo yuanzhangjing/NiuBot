@@ -6,6 +6,7 @@ import { afterEach, expect, test, vi } from "vitest";
 
 import { localApiRequest } from "../local-api/client.js";
 import { resolveBotEndpoint } from "../platform/ipc.js";
+import { TZ } from "../tz.js";
 import { ApiServer, type ApiHandler } from "./api.js";
 
 const tempDirs: string[] = [];
@@ -88,7 +89,8 @@ test("/schedule 把结构化调度命令转交给当前 Pipeline 回合", async 
     cronExpr: undefined,
     description: undefined,
     untilTime: undefined,
-    timeZone: "Asia/Shanghai",
+    // 默认时区与实现同源（NIUBOT_TZ 或系统时区），不绑定具体值，保证 CI（UTC）可移植
+    timeZone: TZ,
   }, "tok-2");
 });
 
