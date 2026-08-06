@@ -15,6 +15,7 @@ describe("startBotRuntime", () => {
       id: "NiuBot",
       pipeline: {
         start: async () => { order.push("pipeline.start"); },
+        recover: async () => { order.push("pipeline.recover"); },
       },
       transport: {
         recover: async () => { order.push("transport.recover"); },
@@ -45,6 +46,7 @@ describe("startBotRuntime", () => {
 
     expect(order).toEqual([
       "pipeline.start",
+      "pipeline.recover",
       "transport.recover",
       "api.start",
       "cron.start",

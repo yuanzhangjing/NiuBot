@@ -156,7 +156,8 @@ describe("buildStableSystemContext", () => {
     expect(context).toContain("<niubot-system-rules>");
     expect(context).toContain("nbt system-rules");
     expect(context).toContain("Task Policy");
-    expect(context).toContain("不要启动、停止或重启 NiuBot Engine 服务");
+    expect(context).toContain("Self Restart");
+    expect(context).toContain("restart.sh");
     expect(context).toContain("<bot-identity>");
     expect(context).toContain("你就是当前 Bot：U3(NiuBot)。");
     expect(context).toContain("对用户来说，你是 NiuBot。");

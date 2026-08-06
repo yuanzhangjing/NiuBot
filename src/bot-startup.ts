@@ -27,7 +27,9 @@ export async function startBotRuntime(
     ?? DEFAULT_TRANSPORT_START_TIMEOUT_MS;
 
   await bot.pipeline.start();
-  // 重启重置：不恢复主会话（不 resume），chat 在用户发消息时自然创建
+  // 主会话 resume：恢复 active sessions，重建 backend session（--resume 旧上下文）。
+  // Worker 重启清理（cleanupWorkerJobsAfterRestart）在 pipeline.start() 内执行，两者独立。
+  await bot.pipeline.recover();
   await bot.transport.recover();
 
   await bot.apiServer.start();

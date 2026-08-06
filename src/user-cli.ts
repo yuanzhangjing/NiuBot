@@ -892,10 +892,6 @@ async function cmdStart(niubotHome: string, flags: CliFlags): Promise<void> {
   const runningEngine = await inspectRunningEngine(niubotHome);
   if (runningEngine) {
     if (flags.restart) {
-      if (process.env["NIUBOT_AGENT_SESSION"]) {
-        fail("Cannot restart from within a bot session. Use /restart in Feishu or run directly in your terminal.");
-        process.exit(1);
-      }
       info("Existing process found, stopping first...");
       await stopProcess(niubotHome);
     } else {
@@ -907,10 +903,6 @@ async function cmdStart(niubotHome: string, flags: CliFlags): Promise<void> {
     const state = recordedState.processes.engine;
     if (isProcessAlive(state.pid)) {
       if (flags.restart) {
-        if (process.env["NIUBOT_AGENT_SESSION"]) {
-          fail("Cannot restart from within a bot session. Use /restart in Feishu or run directly in your terminal.");
-          process.exit(1);
-        }
         info("Existing process is not responding; verifying its creation marker before stopping...");
         await stopProcess(niubotHome);
       } else {
@@ -927,12 +919,6 @@ async function cmdStart(niubotHome: string, flags: CliFlags): Promise<void> {
     const pid = parseInt(fs.readFileSync(pidFile, "utf-8").trim(), 10);
     if (isProcessRunning(pid)) {
       if (flags.restart) {
-        // Guard: refuse to restart from within an agent session.
-        // Agent processes have NIUBOT_AGENT_SESSION set in their environment.
-        if (process.env["NIUBOT_AGENT_SESSION"]) {
-          fail("Cannot restart from within a bot session. Use /restart in Feishu or run directly in your terminal.");
-          process.exit(1);
-        }
         info("Existing process found, stopping first...");
         await stopProcess(niubotHome);
       } else {

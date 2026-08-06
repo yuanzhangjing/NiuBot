@@ -1210,6 +1210,174 @@ describe("Pipeline runtime", () => {
     )).toBe(true);
   });
 
+  test("does not recover active sessions when the stored backend is missing", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare(`
+      INSERT INTO users (id, name, platform, platform_id)
+      VALUES ('u2', 'admin', 'feishu', 'user-open-id')
+    `).run();
+    db.prepare(`
+      INSERT INTO chats (id, type, platform, platform_id, user_id)
+      VALUES ('c1', 'p2p', 'feishu', 'chat-open-id', 'user-open-id')
+    `).run();
+    db.prepare(`
+      INSERT INTO sessions (id, chat_id, user_id, status, agent_session_id, backend_type, last_active_at)
+      VALUES ('s1', 'c1', 'u2', 'active', 'legacy-session-id', NULL, datetime('now'))
+    `).run();
+
+    const agent = new RecordingAgent();
+    const pipeline = new Pipeline(
+      db,
+      createImStub(),
+      agent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "claude",
+    );
+
+    await pipeline.recover();
+
+    const row = db.prepare(
+      "SELECT status, agent_session_id, backend_type FROM sessions WHERE id = 's1'",
+    ).get() as { status: string; agent_session_id: string | null; backend_type: string | null };
+
+    expect(agent.createSessionCalls).toHaveLength(0);
+    expect(row).toEqual({
+      status: "archive_failed",
+      agent_session_id: "legacy-session-id",
+      backend_type: null,
+    });
+  });
+
+  test("does not recover active sessions from a different backend", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare(`
+      INSERT INTO users (id, name, platform, platform_id)
+      VALUES ('u2', 'admin', 'feishu', 'user-open-id')
+    `).run();
+    db.prepare(`
+      INSERT INTO chats (id, type, platform, platform_id, user_id)
+      VALUES ('c1', 'p2p', 'feishu', 'chat-open-id', 'user-open-id')
+    `).run();
+    db.prepare(`
+      INSERT INTO sessions (id, chat_id, user_id, status, agent_session_id, backend_type, last_active_at)
+      VALUES ('s1', 'c1', 'u2', 'active', 'codex-thread-id', 'codex', datetime('now'))
+    `).run();
+
+    const agent = new RecordingAgent();
+    const pipeline = new Pipeline(
+      db,
+      createImStub(),
+      agent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "claude",
+    );
+
+    await pipeline.recover();
+
+    const row = db.prepare(
+      "SELECT status, agent_session_id, backend_type FROM sessions WHERE id = 's1'",
+    ).get() as { status: string; agent_session_id: string | null; backend_type: string | null };
+
+    expect(agent.createSessionCalls).toHaveLength(0);
+    expect(row).toEqual({
+      status: "archive_failed",
+      agent_session_id: "codex-thread-id",
+      backend_type: "codex",
+    });
+  });
+
+  test("reuses agent session ids when the stored backend matches", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare(`
+      INSERT INTO users (id, name, platform, platform_id)
+      VALUES ('u2', 'admin', 'feishu', 'user-open-id')
+    `).run();
+    db.prepare(`
+      INSERT INTO chats (id, type, platform, platform_id, user_id)
+      VALUES ('c1', 'p2p', 'feishu', 'chat-open-id', 'user-open-id')
+    `).run();
+    db.prepare(`
+      INSERT INTO sessions (id, chat_id, user_id, status, agent_session_id, backend_type, last_active_at)
+      VALUES ('s1', 'c1', 'u2', 'active', 'claude-session-id', 'claude', datetime('now'))
+    `).run();
+
+    const agent = new RecordingAgent();
+    const pipeline = new Pipeline(
+      db,
+      createImStub(),
+      agent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "claude",
+    );
+
+    await pipeline.recover();
+
+    expect(agent.createSessionCalls).toHaveLength(1);
+    expect(agent.createSessionCalls[0]?.agentSessionId).toBe("claude-session-id");
+  });
+
+  test("injects session profile on first message after recovering a non-resumable active session", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare(`
+      INSERT INTO users (id, name, platform, platform_id)
+      VALUES ('u2', 'admin', 'feishu', 'user-open-id')
+    `).run();
+    db.prepare(`
+      INSERT INTO chats (id, type, platform, platform_id, user_id)
+      VALUES ('c1', 'p2p', 'feishu', 'chat-open-id', 'user-open-id')
+    `).run();
+    db.prepare(`
+      INSERT INTO sessions (id, chat_id, user_id, status, agent_session_id, backend_type, last_active_at)
+      VALUES ('s1', 'c1', 'u2', 'active', NULL, 'claude', datetime('now'))
+    `).run();
+
+    const agent = new RecordingAgent();
+    const pipeline = new Pipeline(
+      db,
+      createImStub(),
+      agent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "claude",
+    );
+
+    await pipeline.start();
+    await pipeline.recover();
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "after recover",
+      platformMsgId: "m-recover-context",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(agent.sendMessageCalls).toHaveLength(1);
+    expect(agent.sendMessageCalls[0]).toContain("<session-profile");
+    expect(agent.sendMessageCalls[0]).toContain("after recover");
+    expect(agent.sendMessageCalls[0]).not.toContain("<niubot-system-rules>");
+  });
+
 
   test("handles single-slash service as a local builtin command", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));

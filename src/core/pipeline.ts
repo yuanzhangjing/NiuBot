@@ -2483,6 +2483,135 @@ export class Pipeline {
     }
   }
 
+  /** 进程恢复：从 DB 恢复 active sessions，重建 backend session（--resume 旧上下文） */
+  async recover(): Promise<void> {
+    const rows = this.db.prepare(`
+      SELECT s.id, s.chat_id, s.user_id, s.agent_session_id, s.backend_type, c.platform_id, c.type
+      FROM sessions s
+      JOIN chats c ON s.chat_id = c.id
+      WHERE s.status = 'active'
+      ORDER BY s.last_active_at DESC
+    `).all() as Array<{
+      id: string;
+      chat_id: string;
+      user_id: string | null;
+      agent_session_id: string | null;
+      backend_type: AgentBackendType | null;
+      platform_id: string;
+      type: string;
+    }>;
+
+    if (rows.length === 0) return;
+
+    // 每个 chat 只恢复最近的一个 session，跳过重复
+    const seen = new Set<string>();
+    const uniqueRows = rows.filter((r) => {
+      if (seen.has(r.chat_id)) return false;
+      seen.add(r.chat_id);
+      return true;
+    });
+
+    this.log.info("recovering active sessions", { count: uniqueRows.length });
+
+    for (const row of uniqueRows) {
+      const chatType = (row.type ?? "p2p") as "p2p" | "group";
+      const storedBackendType = normalizeBackend(row.backend_type ?? undefined);
+      const canResumeRecoveredSession = storedBackendType !== undefined && storedBackendType === this.backendType;
+
+      if (!canResumeRecoveredSession && storedBackendType !== this.backendType) {
+        this.db.prepare(`
+          UPDATE sessions
+          SET status = 'archive_failed',
+              ended_at = datetime('now'),
+              last_active_at = datetime('now')
+          WHERE id = ?
+        `).run(row.id);
+        this.log.warn("resetting unrecoverable active session during startup", {
+          chatId: row.chat_id,
+          sessionId: row.id,
+          storedBackendType: storedBackendType ?? "unknown",
+          activeBackendType: this.backendType,
+        });
+        continue;
+      }
+
+      // 重建 stable system context
+      // 群聊：只注入 bot + chat 信息，不注入用户身份
+      const isGroup = chatType === "group";
+      const userRow = (!isGroup && row.user_id)
+        ? this.db.prepare("SELECT name FROM users WHERE id = ?").get(row.user_id) as { name: string | null } | undefined
+        : undefined;
+      const isAdmin = row.user_id ? this.adminRoles.has(row.user_id) : false;
+      const sessionProfile = buildImportantContext(this.db, {
+        botName: this.botIdentity.name,
+        botLabel: this.botUserId ? getUserShortLabel(this.db, this.botUserId) : undefined,
+        platform: this.botIdentity.platform,
+        userName: userRow?.name ?? undefined,
+        userId: isGroup ? undefined : (row.user_id ?? undefined),
+        chatId: row.chat_id,
+        chatLabel: getChatShortLabel(this.db, row.chat_id),
+        chatType,
+        isAdmin,
+        botProfilePath: this.stableContextOptions.botProfilePath,
+      });
+      const stableContext = this.buildStableSystemContext();
+      const scheduleToken = randomUUID();
+      this.chatScheduleTokens.set(row.chat_id, scheduleToken);
+
+      try {
+        const agentSession = await this.createAgentSession({
+          workingDirectory: this.workingDirectory,
+          importantContext: stableContext || undefined,
+          userId: row.user_id ?? undefined,
+          chatId: row.chat_id,
+          chatType,
+          dbPath: this.dbPath,
+          botId: this.botIdentity.platformBotId,
+          botName: this.botIdentity.name,
+          platform: this.botIdentity.platform,
+          model: this.botIdentity.model,
+          isAdmin,
+          botProfilePath: this.stableContextOptions.botProfilePath,
+          agentSessionId: canResumeRecoveredSession ? (row.agent_session_id ?? undefined) : undefined,
+          scheduleToken,
+        });
+
+        // fallback 模式下：仅新建 session 时需要注入（resume 的 session 已有上下文）
+        const isResuming = canResumeRecoveredSession && !!row.agent_session_id;
+        if (!isResuming) {
+          this.pendingMessageContext.set(row.chat_id, sessionProfile);
+        }
+        if (this.agent.needsStableUserPrefix() && stableContext && !isResuming) {
+          this.pendingStableContext.set(row.chat_id, stableContext);
+        }
+
+        this.chatSessions.set(row.chat_id, {
+          agentSession,
+          sessionId: row.id,
+          platformChatId: row.platform_id,
+          userId: row.user_id ?? "",
+          hasReplied: true, // recovered sessions skip reply-to
+        });
+        this.platformChatIds.set(row.chat_id, row.platform_id);
+        if (row.user_id) this.chatUserIds.set(row.chat_id, row.user_id);
+
+        this.log.info("session recovered", {
+          chatId: row.chat_id,
+          sessionId: row.id,
+          resumed: canResumeRecoveredSession && !!row.agent_session_id,
+          storedBackendType: storedBackendType ?? "unknown",
+          activeBackendType: this.backendType,
+        });
+      } catch (err) {
+        this.log.error("failed to recover session", {
+          chatId: row.chat_id,
+          sessionId: row.id,
+          error: String(err),
+        });
+      }
+    }
+  }
+
   /**
    * 组装 Worker 的上下文：稳定系统规则 + Profile 角色说明 + Job 目标。
    * 第一版不注入主会话 transcript 和用户记忆。

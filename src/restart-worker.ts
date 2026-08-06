@@ -60,9 +60,7 @@ interface RuntimeTarget {
 }
 
 export async function runRestartWorker(env: NodeJS.ProcessEnv = process.env): Promise<void> {
-  if (env["NIUBOT_AGENT_SESSION"]) {
-    throw new Error("restart worker cannot run inside an agent session");
-  }
+  // 允许 Agent 会话内重启：通知目标靠 NIUBOT_CHAT_ID 自动注入（Engine 侧），不需要拦截。
   const niubotHome = env["NIUBOT_HOME"] ? path.resolve(env["NIUBOT_HOME"]) : undefined;
   if (!niubotHome) throw new Error("NIUBOT_HOME is not set");
 

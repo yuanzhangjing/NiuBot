@@ -48,9 +48,7 @@ export function buildRestartWorkerEnvironment(
 }
 
 export function launchRestartWorker(options: RestartWorkerLaunchOptions): RestartWorkerLaunch {
-  if (process.env["NIUBOT_AGENT_SESSION"]) {
-    throw new Error("Cannot restart from within an agent session");
-  }
+  // 允许 Agent 会话内触发重启（/restart 命令或 Agent 直接调用都走同一入口）。
   const runtimeRoot = path.resolve(options.runtimeRoot);
   const workerEntry = path.join(runtimeRoot, "dist", "restart-worker.js");
   if (!fs.existsSync(workerEntry)) throw new Error(`Restart worker not found: ${workerEntry}`);
