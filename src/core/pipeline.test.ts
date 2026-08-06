@@ -4911,7 +4911,7 @@ describe("Pipeline Goal mode", () => {
     expect(sentCards.length).toBe(1);
     // 卡片带 Goal 汇总：结局 + 轮次 + 目标引用
     expect(sentCards[0]?.header).toMatch(/🎯 Goal/);
-    expect(sentCards[0]?.header).toContain("1 轮");
+    expect(sentCards[0]?.header).toContain("2 轮");
     expect(sentCards[0]?.content).toContain("> 目标：测试目标");
     // Goal 结束收尾（清理状态在 runGoalLoop 末尾异步完成）
     await vi.waitFor(() => expect((pipeline as any).activeGoals.has("c1")).toBe(false));

@@ -2398,7 +2398,7 @@ export class Pipeline {
     let consecutiveFailures = 0;
 
     while (!goal.endedAt) {
-      // 保护：外层轮次上限
+      // 保护：外层轮次上限（turnCount 在本轮开始前计数，含正在执行的这一轮）
       if (goal.turnCount >= GOAL_DEFAULTS.maxTurns) {
         this.log.warn("goal max turns reached", { chatId, turnCount: goal.turnCount });
         this.finishGoal(chatId, goal, "failed", `达到最大轮次 ${GOAL_DEFAULTS.maxTurns}`);
@@ -2409,6 +2409,9 @@ export class Pipeline {
         this.finishGoal(chatId, goal, "stopped", "已中断");
         break;
       }
+
+      // 本轮开始：计数（finish 的那一轮也算已执行）
+      goal.turnCount += 1;
 
       // 每轮注入：目标 + 检查引导；新一轮令牌（防跨轮借用旧令牌）
       const turnToken = randomUUID();
@@ -2457,7 +2460,6 @@ export class Pipeline {
       }
 
       // 未结束：不发送本轮正文（进 transcript 但不发 IM），继续下一轮
-      goal.turnCount += 1;
     }
 
     // 结束：清理 Goal 状态，释放令牌；Run 收尾（队列释放由 process 返回后 queue 接管）
