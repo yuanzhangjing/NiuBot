@@ -55,9 +55,34 @@ try {
     `).run();
     upgraded.close();
 
-    const rolledBack = oldRelease.initDatabase(databasePath);
-    insertLegacyCron(rolledBack, "during-rollback", "30 * * * *");
-    rolledBack.close();
+    // candidate 最新迁移是否为破坏性（不可回滚，如 DROP COLUMN）：
+    // 是 → 升级后 schema 版本推进到 LATEST，旧代码回滚必须被明确拒绝（而非崩溃/静默损坏）。
+    const breakingMigration = !candidate.ROLLBACK_COMPATIBLE_SCHEMA_VERSIONS.includes(
+      candidate.LATEST_SCHEMA_VERSION,
+    );
+    const expectedUpgradedSchema = breakingMigration ? candidate.LATEST_SCHEMA_VERSION : oldSchema;
+    const expectedPrompts = ["before-upgrade"];
+
+    if (!breakingMigration) {
+      const rolledBack = oldRelease.initDatabase(databasePath);
+      insertLegacyCron(rolledBack, "during-rollback", "30 * * * *");
+      rolledBack.close();
+      expectedPrompts.push("during-rollback");
+    } else {
+      // 回滚到旧版本必须被拒绝：旧代码报告 schema 版本过新，而不是静默打开或损坏数据
+      let oldCodeRejects = false;
+      try {
+        oldRelease.initDatabase(databasePath);
+      } catch (err) {
+        oldCodeRejects = /newer than code/.test(String(err));
+      }
+      if (!oldCodeRejects) {
+        throw new Error(
+          `${version} failed: breaking migration (schema ${candidate.LATEST_SCHEMA_VERSION}) ` +
+          "should make old code refuse the database with 'newer than code'",
+        );
+      }
+    }
 
     const reupgraded = candidate.initDatabase(databasePath);
     const quickCheck = reupgraded.pragma("quick_check", { simple: true });
@@ -68,8 +93,8 @@ try {
     reupgraded.close();
 
     if (!candidate.ROLLBACK_COMPATIBLE_SCHEMA_VERSIONS.includes(oldSchema)
-      || upgradedSchema !== oldSchema || transportSchema !== candidate.LATEST_TRANSPORT_SCHEMA_VERSION
-      || quickCheck !== "ok" || JSON.stringify(prompts) !== JSON.stringify(["before-upgrade", "during-rollback"])
+      || upgradedSchema !== expectedUpgradedSchema || transportSchema !== candidate.LATEST_TRANSPORT_SCHEMA_VERSION
+      || quickCheck !== "ok" || JSON.stringify(prompts) !== JSON.stringify(expectedPrompts)
       || pending !== "pending") {
       throw new Error(
         `${version} failed: old=${oldSchema} upgraded=${upgradedSchema} transport=${transportSchema} `
