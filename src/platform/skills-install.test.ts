@@ -92,7 +92,8 @@ describe("installBuiltinSkills（备份源 + 双挂载软链接）", () => {
     const backupRoot = tempDir();
     const { dir, claudeMount, agentsMount } = setupBot(backupRoot);
     // 模拟旧版复制残留：把 .claude 挂载点的 ocr 换成真实目录（旧版复制）
-    rmSync(path.join(claudeMount, "ocr"), { force: true });
+    // recursive 必需：Windows 上删除指向目录的 symlink 时无 recursive 会抛 ERR_FS_EISDIR
+    rmSync(path.join(claudeMount, "ocr"), { recursive: true, force: true });
     mkdirSync(path.join(claudeMount, "ocr"), { recursive: true });
     writeFileSync(path.join(claudeMount, "ocr", "SKILL.md"), "old copy");
     installBuiltinSkills(dir, backupRoot);
