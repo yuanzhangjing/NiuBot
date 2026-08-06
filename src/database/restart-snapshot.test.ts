@@ -123,6 +123,7 @@ describe("restart database snapshot", () => {
       .toThrow(/inside the snapshot directory/);
   });
 
+  // 循环打开 25+ 次数据库，Windows 上 better-sqlite3 打开较慢，超时放宽到 15s
   test("only allows legacy preflight for rollback-compatible core schemas", () => {
     const root = temporaryDirectory();
     const databasePath = path.join(root, "bot.db");
@@ -171,7 +172,7 @@ describe("restart database snapshot", () => {
       LATEST_SCHEMA_VERSION + 1,
     ))
       .toThrow(new RegExp(`candidate schema ${LATEST_SCHEMA_VERSION + 1}`));
-  });
+  }, 15_000);
 
   test("preserves the snapshot directory when restore cannot proceed", async () => {
     const root = temporaryDirectory();
