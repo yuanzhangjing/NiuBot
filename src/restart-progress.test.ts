@@ -29,15 +29,16 @@ describe("restart progress", () => {
       other.write("success");
       const writer = new RestartStateWriter(botDirectory, "restart-a", "2026-07-30T00:00:00.000Z");
       const phases: string[] = [];
-      setTimeout(() => writer.write("build_npm_candidate"), 5);
-      setTimeout(() => writer.write("success"), 15);
+      // 间隔放大（50ms/150ms）避免轮询竞态：windows node 20 上过短间隔可能跳过中间阶段
+      setTimeout(() => writer.write("build_npm_candidate"), 50);
+      setTimeout(() => writer.write("success"), 150);
 
       const result = await waitForRestartCompletion({
         stateFile: writer.stateFile,
         restartId: "restart-a",
         workerPid: 123,
         pollIntervalMs: 2,
-        timeoutMs: 500,
+        timeoutMs: 1000,
         processAlive: () => true,
         onPhase: (state) => phases.push(state.phase),
       });
