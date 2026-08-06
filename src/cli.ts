@@ -40,6 +40,7 @@ import { handleSchedule } from "./cli/schedule.js";
 import { handleTask } from "./cli/task.js";
 import { handleSessions } from "./cli/session.js";
 import { handleWorker } from "./cli/worker.js";
+import { handleGoal } from "./cli/goal.js";
 import { parseArgs } from "./cli/args.js";
 import { formatLocalDateTimeWithTZ } from "./tz.js";
 
@@ -60,6 +61,7 @@ const sessionCommands = new Set([
   "worker",
   "whoami",
   "restart",
+  "goal",
 ]);
 const publicCommands = new Set([
   undefined,
@@ -188,6 +190,9 @@ async function main(): Promise<void> {
       break;
     case "worker":
       await handleWorker(openWorkerReadDb(), args.slice(1));
+      break;
+    case "goal":
+      await handleGoal(args.slice(1));
       break;
     case "restart":
       await handleRestart(args.slice(1));
@@ -507,6 +512,7 @@ Commands:
   schedule      create|list|cancel          Manage Loop and Cron schedules
   task          create|list|update|delete   Manage task projects
   restart                                   Restart the Engine (safe pipeline, notifies current chat)
+  goal          finish                      End the current Goal (token-protected)
   system-rules                             Show NiuBot Engine system rules
   whoami                                    Show current scene info
 

@@ -15,7 +15,7 @@ export interface QueuedMessage {
   /** 消息在 DB 中的 ID，用于 runtime 事件关联 */
   dbMsgId?: number;
   /** 触发来源：用户消息（默认）或内部续接事件 */
-  triggerKind?: "user" | "worker_continuation" | "loop_continuation";
+  triggerKind?: "user" | "worker_continuation" | "loop_continuation" | "goal_start";
   /** triggerKind 为 worker_continuation 时携带的 Continuation ID 列表（内部事件，不写库） */
   continuationIds?: string[];
   /** triggerKind 为 loop_continuation 时携带的 Loop Job ID（内部事件，不写库） */
@@ -131,7 +131,7 @@ export class MessageQueue {
 
     q.buffer.push(msg);
     this.emitState(msg.chatId, q);
-    if (msg.triggerKind === "worker_continuation" || msg.triggerKind === "loop_continuation" || msg.scheduleCommand) {
+    if (msg.triggerKind === "worker_continuation" || msg.triggerKind === "loop_continuation" || msg.triggerKind === "goal_start" || msg.scheduleCommand) {
       void this.flush(q, msg.chatId).catch((err) => {
         log.error("flush failed", { chatId: msg.chatId, error: String(err) });
       });
@@ -253,7 +253,7 @@ export class MessageQueue {
       const next = q.pending.splice(0, count);
       q.buffer = next;
       this.emitState(chatId, q);
-      if (kind === "worker_continuation" || kind === "loop_continuation" || kind === "schedule_command") {
+      if (kind === "worker_continuation" || kind === "loop_continuation" || kind === "goal_start" || kind === "schedule_command") {
         void this.flush(q, chatId).catch((err) => {
           log.error("flush failed", { chatId, error: String(err) });
         });
@@ -309,9 +309,10 @@ export class MessageQueue {
 
 }
 
-function queueKind(message: QueuedMessage): "user" | "schedule_command" | "worker_continuation" | "loop_continuation" {
+function queueKind(message: QueuedMessage): "user" | "schedule_command" | "worker_continuation" | "loop_continuation" | "goal_start" {
   if (message.triggerKind === "worker_continuation") return "worker_continuation";
   if (message.triggerKind === "loop_continuation") return "loop_continuation";
+  if (message.triggerKind === "goal_start") return "goal_start";
   if (message.scheduleCommand) return "schedule_command";
   return "user";
 }

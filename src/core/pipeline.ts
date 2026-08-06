@@ -89,6 +89,11 @@ import {
   type ScheduleAgentCommandResult,
 } from "./schedule-command.js";
 import { createLogger } from "../logger.js";
+import {
+  type ActiveGoal,
+  type GoalFinishCommand,
+  GOAL_DEFAULTS,
+} from "./goal.js";
 import { launchRestartWorker } from "../restart-launcher.js";
 import {
   resolveExecutable,
@@ -138,7 +143,7 @@ const INTERRUPT_WORDS = new Set([
 const BUILTIN_COMMANDS = new Set([
   "/restart", "/update", "/service", "/new", "/agent", "/model",
   "/admin", "/help", "/stop", "/clear", "/flush", "/task", "/status", "/history",
-  "/worker",
+  "/worker", "/goal",
 ]);
 const HYBRID_SCHEDULE_COMMANDS = new Set(["/loop", "/cron"]);
 const SCHEDULE_BUILTIN_SUBCOMMANDS = new Set([
@@ -417,6 +422,12 @@ export class Pipeline {
 
   /** 正在占用主聊天队列的 Loop 回合；取消命令用它精确中止对应 run。 */
   private activeLoopRuns = new Map<number, { chatId: string; runId?: string }>();
+
+  /** chatId → 未结束的 Goal（纯内存；重启即断）。 */
+  private activeGoals = new Map<string, ActiveGoal>();
+
+  /** Goal 回合期间可用的 finish 令牌（随每轮注入，防跨会话借用）。 */
+  private goalTokens = new Map<string, string>();
 
   constructor(
     db: Database.Database,
@@ -1616,6 +1627,10 @@ export class Pipeline {
         this.handleWorkerCommand(parts.slice(1), chatId, platformChatId, msgId);
         return true;
       }
+      case "/goal": {
+        this.handleGoalCommand(parts.slice(1), userId, chatId, platformChatId, chatType, msgId);
+        return true;
+      }
       case "/loop":
       case "/cron": {
         this.handleScheduleBuiltinCommand(
@@ -2269,6 +2284,214 @@ export class Pipeline {
         }
       }
       this.log.info("team config reloaded from db", { version: version ?? null });
+    }
+  }
+
+  /** /goal：创建或查询 Goal（纯内存，重启即断）。 */
+  private handleGoalCommand(
+    args: string[],
+    userId: string,
+    chatId: string,
+    platformChatId: string,
+    chatType: string,
+    msgId?: string,
+  ): void {
+    const objective = args.join(" ").trim();
+    const existing = this.activeGoals.get(chatId);
+
+    // 无参：查询当前 Goal
+    if (!objective) {
+      if (!existing) {
+        this.replyText(chatId, platformChatId, msgId, "当前没有进行中的 Goal。");
+        return;
+      }
+      const elapsed = formatUptime(Math.max(0, Date.now() - existing.startedAt));
+      this.replyText(chatId, platformChatId, msgId,
+        `**⚡ 当前 Goal**\n目标：${existing.objective.slice(0, 200)}\n轮次：${existing.turnCount} · 耗时：${elapsed}`);
+      return;
+    }
+
+    // 带参：创建 Goal（已有 Goal 时进入 pending，结束后才开始新 Goal）
+    if (existing) {
+      this.replyText(chatId, platformChatId, msgId, "已有进行中的 Goal，新目标已排队，当前 Goal 结束后自动开始。");
+      return;
+    }
+    if (objective.length > GOAL_DEFAULTS.maxObjectiveLength) {
+      this.replyText(chatId, platformChatId, msgId, `目标过长（上限 ${GOAL_DEFAULTS.maxObjectiveLength} 字符）。`);
+      return;
+    }
+    if ([...this.activeGoals.values()].length >= GOAL_DEFAULTS.maxConcurrentGoals) {
+      this.replyText(chatId, platformChatId, msgId, "全局并发 Goal 已达上限。");
+      return;
+    }
+
+    const goal: ActiveGoal = {
+      objective,
+      userId,
+      turnCount: 0,
+      startedAt: Date.now(),
+    };
+    this.activeGoals.set(chatId, goal);
+    this.log.info("goal started", { chatId, objectiveLength: objective.length, userId });
+    // 通过队列进入 Run：goal_start 不与其他消息合并，立即 flush
+    this.queue.push({
+      chatId,
+      text: objective,
+      timestamp: Date.now(),
+      triggerKind: "goal_start",
+      senderId: userId,
+    });
+    this.replyText(chatId, platformChatId, msgId, `🎯 Goal 已开始：${objective.slice(0, 100)}`);
+  }
+
+  /** nbt goal finish：Agent 显式结束请求（令牌 + Run 一致性校验；三条件结算在回合收尾时做）。 */
+  async executeGoalFinishCommand(chatId: string, command: GoalFinishCommand, scheduleToken?: string): Promise<{ output: string }> {
+    const goal = this.activeGoals.get(chatId);
+    if (!goal) throw new Error("当前没有进行中的 Goal");
+    if (goal.endedAt) throw new Error("Goal 已结束");
+    const activeRun = this.runtimeState.getActiveRun(chatId);
+    if (!activeRun || activeRun.stage !== "agent_running") {
+      throw new Error("Goal finish 必须在当前 Goal 的活动回合内执行");
+    }
+    if (!command.token || command.token !== this.goalTokens.get(chatId)) {
+      throw new Error("Goal finish 请求缺少或携带错误的能力令牌");
+    }
+    if (scheduleToken && scheduleToken !== this.chatScheduleTokens.get(chatId)) {
+      throw new Error("Goal finish 请求缺少或携带错误的会话令牌");
+    }
+    goal.finishRequested = true;
+    goal.finishRunId = activeRun.runId;
+    goal.outcome = command.outcome;
+    goal.conclusion = command.conclusion;
+    this.log.info("goal finish requested", { chatId, outcome: command.outcome, runId: activeRun.runId });
+    return { output: `finish requested: ${command.outcome}` };
+  }
+
+  /** 构建 Goal 每轮注入的引导（目标原文 + 检查引导 + 本轮 finish 令牌）。 */
+  private buildGoalTurnPrompt(goal: ActiveGoal, token: string): string {
+    return `【当前 Goal】${goal.objective}
+【检查引导】本轮结束后确认：
+- 目标是否已达成？是 → 调用 nbt goal finish --outcome achieved --conclusion <一句话结论（建议附证据）>
+- 确认无法达成？→ 调用 nbt goal finish --outcome not-achieved --conclusion <原因>
+- 连续多轮无明显推进（无实质动作、只是重复汇报）→ 调用 nbt goal finish 结束，不要空转
+- 都没有 → 继续推进下一步（不要只汇报计划）
+【本轮令牌】${token}`;
+  }
+
+  /** Goal 主循环：同一个 Run 内连续多轮执行，直到 Agent 调用 finish 或保护触发。 */
+  private async runGoalLoop(chatId: string, goal: ActiveGoal, runId: string | undefined, signal?: AbortSignal): Promise<void> {
+    const chatSession = await this.getOrCreateSession(chatId, undefined, signal);
+    if (!chatSession) {
+      this.log.error("goal run without active session", { chatId, runId: runId ?? null });
+      this.finishGoal(chatId, goal, "failed", "会话不可用");
+      return;
+    }
+    let consecutiveFailures = 0;
+
+    while (!goal.endedAt) {
+      // 保护：外层轮次上限
+      if (goal.turnCount >= GOAL_DEFAULTS.maxTurns) {
+        this.log.warn("goal max turns reached", { chatId, turnCount: goal.turnCount });
+        this.finishGoal(chatId, goal, "failed", `达到最大轮次 ${GOAL_DEFAULTS.maxTurns}`);
+        break;
+      }
+      if (signal?.aborted) {
+        this.log.info("goal aborted by signal", { chatId });
+        this.finishGoal(chatId, goal, "stopped", "已中断");
+        break;
+      }
+
+      // 每轮注入：目标 + 检查引导；新一轮令牌（防跨轮借用旧令牌）
+      const turnToken = randomUUID();
+      this.goalTokens.set(chatId, turnToken);
+      const messageToSend = this.buildGoalTurnPrompt(goal, turnToken);
+      this.log.info("goal turn", { chatId, runId: runId ?? null, turnCount: goal.turnCount, token: turnToken.slice(0, 8) });
+
+      let agentResult;
+      try {
+        agentResult = await this.runManager.runAgent({
+          runId: runId!,
+          chatId,
+          session: chatSession.agentSession,
+          message: messageToSend,
+          signal,
+        });
+      } catch (err) {
+        consecutiveFailures += 1;
+        this.log.warn("goal turn failed", { chatId, error: String(err), consecutiveFailures });
+        if (consecutiveFailures >= GOAL_DEFAULTS.maxConsecutiveFailures) {
+          this.finishGoal(chatId, goal, "failed", `连续 ${GOAL_DEFAULTS.maxConsecutiveFailures} 次执行失败`);
+          break;
+        }
+        continue;
+      }
+      consecutiveFailures = 0;
+
+      if (agentResult.status === "stopped") {
+        this.log.info("goal turn stopped", { chatId });
+        this.finishGoal(chatId, goal, "stopped", "回合被取消");
+        break;
+      }
+      const response = agentResult.response;
+
+      // Agent 请求结束（finish 令牌校验通过）
+      if (goal.finishRequested) {
+        this.log.info("goal finishing", { chatId, outcome: goal.outcome });
+        const outcome = goal.outcome === "achieved" ? "achieved" : "not_achieved";
+        const conclusion = goal.conclusion ?? response.text.trim().slice(0, 500);
+        // 只有最终一轮发送正文；发送成功后结算
+        const delivered = await this.deliverGoalFinalResponse(chatSession, goal, response.text, signal);
+        this.finishGoal(chatId, goal, outcome, conclusion, delivered);
+        break;
+      }
+
+      // 未结束：不发送本轮正文（进 transcript 但不发 IM），继续下一轮
+      goal.turnCount += 1;
+    }
+
+    // 结束：清理 Goal 状态，释放令牌；Run 收尾（队列释放由 process 返回后 queue 接管）
+    this.goalTokens.delete(chatId);
+    this.activeGoals.delete(chatId);
+    this.activeWorkerAgentCommands.delete(chatId);
+    this.activeScheduleAgentCommands.delete(chatId);
+    if (runId) {
+      if (goal.outcome === "failed") {
+        this.markRuntimeRun(runId, "failed", goal.conclusion ?? "goal failed");
+      } else {
+        this.markRuntimeRun(runId, "done");
+      }
+    }
+    this.log.info("goal ended", { chatId, outcome: goal.outcome, turnCount: goal.turnCount });
+  }
+
+  /** 结算 Goal 并记录结果（纯内存；发送成功与否影响 outcome 落库摘要）。 */
+  private finishGoal(
+    chatId: string,
+    goal: ActiveGoal,
+    outcome: ActiveGoal["outcome"],
+    conclusion: string,
+    delivered = true,
+  ): void {
+    goal.endedAt = Date.now();
+    goal.outcome = outcome;
+    if (conclusion) goal.conclusion = conclusion;
+    this.log.info("goal settled", { chatId, outcome, delivered });
+  }
+
+  /** 发送 Goal 最终正文（唯一一次 IM 交付）；失败时返回 false。 */
+  private async deliverGoalFinalResponse(
+    chatSession: { platformChatId: string },
+    goal: ActiveGoal,
+    responseText: string,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    try {
+      const text = stripInternalWorkerTags(responseText);
+      await this.responseSender.sendText(chatSession.platformChatId, text, signal);
+      return true;
+    } catch (err) {
+      this.log.warn("goal final response delivery failed", { error: String(err) });
+      return false;
     }
   }
 
@@ -3791,6 +4014,15 @@ ${jobParts.join("\n\n")}
       for (const id of loopJobIds) releaseQueuedLoopJob(this.db, id);
       this.log.error("invalid mixed loop queue batch", { chatId, loopJobIds, messageCount: messages.length });
       this.markRuntimeRun(runId, "failed", "invalid mixed loop queue batch");
+      return;
+    }
+
+    // Goal 回合：goal_start 触发（或该 chat 已有未结束 Goal 且本轮是它的续轮）。
+    // 一个 Goal 从开始到结束始终是同一个 Run；队列保持 busy，后续消息自然 pending。
+    const isGoalStartTurn = messages.length === 1 && messages[0]?.triggerKind === "goal_start";
+    const existingGoal = this.activeGoals.get(chatId);
+    if (existingGoal && !existingGoal.endedAt && (isGoalStartTurn || existingGoal.finishRunId === runId || existingGoal.turnCount > 0)) {
+      await this.runGoalLoop(chatId, existingGoal, runId, signal);
       return;
     }
 

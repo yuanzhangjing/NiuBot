@@ -4859,3 +4859,95 @@ describe("Pipeline runtime", () => {
     expect((db.prepare("SELECT COUNT(*) AS count FROM messages WHERE chat_id = 'c1'").get() as { count: number }).count).toBeGreaterThanOrEqual(2);
   });
 });
+
+describe("Pipeline Goal mode", () => {
+  function createGoalPipeline() {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-goal-test-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const agent = new DeferredAgent();
+    const { im, sentCards, sentTexts } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex",
+    );
+    return { db, agent, pipeline, sentCards, sentTexts };
+  }
+
+  test("/goal 创建并进入同一 Run 多轮循环，finish 后发送最终正文", async () => {
+    const { agent, pipeline, sentTexts } = createGoalPipeline();
+    await pipeline.start();
+
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "/goal 测试目标",
+      platformMsgId: "goal-msg-1",
+    }));
+    // 等第一轮 sendMessage（goal_start 触发）
+    await vi.waitFor(() => expect(agent.sendMessageCalls.length).toBeGreaterThanOrEqual(1));
+    expect(agent.sendMessageCalls[0]).toContain("【当前 Goal】测试目标");
+    expect(agent.sendMessageCalls[0]).toContain("【本轮令牌】");
+
+    // 第一轮结束（未 finish）→ 继续下一轮
+    agent.resolveNext();
+    await vi.waitFor(() => expect(agent.sendMessageCalls.length).toBeGreaterThanOrEqual(2));
+    expect(agent.sendMessageCalls[1]).toContain("【当前 Goal】测试目标");
+
+    // 模拟 Agent 调用 nbt goal finish：拿本轮令牌，通过 pipeline 直接提交
+    const tokenMatch = agent.sendMessageCalls[1].match(/【本轮令牌】(.+)/);
+    expect(tokenMatch).toBeTruthy();
+    const token = tokenMatch![1]!.trim();
+    await (pipeline as any).executeGoalFinishCommand("c1", {
+      token,
+      outcome: "achieved",
+      conclusion: "目标已达成",
+    });
+
+    // 本轮返回后 Goal 结算并发送最终正文
+    agent.resolveNext();
+    await vi.waitFor(() => expect(sentTexts.length).toBeGreaterThanOrEqual(1));
+    // 只有最终一轮发送；内部轮次不发送
+    expect(sentTexts.length).toBe(1);
+    // Goal 结束收尾（清理状态在 runGoalLoop 末尾异步完成）
+    await vi.waitFor(() => expect((pipeline as any).activeGoals.has("c1")).toBe(false));
+    expect((pipeline as any).goalTokens.has("c1")).toBe(false);
+  });
+
+  test("/goal 无参查询当前 Goal", async () => {
+    const { agent, pipeline, sentTexts } = createGoalPipeline();
+    await pipeline.start();
+
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "/goal 查询测试",
+      platformMsgId: "goal-msg-2",
+    }));
+    await vi.waitFor(() => expect(agent.sendMessageCalls.length).toBeGreaterThanOrEqual(1));
+
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "/goal",
+      platformMsgId: "goal-msg-3",
+    }));
+    await vi.waitFor(() => expect(sentTexts.some((t) => t.includes("当前 Goal"))).toBe(true));
+
+    agent.resolveNext();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
+  test("finish 令牌错误被拒绝", async () => {
+    const { agent, pipeline, sentTexts } = createGoalPipeline();
+    await pipeline.start();
+
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "/goal 令牌测试",
+      platformMsgId: "goal-msg-4",
+    }));
+    await vi.waitFor(() => expect(agent.sendMessageCalls.length).toBeGreaterThanOrEqual(1));
+
+    await expect((pipeline as any).executeGoalFinishCommand("c1", {
+      token: "wrong-token",
+      outcome: "achieved",
+    })).rejects.toThrow(/令牌/);
+    expect((pipeline as any).activeGoals.has("c1")).toBe(true);
+
+    agent.resolveNext();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+});
