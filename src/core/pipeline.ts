@@ -781,17 +781,18 @@ export class Pipeline {
       }
       case "cancel": {
         const id = request.command.id;
+        const reason = request.command.reason?.trim() ? `用户取消：${request.command.reason.trim()}` : undefined;
         const affectedJobs: Job[] = [];
         if (id.startsWith("wrk_")) {
           requireWorkAccess(id);
-          const work = service.cancelWork(id);
+          const work = service.cancelWork(id, reason);
           if (!work) throw new Error(`Work 不存在: ${id}`);
           affectedJobs.push(...service.listJobs(id).filter((job) => job.status === "cancelling"));
         } else if (id.startsWith("job_")) {
           const before = service.getJob(id);
           if (!before) throw new Error(`Job 不存在: ${id}`);
           requireWorkAccess(before.workId);
-          const job = service.requestCancel(id);
+          const job = service.requestCancel(id, reason);
           if (!job) throw new Error(`Job 不可取消: ${id}`);
           affectedJobs.push(job);
         } else {

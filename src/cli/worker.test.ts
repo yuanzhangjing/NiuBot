@@ -81,8 +81,8 @@ beforeEach(() => {
         return { output: job.id };
       }
       case "cancel": {
-        if (command.id.startsWith("wrk_")) service.cancelWork(command.id);
-        else service.requestCancel(command.id);
+        if (command.id.startsWith("wrk_")) service.cancelWork(command.id, command.reason);
+        else service.requestCancel(command.id, command.reason);
         return { output: `${command.id} 已请求取消` };
       }
       case "work.complete_recovery": {
@@ -256,4 +256,27 @@ test("job create 收到未知参数（如已删除的 --workspace）时显式报
   } finally {
     exitSpy.mockRestore();
   }
+});
+
+test("cancel 带 --reason：原因写入 job.error（终态保留）", async () => {
+  const workFile = writeDoc("work.md", "任务");
+  const workId = (await capture(() => handleWorker(db, ["work", "create", "--file", workFile], execute)))[0]!;
+  const jobFile = writeDoc("job.md", "任务内容");
+  const jobId = (await capture(() => handleWorker(db, ["job", "create", "--work", workId, "--worker", "reviewer", "--file", jobFile], execute)))[0]!;
+
+  await capture(() => handleWorker(db, ["cancel", jobId, "--reason", "需求已变更"], execute));
+  const service = new SqliteJobService(db, BOT_ID);
+  // cancelling 时 reason 已写入 error
+  expect(service.getJob(jobId)?.error).toContain("需求已变更");
+  // 终态确认（不带新 error）保留原因
+  service.confirmCancelled(jobId, {
+    status: "cancelled",
+    responseText: "",
+    error: "",
+    changedFiles: [],
+    artifacts: [],
+    startedAt: new Date().toISOString(),
+    endedAt: new Date().toISOString(),
+  });
+  expect(service.getJob(jobId)?.error).toContain("需求已变更");
 });

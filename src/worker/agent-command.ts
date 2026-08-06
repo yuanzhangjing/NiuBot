@@ -19,6 +19,8 @@ export type WorkerAgentCommand =
   | {
       type: "cancel";
       id: string;
+      /** 取消原因（可选），写入 job.error 供查询 */
+      reason?: string;
     }
   | {
       type: "work.complete_recovery";

@@ -249,13 +249,14 @@ export interface JobService {
   interruptJob(jobId: string, reason?: string): Job | undefined;
   /** queued Job 因依赖失败直接终态（不经过执行；连续失败预算照常累计） */
   failQueuedJob(jobId: string, error: string): Job | undefined;
-  /** queued/running → cancelling */
-  requestCancel(jobId: string): Job | undefined;
+  /** queued/running → cancelling；reason 写入 job.error（终态保留，供查询） */
+  requestCancel(jobId: string, reason?: string): Job | undefined;
   /** cancelling → cancelled（确认进程真实退出后） */
   confirmCancelled(jobId: string, record: JobExecutionRecord): Job | undefined;
 
   /** 用户取消整个 Work：所有非终态 Job 进入 cancelling，Work → cancelling */
-  cancelWork(workId: string): Work | undefined;
+  /** 取消整个 Work（级联所有非终态 Job）；reason 写入各 Job 的 error */
+  cancelWork(workId: string, reason?: string): Work | undefined;
   /** 人工修复入口；正常验收由最终回复成功交付后自动完成。 */
   completeWork(workId: string, input: CompleteWorkInput): Work | undefined;
   /** 主 Agent 判定无法继续 */

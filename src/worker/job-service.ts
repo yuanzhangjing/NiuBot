@@ -273,15 +273,20 @@ export class SqliteJobService implements JobService {
     })();
   }
 
-  requestCancel(jobId: string): Job | undefined {
+  requestCancel(jobId: string, reason?: string): Job | undefined {
     return this.db.transaction(() => {
       const job = this.getJobDomain(jobId);
       if (!job) return undefined;
       const from: Job["status"] = job.status;
       if (from !== "queued" && from !== "running") return undefined;
-      const updated = updateJobStatus(this.db, jobId, { from, to: "cancelling", version: job.version });
+      const updated = updateJobStatus(this.db, jobId, {
+        from,
+        to: "cancelling",
+        version: job.version,
+        fields: reason ? { error: reason } : undefined,
+      });
       if (!updated) return undefined;
-      this.recordEvent({ workId: job.workId, jobId, event: "job_cancel_requested" });
+      this.recordEvent({ workId: job.workId, jobId, event: "job_cancel_requested", detail: reason });
       return this.getJobDomain(jobId);
     })();
   }
@@ -310,7 +315,7 @@ export class SqliteJobService implements JobService {
     })();
   }
 
-  cancelWork(workId: string): Work | undefined {
+  cancelWork(workId: string, reason?: string): Work | undefined {
     return this.db.transaction(() => {
       const work = getWork(this.db, workId);
       if (!work) return undefined;
@@ -325,8 +330,9 @@ export class SqliteJobService implements JobService {
             from: jobRow.status,
             to: "cancelling",
             version: jobRow.version,
+            fields: reason ? { error: reason } : undefined,
           });
-          this.recordEvent({ workId, jobId: jobRow.id, event: "job_cancel_requested" });
+          this.recordEvent({ workId, jobId: jobRow.id, event: "job_cancel_requested", detail: reason });
         }
       }
       this.recordEvent({ workId, event: "work_cancel_requested" });
@@ -554,11 +560,16 @@ export class SqliteJobService implements JobService {
       const from: Job["status"] = job.status;
       if (from !== "running" && from !== "cancelling") return undefined;
       if (to === "cancelled" && from !== "cancelling") return undefined;
+      const fields = executionFields(record);
+      // 取消确认且未带新 error 时，保留 requestCancel 写入的取消原因（供查询/审计）
+      if (to === "cancelled" && !record.error && job.error) {
+        fields.error = job.error;
+      }
       const updated = updateJobStatus(this.db, jobId, {
         from,
         to,
         version: job.version,
-        fields: executionFields(record),
+        fields,
       });
       if (!updated) return undefined;
       this.recordEvent({

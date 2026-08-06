@@ -193,8 +193,13 @@ function handleGet(ctx: WorkerCliContext, service: SqliteJobService, id: string)
   fail(`无法识别的 ID: ${id}（work 以 wrk_ 开头，job 以 job_ 开头）`);
 }
 
-async function handleCancel(ctx: WorkerCliContext, execute: WorkerCommandExecutor, id: string): Promise<void> {
-  const result = await execute(ctx.chatId, { type: "cancel", id });
+async function handleCancel(ctx: WorkerCliContext, execute: WorkerCommandExecutor, args: string[]): Promise<void> {
+  rejectUnknownFlags(args, ["--reason"], "cancel");
+  const id = args[0];
+  if (!id) fail("cancel 需要 <work-or-job-id>");
+  const reasonIndex = args.indexOf("--reason");
+  const reason = reasonIndex >= 0 ? args[reasonIndex + 1] : undefined;
+  const result = await execute(ctx.chatId, { type: "cancel", id, reason });
   console.log(result.output);
 }
 
@@ -329,7 +334,7 @@ Work/Job 内容使用自由 Markdown 文件；CLI 不接受 --user/--chat 参数
       break;
     case "cancel":
       if (!args[1]) fail("cancel 需要 <id>");
-      await handleCancel(ctx, execute, args[1]!);
+      await handleCancel(ctx, execute, args.slice(1));
       break;
     case "complete":
       await handleComplete(ctx, execute, args.slice(1));
