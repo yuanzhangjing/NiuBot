@@ -2468,7 +2468,7 @@ export class Pipeline {
       `).run();
       const contResult = this.db.prepare(`
         UPDATE agent_continuations
-        SET status = 'completed', completed_at = datetime('now')
+        SET status = 'failed', error = 'Engine 重启，Worker 结果未交付', completed_at = datetime('now')
         WHERE status IN ('pending', 'claimed')
       `).run();
       if (jobResult.changes > 0 || workResult.changes > 0 || contResult.changes > 0) {

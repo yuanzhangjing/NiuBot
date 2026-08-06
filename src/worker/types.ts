@@ -145,6 +145,8 @@ export interface AgentContinuation {
   claimToken?: string;
   claimedAt?: string;
   completedAt?: string;
+  /** 终止原因（如重启清理时置 failed 的原因） */
+  error?: string;
   createdAt: string;
 }
 

@@ -699,6 +699,17 @@ const migrations: Migration[] = [
       }
     },
   },
+  {
+    version: 27,
+    description: "Add error column to agent_continuations (restart cleanup reason)",
+    up: (db) => {
+      // 重启清理把未交付的 Continuation 置 failed 时记录原因（与 worker_jobs.error 一致）。
+      const columns = db.prepare("PRAGMA table_info(agent_continuations)").all() as Array<{ name: string }>;
+      if (!columns.some((column) => column.name === "error")) {
+        db.exec("ALTER TABLE agent_continuations ADD COLUMN error TEXT");
+      }
+    },
+  },
 ];
 
 const transportMigrations: Migration[] = [

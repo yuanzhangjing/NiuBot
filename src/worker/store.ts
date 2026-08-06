@@ -82,6 +82,7 @@ export interface ContinuationRow {
   claim_token: string | null;
   claimed_at: string | null;
   completed_at: string | null;
+  error: string | null;
   created_at: string;
 }
 
@@ -166,6 +167,7 @@ export function continuationRowToContinuation(row: ContinuationRow): AgentContin
     claimToken: row.claim_token ?? undefined,
     claimedAt: row.claimed_at ?? undefined,
     completedAt: row.completed_at ?? undefined,
+    error: row.error ?? undefined,
     createdAt: row.created_at,
   };
 }

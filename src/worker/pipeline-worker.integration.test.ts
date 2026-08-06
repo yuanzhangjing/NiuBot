@@ -876,8 +876,9 @@ test("重启清理：非终态 Job/Work 置 failed 带原因，Continuation 不�
   expect(service.getJob(job.id)?.error).toMatch(/Engine 重启，任务已终止/);
   // Work → failed
   expect(service.getWork(work.id)?.status).toBe("failed");
-  // Continuation 失效（不再向主 Agent 投递旧结果）
-  expect(service.getContinuation("ctn_restart")?.status).toBe("completed");
+  // Continuation 失效（不再向主 Agent 投递旧结果）——置 failed + 原因（重启终止，不是完成）
+  expect(service.getContinuation("ctn_restart")?.status).toBe("failed");
+  expect(service.getContinuation("ctn_restart")?.error).toMatch(/Engine 重启，Worker 结果未交付/);
   // 无验收回合被唤醒
   await new Promise((resolve) => setTimeout(resolve, 300));
   expect(backend.messages.some((m) => m.text.includes("<worker-continuation>"))).toBe(false);
