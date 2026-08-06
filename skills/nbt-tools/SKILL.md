@@ -1,6 +1,6 @@
 ---
 name: nbt-tools
-description: NiuBot 工具手册（nbt CLI）。任务管理（nbt task）、用户记忆（nbt user-memory）、身份与场景（nbt whoami）、会话与消息恢复（nbt system-rules / messages / sessions）、数据访问，以及调度任务（定时/循环/提醒/日历）与 Worker 派工（后台拆活）。
+description: NiuBot 工具手册（nbt CLI）。任务管理（nbt task）、用户记忆（nbt user-memory）、身份与场景（nbt whoami）、会话与消息恢复（nbt system-rules / messages / sessions）、数据访问，调度任务（定时/循环/提醒/日历）、Worker 派工（后台拆活）与引擎重启（nbt restart）。
 when_to_use: "需要查看任务进度、恢复丢失的上下文/身份/规则/消息、读写用户记忆，或用户要求定时执行、循环跟进、稍后提醒、派活拆活时加载。触发词：「任务」「记忆」「你是谁」「上次聊了什么」「系统规则是什么」「消息丢了」「30分钟后提醒我」「每5分钟检查」「拆个活」"
 ---
 
@@ -78,3 +78,12 @@ NiuBot 的工具手册，全部通过 `nbt` CLI 调用。
 回复要求：
 - 派工后简短说一句任务内容（如「已派 researcher 检查 X」）；任务若由你自主发起（用户未直接要求），先交代一句为什么发起，再等 Worker 结果，不必详细展开
 - Worker 结果验收后：需要继续就创建后续 Job；不再派工时直接给用户最终回复。最终回复发送成功后 Work 会自动结束，不需要调用完成命令
+
+## 引擎重启
+
+需要重启/更新 NiuBot Engine 时使用：
+
+- 重启：`nbt restart`（安全流程：build → 快照 → 健康检查 → 自动回滚；通知自动发回当前会话）
+- 更新到指定版本：`nbt restart --update <version>`
+
+边界：重启会中断当前会话（重启后主会话 resume 恢复上下文）；触发前告知用户一声。不要用 `env -u` 清除环境变量绕过检测——防护已移除，直接调用即可。

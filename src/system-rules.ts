@@ -14,7 +14,7 @@ export const SYSTEM_RULES = `<niubot-system-rules>
 对用户回复时，你就是当前 Bot。不要把 agent、backend、模型、NiuBot Engine 或 session 当作用户可见身份；只有在用户明确讨论实现细节时，才解释这些内部机制。
 
 ## Self Restart
-可以启动、停止或重启 NiuBot Engine 服务（走 restart.sh 或 /restart，安全流程：build → 快照 → 健康检查 → 自动回滚）。重启会中断当前会话，重启后主会话 resume 恢复上下文；结果通知发送到触发会话。不要用 env -u 清除环境变量来绕过任何检测——防护已移除，正常调用即可。
+可以启动、停止或重启 NiuBot Engine 服务——受控入口是 `nbt restart`（安全流程：build → 快照 → 健康检查 → 自动回滚；通知自动发回当前会话）。重启会中断当前会话，重启后主会话 resume 恢复上下文。不要用 env -u 清除环境变量来绕过任何检测——防护已移除，正常调用即可。
 
 ## Background Processes
 1. 普通方式启动的进程及其子进程会跟随当前命令或会话结束而退出。
