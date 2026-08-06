@@ -238,3 +238,22 @@ test("Pipeline 不可用时写操作失败，不回退为直写数据库", async
   await expect(handleWorker(db, ["work", "create", "--file", workFile])).rejects.toThrow(/无法连接 NiuBot Pipeline/);
   expect((db.prepare("SELECT COUNT(*) AS count FROM worker_works").get() as { count: number }).count).toBe(0);
 });
+
+test("job create 收到未知参数（如已删除的 --workspace）时显式报错", async () => {
+  const workFile = writeDoc("w2.md", "未知参数测试");
+  const out1 = await capture(() => handleWorker(db, ["work", "create", "--file", workFile], execute));
+  const workId = out1[0]!;
+  const jobFile = writeDoc("j2.md", "任务内容");
+
+  // fail 走 process.exit——mock 成抛错以便断言
+  const exitSpy = vi.spyOn(process, "exit").mockImplementation((() => {
+    throw new Error("process.exit called");
+  }) as never);
+  try {
+    await expect(
+      capture(() => handleWorker(db, ["job", "create", "--work", workId, "--worker", "reviewer", "--file", jobFile, "--workspace", "scratch"], execute)),
+    ).rejects.toThrow("process.exit called");
+  } finally {
+    exitSpy.mockRestore();
+  }
+});

@@ -131,6 +131,33 @@ describe("nbt sessions", () => {
     db.close();
   });
 
+  it("reports job status and error when a Worker session has no log", async () => {
+    const home = mkdtempSync(join(tmpdir(), "niubot-worker-no-log-"));
+    tempDirs.push(home);
+    const db = initDatabase(join(home, "niubot.db"));
+    const service = new SqliteJobService(db, "NiuBot");
+    const work = service.createWork({
+      botId: "NiuBot", ownerUserId: "u2", sourceChatId: "c1", visibility: "private", request: "失败任务",
+    });
+    const job = service.createJob({
+      workId: work.id, workerProfileId: "researcher", prompt: "查资料", workdir: home,
+    });
+    expect(service.claimJob({ jobId: job.id, claimToken: "claim" }).ok).toBe(true);
+    service.failJob(job.id, {
+      status: "failed",
+      responseText: "",
+      error: "workdir 不可访问: /no/such",
+      changedFiles: [],
+      artifacts: [],
+      startedAt: new Date().toISOString(),
+      endedAt: new Date().toISOString(),
+    });
+    // session 未创建（无 backend_session_id）时，报错信息应携带 job 状态与 error 字段辅助诊断
+    await expect(handleSessions(db, ["get", job.id], "c1", "p2p", home, "NiuBot", parseArgs))
+      .rejects.toThrow(/没有可用日志: .*状态 failed.*workdir 不可访问/);
+    db.close();
+  });
+
   it("chooses a fence without expanding every backtick run as function arguments", () => {
     expect(markdownCodeFence("` ".repeat(200_000))).toBe("```");
     expect(markdownCodeFence("before ```` after")).toBe("`````");

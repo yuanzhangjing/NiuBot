@@ -57,6 +57,22 @@ describe("parseTeamConfig", () => {
     expect(() => parseTeamConfig("profiles:\n  - id: a\n    prompt: x\n    access: nope")).toThrow(/access 非法/);
     expect(() => parseTeamConfig("profiles:\n  - id: a\n    prompt: x\nmaxConcurrent: -1")).toThrow(/正整数/);
   });
+
+  test("兼容旧值 access：scratch/git_worktree 映射为 direct（存量配置不失效）", () => {
+    const config = parseTeamConfig(`
+profiles:
+  - id: dev1
+    description: 旧配置
+    prompt: 开发任务
+    access: scratch
+  - id: dev2
+    description: 更旧配置
+    prompt: 开发任务
+    access: git_worktree
+`);
+    expect(config.profiles.find((p) => p.id === "dev1")!.access).toBe("direct");
+    expect(config.profiles.find((p) => p.id === "dev2")!.access).toBe("direct");
+  });
 });
 
 describe("TeamConfigStore", () => {

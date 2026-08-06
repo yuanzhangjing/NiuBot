@@ -1451,3 +1451,71 @@ test("CLI cancel 准备中的 Job：abort 而非幽灵执行", async () => {
     .some((m) => m.text.includes("幽灵执行检测任务内容"));
   expect(ghostExecuted).toBe(false);
 }, 20000);
+
+test("direct 写任务缺省 workdir 被拒绝（不默认 workspace 根）", async () => {
+  await pipeline.start();
+  // 伪造主会话活动 Agent 回合
+  const rs = (pipeline as any).runtimeState;
+  const run = rs.createRun({
+    chatId: CHAT_ID,
+    triggerMessageIds: [],
+    triggerPlatformMsgIds: [],
+    mergedText: "test turn",
+  });
+  rs.markRunStage(run.runId, "agent_running");
+  const token = "integration-token";
+  (pipeline as any).activeWorkerAgentCommands.set(CHAT_ID, {
+    runId: run.runId,
+    userId: OWNER,
+    chatType: "p2p",
+    continuationTurn: false,
+    createdWorkIds: [],
+    token,
+  });
+  try {
+    const work = service.createWork({
+      botId: BOT_ID,
+      ownerUserId: OWNER,
+      sourceChatId: CHAT_ID,
+      visibility: "private",
+      request: "direct 防护测试",
+    });
+    await expect(pipeline.executeWorkerAgentCommand({
+      chatId: CHAT_ID,
+      scheduleToken: token,
+      command: {
+        type: "job.create",
+        workId: work.id,
+        workerProfileId: "developer",
+        prompt: "改代码",
+        idempotencyKey: `test:${work.id}:nodir`,
+      },
+    })).rejects.toThrow(/direct 写任务必须显式指定 workdir/);
+  } finally {
+    (pipeline as any).activeWorkerAgentCommands.delete(CHAT_ID);
+  }
+}, 15000);
+
+test("read_only job 完成后 tmp 产物目录被清理", async () => {
+  backend.writeFileOnSend = "report.txt";
+  await pipeline.start();
+
+  const work = service.createWork({
+    botId: BOT_ID,
+    ownerUserId: OWNER,
+    sourceChatId: CHAT_ID,
+    visibility: "private",
+    request: "生成报告",
+  });
+  const job = service.createJob({
+    workId: work.id,
+    workerProfileId: "researcher",
+    prompt: "写一份报告",
+    workdir: tempRoot,
+  });
+
+  await waitFor(() => service.getJob(job.id)?.status === "completed");
+  // 终态落库后 tmp 产物目录应被删除（产物清单已在 Job 记录中，目录不再保留）
+  const artifactDir = path.join(tempRoot, "tmp", `job-${job.id}-artifacts`);
+  expect(existsSync(artifactDir)).toBe(false);
+}, 15000);
