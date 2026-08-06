@@ -93,10 +93,19 @@ export async function runRestartWorker(env: NodeJS.ProcessEnv = process.env): Pr
     store: new ReleaseStore(botDirectory),
     state: new RestartStateWriter(botDirectory, id, startedAt),
   };
-  const releaseLock = acquireProcessLock(
-    path.join(context.niubotHome, "run", "restart.lock"),
-    "Restart",
-  );
+  let releaseLock: (() => void) | undefined;
+  try {
+    releaseLock = acquireProcessLock(
+      path.join(context.niubotHome, "run", "restart.lock"),
+      "Restart",
+    );
+  } catch (err) {
+    // 并发重启：后到者明确告知用户，而不是静默退出
+    const message = errorMessage(err);
+    log(context, `restart aborted: ${message}`);
+    await notify(context, `重启未执行：${message}`);
+    throw err;
+  }
   try {
     fs.writeFileSync(context.debugLog, "");
     log(context, `restart worker started pid=${process.pid} bot=${botName} source=${sourceDirectory}`);

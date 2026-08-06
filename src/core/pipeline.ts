@@ -2483,13 +2483,15 @@ export class Pipeline {
     }
   }
 
-  /** 进程恢复：从 DB 恢复 active sessions，重建 backend session（--resume 旧上下文） */
+  /** 进程恢复：从 DB 恢复 active 用户会话，重建 backend session（--resume 旧上下文）。
+   * 只恢复 source='user' 的会话——cron/task 独立会话不占用 chat 槽位，
+   * 避免重启后用户消息 resume 进定时任务会话导致主会话失忆。 */
   async recover(): Promise<void> {
     const rows = this.db.prepare(`
       SELECT s.id, s.chat_id, s.user_id, s.agent_session_id, s.backend_type, c.platform_id, c.type
       FROM sessions s
       JOIN chats c ON s.chat_id = c.id
-      WHERE s.status = 'active'
+      WHERE s.status = 'active' AND s.source = 'user'
       ORDER BY s.last_active_at DESC
     `).all() as Array<{
       id: string;

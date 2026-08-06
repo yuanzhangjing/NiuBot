@@ -1378,6 +1378,47 @@ describe("Pipeline runtime", () => {
     expect(agent.sendMessageCalls[0]).not.toContain("<niubot-system-rules>");
   });
 
+  test("does not recover cron/task sessions (only user sessions take the chat slot)", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare(`
+      INSERT INTO users (id, name, platform, platform_id)
+      VALUES ('u2', 'admin', 'feishu', 'user-open-id')
+    `).run();
+    db.prepare(`
+      INSERT INTO chats (id, type, platform, platform_id, user_id)
+      VALUES ('c1', 'p2p', 'feishu', 'chat-open-id', 'user-open-id')
+    `).run();
+    db.prepare(`
+      INSERT INTO sessions (id, chat_id, user_id, status, source, agent_session_id, backend_type, last_active_at)
+      VALUES ('s-user', 'c1', 'u2', 'active', 'user', 'user-session-id', 'claude', datetime('now', '-1 minute'))
+    `).run();
+    db.prepare(`
+      INSERT INTO sessions (id, chat_id, user_id, status, source, agent_session_id, backend_type, last_active_at)
+      VALUES ('s-cron', 'c1', 'u2', 'active', 'cron', 'cron-session-id', 'claude', datetime('now'))
+    `).run();
+
+    const agent = new RecordingAgent();
+    const pipeline = new Pipeline(
+      db,
+      createImStub(),
+      agent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "claude",
+    );
+
+    await pipeline.recover();
+
+    // 只恢复 user 会话；cron 会话不占用 chat 槽位
+    expect(agent.createSessionCalls).toHaveLength(1);
+    expect(agent.createSessionCalls[0]?.agentSessionId).toBe("user-session-id");
+  });
+
 
   test("handles single-slash service as a local builtin command", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));

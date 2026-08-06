@@ -228,11 +228,15 @@ Usage: nbt restart [--update <version>]`);
     console.error("Error: NIUBOT_HOME is not set.");
     process.exit(1);
   }
+  if (args[0] === "--update" && !args[1]) {
+    console.error("Error: --update 需要版本号（如 nbt restart --update 1.2.3）");
+    process.exit(1);
+  }
   const updateVersion = args[0] === "--update" ? args[1] : undefined;
   const runtimeRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-  // 源码开发版：sourceDirectory 指向仓库（recover/重新构建路径）；release 运行版用 runtimeRoot 本身。
-  const sourceDirectory = process.env["NIUBOT_SOURCE_DIR"]
-    ?? (path.dirname(runtimeRoot).endsWith("package") ? runtimeRoot : path.dirname(path.dirname(runtimeRoot)));
+  // sourceDirectory 与 restart-compat 一致：env 显式指定优先，否则回退 runtimeRoot。
+  // 源码开发版路径由 worker 内部 resolveRestartSourceDirectory 从 config.yaml 解析。
+  const sourceDirectory = process.env["NIUBOT_SOURCE_DIR"] ?? runtimeRoot;
   const { launchRestartWorker } = await import("./restart-launcher.js");
   try {
     const worker = launchRestartWorker({
