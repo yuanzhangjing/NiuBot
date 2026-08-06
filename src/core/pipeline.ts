@@ -201,6 +201,15 @@ function buildLoopDeliveryMarker(job: LoopJob): string {
   return `> ${buildLoopCardHeader(job)}\n${buildLoopTaskQuote(job)}`;
 }
 
+/** Goal 卡片标题：固定展示目标来源 + 结局 + 轮次 + 耗时。 */
+function buildGoalCardHeader(goal: ActiveGoal, elapsedMs: number): string {
+  const outcomeLabel = goal.outcome === "achieved" ? "✅ 已达成"
+    : goal.outcome === "not_achieved" ? "⛔ 未达成"
+    : goal.outcome === "stopped" ? "🛑 已停止"
+    : "❌ 失败";
+  return `🎯 Goal ${outcomeLabel} · ${goal.turnCount} 轮 · ${formatUptime(elapsedMs)}`;
+}
+
 function formatLongRunningHours(runningMs: number): number {
   return Math.max(1, Math.round(runningMs / 3_600_000));
 }
@@ -2439,8 +2448,10 @@ export class Pipeline {
         this.log.info("goal finishing", { chatId, outcome: goal.outcome });
         const outcome = goal.outcome === "achieved" ? "achieved" : "not_achieved";
         const conclusion = goal.conclusion ?? response.text.trim().slice(0, 500);
-        // 只有最终一轮发送正文；发送成功后结算
-        const delivered = await this.deliverGoalFinalResponse(chatSession, goal, response.text, signal);
+        // 引用触发消息（/goal 那条）；只发一次最终正文，发送成功后结算
+        const activeRun = this.runtimeState.getActiveRun(chatId);
+        const replyToMsgId = activeRun?.replyToPlatformMsgId ?? undefined;
+        const delivered = await this.deliverGoalFinalResponse(chatSession, goal, response.text, replyToMsgId, signal);
         this.finishGoal(chatId, goal, outcome, conclusion, delivered);
         break;
       }
@@ -2478,16 +2489,27 @@ export class Pipeline {
     this.log.info("goal settled", { chatId, outcome, delivered });
   }
 
-  /** 发送 Goal 最终正文（唯一一次 IM 交付）；失败时返回 false。 */
+  /** 发送 Goal 最终正文（唯一一次 IM 交付，卡片 + 引用触发消息 + 汇总）；失败时返回 false。 */
   private async deliverGoalFinalResponse(
     chatSession: { platformChatId: string },
     goal: ActiveGoal,
     responseText: string,
+    replyToMsgId: string | undefined,
     signal?: AbortSignal,
   ): Promise<boolean> {
     try {
       const text = stripInternalWorkerTags(responseText);
-      await this.responseSender.sendText(chatSession.platformChatId, text, signal);
+      const elapsedMs = Date.now() - goal.startedAt;
+      const header = buildGoalCardHeader(goal, elapsedMs);
+      const content = `> 目标：${goal.objective}\n\n${text}`;
+      await this.responseSender.sendCard(
+        chatSession.platformChatId,
+        header,
+        content,
+        undefined,
+        replyToMsgId,
+        signal,
+      );
       return true;
     } catch (err) {
       this.log.warn("goal final response delivery failed", { error: String(err) });

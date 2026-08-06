@@ -4874,7 +4874,7 @@ describe("Pipeline Goal mode", () => {
   }
 
   test("/goal 创建并进入同一 Run 多轮循环，finish 后发送最终正文", async () => {
-    const { agent, pipeline, sentTexts } = createGoalPipeline();
+    const { agent, pipeline, sentTexts, sentCards } = createGoalPipeline();
     await pipeline.start();
 
     (pipeline as any).handleMessage(createMessage({
@@ -4901,11 +4901,18 @@ describe("Pipeline Goal mode", () => {
       conclusion: "目标已达成",
     });
 
-    // 本轮返回后 Goal 结算并发送最终正文
+    // 本轮返回后 Goal 结算并发送最终正文（卡片）
     agent.resolveNext();
-    await vi.waitFor(() => expect(sentTexts.length).toBeGreaterThanOrEqual(1));
-    // 只有最终一轮发送；内部轮次不发送
+    await vi.waitFor(() => expect(sentCards.length).toBeGreaterThanOrEqual(1));
+    // 只有最终一轮发送（卡片）；内部轮次不发送。
+    // sentTexts 仅含 /goal 创建时的确认文本（「🎯 Goal 已开始」），不是最终正文。
     expect(sentTexts.length).toBe(1);
+    expect(sentTexts[0]).toContain("Goal 已开始");
+    expect(sentCards.length).toBe(1);
+    // 卡片带 Goal 汇总：结局 + 轮次 + 目标引用
+    expect(sentCards[0]?.header).toMatch(/🎯 Goal/);
+    expect(sentCards[0]?.header).toContain("1 轮");
+    expect(sentCards[0]?.content).toContain("> 目标：测试目标");
     // Goal 结束收尾（清理状态在 runGoalLoop 末尾异步完成）
     await vi.waitFor(() => expect((pipeline as any).activeGoals.has("c1")).toBe(false));
     expect((pipeline as any).goalTokens.has("c1")).toBe(false);
