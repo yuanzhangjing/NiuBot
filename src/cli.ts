@@ -19,6 +19,7 @@
 
 import path from "node:path";
 import os from "node:os";
+import { fileURLToPath } from "node:url";
 import dotenv from "dotenv";
 import Database from "better-sqlite3";
 import {
@@ -58,6 +59,7 @@ const sessionCommands = new Set([
   "task",
   "worker",
   "whoami",
+  "restart",
 ]);
 const publicCommands = new Set([
   undefined,
@@ -187,6 +189,9 @@ async function main(): Promise<void> {
     case "worker":
       await handleWorker(openWorkerReadDb(), args.slice(1));
       break;
+    case "restart":
+      await handleRestart(args.slice(1));
+      break;
     case "system-rules":
       handleSystemRules(args.slice(1));
       break;
@@ -206,6 +211,45 @@ Use when context is lost after compaction or when checking current engine-owned 
     return;
   }
   console.log(SYSTEM_RULES);
+}
+
+// ─── restart ───────────────────────────────────────────────
+
+/** 重启引擎（受控入口）。通知目标自动带当前会话（NIUBOT_CHAT_ID），Agent 无需碰 restart.sh。 */
+async function handleRestart(args: string[]): Promise<void> {
+  if (args[0] === "--help" || args[0] === "help") {
+    console.log(`Restart the NiuBot Engine through the safe restart pipeline.
+Notification is sent back to the current chat automatically.
+
+Usage: nbt restart [--update <version>]`);
+    return;
+  }
+  if (!NIUBOT_HOME) {
+    console.error("Error: NIUBOT_HOME is not set.");
+    process.exit(1);
+  }
+  const updateVersion = args[0] === "--update" ? args[1] : undefined;
+  const runtimeRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  // 源码开发版：sourceDirectory 指向仓库（recover/重新构建路径）；release 运行版用 runtimeRoot 本身。
+  const sourceDirectory = process.env["NIUBOT_SOURCE_DIR"]
+    ?? (path.dirname(runtimeRoot).endsWith("package") ? runtimeRoot : path.dirname(path.dirname(runtimeRoot)));
+  const { launchRestartWorker } = await import("./restart-launcher.js");
+  try {
+    const worker = launchRestartWorker({
+      niubotHome: NIUBOT_HOME,
+      botName: BOT_NAME ?? "NiuBot",
+      runtimeRoot,
+      sourceDirectory,
+      runtimeMode: process.env["NIUBOT_RUNTIME_MODE"] ?? "",
+      notifyChatId: CHAT_ID,
+      updateVersion,
+    });
+    console.log(`重启已启动（worker PID ${worker.pid}）`);
+    console.log(`通知将发送到当前会话；日志：${worker.logFile}`);
+  } catch (err) {
+    console.error(`重启启动失败：${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  }
 }
 
 // ─── user-memory ───────────────────────────────────────────
@@ -458,6 +502,7 @@ Commands:
   cron          add|list|del                Manage scheduled tasks
   schedule      create|list|cancel          Manage Loop and Cron schedules
   task          create|list|update|delete   Manage task projects
+  restart                                   Restart the Engine (safe pipeline, notifies current chat)
   system-rules                             Show NiuBot Engine system rules
   whoami                                    Show current scene info
 
