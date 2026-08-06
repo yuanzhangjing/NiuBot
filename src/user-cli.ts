@@ -1049,11 +1049,6 @@ async function cmdStop(niubotHome: string): Promise<void> {
 }
 
 async function cmdRestart(niubotHome: string): Promise<void> {
-  if (process.env["NIUBOT_AGENT_SESSION"]) {
-    fail("Cannot restart from within a bot session. Use /restart in Feishu or run directly in your terminal.");
-    process.exitCode = 1;
-    return;
-  }
   const running = await inspectRunningEngine(niubotHome);
   if (!running) {
     fail("NiuBot is not running or its process identity cannot be verified.");
@@ -1330,11 +1325,6 @@ async function cmdUpdate(niubotHome: string, flags: CliFlags): Promise<void> {
   console.log();
 
   if (running) {
-    if (process.env["NIUBOT_AGENT_SESSION"]) {
-      fail("Cannot update from within a bot session. Use /update in Feishu or run directly in your terminal.");
-      process.exitCode = 1;
-      return;
-    }
     const config = loadConfig(path.join(niubotHome, "config.yaml"));
     const worker = launchRestartWorker({
       niubotHome,
