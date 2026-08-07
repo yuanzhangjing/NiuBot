@@ -463,19 +463,34 @@ async function packRelease(context: RestartContext, options: PackReleaseOptions)
   try {
     const npmCommand = resolveNpmCommandForCurrentNode();
     const npmEnv = npmEnvironmentForCurrentNode();
-    const args = ["pack"];
-    if (options.packageSpec) args.push(options.packageSpec);
-    args.push("--json", "--pack-destination", context.store.packagesDirectory);
-    const packed = await runLogged(
-      context,
-      npmCommand,
-      args,
-      options.cwd,
-      readPositiveMs("NIUBOT_RESTART_PACK_TIMEOUT", 120_000),
-      npmEnv,
-    );
-    const filename = parseNpmPackFilename(packed.stdout);
-    const archive = path.join(context.store.packagesDirectory, filename);
+    // 复用预下载的 tgz（自动升级 predownloadPackage 已拉到 packages 目录）：
+    // 命中则跳过 npm pack（本地操作），避免锁内网络下载。
+    let archive: string | undefined;
+    if (options.packageSpec) {
+      const versionMatch = options.packageSpec.match(/@([0-9A-Za-z._-]+)$/);
+      if (versionMatch) {
+        const expected = npmPackFilenameForPackage(options.packageSpec);
+        if (expected) {
+          const existing = path.join(context.store.packagesDirectory, expected);
+          if (fs.existsSync(existing)) archive = existing;
+        }
+      }
+    }
+    if (!archive) {
+      const args = ["pack"];
+      if (options.packageSpec) args.push(options.packageSpec);
+      args.push("--json", "--pack-destination", context.store.packagesDirectory);
+      const packed = await runLogged(
+        context,
+        npmCommand,
+        args,
+        options.cwd,
+        readPositiveMs("NIUBOT_RESTART_PACK_TIMEOUT", 120_000),
+        npmEnv,
+      );
+      const filename = parseNpmPackFilename(packed.stdout);
+      archive = path.join(context.store.packagesDirectory, filename);
+    }
     if (!fs.existsSync(archive)) throw new Error(`npm pack output not found: ${archive}`);
     await extractTar({ file: archive, cwd: packageDirectory, strip: 1 });
 
@@ -650,6 +665,13 @@ export function buildInstallArgs(preferOffline?: boolean): string[] {
   const args = ["install", "--omit=dev", "--no-audit", "--no-fund"];
   if (preferOffline) args.push("--prefer-offline");
   return args;
+}
+
+/** npm pack 产物文件名（如 @yuanzhangjing/niubot@1.2.3 → yuanzhangjing-niubot-1.2.3.tgz）。 */
+export function npmPackFilenameForPackage(packageSpec: string): string | undefined {
+  const versionMatch = packageSpec.match(/@([0-9A-Za-z._-]+)$/);
+  if (!versionMatch) return undefined;
+  return `${PACKAGE_NAME.replace(/^@/, "").replace("/", "-")}-${versionMatch[1]}.tgz`;
 }
 
 export function parseNpmPackFilename(output: string): string {

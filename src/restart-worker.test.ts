@@ -6,6 +6,7 @@ import {
   DEFAULT_PREFLIGHT_TIMEOUT_MS,
   buildInstallArgs,
   isNpmInstalledPath,
+  npmPackFilenameForPackage,
   parseNpmPackFilename,
   resolvePreflightTimeoutMs,
   resolveRestartSourceDirectory,
@@ -32,6 +33,12 @@ describe("restart worker helpers", () => {
     expect(parseNpmPackFilename('[{"filename":"yuanzhangjing-niubot-1.2.3.tgz"}]'))
       .toBe("yuanzhangjing-niubot-1.2.3.tgz");
     expect(() => parseNpmPackFilename('[{"filename":"../outside.tgz"}]')).toThrow();
+  });
+
+  it("derives npm pack filename for package specs", () => {
+    expect(npmPackFilenameForPackage("@yuanzhangjing/niubot@1.2.3")).toBe("yuanzhangjing-niubot-1.2.3.tgz");
+    expect(npmPackFilenameForPackage("@yuanzhangjing/niubot@0.2.1-beta.1")).toBe("yuanzhangjing-niubot-0.2.1-beta.1.tgz");
+    expect(npmPackFilenameForPackage("@yuanzhangjing/niubot")).toBeUndefined();
   });
 
   it("builds install args with prefer-offline only for dev/local restarts", () => {

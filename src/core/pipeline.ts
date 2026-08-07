@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { exec, execFileSync } from "node:child_process";
-import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -1665,6 +1665,10 @@ export class Pipeline {
           return true;
         }
         this.log.info("builtin command: update", { userId });
+        if (parts[1] === "auto") {
+          this.handleAutoUpdateCommand(parts.slice(2), chatId, platformChatId, msgId);
+          return true;
+        }
         this.handleUpdate(chatId, platformChatId, msgId, isUpdateConfirmedArg(parts[1]));
         return true;
       }
@@ -1735,6 +1739,7 @@ export class Pipeline {
           this.replyText(chatId, platformChatId, msgId, "/autoupdate 仅管理员可用。");
           return true;
         }
+        // 兼容别名：/update auto 是正式入口，/autoupdate 保留为同义命令
         this.handleAutoUpdateCommand(parts.slice(1), chatId, platformChatId, msgId);
         return true;
       }
@@ -3934,8 +3939,9 @@ ${jobParts.join("\n\n")}
       `**空闲判定：** 无进行中任务 + 无排队 + 窗口内无定时触发`,
       `**结果通知：** ${config.notifyOnResult ? "成功白天汇报" : "完全静默"}`,
       "",
-      "`/autoupdate on` 开启",
-      "`/autoupdate off` 关闭",
+      "`/update auto on` 开启",
+      "`/update auto off` 关闭",
+      "（`/autoupdate` 为兼容别名）",
     ];
     this.sendAgentCard(chatId, platformChatId, msgId, "AutoUpdate", lines.join("\n"));
   }
@@ -4337,6 +4343,13 @@ ${jobParts.join("\n\n")}
       return;
     }
 
+    // 预下载新版本 tgz（幂等）：先拉包，空闲判定通过后锁内只做本地解压+安装，
+    // 避免锁内长时间网络下载（下载失败不阻塞本次判定，下次检查再试）
+    const predownloaded = await this.predownloadPackage(latest).catch((err) => {
+      this.log.warn("auto-upgrade predownload failed", { latest, error: String(err) });
+      return false;
+    });
+
     const windowMs = (config.windowEndHour - config.windowStartHour) * 60 * 60_000;
     const sources = this.buildSafenessSources();
     const { safe, blockers } = isSafeForUpgrade(sources, now, windowMs);
@@ -4349,15 +4362,33 @@ ${jobParts.join("\n\n")}
       this.log.info("auto-upgrade skipped: lock acquire failed");
       return;
     }
-    this.log.info("auto-upgrade starting", { latest, version: this.version });
+    this.log.info("auto-upgrade starting", { latest, version: this.version, predownloaded });
     try {
-      this.triggerRestart({ updateVersion: latest });
+      // 自动升级静默：不发"正在重启..."通知（避免半夜打扰）；成功结果白天汇报
+      this.triggerRestart({ updateVersion: latest, silent: true });
     } catch (err) {
       // 触发失败：解除锁，避免残留阻塞下次自动升级
       releaseUpgradeLock(this.db);
       this.log.warn("auto-upgrade trigger failed; lock released", { latest, error: String(err) });
     }
   }
+
+  /** 预下载新版本 tgz 到 packages 目录（幂等：同版本已存在则跳过）。 */
+  private async predownloadPackage(latest: string): Promise<boolean> {
+    const packagesDir = path.join(NIUBOT_HOME, this.botIdentity.name, "packages");
+    mkdirSync(packagesDir, { recursive: true });
+    const expected = `yuanzhangjing-niubot-${latest}.tgz`;
+    if (existsSync(path.join(packagesDir, expected))) {
+      this.log.info("auto-upgrade predownload already present", { latest, file: expected });
+      return true;
+    }
+    // npm pack 到 packages 目录（与 restart worker 的 pack 一致，产物可复用）
+    await this.runNpmCommand(["pack", `${UPDATE_PACKAGE_NAME}@${latest}`, "--pack-destination", packagesDir], 120_000);
+    const present = existsSync(path.join(packagesDir, expected));
+    this.log.info("auto-upgrade predownloaded", { latest, present });
+    return present;
+  }
+
 
   /** 白天汇报：升级锁存在且版本匹配 → 发「已自动升级」卡片并解除锁。 */
   private async maybeReportUpgradeResult(latest: string): Promise<void> {
@@ -4422,7 +4453,7 @@ ${jobParts.join("\n\n")}
   private readonly upgradeWaitRunTimeoutMs = UPGRADE_WAIT_RUN_TIMEOUT_MS;
 
   /** 启动独立的 Node restart worker；worker 完成预检后再停止旧 Engine。 */
-  triggerRestart(opts?: { platformChatId?: string; chatId?: string; updateVersion?: string }): void {
+  triggerRestart(opts?: { platformChatId?: string; chatId?: string; updateVersion?: string; silent?: boolean }): void {
     const runtimeRoot = path.resolve(
       path.dirname(fileURLToPath(import.meta.url)),
       "../..",
@@ -4446,8 +4477,8 @@ ${jobParts.join("\n\n")}
       platformChatId = this.platformChatIds.get(chatId);
     }
 
-    // 发送"正在重启..."通知
-    if (platformChatId) {
+    // 发送"正在重启..."通知（自动升级静默，不打扰用户）
+    if (platformChatId && !opts?.silent) {
       this.transport.sendText(platformChatId, "正在重启...").catch(() => {});
     }
 
