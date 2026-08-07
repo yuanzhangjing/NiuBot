@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_PREFLIGHT_TIMEOUT_MS,
+  buildInstallArgs,
   parseNpmPackFilename,
   resolvePreflightTimeoutMs,
   resolveRestartSourceDirectory,
@@ -29,6 +30,14 @@ describe("restart worker helpers", () => {
     expect(parseNpmPackFilename('[{"filename":"yuanzhangjing-niubot-1.2.3.tgz"}]'))
       .toBe("yuanzhangjing-niubot-1.2.3.tgz");
     expect(() => parseNpmPackFilename('[{"filename":"../outside.tgz"}]')).toThrow();
+  });
+
+  it("builds install args with prefer-offline only for dev/local restarts", () => {
+    expect(buildInstallArgs(false)).toEqual(["install", "--omit=dev", "--no-audit", "--no-fund"]);
+    expect(buildInstallArgs()).toEqual(["install", "--omit=dev", "--no-audit", "--no-fund"]);
+    expect(buildInstallArgs(true)).toEqual([
+      "install", "--omit=dev", "--no-audit", "--no-fund", "--prefer-offline",
+    ]);
   });
 
   it("keeps npm releases independent from configured source directories", () => {

@@ -155,6 +155,8 @@ async function runSourceRestart(context: RestartContext): Promise<void> {
     releaseId,
     cwd: context.sourceDirectory,
     installTimeoutMs: installTimeout(context, false),
+    // 本地源码重启 = dev 环境：优先本地缓存，registry 抖动不影响
+    preferOffline: true,
   });
   await switchToCandidate(context, candidate, "", "重启成功。");
 }
@@ -439,6 +441,8 @@ async function ensureBootstrapRelease(context: RestartContext): Promise<void> {
     releaseId,
     cwd: context.sourceDirectory,
     installTimeoutMs: installTimeout(context, false),
+    // bootstrap 也是本地环境（打包当前运行的 dist），同样优先本地缓存
+    preferOffline: true,
   });
   context.store.writeState({ schemaVersion: 1, current: releaseId, lastKnownGood: releaseId });
 }
@@ -449,6 +453,8 @@ interface PackReleaseOptions {
   packageSpec?: string;
   expectedVersion?: string;
   installTimeoutMs: number;
+  /** 安装依赖时优先使用本地 npm 缓存（缓存命中即不访问 registry）。dev/本地环境用，生产更新不用。 */
+  preferOffline?: boolean;
 }
 
 async function packRelease(context: RestartContext, options: PackReleaseOptions): Promise<string> {
@@ -484,7 +490,7 @@ async function packRelease(context: RestartContext, options: PackReleaseOptions)
     await runLogged(
       context,
       npmCommand,
-      ["install", "--omit=dev", "--no-audit", "--no-fund", "--prefer-offline"],
+      buildInstallArgs(options.preferOffline),
       packageDirectory,
       options.installTimeoutMs,
       npmEnv,
@@ -641,6 +647,12 @@ async function runLogged(
     timeoutMs,
     onOutput: (_stream, text) => fs.appendFileSync(context.debugLog, text),
   });
+}
+
+export function buildInstallArgs(preferOffline?: boolean): string[] {
+  const args = ["install", "--omit=dev", "--no-audit", "--no-fund"];
+  if (preferOffline) args.push("--prefer-offline");
+  return args;
 }
 
 export function parseNpmPackFilename(output: string): string {
