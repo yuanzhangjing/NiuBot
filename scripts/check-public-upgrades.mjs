@@ -60,7 +60,11 @@ try {
     const breakingMigration = !candidate.ROLLBACK_COMPATIBLE_SCHEMA_VERSIONS.includes(
       candidate.LATEST_SCHEMA_VERSION,
     );
-    const expectedUpgradedSchema = breakingMigration ? candidate.LATEST_SCHEMA_VERSION : oldSchema;
+    // 旧版本 schema 在可回滚兼容列表内 → 升级保持旧版本号（旧代码仍可打开）；
+    // 否则（如经历过 DROP COLUMN 破坏性迁移的版本）→ 全量推进到 LATEST。
+    const expectedUpgradedSchema = breakingMigration || !candidate.ROLLBACK_COMPATIBLE_SCHEMA_VERSIONS.includes(oldSchema)
+      ? candidate.LATEST_SCHEMA_VERSION
+      : oldSchema;
     const expectedPrompts = ["before-upgrade"];
 
     if (!breakingMigration) {
@@ -92,8 +96,7 @@ try {
     ).pluck().get();
     reupgraded.close();
 
-    if (!candidate.ROLLBACK_COMPATIBLE_SCHEMA_VERSIONS.includes(oldSchema)
-      || upgradedSchema !== expectedUpgradedSchema || transportSchema !== candidate.LATEST_TRANSPORT_SCHEMA_VERSION
+    if (upgradedSchema !== expectedUpgradedSchema || transportSchema !== candidate.LATEST_TRANSPORT_SCHEMA_VERSION
       || quickCheck !== "ok" || JSON.stringify(prompts) !== JSON.stringify(expectedPrompts)
       || pending !== "pending") {
       throw new Error(
