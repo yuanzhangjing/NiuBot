@@ -484,7 +484,7 @@ async function packRelease(context: RestartContext, options: PackReleaseOptions)
     await runLogged(
       context,
       npmCommand,
-      ["install", "--omit=dev", "--no-audit", "--no-fund"],
+      ["install", "--omit=dev", "--no-audit", "--no-fund", "--prefer-offline"],
       packageDirectory,
       options.installTimeoutMs,
       npmEnv,
