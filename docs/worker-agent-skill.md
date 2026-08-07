@@ -88,4 +88,4 @@ profiles:
 - Worker 无主会话上下文和用户记忆；需要历史时把必要信息写进 Job 文件。
 - 主 Agent 需要检查 Worker 的实际进展时，用 `nbt sessions get <job-id>`；session 尚未启动完成时会提示暂无日志，稍后重试。
 - 同一 Work 的后续 Job 复用同一工作区（文件保留），不同 Work 隔离。
-- 写 Job 的修改留在 worktree（`niubot-worker/<jobId>` 分支），不自动提交、不 push。
+- 写 Job 直接修改目标目录文件，不自动提交、不 push（旧版 worktree/scratch 工作区策略已废弃）。
