@@ -39,6 +39,13 @@ import {
 } from "../database/schema.js";
 import { isNewerPackageVersion, isPrereleaseOrUnrecognizedVersion } from "../version.js";
 import {
+  acquireUpgradeLock, releaseUpgradeLock, readUpgradeLock,
+  isSafeForUpgrade, isInUpgradeWindow,
+  mainRunSource, workerSource, goalSource, cronSource, loopSource,
+  UPGRADE_WAIT_RUN_TIMEOUT_MS,
+  type AutoUpdateConfig, type UpgradeSafenessSource,
+} from "./auto-update.js";
+import {
   buildActiveTaskContext,
   buildImportantContext,
   buildNormalContext,
@@ -352,6 +359,8 @@ export class Pipeline {
   private runManager: RunManager;
   private restartConfig?: RestartConfig;
   private autoUpdateNotificationsEnabled: boolean;
+  private autoUpdateConfig?: AutoUpdateConfig;
+  private upgradeHistoryRecorded = new Set<string>();
   private botIdentity: BotIdentity;
   private log: ReturnType<typeof createLogger>;
 
@@ -484,6 +493,7 @@ export class Pipeline {
     archiveHome?: string,
     getBackendCapabilities?: () => BackendCapability[] | Promise<BackendCapability[]>,
     workerConfig?: WorkerPipelineConfig,
+    autoUpdateConfig?: AutoUpdateConfig,
   ) {
     this.db = db;
     this.transport = transport;
@@ -506,6 +516,7 @@ export class Pipeline {
     this.stableContextOptions = stableContextOptions ?? {};
     this.restartConfig = restartConfig;
     this.autoUpdateNotificationsEnabled = autoUpdateNotificationsEnabled;
+    this.autoUpdateConfig = autoUpdateConfig;
     this.archiveHome = archiveHome ?? (process.env["VITEST"]
       ? path.join(path.dirname(dbPath), ".niubot-test")
       : NIUBOT_HOME);
@@ -4205,8 +4216,6 @@ ${jobParts.join("\n\n")}
       this.log.info("skipping update check for dev/prerelease version", { version: this.version });
       return;
     }
-    const platformChatIds = this.getAdminPrivatePlatformChatIds();
-    if (platformChatIds.length === 0) return;
 
     let latest: string | null = null;
     try {
@@ -4215,8 +4224,25 @@ ${jobParts.join("\n\n")}
       this.log.warn("update check failed", { error: String(err) });
       return;
     }
-    if (!latest || latest === this.version) return;
+    if (!latest) return;
+
+    // 白天汇报：自动升级已完成（锁存在且版本匹配 latest）→ 发「已升级」卡片并解锁。
+    // 必须在 latest === this.version 守卫之前：升级成功后当前版本即 latest，
+    // 此时需要靠锁识别「这次升级是自动完成的」并汇报。
+    await this.maybeReportUpgradeResult(latest);
+
+    if (latest === this.version) return;
+
+    // 自动升级开启：窗口内 + 空闲判定通过 → 直接升级（静默），无需 admin 确认
+    if (this.autoUpdateConfig?.enabled) {
+      await this.maybeRunAutoUpgrade(latest);
+      return;
+    }
+
     if (hasUpdateNotification(this.db, this.botIdentity.name, latest)) return;
+
+    const platformChatIds = this.getAdminPrivatePlatformChatIds();
+    if (platformChatIds.length === 0) return;
 
     const text = `发现新版本：${this.version} → ${latest}\n发送 \`${UPDATE_CONFIRM_COMMAND}\` 升级并重启。`;
 
@@ -4233,6 +4259,105 @@ ${jobParts.join("\n\n")}
       recordUpdateNotification(this.db, this.botIdentity.name, latest);
     }
   }
+
+  /** 自动升级：窗口内 + 空闲判定通过 → 上锁并触发升级；否则顺延。 */
+  private async maybeRunAutoUpgrade(latest: string): Promise<void> {
+    const config = this.autoUpdateConfig;
+    if (!config) return;
+
+    const now = Date.now();
+    if (!isInUpgradeWindow(new Date(now), config)) {
+      this.log.info("auto-upgrade skipped: outside window", { latest });
+      return;
+    }
+    if (readUpgradeLock(this.db)) {
+      this.log.info("auto-upgrade skipped: lock already held");
+      return;
+    }
+
+    const windowMs = (config.windowEndHour - config.windowStartHour) * 60 * 60_000;
+    const sources = this.buildSafenessSources();
+    const { safe, blockers } = isSafeForUpgrade(sources, now, windowMs);
+    if (!safe) {
+      this.log.info("auto-upgrade deferred: engine busy", { latest, blockers });
+      return;
+    }
+
+    if (!acquireUpgradeLock(this.db, latest)) {
+      this.log.info("auto-upgrade skipped: lock acquire failed");
+      return;
+    }
+    this.log.info("auto-upgrade starting", { latest, version: this.version });
+    try {
+      this.triggerRestart({ updateVersion: latest });
+    } catch (err) {
+      // 触发失败：解除锁，避免残留阻塞下次自动升级
+      releaseUpgradeLock(this.db);
+      this.log.warn("auto-upgrade trigger failed; lock released", { latest, error: String(err) });
+    }
+  }
+
+  /** 白天汇报：升级锁存在且版本匹配 → 发「已自动升级」卡片并解除锁。 */
+  private async maybeReportUpgradeResult(latest: string): Promise<void> {
+    const lock = readUpgradeLock(this.db);
+    if (!lock || lock.version !== latest) return;
+    if (this.version !== latest) {
+      // 版本不匹配：升级失败/回滚，静默保持旧版，仅解除锁并记录原因
+      releaseUpgradeLock(this.db);
+      this.log.warn("auto-upgrade did not take effect (rolled back?)", { latest, current: this.version });
+      return;
+    }
+    // 新引擎已运行：升级成功。无论是否汇报，锁都要解除（避免残留阻塞下次自动升级）。
+    if (this.autoUpdateConfig?.notifyOnResult && !this.upgradeHistoryRecorded.has(latest)) {
+      const platformChatIds = this.getAdminPrivatePlatformChatIds();
+      const text = `已自动升级到 **${latest}**。`;
+      let delivered = false;
+      for (const platformChatId of platformChatIds) {
+        try {
+          await this.transport.sendCard(platformChatId, "Update", text);
+          delivered = true;
+        } catch (err) {
+          this.log.warn("failed to send auto-upgrade result", { platformChatId, error: String(err) });
+        }
+      }
+      if (delivered) {
+        recordUpdateNotification(this.db, this.botIdentity.name, latest);
+        this.upgradeHistoryRecorded.add(latest);
+      }
+      this.log.info("auto-upgrade completed and reported", { latest, delivered });
+    }
+    releaseUpgradeLock(this.db);
+    this.log.info("auto-upgrade completed", { latest });
+  }
+
+  /** 组装空闲判定 Source（各执行链自己实现）。 */
+  private buildSafenessSources(): UpgradeSafenessSource[] {
+    const jobService = this.workerConfig?.jobService;
+    return [
+      mainRunSource({
+        inflightRunCount: () => this.runtimeState.getPipelineHealth().inflightRunIds.length,
+        pendingMessageCount: () => this.queue.hasBusyChats() ? 1 : 0,
+      }),
+      workerSource({
+        nonTerminalJobCount: () => {
+          if (!jobService) return 0;
+          return jobService.listJobsByStatus("queued").length
+            + jobService.listJobsByStatus("running").length
+            + jobService.listJobsByStatus("cancelling").length;
+        },
+        nonTerminalContinuationCount: () => {
+          if (!jobService) return 0;
+          return jobService.listPendingContinuations().length;
+        },
+      }),
+      goalSource({ activeGoalCount: () => this.activeGoals.size }),
+      cronSource(this.db),
+      loopSource(this.db),
+    ];
+  }
+
+  /** 升级时等待当前 run 收尾的上限（超时强制升级，中断靠 continuation 恢复兜底）。 */
+  private readonly upgradeWaitRunTimeoutMs = UPGRADE_WAIT_RUN_TIMEOUT_MS;
 
   /** 启动独立的 Node restart worker；worker 完成预检后再停止旧 Engine。 */
   triggerRestart(opts?: { platformChatId?: string; chatId?: string; updateVersion?: string }): void {

@@ -277,6 +277,7 @@ async function main(): Promise<void> {
         runtimeConfig,
         config.restart,
         autoUpdateNotificationsEnabled,
+        config.autoUpdate,
         getBackendCapabilities,
         { preflight },
       );

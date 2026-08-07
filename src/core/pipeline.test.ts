@@ -5206,3 +5206,193 @@ describe("Pipeline Goal mode", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
 });
+
+describe("auto-upgrade", () => {
+  const autoUpdateConfig = {
+    enabled: true,
+    windowStartHour: 2,
+    windowEndHour: 5,
+    timezone: "Asia/Shanghai",
+    marginMinutes: 10,
+    notifyOnResult: true,
+  };
+
+  test("triggers restart when in window and engine idle", async () => {
+    vi.useFakeTimers();
+    // 2026-08-08 03:00 +08:00 = 窗口内
+    vi.setSystemTime(new Date("2026-08-07T19:00:00Z"));
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-autoupdate-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const agent = new RecordingAgent();
+    const { im } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db,
+      im,
+      agent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      autoUpdateConfig,
+    );
+    (pipeline as any).runNpmCommand = async () => ({ stdout: "9.9.9\n", stderr: "" });
+    let restarted: string | undefined;
+    (pipeline as any).triggerRestart = (opts: { updateVersion?: string }) => { restarted = opts?.updateVersion; };
+
+    await pipeline.start();
+    await (pipeline as any).checkForUpdatesAndNotifyAdmins();
+
+    expect(restarted).toBe("9.9.9");
+    pipeline.stop();
+    vi.useRealTimers();
+  });
+
+  test("defers auto upgrade when outside window", async () => {
+    vi.useFakeTimers();
+    // 2026-08-08 10:00 +08:00 = 窗口外
+    vi.setSystemTime(new Date("2026-08-08T02:00:00Z"));
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-autoupdate-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const agent = new RecordingAgent();
+    const { im } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db,
+      im,
+      agent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      autoUpdateConfig,
+    );
+    (pipeline as any).runNpmCommand = async () => ({ stdout: "9.9.9\n", stderr: "" });
+    let restarted: string | undefined;
+    (pipeline as any).triggerRestart = (opts: { updateVersion?: string }) => { restarted = opts?.updateVersion; };
+
+    await pipeline.start();
+    await (pipeline as any).checkForUpdatesAndNotifyAdmins();
+
+    expect(restarted).toBeUndefined();
+    pipeline.stop();
+    vi.useRealTimers();
+  });
+
+  test("defers auto upgrade when engine busy", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-07T19:00:00Z"));
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-autoupdate-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const agent = new RecordingAgent();
+    const { im } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db,
+      im,
+      agent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      autoUpdateConfig,
+    );
+    (pipeline as any).runNpmCommand = async () => ({ stdout: "9.9.9\n", stderr: "" });
+    let restarted: string | undefined;
+    (pipeline as any).triggerRestart = (opts: { updateVersion?: string }) => { restarted = opts?.updateVersion; };
+    // 模拟有活跃 goal → 引擎忙
+    (pipeline as any).activeGoals.set("c1", {});
+
+    await pipeline.start();
+    await (pipeline as any).checkForUpdatesAndNotifyAdmins();
+
+    expect(restarted).toBeUndefined();
+    pipeline.stop();
+    vi.useRealTimers();
+  });
+
+  test("reports successful auto-upgrade during daytime check", async () => {
+    vi.useFakeTimers();
+    // 白天 10:00 +08:00，已升级到 9.9.9（锁存在且版本匹配）→ 发「已升级」卡片并解锁
+    vi.setSystemTime(new Date("2026-08-08T02:00:00Z"));
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-autoupdate-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare(
+      "INSERT INTO users (id, name, platform, platform_id, is_admin) VALUES ('u2', 'admin', 'feishu', 'user-open-id', 'owner')",
+    ).run();
+    db.prepare(
+      "INSERT INTO chats (id, type, platform, platform_id, user_id) VALUES ('c1', 'p2p', 'feishu', 'chat-open-id', 'user-open-id')",
+    ).run();
+    const agent = new RecordingAgent();
+    const { im, sentCards } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db,
+      im,
+      agent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      autoUpdateConfig,
+    );
+    // 模拟升级锁残留（新引擎版本=9.9.9 由 DB 判断，测试里写锁即可）
+    const { acquireUpgradeLock } = await import("./auto-update.js");
+    acquireUpgradeLock(db, "9.9.9");
+    (pipeline as any).runNpmCommand = async () => ({ stdout: "9.9.9\n", stderr: "" });
+    (pipeline as any).version = "9.9.9";
+
+    await pipeline.start();
+    await (pipeline as any).checkForUpdatesAndNotifyAdmins();
+
+    expect(sentCards.some((card: { content: string }) => card.content.includes("已自动升级"))).toBe(true);
+    const { readUpgradeLock } = await import("./auto-update.js");
+    expect(readUpgradeLock(db)).toBeNull();
+    pipeline.stop();
+    vi.useRealTimers();
+  });
+});

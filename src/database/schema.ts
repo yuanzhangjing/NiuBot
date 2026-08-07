@@ -726,6 +726,19 @@ const migrations: Migration[] = [
       }
     },
   },
+  {
+    version: 29,
+    description: "Add settings kv table for auto-update lock and upgrade history",
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS settings (
+          key        TEXT PRIMARY KEY,
+          value      TEXT NOT NULL,
+          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+      `);
+    },
+  },
 ];
 
 const transportMigrations: Migration[] = [

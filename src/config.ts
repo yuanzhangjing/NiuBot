@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import yaml from "yaml";
+import { AUTO_UPDATE_DEFAULTS, type AutoUpdateConfig } from "./core/auto-update.js";
 
 /** 展开路径中的 ~ 为用户 home 目录 */
 export function expandHome(p: string): string {
@@ -105,6 +106,8 @@ export interface NiuBotConfig {
   bots: BotConfig[];
   /** 可选：重启脚本配置。默认使用当前运行包目录。 */
   restart?: RestartConfig;
+  /** 可选：自动升级配置。未配置或 enabled=false 时不启用。 */
+  autoUpdate?: AutoUpdateConfig;
   queue: {
     /** 消息缓冲合并窗口（ms），默认 1500 */
     bufferMs: number;
@@ -228,12 +231,33 @@ export function loadConfig(configPath?: string): NiuBotConfig {
   return {
     bots,
     restart: parseRestartConfig(fileConfig["restart"]),
+    autoUpdate: parseAutoUpdateConfig(fileConfig["autoUpdate"]),
     queue: queueConfig,
   };
 }
 
 function stringValue(value: unknown): string | undefined {
-  return typeof value === "string" ? value : undefined;
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+/** 解析 autoUpdate 配置；未配置或 enabled=false 时不启用。 */
+function parseAutoUpdateConfig(raw: unknown): AutoUpdateConfig | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const obj = raw as Record<string, unknown>;
+  if (obj["enabled"] !== true) return undefined;
+  const defaults = AUTO_UPDATE_DEFAULTS;
+  return {
+    enabled: true,
+    windowStartHour: numberValue(obj["windowStartHour"], defaults.windowStartHour),
+    windowEndHour: numberValue(obj["windowEndHour"], defaults.windowEndHour),
+    timezone: stringValue(obj["timezone"]) ?? defaults.timezone,
+    marginMinutes: numberValue(obj["marginMinutes"], defaults.marginMinutes),
+    notifyOnResult: obj["notifyOnResult"] === undefined ? defaults.notifyOnResult : obj["notifyOnResult"] === true,
+  };
+}
+
+function numberValue(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
 function parseRestartConfig(raw: unknown): RestartConfig | undefined {

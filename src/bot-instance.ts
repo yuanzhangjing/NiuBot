@@ -13,6 +13,7 @@ import {
 import { FeishuAdapter } from "./im/feishu/adapter.js";
 import { PersistentTransport } from "./transport/persistent-transport.js";
 import { Pipeline, type BotIdentity } from "./core/pipeline.js";
+import type { AutoUpdateConfig } from "./core/auto-update.js";
 import { SqliteJobService } from "./worker/job-service.js";
 import { WorkerProfileRegistry } from "./worker/profiles.js";
 import { TeamConfigStore } from "./worker/team-config.js";
@@ -51,6 +52,7 @@ export async function createBotInstance(
   runtimeConfig?: ResolvedBotRuntimeConfig,
   restartConfig?: RestartConfig,
   autoUpdateNotificationsEnabled = true,
+  autoUpdateConfig?: AutoUpdateConfig,
   getBackendCapabilities?: () => BackendCapability[] | Promise<BackendCapability[]>,
   options: { preflight?: boolean } = {},
 ): Promise<BotInstance> {
@@ -145,7 +147,7 @@ export async function createBotInstance(
     },
     restartConfig,
     autoUpdateNotificationsEnabled,
-    undefined,
+    undefined, // archiveHome
     getBackendCapabilities,
     {
       jobService: new SqliteJobService(db, botConfig.id),
@@ -153,6 +155,7 @@ export async function createBotInstance(
       teamConfigStore: new TeamConfigStore(db, botConfig.id),
       resolveBackend: backendResolver,
     },
+    autoUpdateConfig,
   );
   transport.onInbound((delivery) => pipeline.handleInbound(delivery));
 
