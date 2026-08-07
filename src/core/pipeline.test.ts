@@ -5556,4 +5556,49 @@ describe("auto-upgrade", () => {
     pipeline.stop();
     vi.useRealTimers();
   });
+
+  test("fetches npm latest only once per day when no update is available", async () => {
+    vi.useFakeTimers();
+    // 凌晨窗口内，无新版本（latest === 当前版本）
+    vi.setSystemTime(new Date("2026-08-07T19:00:00Z"));
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-autoupdate-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const agent = new RecordingAgent();
+    const { im } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db,
+      im,
+      agent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      autoUpdateConfig,
+    );
+    let fetchCount = 0;
+    // 返回与当前版本相同 → 无新版本
+    (pipeline as any).runNpmCommand = async () => { fetchCount++; return { stdout: `${(pipeline as any).version}\n`, stderr: "" }; };
+
+    // 不依赖 start 的立即调用（fake timers 下异步可能未完成），手动触发 3 次验证缓存
+    await (pipeline as any).runAutoUpgradeCheck();
+    await (pipeline as any).runAutoUpgradeCheck();
+    await (pipeline as any).runAutoUpgradeCheck();
+
+    // 当天只 fetch 一次（无新版本 → 后续检查直接用缓存跳过）
+    expect(fetchCount).toBe(1);
+    pipeline.stop();
+    vi.useRealTimers();
+  });
 });

@@ -61,6 +61,7 @@ import {
   type StableSystemContextOptions,
 } from "../memory/inject.js";
 import {
+  dateInTimeZone,
   dateTimeInTimeZone,
   formatLocalDateTimeWithTZ,
   isInLocalHourWindow,
@@ -364,6 +365,10 @@ export class Pipeline {
   private autoUpdateNotificationsEnabled: boolean;
   private autoUpdateConfig?: AutoUpdateConfig;
   private upgradeHistoryRecorded = new Set<string>();
+  /** 自动升级当天已 fetch 过的日期（YYYY-MM-DD，本地时区）；同一天不重复 fetch */
+  private autoUpgradeFetchedDay = "";
+  /** 当天 fetch 到的最新版本缓存；null = 当天尚未 fetch 或暂无新版本 */
+  private autoUpgradeLatestCache: string | null = null;
 
   /** 自动升级是否启用：DB 开关（/autoupdate 写入）优先，其次 config.yaml 初始值。 */
   private isAutoUpdateEnabled(): boolean {
@@ -4304,19 +4309,38 @@ ${jobParts.join("\n\n")}
     this.autoUpgradeTimer = setInterval(runCheck, AUTO_UPGRADE_CHECK_INTERVAL_MS);
   }
 
-  /** 自动升级检查循环入口：先处理锁汇报（任何时候），再窗口内判定升级（避免无谓网络请求）。 */
+  /** 自动升级检查循环入口：当天只 fetch 一次（无新版本则当天不再查），有锁汇报例外。 */
   private async runAutoUpgradeCheck(): Promise<void> {
     if (isPrereleaseOrUnrecognizedVersion(this.version)) return;
     const config = this.autoUpdateConfig;
     if (!config || !this.isAutoUpdateEnabled()) return;
 
-    // 先查最新版本：用于锁汇报（升级成功后当前版本即 latest，靠锁识别自动完成并解锁）
-    let latest: string | null = null;
-    try {
-      latest = await this.fetchLatestVersion();
-    } catch (err) {
-      this.log.warn("auto-upgrade check: fetch failed", { error: String(err) });
-      return;
+    const now = new Date();
+    const today = dateInTimeZone(now, config.timezone);
+    const hasLock = readUpgradeLock(this.db) !== null;
+
+    let latest = this.autoUpgradeLatestCache;
+    if (today === this.autoUpgradeFetchedDay && !hasLock) {
+      // 当天已 fetch 过且无锁：直接用缓存结果（当天窗口内不重复查 npm）
+      if (latest === null || latest === this.version) return;
+    } else if (hasLock) {
+      // 有锁：必须 fetch 一次用于汇报/解锁（锁 version 与当前版本比对）
+      try {
+        latest = await this.fetchLatestVersion();
+      } catch (err) {
+        this.log.warn("auto-upgrade check: fetch failed", { error: String(err) });
+        return;
+      }
+    } else {
+      // 当天首次检查：fetch 一次并缓存结果，当天后续检查复用
+      try {
+        latest = await this.fetchLatestVersion();
+      } catch (err) {
+        this.log.warn("auto-upgrade check: fetch failed", { error: String(err) });
+        return;
+      }
+      this.autoUpgradeFetchedDay = today;
+      this.autoUpgradeLatestCache = latest;
     }
     if (!latest) return;
 
@@ -4326,9 +4350,8 @@ ${jobParts.join("\n\n")}
     if (latest === this.version) return;
 
     // 升级判定：窗口外直接返回（网络请求已在上一步完成，这里只做本地判定）
-    const now = Date.now();
-    if (!isInUpgradeWindow(new Date(now), config)) return;
-    if (minutesUntilUpgradeWindowEnd(new Date(now), config) < config.marginMinutes) return;
+    if (!isInUpgradeWindow(now, config)) return;
+    if (minutesUntilUpgradeWindowEnd(now, config) < config.marginMinutes) return;
 
     await this.maybeRunAutoUpgrade(latest);
   }
