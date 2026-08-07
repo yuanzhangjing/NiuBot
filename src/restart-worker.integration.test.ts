@@ -372,6 +372,72 @@ describe("restart worker integration", () => {
     expect(running?.state.runtimePath).toBe(oldRuntime);
     expect(new ReleaseStore(botDirectory).readState().current).toBe("old");
   }, 120_000);
+
+  it("reuses a predownloaded package tarball instead of running npm pack", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-restart-integration-"));
+    tempDirs.push(root);
+    const home = path.join(root, "home");
+    const source = path.join(root, "source");
+    fs.mkdirSync(path.join(source, "dist"), { recursive: true });
+    fs.mkdirSync(path.join(source, "src"), { recursive: true });
+    fs.mkdirSync(home, { recursive: true });
+
+    fs.writeFileSync(path.join(source, "package.json"), `${JSON.stringify({
+      name: "@yuanzhangjing/niubot",
+      version: "1.0.0",
+      type: "module",
+      files: ["dist", "src"],
+      scripts: { build: "node -e \"process.exit(0)\"", "pack:check": "node -e \"process.exit(0)\"" },
+    }, null, 2)}\n`);
+    fs.writeFileSync(path.join(source, "src", "placeholder.js"), "export {};\n");
+    fs.writeFileSync(path.join(source, "dist", "index.js"), fakeEngineSource(true, "9.9.9"));
+    fs.writeFileSync(path.join(home, "config.yaml"), [
+      "bots:",
+      "  - id: TestBot",
+      "    backend: codex",
+      "    appId: test-app",
+      "    appSecret: test-secret",
+      `restart:\n  sourceDirectory: ${JSON.stringify(source)}`,
+      "",
+    ].join("\n"));
+
+    // 预下载：在 bot 的 packages 目录预置目标版本 tgz（模拟 auto-upgrade predownloadPackage）
+    const botDirectory = path.join(home, "TestBot");
+    const packagesDir = path.join(botDirectory, "packages");
+    fs.mkdirSync(packagesDir, { recursive: true });
+    const archivePath = path.join(packagesDir, "yuanzhangjing-niubot-9.9.9.tgz");
+    // 构造一个最小合法 tgz：tar 解出 package/（含 package.json 和 dist/index.js）
+    const staging = path.join(root, "staging");
+    const pkgRoot = path.join(staging, "package");
+    fs.mkdirSync(path.join(pkgRoot, "dist"), { recursive: true });
+    fs.writeFileSync(path.join(pkgRoot, "package.json"), `${JSON.stringify({
+      name: "@yuanzhangjing/niubot",
+      version: "9.9.9",
+      type: "module",
+    })}\n`);
+    fs.writeFileSync(path.join(pkgRoot, "dist", "index.js"), fakeEngineSource(true, "9.9.9"));
+    await new Promise<void>((resolve, reject) => {
+      const { execFile } = require("node:child_process") as typeof import("node:child_process");
+      execFile("tar", ["-czf", archivePath, "-C", staging, "package"], (err) => err ? reject(err) : resolve());
+    });
+    fs.rmSync(staging, { recursive: true, force: true });
+
+    // 9.9.9 在 npm registry 不存在：如果 worker 没复用本地 tgz，npm pack 会失败；
+    // 复用则跳过 pack 直接解压本地包，流程成功。
+    await runRestartWorker({
+      ...process.env,
+      NIUBOT_HOME: home,
+      NIUBOT_BOT_NAME: "TestBot",
+      NIUBOT_SOURCE_DIR: source,
+      NIUBOT_RESTART_MODE: "npm-update",
+      NIUBOT_UPDATE_VERSION: "9.9.9",
+      NIUBOT_ENV: "production",
+      NIUBOT_AGENT_SESSION: undefined,
+    });
+
+    const running = await inspectRunningEngine(home);
+    expect(running?.identity.version).toBe("9.9.9");
+  }, 120_000);
 });
 
 function fakeEngineSource(

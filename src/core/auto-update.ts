@@ -161,7 +161,7 @@ export function cronSource(db: Database, query?: CronStateQuery): UpgradeSafenes
         }
       }
       if (job.runAt) {
-        const runAt = new Date(job.runAt.endsWith("Z") ? job.runAt : `${job.runAt}Z`);
+        const runAt = parseSqlUtc(job.runAt);
         if (runAt.getTime() > now && runAt.getTime() <= horizon.getTime()) return true;
       }
     }
@@ -191,7 +191,7 @@ export function loopSource(db: Database, query?: LoopStateQuery): UpgradeSafenes
     for (const job of list()) {
       if (job.status === "running" || job.status === "queued") return true;
       if (job.status === "active" && job.nextRunAt) {
-        const next = new Date(job.nextRunAt.endsWith("Z") ? job.nextRunAt : `${job.nextRunAt}Z`);
+        const next = parseSqlUtc(job.nextRunAt);
         if (next.getTime() > now && next.getTime() <= horizon.getTime()) return true;
       }
     }
@@ -205,6 +205,12 @@ export function loopSource(db: Database, query?: LoopStateQuery): UpgradeSafenes
 }
 
 // ─── 固定窗口 ─────────────────────────────────────────────────────
+
+/** 解析 SQLite UTC datetime（YYYY-MM-DD HH:MM:SS 或带 T）为 Date。 */
+function parseSqlUtc(value: string): Date {
+  return new Date(value.includes("T") ? value : `${value.replace(" ", "T")}Z`);
+}
+
 
 /** 本地时区小时是否在 [startHour, endHour) 窗口内（跨天支持）。 */
 export function isInUpgradeWindow(date: Date, config: AutoUpdateConfig): boolean {
@@ -221,6 +227,23 @@ export function isInUpgradeWindow(date: Date, config: AutoUpdateConfig): boolean
   }
   // 跨天（如 22:00 → 02:00）
   return hour >= windowStartHour || hour < windowEndHour;
+}
+
+/** 距窗口结束的分钟数（若当前在窗口外则返回 0）。 */
+export function minutesUntilUpgradeWindowEnd(date: Date, config: AutoUpdateConfig): number {
+  if (!isInUpgradeWindow(date, config)) return 0;
+  const { windowEndHour, timezone } = config;
+  const parts = new Intl.DateTimeFormat("en-US", {
+    hour: "numeric",
+    minute: "numeric",
+    hour12: false,
+    timeZone: timezone,
+  }).formatToParts(date);
+  const hour = Number(parts.find((p) => p.type === "hour")?.value ?? 0);
+  const minute = Number(parts.find((p) => p.type === "minute")?.value ?? 0);
+  let minutes = (windowEndHour - hour) * 60 - minute;
+  if (minutes < 0) minutes += 24 * 60; // 跨天窗口：已过午夜，补到次日结束
+  return minutes;
 }
 
 // ─── 升级锁（DB 持久化）───────────────────────────────────────────
@@ -257,15 +280,13 @@ export function readUpgradeLock(
   }
 }
 
-/** 写入升级锁（幂等：已有锁不覆盖，返回 false）。 */
+/** 写入升级锁（原子：已存在则返回 false，不覆盖）。 */
 export function acquireUpgradeLock(db: Database, version: string | null): boolean {
-  const existing = readUpgradeLock(db);
-  if (existing) return false;
-  db.prepare(
+  const result = db.prepare(
     `INSERT INTO settings (key, value) VALUES (?, ?)
-     ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+     ON CONFLICT(key) DO NOTHING`,
   ).run(UPGRADE_LOCK_KEY, JSON.stringify({ lockedAt: new Date().toISOString(), version }));
-  return true;
+  return result.changes === 1;
 }
 
 /** 解除升级锁。 */

@@ -5253,6 +5253,47 @@ describe("auto-upgrade", () => {
     notifyOnResult: true,
   };
 
+  test("auto-upgrade check loop triggers restart at night independently of notify window", async () => {
+    vi.useFakeTimers();
+    // 03:00 +08:00 凌晨窗口内；通知窗口（10:00-18:00）之外——验证独立循环能触发
+    vi.setSystemTime(new Date("2026-08-07T19:00:00Z"));
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-autoupdate-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const agent = new RecordingAgent();
+    const { im } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db,
+      im,
+      agent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      autoUpdateConfig,
+    );
+    (pipeline as any).runNpmCommand = async () => ({ stdout: "9.9.9\n", stderr: "" });
+    let restarted: string | undefined;
+    (pipeline as any).triggerRestart = (opts: { updateVersion?: string }) => { restarted = opts?.updateVersion; };
+
+    await pipeline.start();
+    // start() 里 scheduleAutoUpgradeCheck 会立即跑一次 runAutoUpgradeCheck（异步）
+    await vi.waitFor(() => expect(restarted).toBe("9.9.9"));
+    pipeline.stop();
+    vi.useRealTimers();
+  });
+
   test("triggers restart when in window and engine idle", async () => {
     vi.useFakeTimers();
     // 2026-08-08 03:00 +08:00 = 窗口内

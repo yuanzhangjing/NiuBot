@@ -41,7 +41,7 @@ import { isNewerPackageVersion, isPrereleaseOrUnrecognizedVersion } from "../ver
 import {
   acquireUpgradeLock, releaseUpgradeLock, readUpgradeLock,
   readAutoUpdateEnabled, writeAutoUpdateEnabled,
-  isSafeForUpgrade, isInUpgradeWindow,
+  isSafeForUpgrade, isInUpgradeWindow, minutesUntilUpgradeWindowEnd,
   mainRunSource, workerSource, goalSource, cronSource, loopSource,
   UPGRADE_WAIT_RUN_TIMEOUT_MS,
   type AutoUpdateConfig, type UpgradeSafenessSource,
@@ -196,6 +196,8 @@ const AGENT_RUN_HARD_TIMEOUT_MS = 7_200_000;  // 2 小时：主会话 run 硬超
 const INDEPENDENT_IDLE_KILL_MS = 3_600_000;    // 1 小时：独立 session 无活动自动 kill
 const INDEPENDENT_LONG_RUNNING_NOTIFY_MS = 3_600_000;  // 1 小时：独立 session 仍活跃时提醒
 const UPDATE_CHECK_HOUR = 10;                  // 本地时间 10:00 检查 npm latest
+/** 自动升级独立检查间隔（30 分钟）：窗口内周期性判定，不依赖白天通知窗口 */
+const AUTO_UPGRADE_CHECK_INTERVAL_MS = 30 * 60_000;
 const WORKER_DELIVERY_MARKER = "> ⚙️ 本回复基于 Worker 后台任务结果整理";
 const WORKER_DISPATCH_MARKER = "> ⚙️ 已交由 Worker 后台执行";
 const LOOP_TASK_PREVIEW_MAX_CHARS = 80;
@@ -450,6 +452,7 @@ export class Pipeline {
 
   /** 更新检查定时器 */
   private updateCheckTimer: ReturnType<typeof setTimeout> | null = null;
+  private autoUpgradeTimer: ReturnType<typeof setInterval> | null = null;
 
   /** 已发送 compact 通知的 session（避免重复通知） */
   private compactNotifiedSessions = new Set<string>();
@@ -637,6 +640,11 @@ export class Pipeline {
     } else {
       this.log.info("automatic update notifications disabled for bot");
     }
+    // 自动升级独立检查循环：每 30 分钟跑一次，不依赖 10:00 通知窗口
+    // （升级窗口是凌晨 02:00-05:00，必须独立调度才能触发）
+    if (this.isAutoUpdateEnabled()) {
+      this.scheduleAutoUpgradeCheck();
+    }
     this.runStartupPlatformProbes();
 
     this.log.info("pipeline started", {
@@ -700,6 +708,10 @@ export class Pipeline {
       clearTimeout(this.updateCheckTimer);
       this.updateCheckTimer = null;
     }
+    if (this.autoUpgradeTimer) {
+      clearInterval(this.autoUpgradeTimer);
+      this.autoUpgradeTimer = null;
+    }
     this.workerScheduler?.stop();
     this.queue.stop();
     this.log.info("pipeline stopped");
@@ -714,6 +726,10 @@ export class Pipeline {
     if (this.updateCheckTimer) {
       clearTimeout(this.updateCheckTimer);
       this.updateCheckTimer = null;
+    }
+    if (this.autoUpgradeTimer) {
+      clearInterval(this.autoUpgradeTimer);
+      this.autoUpgradeTimer = null;
     }
     for (const [chatId, session] of this.chatSessions) {
       try {
@@ -4273,6 +4289,50 @@ ${jobParts.join("\n\n")}
     }, this.getNextUpdateCheckDelayMs(new Date()));
   }
 
+  /** 自动升级独立检查循环：每 30 分钟跑一次窗口+空闲判定，不依赖白天通知窗口。 */
+  private scheduleAutoUpgradeCheck(): void {
+    if (this.autoUpgradeTimer) {
+      clearInterval(this.autoUpgradeTimer);
+    }
+    const runCheck = (): void => {
+      if (!this.isAutoUpdateEnabled()) return;
+      this.runAutoUpgradeCheck().catch((err) => {
+        this.log.warn("auto-upgrade check failed", { error: String(err) });
+      });
+    };
+    runCheck();
+    this.autoUpgradeTimer = setInterval(runCheck, AUTO_UPGRADE_CHECK_INTERVAL_MS);
+  }
+
+  /** 自动升级检查循环入口：先处理锁汇报（任何时候），再窗口内判定升级（避免无谓网络请求）。 */
+  private async runAutoUpgradeCheck(): Promise<void> {
+    if (isPrereleaseOrUnrecognizedVersion(this.version)) return;
+    const config = this.autoUpdateConfig;
+    if (!config || !this.isAutoUpdateEnabled()) return;
+
+    // 先查最新版本：用于锁汇报（升级成功后当前版本即 latest，靠锁识别自动完成并解锁）
+    let latest: string | null = null;
+    try {
+      latest = await this.fetchLatestVersion();
+    } catch (err) {
+      this.log.warn("auto-upgrade check: fetch failed", { error: String(err) });
+      return;
+    }
+    if (!latest) return;
+
+    // 汇报/解锁不受窗口限制（任何时候都要清锁残留）
+    await this.maybeReportUpgradeResult(latest);
+
+    if (latest === this.version) return;
+
+    // 升级判定：窗口外直接返回（网络请求已在上一步完成，这里只做本地判定）
+    const now = Date.now();
+    if (!isInUpgradeWindow(new Date(now), config)) return;
+    if (minutesUntilUpgradeWindowEnd(new Date(now), config) < config.marginMinutes) return;
+
+    await this.maybeRunAutoUpgrade(latest);
+  }
+
   private async checkForUpdatesAndNotifyAdmins(): Promise<void> {
     if (isPrereleaseOrUnrecognizedVersion(this.version)) {
       this.log.info("skipping update check for dev/prerelease version", { version: this.version });
@@ -4338,6 +4398,11 @@ ${jobParts.join("\n\n")}
       this.log.info("auto-upgrade skipped: outside window", { latest });
       return;
     }
+    // 窗口结束余量：升级耗时可能跨出窗口，临近结束不再启动
+    if (minutesUntilUpgradeWindowEnd(new Date(now), config) < config.marginMinutes) {
+      this.log.info("auto-upgrade skipped: too close to window end", { latest, marginMinutes: config.marginMinutes });
+      return;
+    }
     if (readUpgradeLock(this.db)) {
       this.log.info("auto-upgrade skipped: lock already held");
       return;
@@ -4350,9 +4415,23 @@ ${jobParts.join("\n\n")}
       return false;
     });
 
-    const windowMs = (config.windowEndHour - config.windowStartHour) * 60 * 60_000;
+    // 预下载可能耗时数分钟：重取当前时间，窗口/余量/空闲判定都用新时间
+    const afterDownload = Date.now();
+    if (!isInUpgradeWindow(new Date(afterDownload), config)) {
+      this.log.info("auto-upgrade skipped: window passed during predownload", { latest });
+      return;
+    }
+    if (minutesUntilUpgradeWindowEnd(new Date(afterDownload), config) < config.marginMinutes) {
+      this.log.info("auto-upgrade skipped: too close to window end after predownload", { latest });
+      return;
+    }
+
+    // cron/loop 未来触发检查窗口 = 本次升级窗口总时长（跨天窗口补 24h）
+    let windowHours = config.windowEndHour - config.windowStartHour;
+    if (windowHours <= 0) windowHours += 24;
+    const windowMs = windowHours * 60 * 60_000;
     const sources = this.buildSafenessSources();
-    const { safe, blockers } = isSafeForUpgrade(sources, now, windowMs);
+    const { safe, blockers } = isSafeForUpgrade(sources, afterDownload, windowMs);
     if (!safe) {
       this.log.info("auto-upgrade deferred: engine busy", { latest, blockers });
       return;

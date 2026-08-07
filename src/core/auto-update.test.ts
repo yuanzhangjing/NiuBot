@@ -11,6 +11,7 @@ import {
   isSafeForUpgrade,
   loopSource,
   mainRunSource,
+  minutesUntilUpgradeWindowEnd,
   readAutoUpdateEnabled,
   readUpgradeLock,
   releaseUpgradeLock,
@@ -85,6 +86,15 @@ describe("window check", () => {
     expect(isInUpgradeWindow(new Date("2026-08-08T01:00:00+08:00"), cross)).toBe(true);
     expect(isInUpgradeWindow(new Date("2026-08-08T12:00:00+08:00"), cross)).toBe(false);
   });
+
+  it("computes minutes until window end with margin semantics", () => {
+    expect(minutesUntilUpgradeWindowEnd(new Date("2026-08-08T03:30:00+08:00"), config)).toBe(90);
+    expect(minutesUntilUpgradeWindowEnd(new Date("2026-08-08T04:55:00+08:00"), config)).toBe(5);
+    expect(minutesUntilUpgradeWindowEnd(new Date("2026-08-08T10:00:00+08:00"), config)).toBe(0);
+    // 跨天窗口：23:00 在 22:00-02:00 内，距结束 02:00 = 3 小时 = 180 分钟
+    const cross: AutoUpdateConfig = { ...config, windowStartHour: 22, windowEndHour: 2 };
+    expect(minutesUntilUpgradeWindowEnd(new Date("2026-08-08T23:00:00+08:00"), cross)).toBe(180);
+  });
 });
 
 describe("cron source", () => {
@@ -136,30 +146,20 @@ describe("loop source", () => {
 });
 
 describe("upgrade lock", () => {
-  it("acquire, read, release roundtrip", () => {
-    const db = {} as never;
-    const storage = new Map<string, string>();
-    const fakeDb = {
-      prepare: (sql: string) => ({
-        get: () => {
-          const key = sql.includes("key = ?") ? "auto_update_lock" : undefined;
-          const v = key ? storage.get(key) : undefined;
-          return v ? { value: v } : undefined;
-        },
-        run: (...args: unknown[]) => {
-          storage.set(args[0] as string, args[1] as string);
-          return { changes: 1 };
-        },
-      }),
-    } as never;
+  it("acquire, read, release roundtrip in real DB", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-autoupdate-lock-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
 
-    expect(acquireUpgradeLock(fakeDb as never, "1.2.3")).toBe(true);
-    expect(acquireUpgradeLock(fakeDb as never, "1.2.4")).toBe(false);
-    const lock = readUpgradeLock(fakeDb as never);
+    expect(readUpgradeLock(db)).toBeNull();
+    expect(acquireUpgradeLock(db, "1.2.3")).toBe(true);
+    // 已存在：不覆盖，返回 false
+    expect(acquireUpgradeLock(db, "1.2.4")).toBe(false);
+    const lock = readUpgradeLock(db);
     expect(lock?.version).toBe("1.2.3");
-    releaseUpgradeLock(fakeDb as never);
-    expect(readUpgradeLock(fakeDb as never)).toBeNull();
-    void db;
+    releaseUpgradeLock(db);
+    expect(readUpgradeLock(db)).toBeNull();
+    db.close();
   });
 
   it("persists auto-update enabled toggle in real DB", () => {
