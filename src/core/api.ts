@@ -39,6 +39,12 @@ export interface ApiHandler {
   executeScheduleCommand?(chatId: string, command: ScheduleAgentCommand, token?: string): Promise<ScheduleAgentCommandResult>;
   /** 主 Agent Goal finish 操作；由 Pipeline 校验 Goal 令牌与活动回合。 */
   executeGoalFinishCommand?(chatId: string, command: GoalFinishCommand, token?: string): Promise<GoalCommandResult>;
+  /** 主 Agent Goal start 操作；由 Pipeline 校验活动回合。 */
+  executeGoalStartCommand?(chatId: string, objective: string, token?: string): Promise<GoalCommandResult>;
+  /** 主 Agent Goal progress 操作：中间轮静默记录进展。 */
+  executeGoalProgressCommand?(chatId: string, content: string, status?: string): Promise<GoalCommandResult>;
+  /** 重启唤醒：注入主会话任务（nbt restart --wake 完成后调用）。 */
+  executeWakeCommand?(chatId: string, prompt: string): Promise<GoalCommandResult>;
 }
 
 export class ApiServer {
@@ -184,12 +190,65 @@ export class ApiServer {
       }
       const chatId = data.chat_id;
       const command = data.command;
-      if (typeof chatId !== "string" || !command || typeof command !== "object" || typeof command.token !== "string") {
+      if (typeof chatId !== "string" || !command || typeof command !== "object" || typeof command.outcome !== "string") {
         res.writeHead(400);
         res.end(JSON.stringify({ error: "Missing chat_id or command" }));
         return;
       }
       const result = await this.handler.executeGoalFinishCommand(chatId, command as GoalFinishCommand, data.schedule_token);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(result));
+    } else if (url === "/goal/start" && req.method === "POST") {
+      if (!this.handler.executeGoalStartCommand) {
+        res.writeHead(503);
+        res.end(JSON.stringify({ error: "Goal start API unavailable" }));
+        return;
+      }
+      const chatId = data.chat_id;
+      const objective = data.objective;
+      if (typeof chatId !== "string" || typeof objective !== "string" || !objective.trim()) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: "Missing chat_id or objective" }));
+        return;
+      }
+      const result = await this.handler.executeGoalStartCommand(chatId, objective.trim(), data.schedule_token);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(result));
+    } else if (url === "/goal/progress" && req.method === "POST") {
+      if (!this.handler.executeGoalProgressCommand) {
+        res.writeHead(503);
+        res.end(JSON.stringify({ error: "Goal progress API unavailable" }));
+        return;
+      }
+      const chatId = data.chat_id;
+      const content = data.content;
+      const status = data.status;
+      if (typeof chatId !== "string" || typeof content !== "string" || !content.trim()) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: "Missing chat_id or content" }));
+        return;
+      }
+      const result = await this.handler.executeGoalProgressCommand(
+        chatId,
+        content.trim(),
+        typeof status === "string" ? status.trim() : undefined,
+      );
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(result));
+    } else if (url === "/wake" && req.method === "POST") {
+      if (!this.handler.executeWakeCommand) {
+        res.writeHead(503);
+        res.end(JSON.stringify({ error: "Wake API unavailable" }));
+        return;
+      }
+      const chatId = data.chat_id;
+      const prompt = data.prompt;
+      if (typeof chatId !== "string" || typeof prompt !== "string" || !prompt.trim()) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: "Missing chat_id or prompt" }));
+        return;
+      }
+      const result = await this.handler.executeWakeCommand(chatId, prompt.trim());
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(result));
     } else if (url === "/ping") {

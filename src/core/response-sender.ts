@@ -9,7 +9,7 @@ import { TimeoutError, withTimeout } from "./timeout.js";
 const log = createLogger("response-sender");
 
 export type SendResult =
-  | { ok: true; platformMsgId: string; method: "card" | "text" | "file" }
+  | { ok: true; platformMsgId: string; method: "card" | "text" | "file"; deliveredContent: string }
   | { ok: false; error: string; methodsTried: string[]; uncertain?: boolean };
 
 type ResponseSenderOptions = {
@@ -24,6 +24,8 @@ type SendFinalResponseOptions = {
   footer?: string;
   replyToMsgId?: string;
   signal?: AbortSignal;
+  /** 卡片发送失败后的文本降级内容（默认 = content）；可传函数按卡片失败原因动态构建（如「发送失败：<原因>」提示） */
+  textFallback?: string | ((error: unknown) => string);
 };
 
 export class ResponseSender {
@@ -99,6 +101,7 @@ export class ResponseSender {
       methodLabel: string,
       method: "card" | "text" | "file",
       send: () => Promise<string>,
+      deliveredContent: string,
     ): Promise<SendResult | undefined> => {
       methodsTried.push(methodLabel);
       log.info("send attempt", {
@@ -115,7 +118,7 @@ export class ResponseSender {
           chatId: options.chatId,
           platformMsgId,
         });
-        return { ok: true, platformMsgId, method };
+        return { ok: true, platformMsgId, method, deliveredContent };
       } catch (err) {
         lastError = err;
         uncertain = isUncertainDelivery(err);
@@ -136,32 +139,46 @@ export class ResponseSender {
       uncertain: true,
     });
 
+    // 文本降级内容在降级发生时解析（此时 lastError 为卡片失败原因，可动态构建提示）
+    const resolveFallbackText = (): string => typeof options.textFallback === "function"
+      ? options.textFallback(lastError)
+      : (options.textFallback ?? options.content);
+
     if (options.replyToMsgId) {
       const replyCard = await trySend("card:reply", "card", () =>
-        this.sendCard(options.chatId, options.header, options.content, options.footer, options.replyToMsgId, options.signal));
+        this.sendCard(options.chatId, options.header, options.content, options.footer, options.replyToMsgId, options.signal),
+        options.content);
       if (replyCard) return replyCard;
       if (uncertain) return uncertainResult();
     }
 
     const createCard = await trySend("card:create", "card", () =>
-      this.sendCard(options.chatId, options.header, options.content, options.footer, undefined, options.signal));
+      this.sendCard(options.chatId, options.header, options.content, options.footer, undefined, options.signal),
+      options.content);
     if (createCard) return createCard;
     if (uncertain) return uncertainResult();
 
     if (options.replyToMsgId) {
+      const fallbackText = resolveFallbackText();
       const replyText = await trySend("text:reply", "text", () =>
-        this.sendReply(options.chatId, options.content, options.replyToMsgId!, options.signal));
+        this.sendReply(options.chatId, fallbackText, options.replyToMsgId!, options.signal),
+        fallbackText);
       if (replyText) return replyText;
       if (uncertain) return uncertainResult();
     }
 
+    const fallbackText = resolveFallbackText();
     const createText = await trySend("text:create", "text", () =>
-      this.sendText(options.chatId, options.content, options.signal));
+      this.sendText(options.chatId, fallbackText, options.signal),
+      fallbackText);
     if (createText) return createText;
     if (uncertain) return uncertainResult();
 
+    const fileContent = options.footer ? `${options.content}\n\n---\n${options.footer}` : options.content;
     const createFile = await trySend("file:create", "file", () =>
-      this.sendResponseFile(options.chatId, options.content, options.footer, options.signal));
+      this.sendResponseFile(options.chatId, options.content, options.footer, options.signal),
+      // deliveredContent 只回写正文（不带 footer 拼装产物，避免污染历史/FTS）
+      options.content);
     if (createFile) return createFile;
     if (uncertain) return uncertainResult();
 

@@ -47,6 +47,8 @@ interface RestartContext {
   updateVersion?: string;
   notifyChatId?: string;
   legacyNotifyEndpoint?: string;
+  /** 重启完成后注入主会话的任务提示（nbt restart --wake 传入） */
+  wakePrompt?: string;
   logFile: string;
   debugLog: string;
   store: ReleaseStore;
@@ -88,6 +90,7 @@ export async function runRestartWorker(env: NodeJS.ProcessEnv = process.env): Pr
     updateVersion: env["NIUBOT_UPDATE_VERSION"],
     notifyChatId: env["NIUBOT_RESTART_NOTIFY_CHAT_ID"] || env["NIUBOT_CHAT_ID"],
     legacyNotifyEndpoint: env["NIUBOT_API_SOCKET"],
+    wakePrompt: env["NIUBOT_RESTART_WAKE_PROMPT"] || undefined,
     logFile: path.join(logDirectory, `niubot-${localDate()}.log`),
     debugLog: path.join(logDirectory, "restart-debug.log"),
     store: new ReleaseStore(botDirectory),
@@ -222,6 +225,7 @@ async function runProductionRestart(context: RestartContext): Promise<void> {
   }
   cleanupSnapshot(context, snapshot);
   await notify(context, "重启成功。");
+  await wakeMainSession(context);
 }
 
 async function switchToCandidate(
@@ -302,6 +306,7 @@ async function switchToCandidate(
   }
   cleanupSnapshot(context, snapshot);
   await notify(context, successMessage);
+  await wakeMainSession(context);
 }
 
 function launchRuntime(context: RestartContext, target: RuntimeTarget) {
@@ -575,26 +580,47 @@ async function checkRuntimeHealth(
   return results.every(Boolean);
 }
 
+/** 重启完成后唤醒主会话：注入任务消息触发 Agent 回合（nbt restart --wake；失败不阻断重启结果）。 */
+/** 向当前 Bot 的本地 API 发起请求（端点解析与 notify/wake 共用；失败由调用方记录）。 */
+async function postToBot(
+  context: RestartContext,
+  endpointPath: string,
+  body: Record<string, unknown>,
+): Promise<void> {
+  const config = loadConfig(path.join(context.niubotHome, "config.yaml"));
+  const bot = config.bots.find((candidate) => candidate.id === context.botName) ?? config.bots[0];
+  if (!bot) return;
+  // Old restart callers supplied the exact API socket but not a bot name.
+  // Prefer that address when present so multi-bot upgrades notify through
+  // the same Bot that accepted the command.
+  const endpoint = context.legacyNotifyEndpoint
+    ? endpointFromAddress(context.legacyNotifyEndpoint)
+    : resolveBotEndpoint(context.niubotHome, bot.id, { unixSocketDirectory: path.dirname(bot.dbPath) });
+  const response = await localApiRequest(endpoint, endpointPath, {
+    method: "POST",
+    body: { chat_id: context.notifyChatId, ...body },
+    timeoutMs: 3_000,
+  });
+  if (response.statusCode < 200 || response.statusCode >= 300) {
+    throw new Error(`local API returned ${response.statusCode}`);
+  }
+}
+
+async function wakeMainSession(context: RestartContext): Promise<void> {
+  const prompt = context.wakePrompt;
+  if (!prompt || !context.notifyChatId) return;
+  try {
+    await postToBot(context, "/wake", { prompt });
+    log(context, `main session wake queued: ${prompt.slice(0, 60)}`);
+  } catch (err) {
+    log(context, `wake failed: ${errorMessage(err)}`);
+  }
+}
+
 async function notify(context: RestartContext, text: string): Promise<void> {
   if (!context.notifyChatId) return;
   try {
-    const config = loadConfig(path.join(context.niubotHome, "config.yaml"));
-    const bot = config.bots.find((candidate) => candidate.id === context.botName) ?? config.bots[0];
-    if (!bot) return;
-    // Old restart callers supplied the exact API socket but not a bot name.
-    // Prefer that address when present so multi-bot upgrades notify through
-    // the same Bot that accepted the command.
-    const endpoint = context.legacyNotifyEndpoint
-      ? endpointFromAddress(context.legacyNotifyEndpoint)
-      : resolveBotEndpoint(context.niubotHome, bot.id, { unixSocketDirectory: path.dirname(bot.dbPath) });
-    const response = await localApiRequest(endpoint, "/send", {
-      method: "POST",
-      body: { chat_id: context.notifyChatId, text },
-      timeoutMs: 3_000,
-    });
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw new Error(`local notification API returned ${response.statusCode}`);
-    }
+    await postToBot(context, "/send", { text });
   } catch (err) {
     log(context, `notify failed: ${errorMessage(err)}`);
   }

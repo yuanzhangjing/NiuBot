@@ -23,5 +23,18 @@ describe("restart launcher", () => {
     expect(env["NIUBOT_UPDATE_VERSION"]).toBe("1.2.3");
     expect(env["NIUBOT_RESTART_ID"]).toBe("restart-a");
     expect(env["NIUBOT_RESTART_STARTED_AT"]).toBe("2026-07-30T00:00:00.000Z");
+    expect(env["NIUBOT_RESTART_WAKE_PROMPT"]).toBe("");
+  });
+
+  it("passes wake prompt to the restart worker", () => {
+    const env = buildRestartWorkerEnvironment({
+      niubotHome: "/tmp/home",
+      botName: "NiuBot",
+      runtimeRoot: "/tmp/runtime",
+      sourceDirectory: "/tmp/source",
+      notifyChatId: "chat-a",
+      wakePrompt: "重启完成，继续之前的工作",
+    });
+    expect(env["NIUBOT_RESTART_WAKE_PROMPT"]).toBe("重启完成，继续之前的工作");
   });
 });

@@ -99,7 +99,7 @@ describe("ResponseSender", () => {
       replyToMsgId: "msg-1",
     });
 
-    expect(result).toEqual({ ok: true, platformMsgId: "card-msg", method: "card" });
+    expect(result).toEqual({ ok: true, platformMsgId: "card-msg", method: "card", deliveredContent: "hello" });
     expect(calls).toEqual([
       { method: "card", chatId: "chat-1", content: "hello", replyToMsgId: "msg-1" },
     ]);
@@ -120,7 +120,7 @@ describe("ResponseSender", () => {
       content: "hello",
     });
 
-    expect(result).toEqual({ ok: true, platformMsgId: "text-msg", method: "text" });
+    expect(result).toEqual({ ok: true, platformMsgId: "text-msg", method: "text", deliveredContent: "hello" });
     expect(calls.map((call) => call.method)).toEqual(["card", "text"]);
   });
 
@@ -138,7 +138,7 @@ describe("ResponseSender", () => {
     });
 
     const output = logs.join("");
-    expect(result).toEqual({ ok: true, platformMsgId: "text-msg", method: "text" });
+    expect(result).toEqual({ ok: true, platformMsgId: "text-msg", method: "text", deliveredContent: "secret reply" });
     expect(output).toContain("[response-sender] send attempt method=card:create chatId=chat-1");
     expect(output).toContain("[response-sender] send failed method=card:create chatId=chat-1");
     expect(output).toContain("[response-sender] send succeeded method=text:create chatId=chat-1 platformMsgId=text-msg");
@@ -163,7 +163,7 @@ describe("ResponseSender", () => {
       replyToMsgId: "msg-1",
     });
 
-    expect(result).toEqual({ ok: true, platformMsgId: "created-card-msg", method: "card" });
+    expect(result).toEqual({ ok: true, platformMsgId: "created-card-msg", method: "card", deliveredContent: "hello" });
     expect(calls).toEqual([
       { method: "card", chatId: "chat-1", content: "hello", replyToMsgId: "msg-1" },
       { method: "card", chatId: "chat-1", content: "hello", replyToMsgId: undefined },
@@ -241,7 +241,8 @@ describe("ResponseSender", () => {
       footer: "footer",
     });
 
-    expect(result).toEqual({ ok: true, platformMsgId: "file-msg", method: "file" });
+    // deliveredContent 只回写正文（不带 footer 拼装产物，避免污染历史/FTS）
+    expect(result).toEqual({ ok: true, platformMsgId: "file-msg", method: "file", deliveredContent: "hello" });
     expect(calls.map((call) => call.method)).toEqual(["file"]);
     expect(filePathFromSend).toBeDefined();
     expect(existsSync(filePathFromSend!)).toBe(false);
@@ -267,7 +268,7 @@ describe("ResponseSender", () => {
       content: longText,
     });
 
-    expect(result).toEqual({ ok: true, platformMsgId: "adapter-file-msg", method: "text" });
+    expect(result).toEqual({ ok: true, platformMsgId: "adapter-file-msg", method: "text", deliveredContent: longText });
     expect(calls).toContainEqual({ method: "text", chatId: "chat-1", text: longText });
   });
 });

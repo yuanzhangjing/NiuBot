@@ -193,7 +193,7 @@ function parseScheduleMode(value: string | undefined): ScheduleMode {
   try {
     return normalizeScheduleMode(value?.toLowerCase());
   } catch {
-    fail("Error: --mode must be main (主会话) or isolated (独立会话)");
+    fail("Error: --mode must be current_session (当前对话) or new_session (新开会话)");
   }
 }
 
@@ -217,8 +217,8 @@ function printHelp(): void {
   console.log(`Manage Loop schedules.
 
 会话模式（决定上下文）：
-  --mode main       复用当前聊天主会话（旧名 loop）
-  --mode isolated   每次使用独立会话（旧名 cron）
+  --mode current_session   在当前对话上下文执行（延续当前话题；兼容名 main，旧名 loop）
+  --mode new_session       新开独立会话执行（独立提醒/定时任务；兼容名 isolated，旧名 cron）
 
 触发参数（四选一，两模式通用）：
   --every 5m    循环执行（isolated 模式转为表达式，最小 1 分钟）
@@ -233,12 +233,12 @@ function printHelp(): void {
   --description "..."  任务描述（isolated 模式用于独立会话）
 
 示例：
-  create --mode main --every 5m --prompt "..." [--times 4] [--until "18:00"]
-  create --mode main --cron "0 9 * * 1" --prompt "..." [--until "2026-09-01 09:00"]
-  create --mode main --at "2026-08-05 18:00" --prompt "..."
-  create --mode isolated --cron "0 9 * * *" --prompt "..." [--times 5] [--until "2026-08-10 18:00"]
-  create --mode isolated --after 30m --prompt "..."
-  list [--mode main|isolated]
+  create --mode current_session --every 5m --prompt "..." [--times 4] [--until "18:00"]
+  create --mode current_session --cron "0 9 * * 1" --prompt "..." [--until "2026-09-01 09:00"]
+  create --mode current_session --at "2026-08-05 18:00" --prompt "..."
+  create --mode new_session --cron "0 9 * * *" --prompt "..." [--times 5] [--until "2026-08-10 18:00"]
+  create --mode new_session --after 30m --prompt "..."
+  list [--mode current_session|new_session]
   cancel <loop:id|cron:id>
 
 时长使用 5m、2h、1d。Local calendar times use NIUBOT_TZ (${TZ}).`);

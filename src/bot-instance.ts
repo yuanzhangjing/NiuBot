@@ -164,6 +164,9 @@ export async function createBotInstance(
     executeWorkerCommand: (chatId, command, token) => pipeline.executeWorkerAgentCommand({ chatId, command, scheduleToken: token }),
     executeScheduleCommand: (chatId, command, token) => pipeline.executeScheduleAgentCommand(chatId, command, token),
     executeGoalFinishCommand: (chatId, command, token) => pipeline.executeGoalFinishCommand(chatId, command, token),
+    executeGoalStartCommand: (chatId, objective, token) => pipeline.executeGoalStartCommand(chatId, objective, token),
+    executeGoalProgressCommand: (chatId, content, status) => pipeline.executeGoalProgressCommand(chatId, content, status),
+    executeWakeCommand: (chatId, prompt) => pipeline.executeWakeCommand(chatId, prompt),
     resolveChatPlatformId: (input: string) => {
       // Try as internal ID (c1, c2)
       const lower = input.toLowerCase();

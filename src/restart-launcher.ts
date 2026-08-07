@@ -13,6 +13,8 @@ export interface RestartWorkerLaunchOptions {
   updateVersion?: string;
   restartId?: string;
   restartStartedAt?: string;
+  /** 重启完成后注入主会话的任务提示（nbt restart --wake）；不设置则只发通知不唤醒 */
+  wakePrompt?: string;
 }
 
 export interface RestartWorkerLaunch {
@@ -35,6 +37,7 @@ export function buildRestartWorkerEnvironment(
     NIUBOT_RESTART_NOTIFY_CHAT_ID: options.notifyChatId ?? "",
     NIUBOT_RESTART_ID: options.restartId ?? "",
     NIUBOT_RESTART_STARTED_AT: options.restartStartedAt ?? "",
+    NIUBOT_RESTART_WAKE_PROMPT: options.wakePrompt ?? "",
   };
   delete env["NIUBOT_AGENT_SESSION"];
   if (options.updateVersion) {

@@ -100,6 +100,11 @@ export class ChatManager {
     return pending;
   }
 
+  /** 队列是否已停止（关闭期间不再接受新任务）。 */
+  isStopped(): boolean {
+    return this.queue.isStopped();
+  }
+
   /** 入队一个 Session 续接 Loop；任务内容由 Pipeline 处理时从 DB 读取。 */
   enqueueLoop(chatId: string, loopJobId: number): boolean {
     if (this.queue.isStopped()) {

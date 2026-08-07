@@ -226,18 +226,37 @@ async function handleRestart(args: string[]): Promise<void> {
     console.log(`Restart the NiuBot Engine through the safe restart pipeline.
 Notification is sent back to the current chat automatically.
 
-Usage: nbt restart [--update <version>]`);
+Usage: nbt restart [--update <version>] [--wake [<提示>]]
+  --wake：重启完成后向主会话注入任务（触发 Agent 在原上下文干活，自动激活）；
+          不带提示时默认「重启完成，请简要汇报状态并继续之前的工作」；
+          不传 --wake 则只发通知，不唤醒。`);
     return;
   }
   if (!NIUBOT_HOME) {
     console.error("Error: NIUBOT_HOME is not set.");
     process.exit(1);
   }
-  if (args[0] === "--update" && !args[1]) {
+  // --update 与 --wake 均为位置无关（indexOf 解析，顺序任意）
+  const updateIndex = args.indexOf("--update");
+  const updateValue = updateIndex >= 0 ? args[updateIndex + 1] : undefined;
+  if (updateIndex >= 0 && (!updateValue || updateValue.startsWith("--"))) {
     console.error("Error: --update 需要版本号（如 nbt restart --update 1.2.3）");
     process.exit(1);
   }
-  const updateVersion = args[0] === "--update" ? args[1] : undefined;
+  const updateVersion = updateIndex >= 0 ? updateValue : undefined;
+  // --wake [<提示>]：重启后唤醒主会话；提示可选，取到下一个 -- 参数为止
+  let wakePrompt: string | undefined;
+  const wakeIndex = args.indexOf("--wake");
+  if (wakeIndex >= 0) {
+    const wakeArgs: string[] = [];
+    for (const arg of args.slice(wakeIndex + 1)) {
+      if (arg.startsWith("--")) break;
+      wakeArgs.push(arg);
+    }
+    wakePrompt = wakeArgs.length > 0
+      ? wakeArgs.join(" ")
+      : "重启完成，请简要汇报状态并继续之前的工作";
+  }
   const runtimeRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   // sourceDirectory 与 restart-compat 一致：env 显式指定优先，否则回退 runtimeRoot。
   // 源码开发版路径由 worker 内部 resolveRestartSourceDirectory 从 config.yaml 解析。
@@ -252,6 +271,7 @@ Usage: nbt restart [--update <version>]`);
       runtimeMode: process.env["NIUBOT_RUNTIME_MODE"] ?? "",
       notifyChatId: CHAT_ID,
       updateVersion,
+      wakePrompt,
     });
     console.log(`重启已启动（worker PID ${worker.pid}）`);
     console.log(`通知将发送到当前会话；日志：${worker.logFile}`);

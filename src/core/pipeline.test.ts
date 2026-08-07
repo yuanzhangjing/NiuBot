@@ -257,6 +257,7 @@ function createImStubWithSendFailures(options: {
   const sentTexts: string[] = [];
   const sentReplies: Array<{ chatId: string; text: string; replyToMsgId: string }> = [];
   const sentCards: Array<{ header: string; content: string; footer?: string }> = [];
+  const sentFiles: Array<{ chatId: string; filePath: string }> = [];
   let sendTextCalls = 0;
   let sendReplyCalls = 0;
 
@@ -288,7 +289,10 @@ function createImStubWithSendFailures(options: {
     async editMessage() {},
     async addReaction() {},
     async removeReaction() {},
-    async sendFile() { return "pmid"; },
+    async sendFile(chatId, filePath) {
+      sentFiles.push({ chatId, filePath });
+      return "pmid";
+    },
     async getBotOpenId() { return "bot-open-id"; },
     async getBotName() { return "NiuBot"; },
     async getChatName() { return "Admin"; },
@@ -296,7 +300,7 @@ function createImStubWithSendFailures(options: {
     async getAppCreatorId() { return undefined; },
   };
 
-  return { im, sentTexts, sentReplies, sentCards };
+  return { im, sentTexts, sentReplies, sentCards, sentFiles };
 }
 
 class DeferredAgent extends RecordingAgent {
@@ -537,7 +541,7 @@ describe("Pipeline Loop integration", () => {
     expect(agent.sendMessageCalls[1]).toContain("continue in whichever main conversation is current");
   });
 
-  test("/loop and /cron natural language pass through to the model (schedule instructions are skill-based now)", async () => {
+  test("/loop and /cron natural language are translated to task + nbt schedule suggestion", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-natural-schedule-test-"));
     tempDirs.push(dir);
     const db = initDatabase(path.join(dir, "niubot.db"));
@@ -553,16 +557,19 @@ describe("Pipeline Loop integration", () => {
       platformMsgId: "natural-loop",
     }));
     await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(1));
-    // 调度说明已 skill 化（skills/nbt-tools），不再强制注入，/loop 消息原样交给模型
-    expect(agent.sendMessageCalls[0]).not.toContain("mode=main");
-    expect(agent.sendMessageCalls[0]).toContain("/loop 每5分钟帮我检查部署状态，持续2小时");
+    // /loop 创建由引擎翻译为任务原文 + nbt 建议（mode 由引擎语义给出，命令格式不暴露给模型）
+    expect(agent.sendMessageCalls[0]).not.toContain("/loop");
+    expect(agent.sendMessageCalls[0]).toContain("每5分钟帮我检查部署状态，持续2小时");
+    expect(agent.sendMessageCalls[0]).toContain("nbt schedule create");
 
     (pipeline as any).handleMessage(createMessage({
       contentText: "/cron 每天上午9点提醒我提交日报",
       platformMsgId: "natural-cron",
     }));
     await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(2));
-    expect(agent.sendMessageCalls[1]).toContain("/cron 每天上午9点提醒我提交日报");
+    expect(agent.sendMessageCalls[1]).not.toContain("/cron");
+    expect(agent.sendMessageCalls[1]).toContain("每天上午9点提醒我提交日报");
+    expect(agent.sendMessageCalls[1]).toContain("nbt schedule create");
 
     (pipeline as any).handleMessage(createMessage({
       contentText: "每天上午9点提醒我提交日报",
@@ -2025,21 +2032,25 @@ describe("Pipeline runtime", () => {
     expect(sentCards).toEqual([]);
   });
 
-  test("does not store an assistant message when Cron card delivery fails", async () => {
+  test("does not store an assistant message when Cron final delivery fails", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-cron-delivery-test-"));
     tempDirs.push(dir);
     const db = initDatabase(path.join(dir, "niubot.db"));
     db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u2', 'admin', 'feishu', 'user-open-id')").run();
     db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c1', 'p2p', 'feishu', 'chat-open-id')").run();
     const im = createImStub();
+    // 降级链全失败（卡片 → 文本 → 文件）才视为交付失败
     im.sendCard = async () => { throw new Error("platform unavailable"); };
+    im.sendText = async () => { throw new Error("text unavailable"); };
+    im.sendReply = async () => { throw new Error("text unavailable"); };
+    im.sendFile = async () => { throw new Error("file unavailable"); };
     const pipeline = new Pipeline(
       db, im, new ReplyAgent("should not become history"), createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex",
     );
     await pipeline.start();
 
     await expect(pipeline.processCronJob("c1", "u2", "internal prompt", "delivery test"))
-      .rejects.toThrow("platform unavailable");
+      .rejects.toThrow("final response delivery failed");
     expect(db.prepare("SELECT COUNT(*) AS count FROM messages WHERE role = 'assistant'").get()).toEqual({ count: 0 });
     expect(db.prepare("SELECT role, content_type FROM messages").all()).toEqual([
       { role: "user", content_type: "internal_prompt" },
@@ -4548,7 +4559,7 @@ describe("Pipeline runtime", () => {
     expect(ftsRow).toBeTruthy();
   });
 
-  test("degrades platform send errors when raw platform error cannot be delivered", async () => {
+  test("falls back to a temporary file when card and text both fail", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
@@ -4563,7 +4574,7 @@ describe("Pipeline runtime", () => {
       },
     };
     const rawTextErr = new Error("raw platform error blocked");
-    const { im, sentReplies, sentTexts } = createImStubWithSendFailures({
+    const { im, sentReplies, sentTexts, sentFiles } = createImStubWithSendFailures({
       cardError: platformErr,
       rawTextError: rawTextErr,
     });
@@ -4587,12 +4598,10 @@ describe("Pipeline runtime", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     await new Promise((resolve) => setTimeout(resolve, 0));
 
+    // 卡片与文本降级均失败 → 统一降级链兜底到文件交付
     expect(sentTexts).toHaveLength(0);
-    expect(sentReplies).toContainEqual({
-      chatId: "chat-open-id",
-      text: "上一条回复未送达：平台发送失败（code: 230028）。",
-      replyToMsgId: "m1",
-    });
+    expect(sentReplies).toHaveLength(0);
+    expect(sentFiles).toHaveLength(1);
     const row = db.prepare(`
       SELECT content_text, platform_msg_id
       FROM messages
@@ -4600,17 +4609,7 @@ describe("Pipeline runtime", () => {
       ORDER BY id DESC
       LIMIT 1
     `).get() as { content_text: string; platform_msg_id: string | null };
-    expect(row).toEqual({
-      content_text: "上一条回复未送达：平台发送失败（code: 230028）。",
-      platform_msg_id: "pmid",
-    });
-    const ftsRow = db.prepare(`
-      SELECT rowid
-      FROM messages_fts
-      WHERE messages_fts MATCH ?
-      LIMIT 1
-    `).get("230028") as { rowid: number } | undefined;
-    expect(ftsRow).toBeTruthy();
+    expect(row.platform_msg_id).toBe("pmid");
   });
 
   test("handles Loop/Cron management commands locally while creation stays on the model route", async () => {
@@ -4873,61 +4872,60 @@ describe("Pipeline Goal mode", () => {
     return { db, agent, pipeline, sentCards, sentTexts };
   }
 
-  test("/goal 创建并进入同一 Run 多轮循环，finish 后发送最终正文", async () => {
+  test("nbt goal start 创建并进入同一 Run 多轮循环，finish 后发送最终正文", async () => {
     const { agent, pipeline, sentTexts, sentCards } = createGoalPipeline();
     await pipeline.start();
 
+    // 回合 1：普通用户消息 → Agent 回合内调 nbt goal start（模拟工具调用）
     (pipeline as any).handleMessage(createMessage({
-      contentText: "/goal 测试目标",
+      contentText: "hello",
       platformMsgId: "goal-msg-1",
     }));
-    // 等第一轮 sendMessage（goal_start 触发）
     await vi.waitFor(() => expect(agent.sendMessageCalls.length).toBeGreaterThanOrEqual(1));
-    expect(agent.sendMessageCalls[0]).toContain("【当前 Goal】测试目标");
-    expect(agent.sendMessageCalls[0]).toContain("【本轮令牌】");
+    await (pipeline as any).executeGoalStartCommand("c1", "测试目标");
 
-    // 第一轮结束（未 finish）→ 继续下一轮
+    // 回合 1 结束 → process 检测 startRunId → runGoalLoop 接管（当前回合计入第 1 轮）
     agent.resolveNext();
     await vi.waitFor(() => expect(agent.sendMessageCalls.length).toBeGreaterThanOrEqual(2));
     expect(agent.sendMessageCalls[1]).toContain("【当前 Goal】测试目标");
+    // 无令牌机制：prompt 中无令牌内容，Agent 零感知
+    expect(agent.sendMessageCalls[1]).not.toContain("令牌");
 
-    // 模拟 Agent 调用 nbt goal finish：拿本轮令牌，通过 pipeline 直接提交
-    const tokenMatch = agent.sendMessageCalls[1].match(/【本轮令牌】(.+)/);
-    expect(tokenMatch).toBeTruthy();
-    const token = tokenMatch![1]!.trim();
+    // 回合 2 内模拟 Agent 调 nbt goal finish：请求自动携带 chatId，引擎校验活动 Goal 即可
     await (pipeline as any).executeGoalFinishCommand("c1", {
-      token,
       outcome: "achieved",
       conclusion: "目标已达成",
     });
 
-    // 本轮返回后 Goal 结算并发送最终正文（卡片）
+    // 回合 2 结束 → Goal 结算并发送最终正文（卡片）
     agent.resolveNext();
     await vi.waitFor(() => expect(sentCards.length).toBeGreaterThanOrEqual(1));
-    // 只有最终一轮发送（卡片）；内部轮次不发送。
-    // sentTexts 仅含 /goal 创建时的确认文本（「🎯 Goal 已开始」），不是最终正文。
-    expect(sentTexts.length).toBe(1);
-    expect(sentTexts[0]).toContain("Goal 已开始");
+    // 只有最终一轮发送（卡片）；中间轮次不发送正文
+    expect(sentTexts).toHaveLength(0);
     expect(sentCards.length).toBe(1);
     // 卡片带 Goal 汇总：结局 + 轮次 + 目标引用
     expect(sentCards[0]?.header).toMatch(/🎯 Goal/);
     expect(sentCards[0]?.header).toContain("2 轮");
     expect(sentCards[0]?.content).toContain("> 目标：测试目标");
+    // 卡片带 footer（session 短 ID + session 累计轮次；goal 自身轮次在 header）
+    expect(sentCards[0]?.footer).toMatch(/#\d\b/);
     // Goal 结束收尾（清理状态在 runGoalLoop 末尾异步完成）
     await vi.waitFor(() => expect((pipeline as any).activeGoals.has("c1")).toBe(false));
-    expect((pipeline as any).goalTokens.has("c1")).toBe(false);
   });
 
   test("/goal 无参查询当前 Goal", async () => {
     const { agent, pipeline, sentTexts } = createGoalPipeline();
     await pipeline.start();
 
+    // 通过 Agent 回合内 start 创建 Goal（创建已统一走 nbt goal start）
     (pipeline as any).handleMessage(createMessage({
-      contentText: "/goal 查询测试",
+      contentText: "hello",
       platformMsgId: "goal-msg-2",
     }));
     await vi.waitFor(() => expect(agent.sendMessageCalls.length).toBeGreaterThanOrEqual(1));
+    await (pipeline as any).executeGoalStartCommand("c1", "查询测试目标");
 
+    // /goal 无参：内置命令本地查询
     (pipeline as any).handleMessage(createMessage({
       contentText: "/goal",
       platformMsgId: "goal-msg-3",
@@ -4938,22 +4936,128 @@ describe("Pipeline Goal mode", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
 
-  test("finish 令牌错误被拒绝", async () => {
-    const { agent, pipeline, sentTexts } = createGoalPipeline();
+  test("finish 无活动 Goal 被拒绝", async () => {
+    const { pipeline } = createGoalPipeline();
+    await pipeline.start();
+
+    await expect((pipeline as any).executeGoalFinishCommand("c1", {
+      outcome: "achieved",
+    })).rejects.toThrow("当前没有进行中的 Goal");
+  });
+
+  test("/goal 带参翻译转发（任务原文 + nbt goal start 建议），不直接创建 Goal", async () => {
+    const { agent, pipeline } = createGoalPipeline();
     await pipeline.start();
 
     (pipeline as any).handleMessage(createMessage({
-      contentText: "/goal 令牌测试",
-      platformMsgId: "goal-msg-4",
+      contentText: "/goal 检查 git 状态",
+      platformMsgId: "goal-msg-t1",
     }));
     await vi.waitFor(() => expect(agent.sendMessageCalls.length).toBeGreaterThanOrEqual(1));
+    // 转发内容 = 任务原文 + nbt 命令建议；用户命令格式不暴露给 Agent
+    expect(agent.sendMessageCalls[0]).toContain("检查 git 状态");
+    expect(agent.sendMessageCalls[0]).toContain("nbt goal start");
+    expect(agent.sendMessageCalls[0]).not.toContain("/goal");
+    // 未直接创建 Goal（创建由 Agent 回合内 start 完成）
+    expect((pipeline as any).activeGoals.has("c1")).toBe(false);
 
-    await expect((pipeline as any).executeGoalFinishCommand("c1", {
-      token: "wrong-token",
+    agent.resolveNext();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
+  test("/loop 带参翻译转发（nbt schedule create 建议）", async () => {
+    const { agent, pipeline } = createGoalPipeline();
+    await pipeline.start();
+
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "/loop 每 10 分钟检查部署",
+      platformMsgId: "goal-msg-t2",
+    }));
+    await vi.waitFor(() => expect(agent.sendMessageCalls.length).toBeGreaterThanOrEqual(1));
+    expect(agent.sendMessageCalls[0]).toContain("每 10 分钟检查部署");
+    expect(agent.sendMessageCalls[0]).toContain("nbt schedule create");
+    expect(agent.sendMessageCalls[0]).not.toContain("/loop");
+
+    agent.resolveNext();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
+  test("nbt goal progress 记录步骤与全局状态，注入汇总防遗忘（卡片不带轨迹）", async () => {
+    const { agent, pipeline, sentCards } = createGoalPipeline();
+    await pipeline.start();
+
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "hello",
+      platformMsgId: "progress-msg-1",
+    }));
+    await vi.waitFor(() => expect(agent.sendMessageCalls.length).toBeGreaterThanOrEqual(1));
+    await (pipeline as any).executeGoalStartCommand("c1", "测试目标");
+    await (pipeline as any).executeGoalProgressCommand("c1", "第一步完成", "第 1/2 步完成，剩余：第二步");
+
+    // 回合 1 结束 → 接管 → 回合 2 注入带【进展汇总】（状态 + 步骤）
+    agent.resolveNext();
+    await vi.waitFor(() => expect(agent.sendMessageCalls.length).toBeGreaterThanOrEqual(2));
+    expect(agent.sendMessageCalls[1]).toContain("【进展汇总】");
+    expect(agent.sendMessageCalls[1]).toContain("状态：第 1/2 步完成，剩余：第二步");
+    expect(agent.sendMessageCalls[1]).toContain("步骤：第一步完成");
+
+    await (pipeline as any).executeGoalFinishCommand("c1", {
       outcome: "achieved",
-    })).rejects.toThrow(/令牌/);
-    expect((pipeline as any).activeGoals.has("c1")).toBe(true);
+      conclusion: "目标已达成",
+    });
+    agent.resolveNext();
+    await vi.waitFor(() => expect(sentCards.length).toBeGreaterThanOrEqual(1));
+    // 结算卡片不带进展轨迹块（直接看结论）
+    expect(sentCards[0]?.content).not.toContain("📊 进展轨迹");
+    await vi.waitFor(() => expect((pipeline as any).activeGoals.has("c1")).toBe(false));
+  });
 
+  test("/worker 带任务参数翻译转发（派工引导），管理子命令仍本地", async () => {
+    const { agent, pipeline, sentTexts } = createGoalPipeline();
+    await pipeline.start();
+
+    // 管理子命令本地处理（不转发给 Agent；测试桩无 Worker 配置，回复「未启用」提示）
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "/worker on",
+      platformMsgId: "worker-msg-0",
+    }));
+    await vi.waitFor(() => expect(sentTexts.some((t) => t.includes("Worker"))).toBe(true));
+    expect(agent.sendMessageCalls).toHaveLength(0);
+
+    // 任务参数 → 翻译转发
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "/worker 分析 niubot 仓库代码结构",
+      platformMsgId: "worker-msg-1",
+    }));
+    await vi.waitFor(() => expect(agent.sendMessageCalls.length).toBeGreaterThanOrEqual(1));
+    expect(agent.sendMessageCalls[0]).toContain("分析 niubot 仓库代码结构");
+    expect(agent.sendMessageCalls[0]).toContain("nbt worker work create");
+    expect(agent.sendMessageCalls[0]).toContain("nbt worker job create");
+    expect(agent.sendMessageCalls[0]).not.toContain("/worker 分析 niubot 仓库代码结构");
+
+    agent.resolveNext();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
+  test("restart wake 注入主会话回合（原上下文干活，不写用户消息）", async () => {
+    const { agent, pipeline } = createGoalPipeline();
+    await pipeline.start();
+
+    // 先有一个普通回合建立主会话
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "hello",
+      platformMsgId: "wake-msg-1",
+    }));
+    await vi.waitFor(() => expect(agent.sendMessageCalls.length).toBeGreaterThanOrEqual(1));
+    agent.resolveNext();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // 重启唤醒：注入主会话任务（模拟 nbt restart --wake）
+    await (pipeline as any).executeWakeCommand("c1", "继续之前的工作");
+    await vi.waitFor(() => expect(agent.sendMessageCalls.length).toBeGreaterThanOrEqual(2));
+    expect(agent.sendMessageCalls[1]).toContain("【重启完成】");
+    expect(agent.sendMessageCalls[1]).toContain("继续之前的工作");
     agent.resolveNext();
     await new Promise((resolve) => setTimeout(resolve, 0));
   });

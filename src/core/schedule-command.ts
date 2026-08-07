@@ -99,11 +99,11 @@ export function parseScheduleAgentCommand(value: unknown): ScheduleAgentCommand 
   }
 }
 
-/** 归一化会话模式：新名 main/isolated，旧名 loop/cron 兼容。 */
+/** 归一化会话模式：新名 current_session/new_session（直白），兼容名 main/isolated、旧名 loop/cron。 */
 export function normalizeScheduleMode(value: unknown): ScheduleMode {
-  if (value === "main" || value === "loop") return "main";
-  if (value === "isolated" || value === "cron") return "isolated";
-  throw new Error("mode 必须是 main（主会话）或 isolated（独立会话）");
+  if (value === "main" || value === "loop" || value === "current_session") return "main";
+  if (value === "isolated" || value === "cron" || value === "new_session") return "isolated";
+  throw new Error("mode 必须是 current_session（当前对话）或 new_session（新开会话）");
 }
 
 function parseCreateSchedule(command: Record<string, unknown>): CreateScheduleCommand {

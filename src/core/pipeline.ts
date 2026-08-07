@@ -8,10 +8,9 @@ import { fileURLToPath } from "node:url";
 import type Database from "better-sqlite3";
 import { escapeYamlContent, renderMessageNodes } from "../im/render.js";
 import { findLatestUserPlatformMsgId } from "../messages/store.js";
-import { isDeliveryUncertainError } from "../transport/errors.js";
 import type { InboundDelivery, NormalizedMessage, TransportClient } from "../transport/types.js";
 import { ERROR_DISPLAY_MAX_LEN } from "../agent/types.js";
-import { AgentSessionNotStartedError, type AgentBackend, type AgentSession, type AgentSessionActivity, type SessionConfig } from "../agent/types.js";
+import { AgentSessionNotStartedError, type AgentBackend, type AgentResponse, type AgentSession, type AgentSessionActivity, type SessionConfig } from "../agent/types.js";
 import { CliAgentBackend, buildNiubotEnv } from "../agent/cli-base.js";
 import { BUILTIN_BACKEND_LIST, NIUBOT_HOME, normalizeBackend, type AgentBackendType, type RestartConfig } from "../config.js";
 import { ChatManager } from "./chat-manager.js";
@@ -104,9 +103,9 @@ import { runCommand } from "../platform/command.js";
 import type { BackendCapability } from "../agent/backend-capability.js";
 import { buildResponseFooter } from "./footer.js";
 import { ResponseSender } from "./response-sender.js";
-import { TimeoutError, withTimeout } from "./timeout.js";
+import { withTimeout } from "./timeout.js";
 import { RuntimeStateStore, type RunStage, type RuntimeStateEvent } from "./runtime-state.js";
-import { RunManager } from "./run-manager.js";
+import { RunManager, type RunAgentResult } from "./run-manager.js";
 import { archiveAgentSession, getSessionArchiveDirectory } from "../session-archive/archive.js";
 import { wrapInjectedUserMessage } from "../session-archive/native-transcript.js";
 
@@ -143,12 +142,38 @@ const INTERRUPT_WORDS = new Set([
 const BUILTIN_COMMANDS = new Set([
   "/restart", "/update", "/service", "/new", "/agent", "/model",
   "/admin", "/help", "/stop", "/clear", "/flush", "/task", "/status", "/history",
-  "/worker", "/goal",
+  "/worker",
 ]);
 const HYBRID_SCHEDULE_COMMANDS = new Set(["/loop", "/cron"]);
 const SCHEDULE_BUILTIN_SUBCOMMANDS = new Set([
   "list", "ls", "help", "--help", "cancel", "stop", "del", "delete", "rm",
 ]);
+/** /worker 本地管理子命令；其余参数视为派发任务（翻译转发给 Agent） */
+const WORKER_BUILTIN_SUBCOMMANDS = new Set(["on", "off", "config"]);
+
+/**
+ * hybrid 创建命令翻译：用户命令 → 「任务原文 + nbt 命令建议」。
+ * 返回 null 表示非创建命令（无需改写）。Agent 收到后自主决定执行或澄清（用户可能发错）。
+ */
+function rewriteHybridCreationCommand(text: string): string | null {
+  const parts = text.trim().split(/\s+/);
+  const cmd = parts[0]!.toLowerCase();
+  const rest = parts.slice(1).join(" ").trim();
+  if (!rest) return null;
+  switch (cmd) {
+    case "/goal":
+      return `${rest}（用户要求进入 Goal 模式，请使用 nbt goal start）`;
+    case "/worker":
+      // 派发引导：Work + Job 两步由 Agent 回合内完成；任务与派工不匹配时以 Agent 判断为准
+      return `${rest}（用户要求派发 Worker 任务。请按需拆分并派工：先 nbt worker work create 建需求，再用 nbt worker job create 派工；简单任务可直接自己做，不必强派 Worker）`;
+    case "/loop":
+      return `${rest}（用户要求创建循环任务，请使用 nbt schedule create --mode current_session）`;
+    case "/cron":
+      return `${rest}（用户要求创建定时任务，请使用 nbt schedule create --mode new_session）`;
+    default:
+      return null;
+  }
+}
 // ── Watchdog 常量 ──
 const AGENT_WATCHDOG_INTERVAL_MS = 15_000;     // 15 秒检测间隔
 const AGENT_IDLE_THRESHOLD_MS = 600_000;       // 10 分钟：第一次 idle 通知
@@ -434,9 +459,6 @@ export class Pipeline {
 
   /** chatId → 未结束的 Goal（纯内存；重启即断）。 */
   private activeGoals = new Map<string, ActiveGoal>();
-
-  /** Goal 回合期间可用的 finish 令牌（随每轮注入，防跨会话借用）。 */
-  private goalTokens = new Map<string, string>();
 
   constructor(
     db: Database.Database,
@@ -1358,8 +1380,9 @@ export class Pipeline {
       const escaped = escapeYamlContent(msg.contentText);
       agentText = `- msg: "${escapeYamlContent(label)}: ${escaped}"\n${replyQuoted}`;
     } else {
-      // 独立消息：纯文本
-      agentText = this.normalizeUserTextForAgent(msg.contentText);
+      // 独立消息：纯文本（hybrid 创建命令在此翻译为「任务原文 + nbt 建议」；reply/forward 保持原样）
+      const text = this.normalizeUserTextForAgent(msg.contentText);
+      agentText = rewriteHybridCreationCommand(text) ?? text;
     }
 
     // Save trigger msg ID for reply-to-message（process() 会快照并清除）
@@ -1637,7 +1660,7 @@ export class Pipeline {
         return true;
       }
       case "/goal": {
-        this.handleGoalCommand(parts.slice(1), userId, chatId, platformChatId, chatType, msgId);
+        this.handleGoalCommand(parts.slice(1), userId, chatId, platformChatId, msgId);
         return true;
       }
       case "/loop":
@@ -1814,6 +1837,15 @@ export class Pipeline {
       const parts = text.trim().split(/\s+/);
       const subcommand = parts[1]?.toLowerCase();
       return subcommand === undefined || SCHEDULE_BUILTIN_SUBCOMMANDS.has(subcommand);
+    }
+    // /goal：无参 = 查询（本地）；带参 = 创建（放行，由 hybrid 翻译层转发给 Agent）
+    if (firstToken === "/goal") {
+      return text.trim().split(/\s+/).length <= 1;
+    }
+    // /worker：on/off/config/无参 = 本地管理；其余参数 = 派发任务（放行，翻译转发）
+    if (firstToken === "/worker") {
+      const subcommand = text.trim().split(/\s+/)[1]?.toLowerCase();
+      return subcommand === undefined || WORKER_BUILTIN_SUBCOMMANDS.has(subcommand);
     }
     if (firstToken && BUILTIN_COMMANDS.has(firstToken)) return true;
     if (!this.adminRoles.has(userId)) return false;
@@ -2297,60 +2329,22 @@ export class Pipeline {
   }
 
   /** /goal：创建或查询 Goal（纯内存，重启即断）。 */
+  /** /goal 内置命令：只处理查询（无参）。带参创建由 hybrid 翻译层转发给 Agent（nbt goal start）。 */
   private handleGoalCommand(
     args: string[],
     userId: string,
     chatId: string,
     platformChatId: string,
-    chatType: string,
     msgId?: string,
   ): void {
-    const objective = args.join(" ").trim();
     const existing = this.activeGoals.get(chatId);
-
-    // 无参：查询当前 Goal
-    if (!objective) {
-      if (!existing) {
-        this.replyText(chatId, platformChatId, msgId, "当前没有进行中的 Goal。");
-        return;
-      }
-      const elapsed = formatUptime(Math.max(0, Date.now() - existing.startedAt));
-      this.replyText(chatId, platformChatId, msgId,
-        `**⚡ 当前 Goal**\n目标：${existing.objective.slice(0, 200)}\n轮次：${existing.turnCount} · 耗时：${elapsed}`);
+    if (!existing) {
+      this.replyText(chatId, platformChatId, msgId, "当前没有进行中的 Goal。");
       return;
     }
-
-    // 带参：创建 Goal（已有 Goal 时进入 pending，结束后才开始新 Goal）
-    if (existing) {
-      this.replyText(chatId, platformChatId, msgId, "已有进行中的 Goal，新目标已排队，当前 Goal 结束后自动开始。");
-      return;
-    }
-    if (objective.length > GOAL_DEFAULTS.maxObjectiveLength) {
-      this.replyText(chatId, platformChatId, msgId, `目标过长（上限 ${GOAL_DEFAULTS.maxObjectiveLength} 字符）。`);
-      return;
-    }
-    if ([...this.activeGoals.values()].length >= GOAL_DEFAULTS.maxConcurrentGoals) {
-      this.replyText(chatId, platformChatId, msgId, "全局并发 Goal 已达上限。");
-      return;
-    }
-
-    const goal: ActiveGoal = {
-      objective,
-      userId,
-      turnCount: 0,
-      startedAt: Date.now(),
-    };
-    this.activeGoals.set(chatId, goal);
-    this.log.info("goal started", { chatId, objectiveLength: objective.length, userId });
-    // 通过队列进入 Run：goal_start 不与其他消息合并，立即 flush
-    this.queue.push({
-      chatId,
-      text: objective,
-      timestamp: Date.now(),
-      triggerKind: "goal_start",
-      senderId: userId,
-    });
-    this.replyText(chatId, platformChatId, msgId, `🎯 Goal 已开始：${objective.slice(0, 100)}`);
+    const elapsed = formatUptime(Math.max(0, Date.now() - existing.startedAt));
+    this.replyText(chatId, platformChatId, msgId,
+      `**⚡ 当前 Goal**\n目标：${existing.objective.slice(0, 200)}\n轮次：${existing.turnCount} · 耗时：${elapsed}`);
   }
 
   /** nbt goal finish：Agent 显式结束请求（令牌 + Run 一致性校验；三条件结算在回合收尾时做）。 */
@@ -2362,8 +2356,9 @@ export class Pipeline {
     if (!activeRun || activeRun.stage !== "agent_running") {
       throw new Error("Goal finish 必须在当前 Goal 的活动回合内执行");
     }
-    if (!command.token || command.token !== this.goalTokens.get(chatId)) {
-      throw new Error("Goal finish 请求缺少或携带错误的能力令牌");
+    // 绑定 Goal 的 Run：只有该 Goal 自己的回合（同一 run）能提交 finish，防过期进程结算
+    if (goal.startRunId && activeRun.runId !== goal.startRunId) {
+      throw new Error("Goal finish 必须来自该 Goal 的回合");
     }
     if (scheduleToken && scheduleToken !== this.chatScheduleTokens.get(chatId)) {
       throw new Error("Goal finish 请求缺少或携带错误的会话令牌");
@@ -2376,26 +2371,125 @@ export class Pipeline {
     return { output: `finish requested: ${command.outcome}` };
   }
 
-  /** 构建 Goal 每轮注入的引导（目标原文 + 检查引导 + 本轮 finish 令牌）。 */
-  private buildGoalTurnPrompt(goal: ActiveGoal, token: string): string {
+  /** nbt goal start：Agent 主动进入 Goal 模式。当前回合计入第 1 轮（process 检测 startRunId 后由 runGoalLoop 接管）。 */
+  async executeGoalStartCommand(chatId: string, objective: string, scheduleToken?: string): Promise<{ output: string }> {
+    if (objective.length > GOAL_DEFAULTS.maxObjectiveLength) {
+      throw new Error(`目标过长（上限 ${GOAL_DEFAULTS.maxObjectiveLength} 字符）`);
+    }
+    const existing = this.activeGoals.get(chatId);
+    if (existing && !existing.endedAt) {
+      throw new Error("已有进行中的 Goal");
+    }
+    if ([...this.activeGoals.values()].length >= GOAL_DEFAULTS.maxConcurrentGoals) {
+      throw new Error("全局并发 Goal 已达上限");
+    }
+    const activeRun = this.runtimeState.getActiveRun(chatId);
+    if (!activeRun || activeRun.stage !== "agent_running") {
+      throw new Error("nbt goal start 必须在当前 Agent 回合内调用");
+    }
+    if (scheduleToken && scheduleToken !== this.chatScheduleTokens.get(chatId)) {
+      throw new Error("nbt goal start 请求缺少或携带错误的会话令牌");
+    }
+    const goal: ActiveGoal = {
+      objective,
+      turnCount: 1,
+      startedAt: Date.now(),
+      startRunId: activeRun.runId,
+      progressSteps: [],
+      progressStatus: "",
+    };
+    this.activeGoals.set(chatId, goal);
+    this.log.info("goal started by agent", { chatId, objectiveLength: objective.length, runId: activeRun.runId });
+    return { output: `goal started: ${objective.slice(0, 100)}` };
+  }
+
+  /**
+   * nbt goal progress：中间轮静默记录进展（不发送 IM）。
+   * content = 本次步骤（一两句话，保留最近 N 条）；status = 全局进展状态（覆盖式：任务整体进行到哪、还剩什么）。
+   */
+  async executeGoalProgressCommand(chatId: string, content: string, status?: string): Promise<{ output: string }> {
+    const goal = this.activeGoals.get(chatId);
+    if (!goal) throw new Error("当前没有进行中的 Goal");
+    if (goal.endedAt) throw new Error("Goal 已结束");
+    // 与 start/finish 同级：必须在当前 Goal 的活动回合内调用
+    const activeRun = this.runtimeState.getActiveRun(chatId);
+    if (!activeRun || activeRun.stage !== "agent_running") {
+      throw new Error("nbt goal progress 必须在当前 Goal 的活动回合内执行");
+    }
+    const step = content.trim();
+    if (!step) throw new Error("progress 内容不能为空");
+    if (step.length > GOAL_DEFAULTS.maxProgressLength) {
+      throw new Error(`progress 步骤过长（上限 ${GOAL_DEFAULTS.maxProgressLength} 字符）`);
+    }
+    goal.progressSteps.push(step);
+    if (goal.progressSteps.length > GOAL_DEFAULTS.maxProgressSteps) {
+      goal.progressSteps.shift();
+    }
+    const globalStatus = status?.trim();
+    if (globalStatus) {
+      if (globalStatus.length > GOAL_DEFAULTS.maxProgressLength) {
+        throw new Error(`--status 过长（上限 ${GOAL_DEFAULTS.maxProgressLength} 字符）`);
+      }
+      goal.progressStatus = globalStatus;
+    }
+    this.log.info("goal progress", { chatId, step: step.slice(0, 60), hasStatus: !!globalStatus });
+    return { output: `progress recorded` };
+  }
+
+  /** nbt restart --wake：重启完成后注入主会话任务（在原上下文触发 Agent 回合）。 */
+  async executeWakeCommand(chatId: string, prompt: string): Promise<{ output: string }> {
+    this.queue.push({
+      chatId,
+      text: prompt,
+      timestamp: Date.now(),
+      triggerKind: "restart_wake",
+    });
+    if (this.queue.isStopped()) {
+      throw new Error("引擎队列已停止，wake 未投递");
+    }
+    this.log.info("restart wake queued", { chatId, promptLength: prompt.length });
+    return { output: "wake queued" };
+  }
+
+  /** 构建 Goal 每轮注入的引导（目标原文 + 检查引导 + 进展：全局状态与最近步骤，防遗忘）。 */
+  private buildGoalTurnPrompt(goal: ActiveGoal): string {
+    const parts: string[] = [];
+    if (goal.progressStatus) parts.push(`状态：${goal.progressStatus}`);
+    if (goal.progressSteps.length > 0) parts.push(`步骤：${goal.progressSteps.join("；")}`);
+    const progressBlock = parts.length > 0 ? `\n【进展汇总】\n${parts.join("\n")}` : "";
     return `【当前 Goal】${goal.objective}
 【检查引导】本轮结束后确认：
 - 目标是否已达成？是 → 调用 nbt goal finish --outcome achieved --conclusion <一句话结论（建议附证据）>
-- 确认无法达成？→ 调用 nbt goal finish --outcome not-achieved --conclusion <原因>
+- 未完成即结束（卡住/条件不满足/无法继续）→ 调用 nbt goal finish --outcome not_achieved --conclusion <当前状态与总结>
 - 连续多轮无明显推进（无实质动作、只是重复汇报）→ 调用 nbt goal finish 结束，不要空转
-- 都没有 → 继续推进下一步（不要只汇报计划）
-【本轮令牌】${token}`;
+- 都没有 → 继续推进下一步（不要只汇报计划）；推进时可调用 nbt goal progress <步骤> --status <全局状态> 记录进展${progressBlock}`;
   }
 
   /** Goal 主循环：同一个 Run 内连续多轮执行，直到 Agent 调用 finish 或保护触发。 */
-  private async runGoalLoop(chatId: string, goal: ActiveGoal, runId: string | undefined, signal?: AbortSignal): Promise<void> {
+  private async runGoalLoop(
+    chatId: string,
+    goal: ActiveGoal,
+    runId: string | undefined,
+    signal?: AbortSignal,
+    initialTurn?: RunAgentResult,
+  ): Promise<void> {
     const chatSession = await this.getOrCreateSession(chatId, undefined, signal);
     if (!chatSession) {
       this.log.error("goal run without active session", { chatId, runId: runId ?? null });
       this.finishGoal(chatId, goal, "failed", "会话不可用");
+      this.cleanupGoal(chatId, goal, runId);
       return;
     }
     let consecutiveFailures = 0;
+
+    // 初始回合（Agent 通过 nbt goal start 主动进入）：本轮已执行（turnCount 在 start 时置 1），直接处理其结果
+    if (initialTurn) {
+      const settled = await this.consumeGoalTurn(chatSession, chatId, goal, runId, initialTurn, signal);
+      if (settled) {
+        this.cleanupGoal(chatId, goal, runId);
+        return;
+      }
+    }
 
     while (!goal.endedAt) {
       // 保护：外层轮次上限（turnCount 在本轮开始前计数，含正在执行的这一轮）
@@ -2413,11 +2507,9 @@ export class Pipeline {
       // 本轮开始：计数（finish 的那一轮也算已执行）
       goal.turnCount += 1;
 
-      // 每轮注入：目标 + 检查引导；新一轮令牌（防跨轮借用旧令牌）
-      const turnToken = randomUUID();
-      this.goalTokens.set(chatId, turnToken);
-      const messageToSend = this.buildGoalTurnPrompt(goal, turnToken);
-      this.log.info("goal turn", { chatId, runId: runId ?? null, turnCount: goal.turnCount, token: turnToken.slice(0, 8) });
+      // 每轮注入：目标 + 检查引导（无令牌，Agent 零感知）
+      const messageToSend = this.buildGoalTurnPrompt(goal);
+      this.log.info("goal turn", { chatId, runId: runId ?? null, turnCount: goal.turnCount });
 
       let agentResult;
       try {
@@ -2439,37 +2531,106 @@ export class Pipeline {
       }
       consecutiveFailures = 0;
 
-      if (agentResult.status === "stopped") {
-        this.log.info("goal turn stopped", { chatId });
-        this.finishGoal(chatId, goal, "stopped", "回合被取消");
-        break;
-      }
-      const response = agentResult.response;
-
-      // Agent 请求结束（finish 令牌校验通过）
-      if (goal.finishRequested) {
-        this.log.info("goal finishing", { chatId, outcome: goal.outcome });
-        const outcome = goal.outcome === "achieved" ? "achieved" : "not_achieved";
-        const conclusion = goal.conclusion ?? response.text.trim().slice(0, 500);
-        // 引用触发消息（/goal 那条）；只发一次最终正文，发送成功后结算
-        const activeRun = this.runtimeState.getActiveRun(chatId);
-        const replyToMsgId = activeRun?.replyToPlatformMsgId ?? undefined;
-        const delivered = await this.deliverGoalFinalResponse(chatSession, goal, response.text, replyToMsgId, signal);
-        this.finishGoal(chatId, goal, outcome, conclusion, delivered);
-        break;
-      }
-
-      // 未结束：不发送本轮正文（进 transcript 但不发 IM），继续下一轮
+      const settled = await this.consumeGoalTurn(chatSession, chatId, goal, runId, agentResult, signal);
+      if (settled) break;
     }
 
-    // 结束：清理 Goal 状态，释放令牌；Run 收尾（队列释放由 process 返回后 queue 接管）
-    this.goalTokens.delete(chatId);
+    this.cleanupGoal(chatId, goal, runId);
+  }
+
+  /** 处理一轮 Goal 回合结果：停止/结算（交付）/未结束时落库统计。返回 true = Goal 已结束。 */
+  private async consumeGoalTurn(
+    chatSession: ChatSession,
+    chatId: string,
+    goal: ActiveGoal,
+    runId: string | undefined,
+    agentResult: RunAgentResult,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    if (agentResult.status === "stopped") {
+      this.log.info("goal turn stopped", { chatId });
+      this.finishGoal(chatId, goal, "stopped", "回合被取消");
+      return true;
+    }
+    const response = agentResult.response;
+
+    // Agent 请求结束（finish 校验通过）
+    if (goal.finishRequested) {
+      this.log.info("goal finishing", { chatId, outcome: goal.outcome });
+      const outcome = goal.outcome === "achieved" ? "achieved" : "not_achieved";
+      const conclusion = goal.conclusion ?? response.text.trim().slice(0, 500);
+      // 引用触发消息（/goal 那条）；只发一次最终正文，发送成功后结算
+      const activeRun = this.runtimeState.getActiveRun(chatId);
+      const replyToMsgId = activeRun?.replyToPlatformMsgId ?? undefined;
+      const delivered = await this.deliverGoalFinalResponse(chatSession, goal, response, replyToMsgId, signal);
+      this.finishGoal(chatId, goal, outcome, conclusion, delivered);
+      return true;
+    }
+
+    // 未结束：本轮正文进历史 + session 统计（与主对话同一收尾逻辑），不发送 IM
+    this.recordAgentTurn(chatSession, chatId, response);
+    return false;
+  }
+
+  /** 回合收尾（主对话与 Goal 共用）：assistant 正文落库 + session 统计（turn_count +1 等）。返回落库消息 ID。 */
+  private recordAgentTurn(chatSession: ChatSession, chatId: string, response: AgentResponse): number {
+    const replyMsgId = storeMessage(this.db, {
+      chatId,
+      senderId: this.botUserId!,
+      sessionId: chatSession.sessionId,
+      role: "assistant",
+      contentText: response.text,
+      platform: this.botIdentity.platform,
+    });
+    const cumulativeBytes = this.agent.getCumulativeBytes?.(chatSession.agentSession.id) ?? 0;
+    const agentSessionId = this.agent.getAgentSessionId?.(chatSession.agentSession.id);
+    this.db.prepare(`
+      UPDATE sessions
+      SET message_count = (SELECT COUNT(*) FROM messages WHERE session_key = ?),
+          turn_count = turn_count + 1,
+          cumulative_bytes = ?,
+          last_active_at = datetime('now'),
+          end_msg_id = ?,
+          agent_session_id = COALESCE(agent_session_id, ?),
+          backend_type = COALESCE(backend_type, ?)
+      WHERE id = ?
+    `).run(
+      chatSession.sessionId,
+      cumulativeBytes,
+      replyMsgId,
+      agentSessionId ?? null,
+      this.backendType,
+      chatSession.sessionId,
+    );
+    return replyMsgId;
+  }
+
+  /** Goal 结束清理：状态与 Run 收尾（队列释放由 process 返回后 queue 接管）。 */
+  private cleanupGoal(chatId: string, goal: ActiveGoal, runId: string | undefined): void {
+    // Goal 从 Worker 验收回合接管时消费的 Continuation：标记完成（不释放，防重复投递）
+    if (goal.adoptedContinuationIds?.length && this.workerConfig) {
+      try {
+        this.workerConfig.jobService.completeDeliveredContinuations({
+          continuationIds: goal.adoptedContinuationIds,
+          agentTurnId: runId ?? "",
+          conclusion: goal.conclusion ?? "",
+        });
+        this.log.info("goal adopted continuations settled", {
+          chatId,
+          continuationIds: goal.adoptedContinuationIds,
+        });
+      } catch (err) {
+        this.log.error("goal adopted continuations settle failed", { chatId, error: String(err) });
+      }
+    }
     this.activeGoals.delete(chatId);
     this.activeWorkerAgentCommands.delete(chatId);
     this.activeScheduleAgentCommands.delete(chatId);
     if (runId) {
       if (goal.outcome === "failed") {
         this.markRuntimeRun(runId, "failed", goal.conclusion ?? "goal failed");
+      } else if (goal.outcome === "stopped") {
+        this.markRuntimeRun(runId, "stopped");
       } else {
         this.markRuntimeRun(runId, "done");
       }
@@ -2491,32 +2652,40 @@ export class Pipeline {
     this.log.info("goal settled", { chatId, outcome, delivered });
   }
 
-  /** 发送 Goal 最终正文（唯一一次 IM 交付，卡片 + 引用触发消息 + 汇总）；失败时返回 false。 */
+  /** 发送 Goal 最终正文（唯一一次 IM 交付，卡片 + 引用触发消息 + 汇总 + footer；与常规交付同一降级链）；失败时返回 false。 */
   private async deliverGoalFinalResponse(
-    chatSession: { platformChatId: string },
+    chatSession: ChatSession,
     goal: ActiveGoal,
-    responseText: string,
+    response: AgentResponse,
     replyToMsgId: string | undefined,
     signal?: AbortSignal,
   ): Promise<boolean> {
-    try {
-      const text = stripInternalWorkerTags(responseText);
-      const elapsedMs = Date.now() - goal.startedAt;
-      const header = buildGoalCardHeader(goal, elapsedMs);
-      const content = `> 目标：${goal.objective}\n\n${text}`;
-      await this.responseSender.sendCard(
-        chatSession.platformChatId,
-        header,
-        content,
-        undefined,
-        replyToMsgId,
-        signal,
-      );
-      return true;
-    } catch (err) {
-      this.log.warn("goal final response delivery failed", { error: String(err) });
-      return false;
+    const text = stripInternalWorkerTags(response.text);
+    const elapsedMs = Date.now() - goal.startedAt;
+    // footer 与常规交付一致：session 短 ID + session 累计轮次 + context + model
+    // （goal 自身轮次在 header 中展示，不参与 footer 的 #N）
+    const agentSessionId = this.agent.getAgentSessionId?.(chatSession.agentSession.id);
+    const sessionStats = this.db.prepare(
+      "SELECT turn_count FROM sessions WHERE id = ?",
+    ).get(chatSession.sessionId) as { turn_count: number } | undefined;
+    const result = await this.responseSender.sendFinalResponse({
+      chatId: chatSession.platformChatId,
+      header: buildGoalCardHeader(goal, elapsedMs),
+      content: `> 目标：${goal.objective}\n\n${text}`,
+      footer: buildResponseFooter({
+        sessionId: agentSessionId ?? chatSession.sessionId,
+        turnCount: sessionStats?.turn_count,
+        contextTokens: response.contextTokens,
+        compactCount: response.compactCount,
+        model: response.model,
+      }),
+      replyToMsgId,
+      signal,
+    });
+    if (!result.ok) {
+      this.log.warn("goal final response delivery failed", { error: result.error, methodsTried: result.methodsTried });
     }
+    return result.ok;
   }
 
   /** /worker：Worker 开关与配置管理（管理员）。 */
@@ -3165,7 +3334,21 @@ ${jobParts.join("\n\n")}
           content = `> 任务：${escapeLarkMarkdownText(buildTaskPreview(prompt))}\n\n${response.text}`;
         }
       }
-      const sentPlatformMsgId = await this.transport.sendCard(platformChatId, header, content, footer);
+      // 统一最终交付：卡片（带 footer）→ 文本 → 文件降级链，与主对话/Goal 同一套
+      const sendResult = await this.responseSender.sendFinalResponse({
+        chatId: platformChatId,
+        header,
+        content,
+        footer,
+      });
+      if (!sendResult.ok) {
+        this.log.warn(`${source} final response delivery failed`, {
+          chatId, error: sendResult.error, methodsTried: sendResult.methodsTried,
+        });
+        // 降级链全失败视为交付失败：不写 assistant 消息，任务按失败处理（沿用卡片失败即失败语义）
+        throw new Error(`${source} final response delivery failed: ${sendResult.error}`);
+      }
+      const sentPlatformMsgId = sendResult.platformMsgId;
 
       // 只有平台确认发送成功后才写 assistant 消息，避免发送失败留下“幽灵回复”。
       const replyMsgId = storeMessage(this.db, {
@@ -4034,6 +4217,8 @@ ${jobParts.join("\n\n")}
     const isLoopTurn = loopJobIds.length === 1
       && messages.length === 1
       && messages[0]?.triggerKind === "loop_continuation";
+    // 重启唤醒（nbt restart --wake）：主会话内部任务回合，不写成用户发言
+    const isWakeTurn = messages.length === 1 && messages[0]?.triggerKind === "restart_wake";
     if (loopJobIds.length > 0 && !isLoopTurn) {
       for (const id of loopJobIds) releaseQueuedLoopJob(this.db, id);
       this.log.error("invalid mixed loop queue batch", { chatId, loopJobIds, messageCount: messages.length });
@@ -4041,11 +4226,10 @@ ${jobParts.join("\n\n")}
       return;
     }
 
-    // Goal 回合：goal_start 触发（或该 chat 已有未结束 Goal 且本轮是它的续轮）。
+    // Goal 回合：该 chat 已有未结束 Goal 且本轮是它的续轮。
     // 一个 Goal 从开始到结束始终是同一个 Run；队列保持 busy，后续消息自然 pending。
-    const isGoalStartTurn = messages.length === 1 && messages[0]?.triggerKind === "goal_start";
     const existingGoal = this.activeGoals.get(chatId);
-    if (existingGoal && !existingGoal.endedAt && (isGoalStartTurn || existingGoal.finishRunId === runId || existingGoal.turnCount > 0)) {
+    if (existingGoal && !existingGoal.endedAt && (existingGoal.finishRunId === runId || existingGoal.turnCount > 0)) {
       await this.runGoalLoop(chatId, existingGoal, runId, signal);
       return;
     }
@@ -4140,8 +4324,8 @@ ${jobParts.join("\n\n")}
     if (!triggerMsgId && isContinuationTurn && this.workerConfig && !continuationDisallowFallback) {
       triggerMsgId = findLatestUserPlatformMsgId(this.db, chatId);
     }
-    // Loop 没有对应的当前用户消息，不引用历史消息，避免定时结果挂错位置。
-    if (isLoopTurn) triggerMsgId = undefined;
+    // Loop / 重启唤醒没有对应的当前用户消息，不引用历史消息，避免挂错位置。
+    if (isLoopTurn || isWakeTurn) triggerMsgId = undefined;
 
     const isMerged = messages.length > 1;
     const reactionMsgIds = messages
@@ -4185,7 +4369,9 @@ ${jobParts.join("\n\n")}
       } else {
         const baseMessage = isLoopTurn
           ? this.buildLoopContinuationPrompt(activeLoopJob!)
-          : mergedText;
+          : isWakeTurn
+            ? `【重启完成】\n${mergedText}`
+            : mergedText;
         messageToSend = baseMessage;
         const stableCtx = this.pendingStableContext.get(chatId);
         const messageCtx = this.pendingMessageContext.get(chatId);
@@ -4348,6 +4534,13 @@ ${jobParts.join("\n\n")}
       })();
       if (agentResult.status === "stopped") {
         this.log.info("prompt cancelled, no response to send", { chatId });
+        // 本回合若刚通过 nbt goal start 创建了 Goal：以 stopped 结算并清理，避免孤儿 Goal 吞后续消息
+        const orphanGoal = this.activeGoals.get(chatId);
+        if (orphanGoal && !orphanGoal.endedAt && orphanGoal.startRunId === runId) {
+          this.log.info("goal start turn cancelled, settling goal as stopped", { chatId, runId });
+          this.finishGoal(chatId, orphanGoal, "stopped", "回合被取消");
+          this.cleanupGoal(chatId, orphanGoal, runId);
+        }
         // 验收回合被取消：释放认领，允许后续重新投递（否则卡死 claimed）
         releaseContinuationClaims();
         settleLoop({ success: false, cancelled: true });
@@ -4355,6 +4548,23 @@ ${jobParts.join("\n\n")}
         return;
       }
       const response = agentResult.response;
+
+      // Goal 主动进入：本回合 Agent 调用了 nbt goal start → 本回合计入第 1 轮，runGoalLoop 接管
+      // （本轮不再按普通回合交付，由 Goal 流程处理：finish 则结算，否则静默继续下一轮）
+      const startedGoal = this.activeGoals.get(chatId);
+      if (startedGoal && !startedGoal.endedAt && startedGoal.startRunId === runId) {
+        this.log.info("goal start turn detected, adopting as round 1", { chatId, runId });
+        // Loop/Worker 回合内 start：先结算本轮 loop/continuation，避免 job 永久卡 running/claimed。
+        // Worker 结果已被 Goal 第 1 轮消费：登记到 Goal，结算时标记完成（释放会导致重复投递）。
+        if (isContinuationTurn && continuationIds.length > 0) {
+          startedGoal.adoptedContinuationIds = continuationIds;
+        }
+        if (isLoopTurn && activeLoopJob && !loopSettled) {
+          settleLoop({ success: true, cancelled: true });
+        }
+        await this.runGoalLoop(chatId, startedGoal, runId, signal, agentResult);
+        return;
+      }
 
       // `/loop del` 可在 Agent 执行期间由内置命令立即处理。Agent 返回后先查持久状态，
       // 被取消的本轮不写入主会话历史，也不向平台发送。检查后到 sendCard 之间没有 await，
@@ -4383,39 +4593,11 @@ ${jobParts.join("\n\n")}
         return;
       }
 
-      // 存储 agent 回复
-      const replyMsgId = storeMessage(this.db, {
-        chatId,
-        senderId: this.botUserId!,
-        sessionId: chatSession.sessionId,
-        role: "assistant",
-        contentText: response.text,
-        platform: this.botIdentity.platform,
-      });
-
-      // 更新 session 统计（COALESCE 保证 agent_session_id 只写一次，后续不覆盖）
-      const cumulativeBytes = this.agent.getCumulativeBytes?.(chatSession.agentSession.id) ?? 0;
-      const agentSessionId = this.agent.getAgentSessionId?.(chatSession.agentSession.id);
-      this.db.prepare(`
-        UPDATE sessions
-        SET message_count = (SELECT COUNT(*) FROM messages WHERE session_key = ?),
-            turn_count = turn_count + 1,
-            cumulative_bytes = ?,
-            last_active_at = datetime('now'),
-            end_msg_id = ?,
-            agent_session_id = COALESCE(agent_session_id, ?),
-            backend_type = COALESCE(backend_type, ?)
-        WHERE id = ?
-      `).run(
-        chatSession.sessionId,
-        cumulativeBytes,
-        replyMsgId,
-        agentSessionId ?? null,
-        this.backendType,
-        chatSession.sessionId,
-      );
+      // 存储 agent 回复 + 更新 session 统计（与 Goal 回合共用同一收尾逻辑）
+      const replyMsgId = this.recordAgentTurn(chatSession, chatId, response);
 
       // 构建 footer：shortId · #turn · context · model
+      const agentSessionId = this.agent.getAgentSessionId?.(chatSession.agentSession.id);
       const stats = this.db.prepare(
         "SELECT turn_count FROM sessions WHERE id = ?",
       ).get(chatSession.sessionId) as { turn_count: number } | undefined;
@@ -4466,76 +4648,35 @@ ${jobParts.join("\n\n")}
       }
       deliveredText = displayText;
 
-      // 发送到 IM（始终优先卡片，footer 带 session 信息）
-      // 超长内容由 adapter 层自动转文件发送；发送器负责超时和降级。
+      // 统一最终交付：卡片（reply 优先，footer 带 session 信息）→ 文本（带失败提示）→ 文件
+      // 降级链由 ResponseSender.sendFinalResponse 统一承担（超时、不确定结果、超长自动转文件）。
       this.markRuntimeRun(runId, "sending_response");
       let sentPlatformMsgId: string | undefined;
       let deliveredResponseBody = false;
-      const sendTextWithReplyFallback = async (text: string): Promise<string> => {
-        if (!triggerMsgId) {
-          return this.responseSender.sendText(chatSession.platformChatId, text, signal);
-        }
-        try {
-          return await this.responseSender.sendReply(chatSession.platformChatId, text, triggerMsgId, signal);
-        } catch (error) {
-          if (isUncertainSendError(error)) throw error;
-          return this.responseSender.sendText(chatSession.platformChatId, text, signal);
-        }
-      };
-      try {
-        this.log.info("send decision", { chatId, useReply: !!triggerMsgId, merged: isMerged, messageCount: messages.length, triggerMsgId: triggerMsgId ?? "none" });
-        if (triggerMsgId) {
-          try {
-            sentPlatformMsgId = await this.responseSender.sendCard(chatSession.platformChatId, loopCardHeader, displayText, footer, triggerMsgId, signal);
-          } catch (error) {
-            if (isUncertainSendError(error)) throw error;
-            sentPlatformMsgId = await this.responseSender.sendCard(chatSession.platformChatId, loopCardHeader, displayText, footer, undefined, signal);
-          }
-        } else {
-          sentPlatformMsgId = await this.responseSender.sendCard(chatSession.platformChatId, loopCardHeader, displayText, footer, undefined, signal);
-        }
-        deliveredResponseBody = true;
-      } catch (sendErr) {
+      this.log.info("send decision", { chatId, useReply: !!triggerMsgId, merged: isMerged, messageCount: messages.length, triggerMsgId: triggerMsgId ?? "none" });
+      const sendResult = await this.responseSender.sendFinalResponse({
+        chatId: chatSession.platformChatId,
+        header: loopCardHeader,
+        content: displayText,
+        footer,
+        replyToMsgId: triggerMsgId,
+        signal,
+        textFallback: (sendErr) => addLoopFullMarker(`发送失败：${extractPlatformErrorDetail(sendErr)}`),
+      });
+      if (sendResult.ok) {
+        sentPlatformMsgId = sendResult.platformMsgId;
+        deliveredResponseBody = sendResult.method === "card";
+        // 降级交付（文本/文件）时以实际交付内容回写历史，让「发送失败」提示可见
+        deliveredText = sendResult.deliveredContent;
+      } else {
         this.log.error("failed to send response to IM", {
           chatId,
-          error: String(sendErr),
+          error: sendResult.error,
+          methodsTried: sendResult.methodsTried,
           responseLength: response.text.length,
         });
-        if (isUncertainSendError(sendErr)) {
-          this.log.warn("response delivery result unknown, skipping fallback", { chatId, error: String(sendErr) });
-        } else {
-          try {
-            deliveredText = addLoopFullMarker(`发送失败：${extractPlatformErrorDetail(sendErr)}`);
-            sentPlatformMsgId = await sendTextWithReplyFallback(deliveredText);
-          } catch (firstFallbackErr) {
-            this.log.warn("failed to send first fallback text", { chatId, error: String(firstFallbackErr) });
-            if (!isUncertainSendError(firstFallbackErr)) {
-              try {
-                deliveredText = addLoopFullMarker(buildPlatformFailureFallback(sendErr));
-                sentPlatformMsgId = await sendTextWithReplyFallback(deliveredText);
-              } catch (fallbackSendErr) {
-                if (!isUncertainSendError(fallbackSendErr)) {
-                  const fileContent = footer ? `${deliveredText}\n\n---\n${footer}` : deliveredText;
-                  const result = await this.runManager.sendFinalResponse({
-                    runId: runId!,
-                    chatId: chatSession.platformChatId,
-                    header: "",
-                    content: fileContent,
-                    signal,
-                  });
-                  if (result.ok) {
-                    sentPlatformMsgId = result.platformMsgId;
-                  } else {
-                    this.log.error("failed to send degraded response", {
-                      chatId,
-                      error: result.error,
-                      methodsTried: result.methodsTried,
-                    });
-                  }
-                }
-              }
-            }
-          }
+        if (sendResult.uncertain) {
+          this.log.warn("response delivery result unknown, skipping fallback", { chatId, error: sendResult.error });
         }
       }
 
@@ -4593,6 +4734,12 @@ ${jobParts.join("\n\n")}
       }
     } catch (err) {
       this.log.error("pipeline error", { chatId, error: String(err) });
+      // 本回合刚创建的 Goal 异常退出：结算为 failed 并清理，避免孤儿 Goal 吞后续消息
+      const failedGoal = this.activeGoals.get(chatId);
+      if (failedGoal && !failedGoal.endedAt && failedGoal.startRunId === runId) {
+        this.finishGoal(chatId, failedGoal, "failed", `回合异常：${String(err).slice(0, 200)}`);
+        this.cleanupGoal(chatId, failedGoal, runId);
+      }
       if (isLoopTurn && activeLoopJob && getLoopJob(this.db, activeLoopJob.id)?.status === "cancelled") {
         loopSettled = true;
         clearActiveLoopRun();
@@ -5202,10 +5349,6 @@ function extractAgentErrorDetail(err: unknown): string | null {
   return joined.length > ERROR_DISPLAY_MAX_LEN ? joined.slice(0, ERROR_DISPLAY_MAX_LEN) + "…" : joined;
 }
 
-function isUncertainSendError(error: unknown): boolean {
-  return isDeliveryUncertainError(error) || error instanceof TimeoutError;
-}
-
 function extractPlatformErrorDetail(err: unknown): string {
   const data = typeof err === "object" && err !== null && "response" in err
     ? (err as { response?: { data?: { code?: unknown; msg?: unknown } } }).response?.data
@@ -5220,18 +5363,6 @@ function extractPlatformErrorDetail(err: unknown): string {
 
   const message = err instanceof Error ? err.message.trim() : String(err ?? "").trim();
   return message || "平台发送失败";
-}
-
-function buildPlatformFailureFallback(err: unknown): string {
-  const data = typeof err === "object" && err !== null && "response" in err
-    ? (err as { response?: { data?: { code?: unknown } } }).response?.data
-    : undefined;
-  const code = data?.code;
-
-  if (code !== undefined && code !== null && String(code).trim()) {
-    return `上一条回复未送达：平台发送失败（code: ${String(code).trim()}）。`;
-  }
-  return "上一条回复未送达：平台发送失败。";
 }
 
 /** 检查命令是否在 PATH 中（对齐 Go exec.LookPath） */
