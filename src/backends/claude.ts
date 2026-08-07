@@ -13,6 +13,8 @@ import { claudeProjectKey } from "../platform/workspace-path.js";
 
 interface ClaudeSession extends BaseCliSession {
   permissionMode: string;
+  /** 推理强度（--effort 透传） */
+  reasoningEffort?: string;
 }
 
 export interface ClaudeBackendOptions {
@@ -39,6 +41,7 @@ export default class ClaudeBackend extends CliAgentBackend<ClaudeSession> {
     return {
       workingDirectory: config.workingDirectory ?? process.cwd(),
       model: config.model,
+      reasoningEffort: config.reasoningEffort,
       importantContext: config.importantContext,
       extraEnv: buildNiubotEnv(config),
       cumulativeBytes: 0,
@@ -59,6 +62,9 @@ export default class ClaudeBackend extends CliAgentBackend<ClaudeSession> {
 
     if (session.model) {
       args.push("--model", session.model);
+    }
+    if (session.reasoningEffort) {
+      args.push("--effort", session.reasoningEffort);
     }
     if (session.importantContext) {
       args.push("--append-system-prompt", session.importantContext);

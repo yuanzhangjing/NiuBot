@@ -710,6 +710,22 @@ const migrations: Migration[] = [
       }
     },
   },
+  {
+    version: 28,
+    description: "Persist per-backend reasoning effort per bot",
+    up: (db) => {
+      // /effort 命令的运行时选择，与 model 并列存入 bot_backend_model_state。
+      // 防御：迁移 13 才创建该表，跳过早期迁移构造的库没有此表，直接跳过。
+      const tableExists = db.prepare(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'bot_backend_model_state'",
+      ).get();
+      if (!tableExists) return;
+      const columns = db.prepare("PRAGMA table_info(bot_backend_model_state)").all() as Array<{ name: string }>;
+      if (!columns.some((column) => column.name === "effort")) {
+        db.exec("ALTER TABLE bot_backend_model_state ADD COLUMN effort TEXT");
+      }
+    },
+  },
 ];
 
 const transportMigrations: Migration[] = [
@@ -871,10 +887,13 @@ export function getBotRuntimeBackend(db: Database.Database, botName: string): Ag
 export interface BotRuntimeState {
   backendType?: AgentBackendType;
   model?: string;
+  /** 推理强度运行时选择（low/medium/high/xhigh/max），backend 支持时生效 */
+  effort?: string;
 }
 
 export interface BotBackendModelState {
   model?: string;
+  effort?: string;
 }
 
 export type RuntimeEventName =
@@ -960,12 +979,13 @@ export function getBotBackendModelState(
   backendType: AgentBackendType,
 ): BotBackendModelState | undefined {
   const row = db.prepare(
-    "SELECT model FROM bot_backend_model_state WHERE bot_name = ? AND backend_type = ?",
-  ).get(botName, backendType) as { model: string | null } | undefined;
+    "SELECT model, effort FROM bot_backend_model_state WHERE bot_name = ? AND backend_type = ?",
+  ).get(botName, backendType) as { model: string | null; effort: string | null } | undefined;
 
   if (!row) return undefined;
   return {
     model: row.model ?? undefined,
+    effort: row.effort ?? undefined,
   };
 }
 
@@ -978,15 +998,17 @@ export function setBotBackendModelState(
   const existing = getBotBackendModelState(db, botName, backendType);
   const next = {
     model: "model" in state ? state.model : existing?.model,
+    effort: "effort" in state ? state.effort : existing?.effort,
   };
 
   db.prepare(`
-    INSERT INTO bot_backend_model_state (bot_name, backend_type, model, lite_model, updated_at)
-    VALUES (?, ?, ?, ?, datetime('now'))
+    INSERT INTO bot_backend_model_state (bot_name, backend_type, model, lite_model, effort, updated_at)
+    VALUES (?, ?, ?, ?, ?, datetime('now'))
     ON CONFLICT(bot_name, backend_type) DO UPDATE SET
       model = excluded.model,
+      effort = excluded.effort,
       updated_at = excluded.updated_at
-  `).run(botName, backendType, next.model ?? null, null);
+  `).run(botName, backendType, next.model ?? null, null, next.effort ?? null);
 }
 
 export function clearBotRuntimeModels(db: Database.Database, botName: string): void {
@@ -999,6 +1021,11 @@ export function clearBotRuntimeModels(db: Database.Database, botName: string): v
   setBotBackendModelState(db, botName, existing.backendType, {
     model: undefined,
   });
+}
+
+/** 清除某个 backend 的运行时 effort 选择（/effort reset）。 */
+export function clearBotBackendEffort(db: Database.Database, botName: string, backendType: AgentBackendType): void {
+  setBotBackendModelState(db, botName, backendType, { effort: undefined });
 }
 
 export function loadPersistedBotBackend(dbPath: string, botName: string): AgentBackendType | undefined {
@@ -1024,6 +1051,7 @@ export function loadPersistedBotRuntimeState(dbPath: string, botName: string): B
     return {
       backendType: runtime.backendType,
       model: backendModels.model,
+      effort: backendModels.effort,
     };
   } finally {
     db.close();

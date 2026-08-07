@@ -29,6 +29,7 @@ export default class TraeCliBackend extends CliAgentBackend<TraeCliSession> {
     return {
       workingDirectory: config.workingDirectory ?? process.cwd(),
       model: config.model,
+      reasoningEffort: config.reasoningEffort,
       importantContext: config.importantContext,
       extraEnv: buildNiubotEnv(config),
       cumulativeBytes: 0,
@@ -51,6 +52,9 @@ export default class TraeCliBackend extends CliAgentBackend<TraeCliSession> {
       if (session.model) {
         args.push("-m", session.model);
       }
+      if (session.reasoningEffort) {
+        args.push("-c", `model_reasoning_effort=${session.reasoningEffort}`);
+      }
       return { args, stdin: message };
     }
 
@@ -64,6 +68,9 @@ export default class TraeCliBackend extends CliAgentBackend<TraeCliSession> {
 
     if (session.model) {
       args.push("-m", session.model);
+    }
+    if (session.reasoningEffort) {
+      args.push("-c", `model_reasoning_effort=${session.reasoningEffort}`);
     }
 
     return { args, stdin: message };

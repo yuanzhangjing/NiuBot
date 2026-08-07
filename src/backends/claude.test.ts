@@ -64,6 +64,40 @@ describe("ClaudeBackend session metadata", () => {
     expect(parsed.contextTokens).toBe(5662187);
   });
 
+  it("passes reasoning effort as --effort flag", () => {
+    const backend = new ClaudeBackend();
+    const session = backend.buildSession({
+      workingDirectory: "/tmp/workspace",
+      reasoningEffort: "high",
+    });
+
+    const { args } = backend.buildInput(session, "hello");
+    expect(args).toContain("--effort");
+    expect(args).toContain("high");
+  });
+
+  it("omits --effort when effort is not configured", () => {
+    const backend = new ClaudeBackend();
+    const session = backend.buildSession({ workingDirectory: "/tmp/workspace" });
+
+    const { args } = backend.buildInput(session, "hello");
+    expect(args).not.toContain("--effort");
+  });
+
+  it("applies effort updates to an existing session via updateSessionModels", async () => {
+    const backend = new ClaudeBackend();
+    const agentSession = await backend.createSession({ workingDirectory: "/tmp/workspace" });
+
+    // 模拟 /effort high 的运行时切换：更新内部 session 对象
+    backend.updateSessionModels(agentSession.id, { effort: "high" });
+
+    const internal = (backend as any).sessions.get(agentSession.id);
+    expect(internal.reasoningEffort).toBe("high");
+    const { args } = backend.buildInput(internal, "hello");
+    expect(args).toContain("--effort");
+    expect(args).toContain("high");
+  });
+
   it("keeps the original Claude result text as the error message", () => {
     const backend = new ClaudeBackend();
     const session = backend.buildSession({ workingDirectory: "/tmp" });

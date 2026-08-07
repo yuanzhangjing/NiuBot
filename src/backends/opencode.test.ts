@@ -81,4 +81,16 @@ describe("OpencodeBackend error parsing", () => {
     expect(parsed.lastMessage).toBe("处理中");
     expect(parsed.incompleteReason).toContain("reason=length");
   });
+
+  it("passes reasoning effort as --variant", () => {
+    const backend = new OpencodeBackend();
+    const session = backend.buildSession({
+      workingDirectory: "/tmp",
+      reasoningEffort: "high",
+    });
+
+    const { args } = backend.buildInput(session, "hello");
+    expect(args).toContain("--variant");
+    expect(args).toContain("high");
+  });
 });

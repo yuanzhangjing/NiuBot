@@ -51,6 +51,7 @@ export default class PiBackend extends CliAgentBackend<PiSession> {
     return {
       workingDirectory: config.workingDirectory ?? process.cwd(),
       model: config.model,
+      reasoningEffort: config.reasoningEffort,
       importantContext: config.importantContext,
       extraEnv: buildNiubotEnv(config),
       cumulativeBytes: 0,
@@ -68,6 +69,9 @@ export default class PiBackend extends CliAgentBackend<PiSession> {
 
     if (session.model) {
       args.push("--model", session.model);
+    }
+    if (session.reasoningEffort) {
+      args.push("--thinking", session.reasoningEffort);
     }
     if (session.importantContext) {
       args.push("--append-system-prompt", session.importantContext);

@@ -2358,6 +2358,150 @@ describe("Pipeline runtime", () => {
     });
   });
 
+  test("switches reasoning effort via /effort and persists it", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const identity = createBotIdentity();
+    const pipeline = new Pipeline(
+      db,
+      createImStub(),
+      new RecordingAgent(),
+      identity,
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+    const activeAgentSession: Record<string, unknown> = { id: "agent_1" };
+    (pipeline as any).chatSessions.set("c1", {
+      agentSession: activeAgentSession,
+      sessionId: "s1",
+      platformChatId: "chat-open-id",
+      userId: "u2",
+      hasReplied: false,
+    });
+
+    (pipeline as any).handleEffortCommand(["high"], "c1", "chat-open-id");
+
+    expect(identity.effort).toBe("high");
+    expect(activeAgentSession.reasoningEffort).toBe("high");
+    expect(getBotBackendModelState(db, "NiuBot", "codex")).toEqual({
+      effort: "high",
+    });
+    // effort 只存 bot_backend_model_state，runtime 表不含 effort
+    expect(getBotRuntimeState(db, "NiuBot")).toEqual({
+      backendType: "codex",
+      model: undefined,
+    });
+  });
+
+  test("switches effort by index number like /model", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const identity = createBotIdentity();
+    const pipeline = new Pipeline(
+      db,
+      createImStub(),
+      new RecordingAgent(),
+      identity,
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "claude",
+    );
+
+    (pipeline as any).handleEffortCommand(["1"], "c1", "chat-open-id");
+    expect(identity.effort).toBe("low");
+
+    (pipeline as any).handleEffortCommand(["3"], "c1", "chat-open-id");
+    expect(identity.effort).toBe("high");
+
+    (pipeline as any).handleEffortCommand(["99"], "c1", "chat-open-id");
+    expect(identity.effort).toBe("high");
+  });
+
+  test("rejects invalid effort levels", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const identity = createBotIdentity();
+    const pipeline = new Pipeline(
+      db,
+      createImStub(),
+      new RecordingAgent(),
+      identity,
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+
+    (pipeline as any).handleEffortCommand(["ultra"], "c1", "chat-open-id");
+
+    expect(identity.effort).toBeUndefined();
+    // 无效级别不触发任何持久化
+    expect(getBotRuntimeState(db, "NiuBot")).toBeUndefined();
+    expect(getBotBackendModelState(db, "NiuBot", "codex")).toBeUndefined();
+  });
+
+  test("clears effort on /effort reset", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const identity = createBotIdentity();
+    identity.effort = "high";
+    const pipeline = new Pipeline(
+      db,
+      createImStub(),
+      new RecordingAgent(),
+      identity,
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+
+    (pipeline as any).handleEffortCommand(["reset"], "c1", "chat-open-id");
+
+    expect(identity.effort).toBeUndefined();
+    expect(getBotBackendModelState(db, "NiuBot", "codex")).toEqual({
+      effort: undefined,
+    });
+  });
+
+  test("keeps effort on unsupported backend and reports it", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const identity = createBotIdentity();
+    const { im, sentCards } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db,
+      im,
+      new RecordingAgent(),
+      identity,
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "trae",
+    );
+
+    (pipeline as any).handleEffortCommand(["high"], "c1", "chat-open-id");
+
+    // trae 未声明支持 effort：值保存，但提示当前 backend 不生效
+    expect(identity.effort).toBe("high");
+    const lastCard = sentCards.at(-1);
+    expect(lastCard?.content).toContain("推理强度已切换为 **high**");
+    expect(lastCard?.content).toContain("trae）不支持 effort");
+  });
+
   test("persists backend and restored models after /agent switch", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);

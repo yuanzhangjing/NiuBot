@@ -21,6 +21,8 @@ import { resolveBackendProbeTimeoutMs } from "../lifecycle-timeouts.js";
 export interface BaseCliSession {
   workingDirectory: string;
   model?: string;
+  /** 推理强度（low/medium/high/xhigh/max），backend 支持时透传给 CLI */
+  reasoningEffort?: string;
   importantContext?: string;
   /** agent 侧的 session ID（用于 resume），由基类自动管理 */
   agentSessionId?: string;
@@ -383,12 +385,15 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
     });
   }
 
-  updateSessionModels(sessionId: string, models: { model?: string }): void {
+  updateSessionModels(sessionId: string, models: { model?: string; effort?: string }): void {
     const session = this.sessions.get(sessionId);
     if (!session) return;
 
     if ("model" in models) {
       session.model = models.model;
+    }
+    if ("effort" in models) {
+      session.reasoningEffort = models.effort;
     }
   }
 

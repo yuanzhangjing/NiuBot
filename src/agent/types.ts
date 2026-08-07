@@ -11,6 +11,8 @@ export interface SessionConfig {
   workingDirectory?: string;
   /** 主模型 ID（覆盖 backend 默认值） */
   model?: string;
+  /** 推理强度（low/medium/high/xhigh/max，backend 支持时透传；不支持的后端忽略） */
+  reasoningEffort?: string;
   /** stable system context（backend 在 createSession/buildInput 自行交付；仅 needsStableUserPrefix 时由 pipeline 前缀注入） */
   importantContext?: string;
   /** 当前用户 ID（传递给 agent 环境变量） */
@@ -119,10 +121,10 @@ export interface AgentBackend {
    */
   inspectSessionTranscript?(session: AgentSession): Promise<SessionTranscript>;
 
-  /** 更新已存在 session 的模型配置（可选，用于运行时 /model 切换） */
+  /** 更新已存在 session 的模型配置（可选，用于运行时 /model、/effort 切换） */
   updateSessionModels?(
     sessionId: string,
-    models: { model?: string },
+    models: { model?: string; effort?: string },
   ): void;
 
   /** 获取 session 累计字节数（可选，用于统计） */

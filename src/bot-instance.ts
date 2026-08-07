@@ -115,6 +115,7 @@ export async function createBotInstance(
     platform: "feishu",
     platformBotId: `_bot_${botConfig.id}_`,
     model: runtimeConfig?.model,
+    effort: runtimeConfig?.effort,
   };
 
   const transport = new PersistentTransport({

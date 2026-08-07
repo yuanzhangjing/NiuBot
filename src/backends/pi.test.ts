@@ -50,6 +50,18 @@ describe("PiBackend", () => {
     expect(input.stdin).toBe("hello");
   });
 
+  it("passes reasoning effort as --thinking level", () => {
+    const backend = new PiBackend();
+    const session = backend.buildSession({
+      workingDirectory: "/tmp",
+      reasoningEffort: "high",
+    });
+    const input = backend.buildInput(session, "hello");
+
+    expect(input.args).toContain("--thinking");
+    expect(input.args).toContain("high");
+  });
+
   it("resumes with --session when agentSessionId is present", () => {
     const backend = new PiBackend();
     const session = backend.buildSession({ workingDirectory: "/tmp", model: "deepseek-v4-flash" });

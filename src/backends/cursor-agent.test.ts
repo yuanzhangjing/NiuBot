@@ -77,6 +77,41 @@ describe("CursorAgentBackend", () => {
     });
   });
 
+  it("encodes reasoning effort into the model name", () => {
+    const backend = new CursorAgentBackend();
+    const session = backend.buildSession({
+      workingDirectory: "/tmp/workspace",
+      model: "claude-opus-4-8",
+      reasoningEffort: "high",
+    });
+
+    const { args } = backend.buildInput(session, "hello");
+    expect(args).toContain("claude-opus-4-8[effort=high]");
+  });
+
+  it("replaces an existing effort fragment and keeps other model params", () => {
+    const backend = new CursorAgentBackend();
+    const session = backend.buildSession({
+      workingDirectory: "/tmp/workspace",
+      model: "claude-opus-4-8[context=1m,effort=low,fast=false]",
+      reasoningEffort: "max",
+    });
+
+    const { args } = backend.buildInput(session, "hello");
+    expect(args).toContain("claude-opus-4-8[context=1m,effort=max,fast=false]");
+  });
+
+  it("keeps the model name unchanged when effort is not configured", () => {
+    const backend = new CursorAgentBackend();
+    const session = backend.buildSession({
+      workingDirectory: "/tmp/workspace",
+      model: "claude-opus-4-8",
+    });
+
+    const { args } = backend.buildInput(session, "hello");
+    expect(args).toContain("claude-opus-4-8");
+  });
+
   it("parses stream-json result, session id, configured model, and token usage", () => {
     const backend = new CursorAgentBackend();
     const session = backend.buildSession({

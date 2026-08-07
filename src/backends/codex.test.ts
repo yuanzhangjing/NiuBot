@@ -320,6 +320,32 @@ describe("CodexBackend session metadata", () => {
     });
   });
 
+  it("passes reasoning effort as a config override on new sessions", () => {
+    const backend = new CodexBackend();
+    const session = backend.buildSession({
+      workingDirectory: "/tmp/project",
+      model: "gpt-5.4",
+      reasoningEffort: "high",
+    });
+
+    const { args } = backend.buildInput(session, "hello");
+    expect(args).toContain("-c");
+    expect(args).toContain("model_reasoning_effort=high");
+  });
+
+  it("passes reasoning effort on resumed sessions too", () => {
+    const backend = new CodexBackend();
+    const session = backend.buildSession({
+      workingDirectory: "/tmp/project",
+      reasoningEffort: "low",
+    });
+    session.agentSessionId = "thread_123";
+
+    const { args } = backend.buildInput(session, "next");
+    expect(args).toContain("-c");
+    expect(args).toContain("model_reasoning_effort=low");
+  });
+
   it("returns the last agent message when commentary and final answer both appear in one turn", () => {
     const backend = new CodexBackend();
     const session = backend.buildSession({ workingDirectory: "/tmp" });

@@ -19,6 +19,24 @@ interface CursorAgentSession extends BaseCliSession {
   resolvedModel?: string;
 }
 
+/**
+ * Cursor CLI 把推理强度编码进 model 名（`model[context=1m,effort=high,fast=false]`）。
+ * 有 effort 时：已含 effort= 片段则替换，含其他参数则追加，否则拼 `[effort=<level>]`。
+ */
+export function applyModelEffort(model: string, effort: string | undefined): string {
+  if (!effort) return model;
+  const bracketIndex = model.indexOf("[");
+  if (bracketIndex === -1) return `${model}[effort=${effort}]`;
+  const name = model.slice(0, bracketIndex);
+  const params = model.slice(bracketIndex + 1, -1).split(",").filter(Boolean);
+  const replaced = params.some((param) => param.startsWith("effort="));
+  const rest = params.map((param) => param.startsWith("effort=") ? `effort=${effort}` : param);
+  if (!replaced) {
+    rest.push(`effort=${effort}`);
+  }
+  return `${name}[${rest.join(",")}]`;
+}
+
 type CursorAgentUsage = {
   inputTokens?: number;
   outputTokens?: number;
@@ -108,6 +126,7 @@ export default class CursorAgentBackend extends CliAgentBackend<CursorAgentSessi
     return {
       workingDirectory: config.workingDirectory ?? process.cwd(),
       model: config.model,
+      reasoningEffort: config.reasoningEffort,
       importantContext: config.importantContext,
       extraEnv: buildNiubotEnv(config),
       cumulativeBytes: 0,
@@ -128,7 +147,7 @@ export default class CursorAgentBackend extends CliAgentBackend<CursorAgentSessi
     ];
 
     if (session.model) {
-      args.push("--model", session.model);
+      args.push("--model", applyModelEffort(session.model, session.reasoningEffort));
     }
     if (session.agentSessionId) {
       args.push("--resume", session.agentSessionId);

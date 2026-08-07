@@ -52,6 +52,7 @@ export default class OpencodeBackend extends CliAgentBackend<OpencodeSession> {
     return {
       workingDirectory: config.workingDirectory ?? process.cwd(),
       model: config.model,
+      reasoningEffort: config.reasoningEffort,
       importantContext: config.importantContext,
       extraEnv: buildNiubotEnv(config),
       cumulativeBytes: 0,
@@ -68,6 +69,7 @@ export default class OpencodeBackend extends CliAgentBackend<OpencodeSession> {
       "--dir", session.workingDirectory,
     ];
     if (session.model) args.push("-m", session.model);
+    if (session.reasoningEffort) args.push("--variant", session.reasoningEffort);
     if (session.agentSessionId) args.push("-s", session.agentSessionId);
     return { args, stdin: message };
   }

@@ -224,6 +224,18 @@ describe("TraeCliBackend", () => {
     });
   });
 
+  it("passes reasoning effort as a config override (codex protocol)", () => {
+    const backend = new TraeCliBackend();
+    const session = backend.buildSession({
+      workingDirectory: "/tmp/project",
+      reasoningEffort: "high",
+    });
+
+    const { args } = backend.buildInput(session, "hello");
+    expect(args).toContain("-c");
+    expect(args).toContain("model_reasoning_effort=high");
+  });
+
   it("returns the last agent message when multiple appear in one turn", () => {
     const backend = new TraeCliBackend();
     const session = backend.buildSession({ workingDirectory: "/tmp" });

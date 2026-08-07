@@ -116,6 +116,10 @@ const MERGED_EMOJI = "Pin";
 const EMPTY_RESPONSE_FALLBACK = "（处理完成，但未生成回复。如果没收到预期结果，请重试）";
 const UPDATE_CONFIRM_COMMAND = "/update 1";
 const UPDATE_PACKAGE_NAME = "@yuanzhangjing/niubot";
+/** /effort 可选级别（与 claude --effort 值域一致） */
+const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
+/** 支持 effort 透传的内置 backend（CLI 能力静态声明；不支持的 backend 保存但不生效） */
+const EFFORT_SUPPORTED_BACKENDS = new Set(["claude", "cursor-agent", "codex", "pi", "opencode", "traecli"]);
 export const SHELL_COMMAND_TIMEOUT_MS = 300_000;
 
 export function resolveUpdateCommandCwd(niubotHome: string, fallbackHome = os.homedir()): string {
@@ -140,7 +144,7 @@ const INTERRUPT_WORDS = new Set([
 ]);
 
 const BUILTIN_COMMANDS = new Set([
-  "/restart", "/update", "/service", "/new", "/agent", "/model",
+  "/restart", "/update", "/service", "/new", "/agent", "/model", "/effort",
   "/admin", "/help", "/stop", "/clear", "/flush", "/task", "/status", "/history",
   "/worker",
 ]);
@@ -262,6 +266,8 @@ export interface BotIdentity {
   platformBotId: string;
   /** 主模型 ID（可选，覆盖 backend 默认值） */
   model?: string;
+  /** 推理强度运行时选择（low/medium/high/xhigh/max），backend 支持时生效 */
+  effort?: string;
 }
 
 interface ChatSession {
@@ -416,7 +422,7 @@ export class Pipeline {
   private processingMsgIds = new Set<string>();
 
   /** 每个 backend 的模型配置快照，切换时保存/恢复 */
-  private backendModelCache = new Map<string, { model?: string }>();
+  private backendModelCache = new Map<string, { model?: string; effort?: string }>();
 
   /** Watchdog 定时器 */
   private watchdogTimer: ReturnType<typeof setInterval> | null = null;
@@ -514,6 +520,7 @@ export class Pipeline {
     // 初始 backend 的模型配置入缓存，确保切走再切回来能恢复
     this.backendModelCache.set(backendType, {
       model: botIdentity.model,
+      effort: botIdentity.effort,
     });
 
     this.queue.onProcess((runId, chatId, mergedText, messages, signal) => (
@@ -1693,6 +1700,14 @@ export class Pipeline {
           return true;
         }
         this.handleModelCommand(parts.slice(1), chatId, platformChatId, msgId);
+        return true;
+      }
+      case "/effort": {
+        if (!isAdmin) {
+          this.replyText(chatId, platformChatId, msgId, "/effort 仅管理员可用。");
+          return true;
+        }
+        this.handleEffortCommand(parts.slice(1), chatId, platformChatId, msgId);
         return true;
       }
       case "/admin": {
@@ -2979,6 +2994,7 @@ export class Pipeline {
       try {
         const agentSession = await this.createAgentSession({
           workingDirectory: this.workingDirectory,
+          reasoningEffort: this.botIdentity.effort,
           importantContext: stableContext || undefined,
           userId: row.user_id ?? undefined,
           chatId: row.chat_id,
@@ -3237,6 +3253,7 @@ ${jobParts.join("\n\n")}
     // Create independent agent session
     const agentSession = await this.createAgentSession({
       workingDirectory: this.workingDirectory,
+      reasoningEffort: this.botIdentity.effort,
       importantContext: stableContext || undefined,
       userId: sessionUserId,
       chatId,
@@ -3685,6 +3702,7 @@ ${jobParts.join("\n\n")}
       // 保存当前 backend 的模型配置
       this.backendModelCache.set(this.backendType, {
         model: this.botIdentity.model,
+        effort: this.botIdentity.effort,
       });
 
       this.agent = newBackend;
@@ -3695,6 +3713,7 @@ ${jobParts.join("\n\n")}
       const cached = this.backendModelCache.get(target)
         ?? getBotBackendModelState(this.db, this.botIdentity.name, target);
       this.botIdentity.model = cached?.model;
+      this.botIdentity.effort = cached?.effort;
       this.persistRuntimeState();
     };
 
@@ -3796,6 +3815,64 @@ ${jobParts.join("\n\n")}
     this.log.info("model switched (runtime)", { model: resolvedModel, backend: this.backendType });
   }
 
+  /**
+   * /effort 命令：查看或切换推理强度。
+   * - /effort              → 显示当前 effort + 可选值 + 当前 backend 是否支持
+   * - /effort <level>      → 切换（low/medium/high/xhigh/max）
+   * - /effort reset        → 恢复 backend 默认
+   */
+  private handleEffortCommand(args: string[], chatId: string, platformChatId: string, msgId?: string): void {
+    const supported = EFFORT_SUPPORTED_BACKENDS.has(this.backendType);
+
+    if (args.length === 0) {
+      const lines = [
+        `**Agent:** ${this.backendType}`,
+        `**Effort:** ${this.botIdentity.effort ?? "default"}`,
+        "",
+        supported
+          ? `可选：${EFFORT_LEVELS.map((level, i) => `${i + 1}. \`${level}\``).join("  ")}`
+          : `当前 backend（${this.backendType}）不支持 effort 参数，设置会保存但不生效。`,
+        "",
+        "`/effort <级别|编号>` 切换",
+        "`/effort reset` 恢复默认",
+      ];
+      this.sendAgentCard(chatId, platformChatId, msgId, "Effort", lines.join("\n"));
+      return;
+    }
+
+    if (args[0] === "reset") {
+      this.botIdentity.effort = undefined;
+      this.updateActiveChatSessionModels(chatId, { effort: undefined });
+      this.persistRuntimeState();
+      this.sendAgentCard(chatId, platformChatId, msgId, "Effort", "已恢复为默认强度。\n当前会话立即生效。");
+      this.log.info("effort reset", { backend: this.backendType });
+      return;
+    }
+
+    // 支持编号或名字（与 /model 一致）：/effort 1 → low
+    const raw = args[0];
+    const index = Number(raw);
+    const level = (Number.isInteger(index) && index >= 1 && index <= EFFORT_LEVELS.length
+      ? EFFORT_LEVELS[index - 1]
+      : raw) as (typeof EFFORT_LEVELS)[number];
+    if (!EFFORT_LEVELS.includes(level)) {
+      this.sendAgentCard(
+        chatId, platformChatId, msgId, "Effort",
+        `无效级别 **${args[0]}**。\n可选：${EFFORT_LEVELS.map((item, i) => `${i + 1}. ${item}`).join("  ")}`,
+      );
+      return;
+    }
+
+    this.botIdentity.effort = level;
+    this.updateActiveChatSessionModels(chatId, { effort: level });
+    this.persistRuntimeState();
+    const note = supported
+      ? "当前会话立即生效，重启后仍保持当前选择。"
+      : `当前 backend（${this.backendType}）不支持 effort 参数，值已保存；切换到支持的 backend 后自动生效。`;
+    this.sendAgentCard(chatId, platformChatId, msgId, "Effort", `推理强度已切换为 **${level}**\n${note}`);
+    this.log.info("effort switched (runtime)", { effort: level, backend: this.backendType });
+  }
+
   /** 保存当前 agent/model 运行时选择；失败不影响当前命令执行。 */
   private persistRuntimeState(): void {
     try {
@@ -3805,6 +3882,7 @@ ${jobParts.join("\n\n")}
       });
       setBotBackendModelState(this.db, this.botIdentity.name, this.backendType, {
         model: this.botIdentity.model,
+        effort: this.botIdentity.effort,
       });
     } catch (err) {
       this.log.warn("failed to persist bot runtime state", { error: String(err) });
@@ -3821,16 +3899,20 @@ ${jobParts.join("\n\n")}
     }
   }
 
-  /** 同步当前 chat 已存在的 backend session；各 backend resume 时会从 session 对象读取 model。 */
-  private updateActiveChatSessionModels(chatId: string, models: { model?: string }): void {
+  /** 同步当前 chat 已存在的 backend session；各 backend resume 时会从 session 对象读取 model/effort。 */
+  private updateActiveChatSessionModels(chatId: string, models: { model?: string; effort?: string }): void {
     const chatSession = this.chatSessions.get(chatId);
     if (!chatSession) return;
 
     const agentSession = chatSession.agentSession as AgentSession & {
       model?: string;
+      reasoningEffort?: string;
     };
     if ("model" in models) {
       agentSession.model = models.model;
+    }
+    if ("effort" in models) {
+      agentSession.reasoningEffort = models.effort;
     }
 
     this.agent.updateSessionModels?.(chatSession.agentSession.id, models);
@@ -3952,6 +4034,7 @@ ${jobParts.join("\n\n")}
         "**管理员**",
         "`/admin`　　管理员列表/添加/移除",
         "`/model`　　查看/切换模型",
+        "`/effort`　 查看/切换推理强度",
         "`/agent`　　查看/切换 Agent backend",
         "`/restart`　重启引擎",
         "`/update`　　检查更新",
@@ -4835,6 +4918,7 @@ ${jobParts.join("\n\n")}
 
     const agentSession = await this.createAgentSession({
       workingDirectory: this.workingDirectory,
+      reasoningEffort: this.botIdentity.effort,
       importantContext: stableContext || undefined,
       userId: userId ?? undefined,
       chatId,

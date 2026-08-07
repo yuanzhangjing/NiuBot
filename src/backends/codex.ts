@@ -40,6 +40,7 @@ export default class CodexBackend extends CliAgentBackend<CodexSession> {
       cumulativeBytes: 0,
       compactCount: 0,
       jsonlOffset: 0,
+      reasoningEffort: config.reasoningEffort,
       sandboxMode: this.sandboxMode,
     };
   }
@@ -58,6 +59,9 @@ export default class CodexBackend extends CliAgentBackend<CodexSession> {
       if (session.model) {
         args.push("-m", session.model);
       }
+      if (session.reasoningEffort) {
+        args.push("-c", `model_reasoning_effort=${session.reasoningEffort}`);
+      }
       return { args, stdin: message };
     }
 
@@ -71,6 +75,9 @@ export default class CodexBackend extends CliAgentBackend<CodexSession> {
 
     if (session.model) {
       args.push("-m", session.model);
+    }
+    if (session.reasoningEffort) {
+      args.push("-c", `model_reasoning_effort=${session.reasoningEffort}`);
     }
 
     return { args, stdin: message };
