@@ -1,4 +1,8 @@
-import { describe, expect, it } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import { initDatabase } from "../database/schema.js";
 import {
   acquireUpgradeLock,
   cronSource,
@@ -7,13 +11,21 @@ import {
   isSafeForUpgrade,
   loopSource,
   mainRunSource,
+  readAutoUpdateEnabled,
   readUpgradeLock,
   releaseUpgradeLock,
+  writeAutoUpdateEnabled,
   workerSource,
   type AutoUpdateConfig,
 } from "./auto-update.js";
 
 const now = new Date("2026-08-08T03:30:00+08:00").getTime();
+
+const tempDirs: string[] = [];
+
+afterEach(() => {
+  for (const dir of tempDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+});
 
 describe("isSafeForUpgrade", () => {
   it("safe when all sources idle", () => {
@@ -148,5 +160,17 @@ describe("upgrade lock", () => {
     releaseUpgradeLock(fakeDb as never);
     expect(readUpgradeLock(fakeDb as never)).toBeNull();
     void db;
+  });
+
+  it("persists auto-update enabled toggle in real DB", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-autoupdate-toggle-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    expect(readAutoUpdateEnabled(db)).toBeNull();
+    writeAutoUpdateEnabled(db, true);
+    expect(readAutoUpdateEnabled(db)).toBe(true);
+    writeAutoUpdateEnabled(db, false);
+    expect(readAutoUpdateEnabled(db)).toBe(false);
+    db.close();
   });
 });

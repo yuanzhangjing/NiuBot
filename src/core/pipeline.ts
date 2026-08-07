@@ -40,6 +40,7 @@ import {
 import { isNewerPackageVersion, isPrereleaseOrUnrecognizedVersion } from "../version.js";
 import {
   acquireUpgradeLock, releaseUpgradeLock, readUpgradeLock,
+  readAutoUpdateEnabled, writeAutoUpdateEnabled,
   isSafeForUpgrade, isInUpgradeWindow,
   mainRunSource, workerSource, goalSource, cronSource, loopSource,
   UPGRADE_WAIT_RUN_TIMEOUT_MS,
@@ -151,7 +152,7 @@ const INTERRUPT_WORDS = new Set([
 ]);
 
 const BUILTIN_COMMANDS = new Set([
-  "/restart", "/update", "/service", "/new", "/agent", "/model", "/effort",
+  "/restart", "/update", "/service", "/new", "/agent", "/model", "/effort", "/autoupdate",
   "/admin", "/help", "/stop", "/clear", "/flush", "/task", "/status", "/history",
   "/worker",
 ]);
@@ -361,6 +362,14 @@ export class Pipeline {
   private autoUpdateNotificationsEnabled: boolean;
   private autoUpdateConfig?: AutoUpdateConfig;
   private upgradeHistoryRecorded = new Set<string>();
+
+  /** 自动升级是否启用：DB 开关（/autoupdate 写入）优先，其次 config.yaml 初始值。 */
+  private isAutoUpdateEnabled(): boolean {
+    if (!this.autoUpdateConfig) return false;
+    const persisted = readAutoUpdateEnabled(this.db);
+    if (persisted !== null) return persisted;
+    return this.autoUpdateConfig.enabled;
+  }
   private botIdentity: BotIdentity;
   private log: ReturnType<typeof createLogger>;
 
@@ -1719,6 +1728,14 @@ export class Pipeline {
           return true;
         }
         this.handleEffortCommand(parts.slice(1), chatId, platformChatId, msgId);
+        return true;
+      }
+      case "/autoupdate": {
+        if (!isAdmin) {
+          this.replyText(chatId, platformChatId, msgId, "/autoupdate 仅管理员可用。");
+          return true;
+        }
+        this.handleAutoUpdateCommand(parts.slice(1), chatId, platformChatId, msgId);
         return true;
       }
       case "/admin": {
@@ -3884,6 +3901,45 @@ ${jobParts.join("\n\n")}
     this.log.info("effort switched (runtime)", { effort: level, backend: this.backendType });
   }
 
+  /** /autoupdate：查看/开关自动升级。 */
+  private handleAutoUpdateCommand(args: string[], chatId: string, platformChatId: string, msgId?: string): void {
+    const config = this.autoUpdateConfig;
+    if (!config) {
+      this.sendAgentCard(chatId, platformChatId, msgId, "AutoUpdate", "未配置自动升级（config.yaml 缺少 autoUpdate 配置）。");
+      return;
+    }
+
+    const action = args[0]?.toLowerCase();
+    if (action === "on" || action === "enable" || action === "1") {
+      writeAutoUpdateEnabled(this.db, true);
+      this.sendAgentCard(
+        chatId, platformChatId, msgId, "AutoUpdate",
+        `自动升级已**开启**。\n窗口：${config.windowStartHour}:00-${config.windowEndHour}:00（${config.timezone}），引擎空闲时自动升级。`,
+      );
+      this.log.info("auto-update enabled (runtime)", { userId: chatId });
+      return;
+    }
+    if (action === "off" || action === "disable" || action === "0") {
+      writeAutoUpdateEnabled(this.db, false);
+      this.sendAgentCard(chatId, platformChatId, msgId, "AutoUpdate", "自动升级已**关闭**。");
+      this.log.info("auto-update disabled (runtime)", { userId: chatId });
+      return;
+    }
+
+    // 查看状态（含无效参数）
+    const enabled = this.isAutoUpdateEnabled();
+    const lines = [
+      `**自动升级：** ${enabled ? "✅ 开启" : "⛔ 关闭"}`,
+      `**窗口：** ${config.windowStartHour}:00-${config.windowEndHour}:00（${config.timezone}）`,
+      `**空闲判定：** 无进行中任务 + 无排队 + 窗口内无定时触发`,
+      `**结果通知：** ${config.notifyOnResult ? "成功白天汇报" : "完全静默"}`,
+      "",
+      "`/autoupdate on` 开启",
+      "`/autoupdate off` 关闭",
+    ];
+    this.sendAgentCard(chatId, platformChatId, msgId, "AutoUpdate", lines.join("\n"));
+  }
+
   /** 保存当前 agent/model 运行时选择；失败不影响当前命令执行。 */
   private persistRuntimeState(): void {
     try {
@@ -4234,7 +4290,7 @@ ${jobParts.join("\n\n")}
     if (latest === this.version) return;
 
     // 自动升级开启：窗口内 + 空闲判定通过 → 直接升级（静默），无需 admin 确认
-    if (this.autoUpdateConfig?.enabled) {
+    if (this.isAutoUpdateEnabled()) {
       await this.maybeRunAutoUpgrade(latest);
       return;
     }
@@ -4264,6 +4320,12 @@ ${jobParts.join("\n\n")}
   private async maybeRunAutoUpgrade(latest: string): Promise<void> {
     const config = this.autoUpdateConfig;
     if (!config) return;
+
+    // 避开 dev/prerelease 版本：自动升级只升正式版
+    if (isPrereleaseOrUnrecognizedVersion(latest)) {
+      this.log.info("auto-upgrade skipped: target is prerelease", { latest });
+      return;
+    }
 
     const now = Date.now();
     if (!isInUpgradeWindow(new Date(now), config)) {

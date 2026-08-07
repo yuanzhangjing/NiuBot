@@ -17,6 +17,7 @@ import {
 } from "../database/schema.js";
 import type { NormalizedMessage, PlatformAdapter } from "../im/types.js";
 import { COMPACT_RECOVERY_REMINDER } from "../memory/inject.js";
+import { readAutoUpdateEnabled } from "./auto-update.js";
 import { SYSTEM_RULES } from "../system-rules.js";
 import { addCronJob, claimDueCronJobs, deleteCronJob } from "./cron.js";
 import { addLoopJob, claimDueLoopJobs, getLoopJob, LoopScheduler } from "./loop.js";
@@ -2356,6 +2357,41 @@ describe("Pipeline runtime", () => {
       backendType: "codex",
       model: undefined,
     });
+  });
+
+  test("/autoupdate toggles and persists the enabled flag", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const pipeline = new Pipeline(
+      db,
+      createImStub(),
+      new RecordingAgent(),
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { enabled: true, windowStartHour: 2, windowEndHour: 5, timezone: "Asia/Shanghai", marginMinutes: 10, notifyOnResult: true },
+    );
+
+    (pipeline as any).handleAutoUpdateCommand(["off"], "c1", "chat-open-id");
+    expect(readAutoUpdateEnabled(db)).toBe(false);
+    expect((pipeline as any).isAutoUpdateEnabled()).toBe(false);
+
+    (pipeline as any).handleAutoUpdateCommand(["on"], "c1", "chat-open-id");
+    expect(readAutoUpdateEnabled(db)).toBe(true);
+    expect((pipeline as any).isAutoUpdateEnabled()).toBe(true);
   });
 
   test("switches reasoning effort via /effort and persists it", () => {
@@ -5392,6 +5428,47 @@ describe("auto-upgrade", () => {
     expect(sentCards.some((card: { content: string }) => card.content.includes("已自动升级"))).toBe(true);
     const { readUpgradeLock } = await import("./auto-update.js");
     expect(readUpgradeLock(db)).toBeNull();
+    pipeline.stop();
+    vi.useRealTimers();
+  });
+
+  test("skips auto upgrade when target is a prerelease/dev version", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-07T19:00:00Z"));
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-autoupdate-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const agent = new RecordingAgent();
+    const { im } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db,
+      im,
+      agent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      autoUpdateConfig,
+    );
+    (pipeline as any).runNpmCommand = async () => ({ stdout: "9.9.9-beta.1\n", stderr: "" });
+    let restarted: string | undefined;
+    (pipeline as any).triggerRestart = (opts: { updateVersion?: string }) => { restarted = opts?.updateVersion; };
+
+    await pipeline.start();
+    await (pipeline as any).checkForUpdatesAndNotifyAdmins();
+
+    expect(restarted).toBeUndefined();
     pipeline.stop();
     vi.useRealTimers();
   });
