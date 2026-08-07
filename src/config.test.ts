@@ -193,4 +193,48 @@ restart:
       sourceDirectory: sourceDir,
     });
   });
+
+  it("parses autoUpdate config with hour clamping", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-config-"));
+    tempDirs.push(dir);
+    const configPath = path.join(dir, "config.yaml");
+    fs.writeFileSync(configPath, `
+bots:
+  - id: NiuBot
+    appId: app-id
+    appSecret: app-secret
+    workingDirectory: ${dir}/workspace
+autoUpdate:
+  enabled: true
+  windowStartHour: 25
+  windowEndHour: -3
+  timezone: UTC
+  marginMinutes: 5
+`, "utf-8");
+
+    const config = loadConfig(configPath);
+    expect(config.autoUpdate?.enabled).toBe(true);
+    expect(config.autoUpdate?.windowStartHour).toBe(23); // 25 → clamp 23
+    expect(config.autoUpdate?.windowEndHour).toBe(0);    // -3 → clamp 0
+    expect(config.autoUpdate?.timezone).toBe("UTC");
+    expect(config.autoUpdate?.marginMinutes).toBe(5);
+  });
+
+  it("skips autoUpdate config when disabled", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-config-"));
+    tempDirs.push(dir);
+    const configPath = path.join(dir, "config.yaml");
+    fs.writeFileSync(configPath, `
+bots:
+  - id: NiuBot
+    appId: app-id
+    appSecret: app-secret
+    workingDirectory: ${dir}/workspace
+autoUpdate:
+  enabled: false
+  windowStartHour: 2
+`, "utf-8");
+
+    expect(loadConfig(configPath).autoUpdate).toBeUndefined();
+  });
 });

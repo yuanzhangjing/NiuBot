@@ -246,10 +246,15 @@ function parseAutoUpdateConfig(raw: unknown): AutoUpdateConfig | undefined {
   const obj = raw as Record<string, unknown>;
   if (obj["enabled"] !== true) return undefined;
   const defaults = AUTO_UPDATE_DEFAULTS;
+  // 小时字段限 0-23，避免非法配置导致窗口判定异常
+  const clampHour = (value: unknown, fallback: number): number => {
+    const n = numberValue(value, fallback);
+    return Math.min(23, Math.max(0, Math.round(n)));
+  };
   return {
     enabled: true,
-    windowStartHour: numberValue(obj["windowStartHour"], defaults.windowStartHour),
-    windowEndHour: numberValue(obj["windowEndHour"], defaults.windowEndHour),
+    windowStartHour: clampHour(obj["windowStartHour"], defaults.windowStartHour),
+    windowEndHour: clampHour(obj["windowEndHour"], defaults.windowEndHour),
     timezone: stringValue(obj["timezone"]) ?? defaults.timezone,
     marginMinutes: numberValue(obj["marginMinutes"], defaults.marginMinutes),
     notifyOnResult: obj["notifyOnResult"] === undefined ? defaults.notifyOnResult : obj["notifyOnResult"] === true,
