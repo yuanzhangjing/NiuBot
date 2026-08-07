@@ -119,7 +119,7 @@ const UPDATE_PACKAGE_NAME = "@yuanzhangjing/niubot";
 /** /effort 可选级别（与 claude --effort 值域一致） */
 const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
 /** 支持 effort 透传的内置 backend（CLI 能力静态声明；不支持的 backend 保存但不生效） */
-const EFFORT_SUPPORTED_BACKENDS = new Set(["claude", "cursor-agent", "codex", "pi", "opencode", "traecli"]);
+const EFFORT_SUPPORTED_BACKENDS = new Set(["claude", "codex", "pi", "opencode", "traecli"]);
 export const SHELL_COMMAND_TIMEOUT_MS = 300_000;
 
 export function resolveUpdateCommandCwd(niubotHome: string, fallbackHome = os.homedir()): string {
