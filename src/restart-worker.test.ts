@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_PREFLIGHT_TIMEOUT_MS,
   buildInstallArgs,
+  isNpmInstalledPath,
   parseNpmPackFilename,
   resolvePreflightTimeoutMs,
   resolveRestartSourceDirectory,
@@ -50,6 +51,18 @@ describe("restart worker helpers", () => {
       .toBe("production");
   });
 
+  it("resolves runtime environment: npm-installed path means production (manual npm install + start)", () => {
+    const source = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-env-"));
+    tempDirs.push(source);
+    // 手动 npm install -g + start：运行路径在 node_modules 下，无 npm-release 标记，无 src/
+    expect(resolveRuntimeEnvironment({}, source, "/opt/homebrew/lib/node_modules/@yuanzhangjing/niubot"))
+      .toBe("production");
+    // 显式 NIUBOT_ENV 仍优先
+    expect(resolveRuntimeEnvironment(
+      { NIUBOT_ENV: "dev" }, source, "/opt/homebrew/lib/node_modules/@yuanzhangjing/niubot",
+    )).toBe("dev");
+  });
+
   it("resolves runtime environment: npm-release source means production", () => {
     const source = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-env-"));
     tempDirs.push(source);
@@ -70,6 +83,13 @@ describe("restart worker helpers", () => {
     // npm-installed without upgrade marker, no src/ checkout → conservative production
     expect(resolveRuntimeEnvironment({}, source)).toBe("production");
     expect(resolveRuntimeEnvironment({ NIUBOT_SOURCE_DIR: "/some/package" }, source)).toBe("production");
+  });
+
+  it("detects npm installed paths by node_modules segment", () => {
+    expect(isNpmInstalledPath("/opt/homebrew/lib/node_modules/@yuanzhangjing/niubot")).toBe(true);
+    expect(isNpmInstalledPath("/Users/x/.niubot/NiuBot/releases/20260807-1/package")).toBe(false);
+    expect(isNpmInstalledPath("C:\\Users\\x\\node_modules\\@scope\\pkg")).toBe(true);
+    expect(isNpmInstalledPath("")).toBe(false);
   });
 
   it("keeps npm releases independent from configured source directories", () => {

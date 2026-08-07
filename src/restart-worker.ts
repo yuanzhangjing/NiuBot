@@ -92,7 +92,7 @@ export async function runRestartWorker(env: NodeJS.ProcessEnv = process.env): Pr
     sourceDirectory,
     workerRuntimePath,
     previousRuntimeMode: env["NIUBOT_RUNTIME_MODE"] || "",
-    environment: resolveRuntimeEnvironment(env, sourceDirectory),
+    environment: resolveRuntimeEnvironment(env, sourceDirectory, workerRuntimePath),
     updateVersion: env["NIUBOT_UPDATE_VERSION"],
     notifyChatId: env["NIUBOT_RESTART_NOTIFY_CHAT_ID"] || env["NIUBOT_CHAT_ID"],
     legacyNotifyEndpoint: env["NIUBOT_API_SOCKET"],
@@ -711,14 +711,29 @@ function resolveRestartMode(context: RestartContext, env: NodeJS.ProcessEnv): Re
 
 /**
  * 解析运行环境标识（dev/production）。
- * 优先级：NIUBOT_ENV 显式声明 > npm-release 来源（生产）> 源码目录有 src/（开发）> 兜底保守 production。
+ * 优先级：NIUBOT_ENV 显式声明 > 运行时路径在 npm 全局 node_modules（npm 包）> npm-release 旧标记
+ *         > 源码目录有 src/（开发）> 兜底保守 production。
  */
-export function resolveRuntimeEnvironment(env: NodeJS.ProcessEnv, sourceDirectory: string): RuntimeEnvironment {
+export function resolveRuntimeEnvironment(
+  env: NodeJS.ProcessEnv,
+  sourceDirectory: string,
+  runtimePath = "",
+): RuntimeEnvironment {
   const declared = env["NIUBOT_ENV"];
   if (declared === "dev" || declared === "production") return declared;
+  // npm 全局安装的包：运行路径必然在 node_modules 下（手动 npm install + start 也命中）
+  if (isNpmInstalledPath(runtimePath)) return "production";
+  // 旧标记：升级路径写入的 npm-release
   if (env["NIUBOT_RUNTIME_MODE"] === "npm-release") return "production";
   if (fs.existsSync(path.join(sourceDirectory, "src"))) return "dev";
   return "production";
+}
+
+/** npm 全局包路径必然包含 node_modules 段（如 /opt/homebrew/lib/node_modules/@xxx/pkg） */
+export function isNpmInstalledPath(runtimePath: string): boolean {
+  if (!runtimePath) return false;
+  const segments = runtimePath.split(/[\\/]+/);
+  return segments.includes("node_modules");
 }
 
 function runtimeEnvironment(context: RestartContext, runtimeMode: string): NodeJS.ProcessEnv {
