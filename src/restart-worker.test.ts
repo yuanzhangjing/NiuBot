@@ -8,6 +8,7 @@ import {
   parseNpmPackFilename,
   resolvePreflightTimeoutMs,
   resolveRestartSourceDirectory,
+  resolveRuntimeEnvironment,
 } from "./restart-worker.js";
 
 const tempDirs: string[] = [];
@@ -38,6 +39,37 @@ describe("restart worker helpers", () => {
     expect(buildInstallArgs(true)).toEqual([
       "install", "--omit=dev", "--no-audit", "--no-fund", "--prefer-offline",
     ]);
+  });
+
+  it("resolves runtime environment: explicit NIUBOT_ENV wins", () => {
+    const source = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-env-"));
+    tempDirs.push(source);
+    expect(resolveRuntimeEnvironment({ NIUBOT_ENV: "production" }, source)).toBe("production");
+    expect(resolveRuntimeEnvironment({ NIUBOT_ENV: "dev" }, source)).toBe("dev");
+    expect(resolveRuntimeEnvironment({ NIUBOT_ENV: "production", NIUBOT_RUNTIME_MODE: "npm-release" }, source))
+      .toBe("production");
+  });
+
+  it("resolves runtime environment: npm-release source means production", () => {
+    const source = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-env-"));
+    tempDirs.push(source);
+    expect(resolveRuntimeEnvironment({ NIUBOT_RUNTIME_MODE: "npm-release" }, source)).toBe("production");
+  });
+
+  it("resolves runtime environment: source checkout with src/ means dev", () => {
+    const source = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-env-"));
+    fs.mkdirSync(path.join(source, "src"), { recursive: true });
+    tempDirs.push(source);
+    expect(resolveRuntimeEnvironment({}, source)).toBe("dev");
+    expect(resolveRuntimeEnvironment({ NIUBOT_RUNTIME_MODE: "npm-release" }, source)).toBe("production");
+  });
+
+  it("resolves runtime environment: defaults to production when ambiguous", () => {
+    const source = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-env-"));
+    tempDirs.push(source);
+    // npm-installed without upgrade marker, no src/ checkout → conservative production
+    expect(resolveRuntimeEnvironment({}, source)).toBe("production");
+    expect(resolveRuntimeEnvironment({ NIUBOT_SOURCE_DIR: "/some/package" }, source)).toBe("production");
   });
 
   it("keeps npm releases independent from configured source directories", () => {

@@ -35,6 +35,9 @@ export const DEFAULT_PREFLIGHT_TIMEOUT_MS = 120_000;
 
 type RestartMode = "source" | "npm-update" | "production";
 
+/** 运行环境标识：dev（本地开发）vs production（正式服务）。显式声明优先，否则推导，兜底保守取 production。 */
+export type RuntimeEnvironment = "dev" | "production";
+
 interface RestartContext {
   id: string;
   startedAt: string;
@@ -44,6 +47,8 @@ interface RestartContext {
   sourceDirectory: string;
   workerRuntimePath: string;
   previousRuntimeMode: string;
+  /** dev/production 运行环境（NIUBOT_ENV 显式声明或推导） */
+  environment: RuntimeEnvironment;
   updateVersion?: string;
   notifyChatId?: string;
   legacyNotifyEndpoint?: string;
@@ -87,6 +92,7 @@ export async function runRestartWorker(env: NodeJS.ProcessEnv = process.env): Pr
     sourceDirectory,
     workerRuntimePath,
     previousRuntimeMode: env["NIUBOT_RUNTIME_MODE"] || "",
+    environment: resolveRuntimeEnvironment(env, sourceDirectory),
     updateVersion: env["NIUBOT_UPDATE_VERSION"],
     notifyChatId: env["NIUBOT_RESTART_NOTIFY_CHAT_ID"] || env["NIUBOT_CHAT_ID"],
     legacyNotifyEndpoint: env["NIUBOT_API_SOCKET"],
@@ -155,8 +161,6 @@ async function runSourceRestart(context: RestartContext): Promise<void> {
     releaseId,
     cwd: context.sourceDirectory,
     installTimeoutMs: installTimeout(context, false),
-    // 本地源码重启 = dev 环境：优先本地缓存，registry 抖动不影响
-    preferOffline: true,
   });
   await switchToCandidate(context, candidate, "", "重启成功。");
 }
@@ -441,8 +445,6 @@ async function ensureBootstrapRelease(context: RestartContext): Promise<void> {
     releaseId,
     cwd: context.sourceDirectory,
     installTimeoutMs: installTimeout(context, false),
-    // bootstrap 也是本地环境（打包当前运行的 dist），同样优先本地缓存
-    preferOffline: true,
   });
   context.store.writeState({ schemaVersion: 1, current: releaseId, lastKnownGood: releaseId });
 }
@@ -453,8 +455,6 @@ interface PackReleaseOptions {
   packageSpec?: string;
   expectedVersion?: string;
   installTimeoutMs: number;
-  /** 安装依赖时优先使用本地 npm 缓存（缓存命中即不访问 registry）。dev/本地环境用，生产更新不用。 */
-  preferOffline?: boolean;
 }
 
 async function packRelease(context: RestartContext, options: PackReleaseOptions): Promise<string> {
@@ -490,7 +490,7 @@ async function packRelease(context: RestartContext, options: PackReleaseOptions)
     await runLogged(
       context,
       npmCommand,
-      buildInstallArgs(options.preferOffline),
+      buildInstallArgs(context.environment === "dev"),
       packageDirectory,
       options.installTimeoutMs,
       npmEnv,
@@ -709,10 +709,23 @@ function resolveRestartMode(context: RestartContext, env: NodeJS.ProcessEnv): Re
   return "production";
 }
 
+/**
+ * 解析运行环境标识（dev/production）。
+ * 优先级：NIUBOT_ENV 显式声明 > npm-release 来源（生产）> 源码目录有 src/（开发）> 兜底保守 production。
+ */
+export function resolveRuntimeEnvironment(env: NodeJS.ProcessEnv, sourceDirectory: string): RuntimeEnvironment {
+  const declared = env["NIUBOT_ENV"];
+  if (declared === "dev" || declared === "production") return declared;
+  if (env["NIUBOT_RUNTIME_MODE"] === "npm-release") return "production";
+  if (fs.existsSync(path.join(sourceDirectory, "src"))) return "dev";
+  return "production";
+}
+
 function runtimeEnvironment(context: RestartContext, runtimeMode: string): NodeJS.ProcessEnv {
   return {
     NIUBOT_SOURCE_DIR: context.sourceDirectory,
     NIUBOT_RUNTIME_MODE: runtimeMode,
+    NIUBOT_ENV: context.environment,
     NIUBOT_LOG_LEVEL: process.env["NIUBOT_LOG_LEVEL"] || "info",
   };
 }
