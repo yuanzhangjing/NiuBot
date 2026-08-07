@@ -43,7 +43,7 @@ import {
   readAutoUpdateEnabled, writeAutoUpdateEnabled,
   isSafeForUpgrade, isInUpgradeWindow, minutesUntilUpgradeWindowEnd,
   mainRunSource, workerSource, goalSource, cronSource, loopSource,
-  UPGRADE_WAIT_RUN_TIMEOUT_MS,
+  UPGRADE_SAFENESS_WINDOW_MS, UPGRADE_WAIT_RUN_TIMEOUT_MS,
   type AutoUpdateConfig, type UpgradeSafenessSource,
 } from "./auto-update.js";
 import {
@@ -4426,10 +4426,9 @@ ${jobParts.join("\n\n")}
       return;
     }
 
-    // cron/loop 未来触发检查窗口 = 本次升级窗口总时长（跨天窗口补 24h）
-    let windowHours = config.windowEndHour - config.windowStartHour;
-    if (windowHours <= 0) windowHours += 24;
-    const windowMs = windowHours * 60 * 60_000;
+    // cron/loop 未来触发检查窗口 = 升级执行耗时 + 余量（30 分钟），
+    // 不沿用整个可升级窗口：避免窗口内远端 cron 白白顺延，同时仍避开真正撞上升级的触发
+    const windowMs = UPGRADE_SAFENESS_WINDOW_MS;
     const sources = this.buildSafenessSources();
     const { safe, blockers } = isSafeForUpgrade(sources, afterDownload, windowMs);
     if (!safe) {

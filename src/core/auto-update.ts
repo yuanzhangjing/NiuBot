@@ -16,6 +16,13 @@ export const DEFAULT_UPGRADE_MARGIN_MINUTES = 10;
 /** 等待当前 run 收尾的超时上限（毫秒）：长跑任务强制升级，中断靠 continuation 恢复兜底。 */
 export const UPGRADE_WAIT_RUN_TIMEOUT_MS = 5 * 60_000;
 
+/**
+ * cron/loop 未来触发检查窗口（毫秒）：覆盖「升级执行耗时 + 余量」。
+ * 不沿用整个可升级窗口——升级只需几分钟，用 30 分钟窗口即可避开
+ * 真正会撞上升级的 cron，同时不因窗口内远端 cron 白白顺延。
+ */
+export const UPGRADE_SAFENESS_WINDOW_MS = 30 * 60_000;
+
 /** 升级锁在 DB 中的键名。 */
 export const UPGRADE_LOCK_KEY = "auto_update_lock";
 

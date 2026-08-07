@@ -5378,6 +5378,49 @@ describe("auto-upgrade", () => {
     vi.useRealTimers();
   });
 
+  test("does not block auto upgrade for cron beyond the 30-minute safeness window", async () => {
+    vi.useFakeTimers();
+    // 03:00 +08:00 窗口内；DB 有 06:00 的 cron——30 分钟检查窗内不触发，不应阻塞升级
+    vi.setSystemTime(new Date("2026-08-07T19:00:00Z"));
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-autoupdate-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare(
+      "INSERT INTO cron_jobs (chat_id, creator_user_id, cron_expr, prompt, status) VALUES ('c1', 'u2', '0 6 * * *', 'morning', 'active')",
+    ).run();
+    const agent = new RecordingAgent();
+    const { im } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db,
+      im,
+      agent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      autoUpdateConfig,
+    );
+    (pipeline as any).runNpmCommand = async () => ({ stdout: "9.9.9\n", stderr: "" });
+    let restarted: string | undefined;
+    (pipeline as any).triggerRestart = (opts: { updateVersion?: string }) => { restarted = opts?.updateVersion; };
+
+    await pipeline.start();
+    await vi.waitFor(() => expect(restarted).toBe("9.9.9"));
+    pipeline.stop();
+    vi.useRealTimers();
+  });
+
   test("defers auto upgrade when engine busy", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-07T19:00:00Z"));
