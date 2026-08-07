@@ -50,6 +50,14 @@ NIUBOT_HOME=~/.niubot bash restart.sh
 ```
 流程：build → backup dist → stop → start → health check → rollback on failure
 
+### 运行环境标识（NIUBOT_ENV）
+重启链路用 `NIUBOT_ENV` 区分 dev/production，决定 release 依赖安装是否走 `--prefer-offline`（本地缓存优先）：
+
+- **显式声明**：启动/部署时设置 `NIUBOT_ENV=dev` 或 `NIUBOT_ENV=production`，最高优先
+- **自动推导**（未声明时）：运行路径含 `node_modules`（npm 全局安装）→ production；`NIUBOT_RUNTIME_MODE=npm-release` 旧标记 → production（老实例兼容）；源码目录含 `src/` → dev；兜底 → production（保守，宁慢勿错）
+- **生效范围**：restart worker 算出环境后透传新引擎，dev 才给 `npm install` 加 `--prefer-offline`；生产更新（npm-update）始终拉取最新依赖，不受缓存影响
+- `NIUBOT_RUNTIME_MODE` 已废弃透传，仅保留读取兼容（`resolveRuntimeEnvironment` 等），等老实例升级完后可删除
+
 ### 代码规范
 - TypeScript strict mode
 - 日志用 `createLogger`，不用 `console.log`
