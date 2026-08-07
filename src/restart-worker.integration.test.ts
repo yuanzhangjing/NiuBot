@@ -63,8 +63,8 @@ describe("restart worker integration", () => {
       runtimePath: runtime,
       logFile: path.join(home, "logs", "initial.log"),
       version: "9.8.7",
-      runtimeMode: "npm-release",
-      env: { NIUBOT_RUNTIME_MODE: "npm-release" },
+      runtimeMode: "production",
+      env: { NIUBOT_ENV: "production" },
     });
     expect(initial.state.runtimePath).toBe(runtime);
 
@@ -73,7 +73,7 @@ describe("restart worker integration", () => {
       NIUBOT_HOME: home,
       NIUBOT_BOT_NAME: "TestBot",
       NIUBOT_SOURCE_DIR: runtime,
-      NIUBOT_RUNTIME_MODE: "npm-release",
+      NIUBOT_ENV: "production",
       NIUBOT_AGENT_SESSION: undefined,
     });
 

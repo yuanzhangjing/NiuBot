@@ -273,7 +273,7 @@ Usage: nbt restart [--update <version>] [--wake [<提示>]] [--no-wake]
       botName: BOT_NAME ?? "NiuBot",
       runtimeRoot,
       sourceDirectory,
-      runtimeMode: process.env["NIUBOT_RUNTIME_MODE"] ?? "",
+      environment: process.env["NIUBOT_ENV"] ?? "",
       notifyChatId: CHAT_ID,
       updateVersion,
       wakePrompt,

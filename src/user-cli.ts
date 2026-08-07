@@ -1062,7 +1062,7 @@ async function cmdRestart(niubotHome: string): Promise<void> {
     botName: config.bots[0]?.id ?? "NiuBot",
     runtimeRoot: PROJECT_ROOT,
     sourceDirectory: running.identity.runtimePath,
-    runtimeMode: running.state.runtimeMode ?? "",
+    environment: running.state.runtimeMode ?? process.env["NIUBOT_ENV"] ?? "",
   });
   console.log(`Restart started (worker PID ${worker.pid})`);
   console.log(`  Log: ${worker.logFile}`);
@@ -1331,7 +1331,7 @@ async function cmdUpdate(niubotHome: string, flags: CliFlags): Promise<void> {
       botName: config.bots[0]?.id ?? "NiuBot",
       runtimeRoot: PROJECT_ROOT,
       sourceDirectory: running.identity.runtimePath,
-      runtimeMode: running.state.runtimeMode ?? "",
+      environment: running.state.runtimeMode ?? process.env["NIUBOT_ENV"] ?? "",
       updateVersion: latest,
     });
     info(`Update started (worker PID ${worker.pid})`);

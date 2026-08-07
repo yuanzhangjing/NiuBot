@@ -4240,7 +4240,10 @@ ${jobParts.join("\n\n")}
       path.dirname(fileURLToPath(import.meta.url)),
       "../..",
     );
-    const useNpmRelease = process.env["NIUBOT_RUNTIME_MODE"] === "npm-release";
+    // 环境判定：显式 NIUBOT_ENV 优先，npm-release 旧标记兼容；生产环境升级走 runtimeRoot
+    const environment = process.env["NIUBOT_ENV"]
+      || (process.env["NIUBOT_RUNTIME_MODE"] === "npm-release" ? "production" : undefined);
+    const useNpmRelease = environment === "production";
     const projectRoot = opts?.updateVersion || useNpmRelease
       ? runtimeRoot
       : (this.restartConfig?.sourceDirectory ?? runtimeRoot);
@@ -4267,7 +4270,7 @@ ${jobParts.join("\n\n")}
         botName: this.botIdentity.name,
         runtimeRoot,
         sourceDirectory: projectRoot,
-        runtimeMode: process.env["NIUBOT_RUNTIME_MODE"] || "",
+        environment: process.env["NIUBOT_ENV"] || "",
         notifyChatId: chatId,
         updateVersion: opts?.updateVersion,
       });

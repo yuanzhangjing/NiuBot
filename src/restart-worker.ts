@@ -46,7 +46,6 @@ interface RestartContext {
   botDirectory: string;
   sourceDirectory: string;
   workerRuntimePath: string;
-  previousRuntimeMode: string;
   /** dev/production 运行环境（NIUBOT_ENV 显式声明或推导） */
   environment: RuntimeEnvironment;
   updateVersion?: string;
@@ -91,7 +90,6 @@ export async function runRestartWorker(env: NodeJS.ProcessEnv = process.env): Pr
     botDirectory,
     sourceDirectory,
     workerRuntimePath,
-    previousRuntimeMode: env["NIUBOT_RUNTIME_MODE"] || "",
     environment: resolveRuntimeEnvironment(env, sourceDirectory, workerRuntimePath),
     updateVersion: env["NIUBOT_UPDATE_VERSION"],
     notifyChatId: env["NIUBOT_RESTART_NOTIFY_CHAT_ID"] || env["NIUBOT_CHAT_ID"],
@@ -162,7 +160,7 @@ async function runSourceRestart(context: RestartContext): Promise<void> {
     cwd: context.sourceDirectory,
     installTimeoutMs: installTimeout(context, false),
   });
-  await switchToCandidate(context, candidate, "", "重启成功。");
+  await switchToCandidate(context, candidate, "重启成功。");
 }
 
 async function runNpmUpdate(context: RestartContext): Promise<void> {
@@ -178,7 +176,7 @@ async function runNpmUpdate(context: RestartContext): Promise<void> {
     expectedVersion: version,
     installTimeoutMs: installTimeout(context, true),
   });
-  await switchToCandidate(context, candidate, "npm-release", "更新并重启成功。");
+  await switchToCandidate(context, candidate, "更新并重启成功。");
 }
 
 async function runProductionRestart(context: RestartContext): Promise<void> {
@@ -215,7 +213,7 @@ async function runProductionRestart(context: RestartContext): Promise<void> {
     const launched = launchRuntime(context, {
       runtimePath,
       version: readPackage(path.join(runtimePath, "package.json")).version,
-      runtimeMode: context.previousRuntimeMode,
+      runtimeMode: context.environment,
     });
     context.state.write("production_health_check", { candidatePid: launched.state.pid });
     if (!await checkRuntimeHealth(context, launched)) throw new Error("health check failed");
@@ -237,7 +235,6 @@ async function runProductionRestart(context: RestartContext): Promise<void> {
 async function switchToCandidate(
   context: RestartContext,
   releaseId: string,
-  runtimeMode: string,
   successMessage: string,
 ): Promise<void> {
   const packageDirectory = context.store.packageDirectory(releaseId);
@@ -281,7 +278,7 @@ async function switchToCandidate(
     const launched = launchRuntime(context, {
       runtimePath: packageDirectory,
       version: readPackage(path.join(packageDirectory, "package.json")).version,
-      runtimeMode,
+      runtimeMode: context.environment,
     });
     context.state.write("health_check_candidate", { candidatePid: launched.state.pid });
     if (!await checkRuntimeHealth(context, launched)) throw new Error("candidate health check failed");
@@ -323,7 +320,7 @@ function launchRuntime(context: RestartContext, target: RuntimeTarget) {
     logFile: context.logFile,
     version: target.version,
     runtimeMode: target.runtimeMode,
-    env: runtimeEnvironment(context, target.runtimeMode),
+    env: runtimeEnvironment(context),
   });
 }
 
@@ -346,7 +343,7 @@ function resolveRollbackTarget(
       return {
         runtimePath,
         version: readPackage(path.join(runtimePath, "package.json")).version,
-        runtimeMode: old?.state.runtimeMode ?? context.previousRuntimeMode,
+        runtimeMode: old?.state.runtimeMode ?? context.environment,
       };
     }
   } catch (err) {
@@ -518,7 +515,7 @@ async function runPreflight(
       runtimePath,
       timeoutMs,
       {
-        ...runtimeEnvironment(context, context.previousRuntimeMode),
+        ...runtimeEnvironment(context),
         [PREFLIGHT_DATABASE_MANIFEST_ENV]: databaseManifestPath,
         [PREFLIGHT_FULL_VALIDATION_ENV]: "1",
       },
@@ -683,8 +680,8 @@ export function resolveRestartSourceDirectory(options: {
   env: NodeJS.ProcessEnv;
 }): string {
   const mode = options.env["NIUBOT_RESTART_MODE"];
-  const runtimeMode = options.env["NIUBOT_RUNTIME_MODE"];
-  if (mode === "npm-update" || runtimeMode === "npm-release") {
+  const environment = options.env["NIUBOT_ENV"];
+  if (mode === "npm-update" || environment === "production" || options.env["NIUBOT_RUNTIME_MODE"] === "npm-release") {
     return path.resolve(options.env["NIUBOT_SOURCE_DIR"] || options.workerRuntimePath);
   }
   try {
@@ -736,10 +733,9 @@ export function isNpmInstalledPath(runtimePath: string): boolean {
   return segments.includes("node_modules");
 }
 
-function runtimeEnvironment(context: RestartContext, runtimeMode: string): NodeJS.ProcessEnv {
+function runtimeEnvironment(context: RestartContext): NodeJS.ProcessEnv {
   return {
     NIUBOT_SOURCE_DIR: context.sourceDirectory,
-    NIUBOT_RUNTIME_MODE: runtimeMode,
     NIUBOT_ENV: context.environment,
     NIUBOT_LOG_LEVEL: process.env["NIUBOT_LOG_LEVEL"] || "info",
   };

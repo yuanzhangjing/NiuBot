@@ -17,7 +17,7 @@ export function resolveRestartCompatOptions(
     botName: env["NIUBOT_BOT_NAME"] || "NiuBot",
     runtimeRoot,
     sourceDirectory: env["NIUBOT_SOURCE_DIR"] || runtimeRoot,
-    runtimeMode: env["NIUBOT_RUNTIME_MODE"] || "",
+    environment: env["NIUBOT_ENV"] || env["NIUBOT_RUNTIME_MODE"] || "",
     // v0.1.12..v0.1.16 only provided NIUBOT_CHAT_ID. Keep the old name so
     // installing a new package before invoking the old /restart still reports
     // the final result to the originating chat.

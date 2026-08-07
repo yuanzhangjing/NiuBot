@@ -125,7 +125,7 @@ function launchDetachedEngineLocked(options: LaunchEngineOptions): LaunchedEngin
     endpointKind: endpoint.kind,
     controlToken,
     version: options.version,
-    runtimeMode: options.runtimeMode ?? options.env?.["NIUBOT_RUNTIME_MODE"],
+    runtimeMode: options.runtimeMode ?? options.env?.["NIUBOT_ENV"] ?? options.env?.["NIUBOT_RUNTIME_MODE"],
     runtimePath: options.runtimePath,
     nodePath: process.execPath,
     logFile: options.logFile,

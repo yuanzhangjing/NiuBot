@@ -8,7 +8,8 @@ export interface RestartWorkerLaunchOptions {
   botName: string;
   runtimeRoot: string;
   sourceDirectory: string;
-  runtimeMode?: string;
+  /** dev/production 运行环境；透传给 worker 作为 NIUBOT_ENV（旧版 runtimeMode 透传已废弃） */
+  environment?: string;
   notifyChatId?: string;
   updateVersion?: string;
   restartId?: string;
@@ -33,7 +34,7 @@ export function buildRestartWorkerEnvironment(
     NIUBOT_HOME: path.resolve(options.niubotHome),
     NIUBOT_BOT_NAME: options.botName,
     NIUBOT_SOURCE_DIR: path.resolve(options.sourceDirectory),
-    NIUBOT_RUNTIME_MODE: options.runtimeMode ?? "",
+    NIUBOT_ENV: options.environment ?? "",
     NIUBOT_RESTART_NOTIFY_CHAT_ID: options.notifyChatId ?? "",
     NIUBOT_RESTART_ID: options.restartId ?? "",
     NIUBOT_RESTART_STARTED_AT: options.restartStartedAt ?? "",

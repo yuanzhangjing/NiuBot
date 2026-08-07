@@ -449,7 +449,7 @@ async function main(): Promise<void> {
       endpointKind: engineEndpoint.kind,
       controlToken,
       version,
-      runtimeMode: process.env["NIUBOT_RUNTIME_MODE"] || "",
+      runtimeMode: process.env["NIUBOT_ENV"] || process.env["NIUBOT_RUNTIME_MODE"] || "",
       runtimePath,
       nodePath: process.execPath,
       logFile: process.env["NIUBOT_LOG_FILE"],
