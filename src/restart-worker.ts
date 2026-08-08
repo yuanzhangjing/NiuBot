@@ -630,10 +630,11 @@ async function wakeMainSession(context: RestartContext): Promise<void> {
   try {
     await postToBot(context, "/wake", { prompt });
     log(context, `main session wake queued: ${prompt.slice(0, 60)}`);
-    // 唤醒投递成功后，追加一条用户可见确认：明确「重启后已唤醒」，
-    // 避免用户分不清重启后 Agent 是否真的被拉起继续干活。
+    // 唤醒投递成功后，追加一条用户可见确认：明确「重启后已唤醒」及唤醒内容，
+    // 让用户知道重启后 Agent 被拉起要干什么，不只是一句模糊的「已唤醒」。
     try {
-      await postToBot(context, "/send", { text: "✅ 重启完成，主会话已唤醒。" });
+      const text = `✅ 重启完成，主会话已唤醒。\n**唤醒任务：** ${prompt}`;
+      await postToBot(context, "/send", { text });
     } catch (err) {
       log(context, `wake confirmation send failed: ${errorMessage(err)}`);
     }
