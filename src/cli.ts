@@ -226,11 +226,10 @@ async function handleRestart(args: string[]): Promise<void> {
     console.log(`Restart the NiuBot Engine through the safe restart pipeline.
 Notification is sent back to the current chat automatically.
 
-Usage: nbt restart [--update <version>] [--wake [<提示>]] [--no-wake]
+Usage: nbt restart [--update <version>] [--wake [<提示>]]
   --wake [<提示>]：重启完成后向主会话注入任务（触发 Agent 在原上下文干活）；
                    提示可选，不带提示时默认「重启完成，请简要汇报状态并继续之前的工作」。
-                   该入口主要给 Agent 调用，默认即唤醒，无需传 --wake；
-  --no-wake：显式关闭唤醒（只发重启通知，Agent 保持等待）。`);
+                   重启后始终唤醒（无 --no-wake 选项），确保重启结果能被确认。`);
     return;
   }
   if (!NIUBOT_HOME) {
@@ -245,23 +244,18 @@ Usage: nbt restart [--update <version>] [--wake [<提示>]] [--no-wake]
     process.exit(1);
   }
   const updateVersion = updateIndex >= 0 ? updateValue : undefined;
-  // 唤醒默认开启（该入口主要给 Agent 调用，重启后需要继续干活）：
-  // --wake [<提示>] 显式指定提示语；--no-wake 显式关闭；都不传则默认提示语唤醒。
+  // 唤醒默认开启（重启后需要确认结果）：--wake [<提示>] 显式指定提示语；
+  // 不传则默认提示语唤醒。不支持 --no-wake（重启后必须唤醒，避免结果无法确认）。
   const DEFAULT_WAKE_PROMPT = "重启完成，请简要汇报状态并继续之前的工作";
-  let wakePrompt: string | undefined;
-  if (args.includes("--no-wake")) {
-    wakePrompt = undefined;
-  } else {
-    const wakeIndex = args.indexOf("--wake");
-    const wakeArgs: string[] = [];
-    if (wakeIndex >= 0) {
-      for (const arg of args.slice(wakeIndex + 1)) {
-        if (arg.startsWith("--")) break;
-        wakeArgs.push(arg);
-      }
+  const wakeIndex = args.indexOf("--wake");
+  const wakeArgs: string[] = [];
+  if (wakeIndex >= 0) {
+    for (const arg of args.slice(wakeIndex + 1)) {
+      if (arg.startsWith("--")) break;
+      wakeArgs.push(arg);
     }
-    wakePrompt = wakeArgs.length > 0 ? wakeArgs.join(" ") : DEFAULT_WAKE_PROMPT;
   }
+  const wakePrompt = wakeArgs.length > 0 ? wakeArgs.join(" ") : DEFAULT_WAKE_PROMPT;
   const runtimeRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   // sourceDirectory 与 restart-compat 一致：env 显式指定优先，否则回退 runtimeRoot。
   // 源码开发版路径由 worker 内部 resolveRestartSourceDirectory 从 config.yaml 解析。

@@ -630,6 +630,13 @@ async function wakeMainSession(context: RestartContext): Promise<void> {
   try {
     await postToBot(context, "/wake", { prompt });
     log(context, `main session wake queued: ${prompt.slice(0, 60)}`);
+    // 唤醒投递成功后，追加一条用户可见确认：明确「重启后已唤醒」，
+    // 避免用户分不清重启后 Agent 是否真的被拉起继续干活。
+    try {
+      await postToBot(context, "/send", { text: "✅ 重启完成，主会话已唤醒。" });
+    } catch (err) {
+      log(context, `wake confirmation send failed: ${errorMessage(err)}`);
+    }
   } catch (err) {
     log(context, `wake failed: ${errorMessage(err)}`);
   }
