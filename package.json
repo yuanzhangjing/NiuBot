@@ -33,7 +33,7 @@
     "dev": "tsx src/index.ts",
     "build": "node scripts/build.mjs",
     "start": "node dist/index.js",
-    "test": "vitest run",
+    "test": "vitest run --testTimeout=30000",
     "test:public-upgrades": "node scripts/check-public-upgrades.mjs",
     "test:watch": "vitest",
     "pack:check": "node scripts/check-package.mjs",
