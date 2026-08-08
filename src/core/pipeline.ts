@@ -1690,6 +1690,10 @@ export class Pipeline {
           this.handleAutoUpdateCommand(parts.slice(2), chatId, platformChatId, msgId);
           return true;
         }
+        if (parts.length === 1 || !parts[1]) {
+          // /update 不带参数：先显示自动升级帮助/状态，再检查版本
+          this.handleAutoUpdateCommand([], chatId, platformChatId, msgId);
+        }
         this.handleUpdate(chatId, platformChatId, msgId, isUpdateConfirmedArg(parts[1]));
         return true;
       }
@@ -2324,6 +2328,7 @@ export class Pipeline {
     const content = [
       `**Bot:** ${this.botIdentity.name}`,
       `**Version:** ${this.version}`,
+      `**Env:** ${process.env["NIUBOT_ENV"] || "production"}`,
       `**Platform:** ${this.botIdentity.platform}`,
       `**Backend:** ${displayBackendType(this.backendType)}`,
       `**Model:** ${this.botIdentity.model ?? "default"}`,
@@ -3956,6 +3961,7 @@ ${jobParts.join("\n\n")}
     const enabled = this.isAutoUpdateEnabled();
     const lines = [
       `**自动升级：** ${enabled ? "✅ 开启" : "⛔ 关闭"}`,
+      `**Env：** ${process.env["NIUBOT_ENV"] || "production"}`,
       `**窗口：** ${config.windowStartHour}:00-${config.windowEndHour}:00（${config.timezone}）`,
       `**空闲判定：** 无进行中任务 + 无排队 + 窗口内无定时触发`,
       `**结果通知：** ${config.notifyOnResult ? "成功白天汇报" : "完全静默"}`,
@@ -4236,18 +4242,19 @@ ${jobParts.join("\n\n")}
 
   private async handleUpdate(chatId: string, platformChatId: string, msgId?: string, confirmed = false): Promise<void> {
     const currentVersion = this.version;
+    const env = process.env["NIUBOT_ENV"] || "production";
 
     try {
       const latest = await this.fetchLatestVersion();
       if (!latest || !isNewerPackageVersion(latest, currentVersion)) {
-        const text = `已是最新版本 (${currentVersion})。`;
+        const text = `已是最新版本 (${currentVersion})。\nEnv: ${env}`;
         const send = this.transport.sendCard(platformChatId, "Update", text, undefined, msgId);
         send.then((pmid) => { this.storeBotResponse(chatId, text, pmid); }).catch((err) => this.log.warn("update card send failed", { error: String(err) }));
         return;
       }
 
       if (!confirmed) {
-        const text = `发现新版本：${currentVersion} → ${latest}\n发送 \`${UPDATE_CONFIRM_COMMAND}\` 升级并重启。`;
+        const text = `发现新版本：${currentVersion} → ${latest}\nEnv: ${env}\n发送 \`${UPDATE_CONFIRM_COMMAND}\` 升级并重启。`;
         const send = this.transport.sendCard(platformChatId, "Update", text, undefined, msgId);
         send.then((pmid) => { this.storeBotResponse(chatId, text, pmid); }).catch((err) => this.log.warn("update card send failed", { error: String(err) }));
         return;
