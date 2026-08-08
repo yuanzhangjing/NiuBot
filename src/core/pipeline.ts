@@ -41,6 +41,7 @@ import { isNewerPackageVersion, isPrereleaseOrUnrecognizedVersion } from "../ver
 import {
   acquireUpgradeLock, releaseUpgradeLock, readUpgradeLock,
   readAutoUpdateEnabled, writeAutoUpdateEnabled,
+  readAutoUpdateHistory, writeAutoUpdateHistory, clearAutoUpdateHistory,
   isSafeForUpgrade, isInUpgradeWindow, minutesUntilUpgradeWindowEnd,
   mainRunSource, workerSource, goalSource, cronSource, loopSource,
   UPGRADE_SAFENESS_WINDOW_MS, UPGRADE_WAIT_RUN_TIMEOUT_MS,
@@ -377,6 +378,24 @@ export class Pipeline {
     if (persisted !== null) return persisted;
     return this.autoUpdateConfig.enabled;
   }
+
+  /**
+   * 引擎启动时的锁清理：上一轮升级/重启已结束，锁的使命完成。
+   * 记录升级结果（供白天汇报）并立即解锁——锁不跨进程存活，
+   * 生命周期 = 触发瞬间到新引擎启动（几分钟），不是到第二天。
+   */
+  private cleanupUpgradeLockOnStartup(): void {
+    const lock = readUpgradeLock(this.db);
+    if (!lock) return;
+    const outcome = lock.version && lock.version === this.version ? "success" : "rolled_back";
+    writeAutoUpdateHistory(this.db, {
+      version: lock.version ?? this.version,
+      outcome,
+      finishedAt: new Date().toISOString(),
+    });
+    releaseUpgradeLock(this.db);
+    this.log.info("auto-upgrade lock cleaned on startup", { outcome, lockedVersion: lock.version, current: this.version });
+  }
   private botIdentity: BotIdentity;
   private log: ReturnType<typeof createLogger>;
 
@@ -588,6 +607,8 @@ export class Pipeline {
 
     this.markUnfinishedRuntimeRunsFailedByRestart();
     this.restoreAdminsFromDb();
+    // 引擎启动 = 上一轮升级/重启已结束：解除残留升级锁（锁只保护触发瞬间，不跨进程存活）
+    this.cleanupUpgradeLockOnStartup();
 
     // 启动 watchdog 定时器
     this.watchdogTimer = setInterval(() => this.runIdleWatchdogSafely(), AGENT_WATCHDOG_INTERVAL_MS);
@@ -4315,22 +4336,28 @@ ${jobParts.join("\n\n")}
     const config = this.autoUpdateConfig;
     if (!config || !this.isAutoUpdateEnabled()) return;
 
-    const now = new Date();
-    const today = dateInTimeZone(now, config.timezone);
-    const hasLock = readUpgradeLock(this.db) !== null;
-
-    let latest = this.autoUpgradeLatestCache;
-    if (today === this.autoUpgradeFetchedDay && !hasLock) {
-      // 当天已 fetch 过且无锁：直接用缓存结果（当天窗口内不重复查 npm）
-      if (latest === null || latest === this.version) return;
-    } else if (hasLock) {
-      // 有锁：必须 fetch 一次用于汇报/解锁（锁 version 与当前版本比对）
-      try {
-        latest = await this.fetchLatestVersion();
-      } catch (err) {
-        this.log.warn("auto-upgrade check: fetch failed", { error: String(err) });
+    // 有锁 = 升级进行中（触发瞬间到新引擎启动之间）：跳过本次检查。
+    // 锁由新引擎启动时清理（cleanupUpgradeLockOnStartup）。
+    // 兜底：锁龄超过升级最长耗时（30 分钟）视为残留（如回滚后旧引擎继续、
+    // 或触发后进程异常退出），立即清理，避免永远挡住后续升级。
+    const lock = readUpgradeLock(this.db);
+    if (lock) {
+      const lockedAt = new Date(lock.lockedAt).getTime();
+      if (Number.isFinite(lockedAt) && Date.now() - lockedAt > UPGRADE_SAFENESS_WINDOW_MS) {
+        releaseUpgradeLock(this.db);
+        this.log.warn("auto-upgrade stale lock cleaned", { lockedAt: lock.lockedAt, version: lock.version });
+      } else {
         return;
       }
+    }
+
+    const now = new Date();
+    const today = dateInTimeZone(now, config.timezone);
+
+    let latest = this.autoUpgradeLatestCache;
+    if (today === this.autoUpgradeFetchedDay) {
+      // 当天已 fetch 过：直接用缓存结果（当天窗口内不重复查 npm）
+      if (latest === null || latest === this.version) return;
     } else {
       // 当天首次检查：fetch 一次并缓存结果，当天后续检查复用
       try {
@@ -4344,12 +4371,12 @@ ${jobParts.join("\n\n")}
     }
     if (!latest) return;
 
-    // 汇报/解锁不受窗口限制（任何时候都要清锁残留）
+    // 汇报读升级历史（启动时写入），不依赖锁
     await this.maybeReportUpgradeResult(latest);
 
     if (latest === this.version) return;
 
-    // 升级判定：窗口外直接返回（网络请求已在上一步完成，这里只做本地判定）
+    // 升级判定：窗口外直接返回
     if (!isInUpgradeWindow(now, config)) return;
     if (minutesUntilUpgradeWindowEnd(now, config) < config.marginMinutes) return;
 
@@ -4463,12 +4490,22 @@ ${jobParts.join("\n\n")}
       this.log.info("auto-upgrade skipped: lock acquire failed");
       return;
     }
+
+    // double check：上锁后立即重查空闲。锁只是触发瞬间的互斥保护——
+    // 若这期间有任务进来（消息/worker/定时），立即释放锁，下个窗口再试。
+    const doubleCheck = isSafeForUpgrade(this.buildSafenessSources(), Date.now(), windowMs);
+    if (!doubleCheck.safe) {
+      releaseUpgradeLock(this.db);
+      this.log.info("auto-upgrade aborted: task arrived after lock; released", { latest, blockers: doubleCheck.blockers });
+      return;
+    }
+
     this.log.info("auto-upgrade starting", { latest, version: this.version, predownloaded });
     try {
       // 自动升级静默：不发"正在重启..."通知（避免半夜打扰）；成功结果白天汇报
       this.triggerRestart({ updateVersion: latest, silent: true });
     } catch (err) {
-      // 触发失败：解除锁，避免残留阻塞下次自动升级
+      // 触发失败：立即解除锁（锁只保护触发瞬间，不留残留）
       releaseUpgradeLock(this.db);
       this.log.warn("auto-upgrade trigger failed; lock released", { latest, error: String(err) });
     }
@@ -4492,36 +4529,32 @@ ${jobParts.join("\n\n")}
 
 
   /** 白天汇报：升级锁存在且版本匹配 → 发「已自动升级」卡片并解除锁。 */
-  private async maybeReportUpgradeResult(latest: string): Promise<void> {
-    const lock = readUpgradeLock(this.db);
-    if (!lock || lock.version !== latest) return;
-    if (this.version !== latest) {
-      // 版本不匹配：升级失败/回滚，静默保持旧版，仅解除锁并记录原因
-      releaseUpgradeLock(this.db);
-      this.log.warn("auto-upgrade did not take effect (rolled back?)", { latest, current: this.version });
-      return;
-    }
-    // 新引擎已运行：升级成功。无论是否汇报，锁都要解除（避免残留阻塞下次自动升级）。
-    if (this.autoUpdateConfig?.notifyOnResult && !this.upgradeHistoryRecorded.has(latest)) {
-      const platformChatIds = this.getAdminPrivatePlatformChatIds();
-      const text = `已自动升级到 **${latest}**。`;
-      let delivered = false;
-      for (const platformChatId of platformChatIds) {
-        try {
-          await this.transport.sendCard(platformChatId, "Update", text);
-          delivered = true;
-        } catch (err) {
-          this.log.warn("failed to send auto-upgrade result", { platformChatId, error: String(err) });
-        }
+  /** 白天汇报：读升级历史（启动时写入），发「已自动升级」卡片并清除记录。不依赖锁。 */
+  private async maybeReportUpgradeResult(_latest: string): Promise<void> {
+    if (!this.autoUpdateConfig?.notifyOnResult) return;
+    if (this.upgradeHistoryRecorded.has("reported")) return;
+
+    const history = readAutoUpdateHistory(this.db);
+    if (!history || history.outcome !== "success") return;
+    if (history.version !== this.version) return;
+
+    const platformChatIds = this.getAdminPrivatePlatformChatIds();
+    const text = `已自动升级到 **${history.version}**。`;
+    let delivered = false;
+    for (const platformChatId of platformChatIds) {
+      try {
+        await this.transport.sendCard(platformChatId, "Update", text);
+        delivered = true;
+      } catch (err) {
+        this.log.warn("failed to send auto-upgrade result", { platformChatId, error: String(err) });
       }
-      if (delivered) {
-        recordUpdateNotification(this.db, this.botIdentity.name, latest);
-        this.upgradeHistoryRecorded.add(latest);
-      }
-      this.log.info("auto-upgrade completed and reported", { latest, delivered });
     }
-    releaseUpgradeLock(this.db);
-    this.log.info("auto-upgrade completed", { latest });
+    if (delivered) {
+      recordUpdateNotification(this.db, this.botIdentity.name, history.version);
+      this.upgradeHistoryRecorded.add("reported");
+    }
+    clearAutoUpdateHistory(this.db);
+    this.log.info("auto-upgrade result reported", { version: history.version, delivered });
   }
 
   /** 组装空闲判定 Source（各执行链自己实现）。 */

@@ -5466,7 +5466,7 @@ describe("auto-upgrade", () => {
 
   test("reports successful auto-upgrade during daytime check", async () => {
     vi.useFakeTimers();
-    // 白天 10:00 +08:00，已升级到 9.9.9（锁存在且版本匹配）→ 发「已升级」卡片并解锁
+    // 白天 10:00 +08:00，已升级到 9.9.9（启动时清理锁并写入升级历史）→ 发「已升级」卡片
     vi.setSystemTime(new Date("2026-08-08T02:00:00Z"));
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-autoupdate-test-"));
     tempDirs.push(dir);
@@ -5500,7 +5500,7 @@ describe("auto-upgrade", () => {
       undefined,
       autoUpdateConfig,
     );
-    // 模拟升级锁残留（新引擎版本=9.9.9 由 DB 判断，测试里写锁即可）
+    // 模拟上一轮自动升级：写锁（新引擎启动时 cleanupUpgradeLockOnStartup 会写 history + 解锁）
     const { acquireUpgradeLock } = await import("./auto-update.js");
     acquireUpgradeLock(db, "9.9.9");
     (pipeline as any).runNpmCommand = async () => ({ stdout: "9.9.9\n", stderr: "" });
@@ -5553,6 +5553,48 @@ describe("auto-upgrade", () => {
     await (pipeline as any).checkForUpdatesAndNotifyAdmins();
 
     expect(restarted).toBeUndefined();
+    pipeline.stop();
+    vi.useRealTimers();
+  });
+
+  test("cleans up upgrade lock and records history on startup", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-07T19:00:00Z"));
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-autoupdate-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const { acquireUpgradeLock, readUpgradeLock, readAutoUpdateHistory } = await import("./auto-update.js");
+    acquireUpgradeLock(db, "9.9.9");
+    const agent = new RecordingAgent();
+    const { im } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db,
+      im,
+      agent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      autoUpdateConfig,
+    );
+    (pipeline as any).version = "9.9.9";
+
+    await pipeline.start();
+
+    // 启动即清理锁，并记录 success 历史（供白天汇报）
+    expect(readUpgradeLock(db)).toBeNull();
+    expect(readAutoUpdateHistory(db)).toMatchObject({ version: "9.9.9", outcome: "success" });
     pipeline.stop();
     vi.useRealTimers();
   });

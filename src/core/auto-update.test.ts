@@ -13,9 +13,12 @@ import {
   mainRunSource,
   minutesUntilUpgradeWindowEnd,
   readAutoUpdateEnabled,
+  readAutoUpdateHistory,
   readUpgradeLock,
   releaseUpgradeLock,
   writeAutoUpdateEnabled,
+  writeAutoUpdateHistory,
+  clearAutoUpdateHistory,
   workerSource,
   type AutoUpdateConfig,
 } from "./auto-update.js";
@@ -171,6 +174,18 @@ describe("upgrade lock", () => {
     expect(readAutoUpdateEnabled(db)).toBe(true);
     writeAutoUpdateEnabled(db, false);
     expect(readAutoUpdateEnabled(db)).toBe(false);
+    db.close();
+  });
+
+  it("persists and clears auto-upgrade history", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-autoupdate-history-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    expect(readAutoUpdateHistory(db)).toBeNull();
+    writeAutoUpdateHistory(db, { version: "9.9.9", outcome: "success", finishedAt: "2026-08-08T00:00:00Z" });
+    expect(readAutoUpdateHistory(db)).toMatchObject({ version: "9.9.9", outcome: "success" });
+    clearAutoUpdateHistory(db);
+    expect(readAutoUpdateHistory(db)).toBeNull();
     db.close();
   });
 });

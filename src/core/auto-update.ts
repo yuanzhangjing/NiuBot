@@ -29,6 +29,42 @@ export const UPGRADE_LOCK_KEY = "auto_update_lock";
 /** 自动升级开关在 DB 中的键名（/autoupdate on|off 持久化）。 */
 export const AUTO_UPDATE_ENABLED_KEY = "auto_update_enabled";
 
+/** 上次自动升级结果在 DB 中的键名（汇报用，不依赖锁）。 */
+export const AUTO_UPDATE_HISTORY_KEY = "auto_update_history";
+
+export interface AutoUpdateHistory {
+  version: string;
+  /** "success" | "rolled_back" */
+  outcome: string;
+  finishedAt: string;
+}
+
+/** 读取上次自动升级结果；无记录返回 null。 */
+export function readAutoUpdateHistory(db: Database): AutoUpdateHistory | null {
+  const row = db.prepare("SELECT value FROM settings WHERE key = ?").get(AUTO_UPDATE_HISTORY_KEY) as
+    | { value: string }
+    | undefined;
+  if (!row) return null;
+  try {
+    return JSON.parse(row.value) as AutoUpdateHistory;
+  } catch {
+    return null;
+  }
+}
+
+/** 写入上次自动升级结果。 */
+export function writeAutoUpdateHistory(db: Database, history: AutoUpdateHistory): void {
+  db.prepare(
+    `INSERT INTO settings (key, value, updated_at) VALUES (?, ?, datetime('now'))
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`,
+  ).run(AUTO_UPDATE_HISTORY_KEY, JSON.stringify(history));
+}
+
+/** 清除上次自动升级结果。 */
+export function clearAutoUpdateHistory(db: Database): void {
+  db.prepare("DELETE FROM settings WHERE key = ?").run(AUTO_UPDATE_HISTORY_KEY);
+}
+
 export interface AutoUpdateConfig {
   enabled: boolean;
   /** 当地时区固定可升级窗口（24h 制） */
