@@ -4280,9 +4280,9 @@ ${jobParts.join("\n\n")}
 
   /** 自动升级状态/帮助行（供 /update 默认展示，单卡片合并）。 */
   private buildAutoUpdateStatusLines(): string[] {
-    const config = this.autoUpdateConfig;
+    // config.yaml 可配 autoUpdate: true 声明支持；不配时用默认窗口（开关仍可用 /update auto on|off）
+    const config = this.autoUpdateConfig ?? { enabled: true, ...AUTO_UPDATE_DEFAULTS };
     const enabled = this.isAutoUpdateEnabled();
-    if (!config) return ["自动升级：未配置（config.yaml 缺少 autoUpdate）"];
     return [
       `**自动升级：** ${enabled ? "✅ 开启" : "⛔ 关闭"}`,
       `**窗口：** ${config.windowStartHour}:00-${config.windowEndHour}:00（${config.timezone}）`,
