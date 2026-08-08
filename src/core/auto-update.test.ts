@@ -4,7 +4,6 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { initDatabase } from "../database/schema.js";
 import {
-  acquireUpgradeLock,
   cronSource,
   goalSource,
   isInUpgradeWindow,
@@ -13,12 +12,7 @@ import {
   mainRunSource,
   minutesUntilUpgradeWindowEnd,
   readAutoUpdateEnabled,
-  readAutoUpdateHistory,
-  readUpgradeLock,
-  releaseUpgradeLock,
   writeAutoUpdateEnabled,
-  writeAutoUpdateHistory,
-  clearAutoUpdateHistory,
   workerSource,
   type AutoUpdateConfig,
 } from "./auto-update.js";
@@ -148,23 +142,7 @@ describe("loop source", () => {
   });
 });
 
-describe("upgrade lock", () => {
-  it("acquire, read, release roundtrip in real DB", () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-autoupdate-lock-"));
-    tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
-
-    expect(readUpgradeLock(db)).toBeNull();
-    expect(acquireUpgradeLock(db, "1.2.3")).toBe(true);
-    // 已存在：不覆盖，返回 false
-    expect(acquireUpgradeLock(db, "1.2.4")).toBe(false);
-    const lock = readUpgradeLock(db);
-    expect(lock?.version).toBe("1.2.3");
-    releaseUpgradeLock(db);
-    expect(readUpgradeLock(db)).toBeNull();
-    db.close();
-  });
-
+describe("upgrade enabled toggle", () => {
   it("persists auto-update enabled toggle in real DB", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-autoupdate-toggle-"));
     tempDirs.push(dir);
@@ -174,18 +152,6 @@ describe("upgrade lock", () => {
     expect(readAutoUpdateEnabled(db)).toBe(true);
     writeAutoUpdateEnabled(db, false);
     expect(readAutoUpdateEnabled(db)).toBe(false);
-    db.close();
-  });
-
-  it("persists and clears auto-upgrade history", () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-autoupdate-history-"));
-    tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
-    expect(readAutoUpdateHistory(db)).toBeNull();
-    writeAutoUpdateHistory(db, { version: "9.9.9", outcome: "success", finishedAt: "2026-08-08T00:00:00Z" });
-    expect(readAutoUpdateHistory(db)).toMatchObject({ version: "9.9.9", outcome: "success" });
-    clearAutoUpdateHistory(db);
-    expect(readAutoUpdateHistory(db)).toBeNull();
     db.close();
   });
 });

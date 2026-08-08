@@ -12,6 +12,8 @@ export interface RestartState {
   startedAt: string;
   updatedAt: string;
   error?: string;
+  /** 本次重启是否由自动升级触发（NIUBOT_AUTO_UPDATE=1 写入）；供新引擎早晨汇报判定。 */
+  autoUpdate?: boolean;
 }
 
 export function readRestartState(stateFile: string, expectedId?: string): RestartState | undefined {
@@ -53,6 +55,8 @@ export class RestartStateWriter {
       startedAt: this.startedAt,
       updatedAt: new Date().toISOString(),
       error: values.error,
+      // 每次重启重置：autoUpdate 只反映「最近一次重启是否自动升级触发」，不继承旧值
+      autoUpdate: values.autoUpdate,
     };
     const tempFile = `${this.stateFile}.${process.pid}.${Date.now()}.tmp`;
     const fd = fs.openSync(tempFile, "wx", 0o600);

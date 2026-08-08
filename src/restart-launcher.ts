@@ -10,6 +10,8 @@ export interface RestartWorkerLaunchOptions {
   sourceDirectory: string;
   /** dev/production 运行环境；透传给 worker 作为 NIUBOT_ENV（旧版 runtimeMode 透传已废弃） */
   environment?: string;
+  /** 本次重启是否自动升级触发；worker 写入 restart/state.json 的 autoUpdate 标记 */
+  autoUpdate?: boolean;
   notifyChatId?: string;
   updateVersion?: string;
   restartId?: string;
@@ -39,6 +41,7 @@ export function buildRestartWorkerEnvironment(
     NIUBOT_RESTART_ID: options.restartId ?? "",
     NIUBOT_RESTART_STARTED_AT: options.restartStartedAt ?? "",
     NIUBOT_RESTART_WAKE_PROMPT: options.wakePrompt ?? "",
+    NIUBOT_AUTO_UPDATE: options.autoUpdate ? "1" : "",
   };
   delete env["NIUBOT_AGENT_SESSION"];
   if (options.updateVersion) {

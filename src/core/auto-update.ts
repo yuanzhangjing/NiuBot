@@ -23,47 +23,8 @@ export const UPGRADE_WAIT_RUN_TIMEOUT_MS = 5 * 60_000;
  */
 export const UPGRADE_SAFENESS_WINDOW_MS = 30 * 60_000;
 
-/** 升级锁在 DB 中的键名。 */
-export const UPGRADE_LOCK_KEY = "auto_update_lock";
-
 /** 自动升级开关在 DB 中的键名（/autoupdate on|off 持久化）。 */
 export const AUTO_UPDATE_ENABLED_KEY = "auto_update_enabled";
-
-/** 上次自动升级结果在 DB 中的键名（汇报用，不依赖锁）。 */
-export const AUTO_UPDATE_HISTORY_KEY = "auto_update_history";
-
-export interface AutoUpdateHistory {
-  version: string;
-  /** "success" | "rolled_back" */
-  outcome: string;
-  finishedAt: string;
-}
-
-/** 读取上次自动升级结果；无记录返回 null。 */
-export function readAutoUpdateHistory(db: Database): AutoUpdateHistory | null {
-  const row = db.prepare("SELECT value FROM settings WHERE key = ?").get(AUTO_UPDATE_HISTORY_KEY) as
-    | { value: string }
-    | undefined;
-  if (!row) return null;
-  try {
-    return JSON.parse(row.value) as AutoUpdateHistory;
-  } catch {
-    return null;
-  }
-}
-
-/** 写入上次自动升级结果。 */
-export function writeAutoUpdateHistory(db: Database, history: AutoUpdateHistory): void {
-  db.prepare(
-    `INSERT INTO settings (key, value, updated_at) VALUES (?, ?, datetime('now'))
-     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`,
-  ).run(AUTO_UPDATE_HISTORY_KEY, JSON.stringify(history));
-}
-
-/** 清除上次自动升级结果。 */
-export function clearAutoUpdateHistory(db: Database): void {
-  db.prepare("DELETE FROM settings WHERE key = ?").run(AUTO_UPDATE_HISTORY_KEY);
-}
 
 export interface AutoUpdateConfig {
   enabled: boolean;
@@ -306,33 +267,4 @@ export function writeAutoUpdateEnabled(db: Database, enabled: boolean): void {
     `INSERT INTO settings (key, value, updated_at) VALUES (?, ?, datetime('now'))
      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`,
   ).run(AUTO_UPDATE_ENABLED_KEY, enabled ? "1" : "0");
-}
-
-/** 读取升级锁；返回 null 表示无锁。 */
-export function readUpgradeLock(
-  db: Database,
-): { lockedAt: string; version: string | null } | null {
-  const row = db.prepare("SELECT value FROM settings WHERE key = ?").get(UPGRADE_LOCK_KEY) as
-    | { value: string }
-    | undefined;
-  if (!row) return null;
-  try {
-    return JSON.parse(row.value) as { lockedAt: string; version: string | null };
-  } catch {
-    return null;
-  }
-}
-
-/** 写入升级锁（原子：已存在则返回 false，不覆盖）。 */
-export function acquireUpgradeLock(db: Database, version: string | null): boolean {
-  const result = db.prepare(
-    `INSERT INTO settings (key, value) VALUES (?, ?)
-     ON CONFLICT(key) DO NOTHING`,
-  ).run(UPGRADE_LOCK_KEY, JSON.stringify({ lockedAt: new Date().toISOString(), version }));
-  return result.changes === 1;
-}
-
-/** 解除升级锁。 */
-export function releaseUpgradeLock(db: Database): void {
-  db.prepare("DELETE FROM settings WHERE key = ?").run(UPGRADE_LOCK_KEY);
 }

@@ -5466,7 +5466,7 @@ describe("auto-upgrade", () => {
 
   test("reports successful auto-upgrade during daytime check", async () => {
     vi.useFakeTimers();
-    // 白天 10:00 +08:00，已升级到 9.9.9（启动时清理锁并写入升级历史）→ 发「已升级」卡片
+    // 白天 10:00 +08:00，最近一次重启是自动升级且成功 → 发「已升级」卡片
     vi.setSystemTime(new Date("2026-08-08T02:00:00Z"));
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-autoupdate-test-"));
     tempDirs.push(dir);
@@ -5500,9 +5500,13 @@ describe("auto-upgrade", () => {
       undefined,
       autoUpdateConfig,
     );
-    // 模拟上一轮自动升级：写锁（新引擎启动时 cleanupUpgradeLockOnStartup 会写 history + 解锁）
-    const { acquireUpgradeLock } = await import("./auto-update.js");
-    acquireUpgradeLock(db, "9.9.9");
+    // 模拟最近一次重启由自动升级触发且成功（worker 写入 restart/state.json）
+    const restartDir = path.join(dir, "restart");
+    mkdirSync(restartDir, { recursive: true });
+    writeFileSync(path.join(restartDir, "state.json"), JSON.stringify({
+      id: "r1", phase: "success", startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      candidateRelease: "20260808-000000-000Z-9.9.9-abc", autoUpdate: true,
+    }));
     (pipeline as any).runNpmCommand = async () => ({ stdout: "9.9.9\n", stderr: "" });
     (pipeline as any).version = "9.9.9";
 
@@ -5510,8 +5514,6 @@ describe("auto-upgrade", () => {
     await (pipeline as any).checkForUpdatesAndNotifyAdmins();
 
     expect(sentCards.some((card: { content: string }) => card.content.includes("已自动升级"))).toBe(true);
-    const { readUpgradeLock } = await import("./auto-update.js");
-    expect(readUpgradeLock(db)).toBeNull();
     pipeline.stop();
     vi.useRealTimers();
   });
@@ -5557,17 +5559,22 @@ describe("auto-upgrade", () => {
     vi.useRealTimers();
   });
 
-  test("cleans up upgrade lock and records history on startup", async () => {
+  test("does not report auto-upgrade when last restart was manual", async () => {
     vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-08-07T19:00:00Z"));
+    // 白天 10:00 +08:00，最近一次重启是手动升级（state.json 无 autoUpdate 标记）→ 不通知
+    vi.setSystemTime(new Date("2026-08-08T02:00:00Z"));
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-autoupdate-test-"));
     tempDirs.push(dir);
 
     const db = initDatabase(path.join(dir, "niubot.db"));
-    const { acquireUpgradeLock, readUpgradeLock, readAutoUpdateHistory } = await import("./auto-update.js");
-    acquireUpgradeLock(db, "9.9.9");
+    db.prepare(
+      "INSERT INTO users (id, name, platform, platform_id, is_admin) VALUES ('u2', 'admin', 'feishu', 'user-open-id', 'owner')",
+    ).run();
+    db.prepare(
+      "INSERT INTO chats (id, type, platform, platform_id, user_id) VALUES ('c1', 'p2p', 'feishu', 'chat-open-id', 'user-open-id')",
+    ).run();
     const agent = new RecordingAgent();
-    const { im } = createRecordingImStub();
+    const { im, sentCards } = createRecordingImStub();
     const pipeline = new Pipeline(
       db,
       im,
@@ -5588,13 +5595,20 @@ describe("auto-upgrade", () => {
       undefined,
       autoUpdateConfig,
     );
+    // 手动升级：state.json 存在但 autoUpdate 为 false
+    const restartDir = path.join(dir, "restart");
+    mkdirSync(restartDir, { recursive: true });
+    writeFileSync(path.join(restartDir, "state.json"), JSON.stringify({
+      id: "r2", phase: "success", startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      candidateRelease: "20260808-000000-000Z-9.9.9-abc",
+    }));
+    (pipeline as any).runNpmCommand = async () => ({ stdout: "9.9.9\n", stderr: "" });
     (pipeline as any).version = "9.9.9";
 
     await pipeline.start();
+    await (pipeline as any).checkForUpdatesAndNotifyAdmins();
 
-    // 启动即清理锁，并记录 success 历史（供白天汇报）
-    expect(readUpgradeLock(db)).toBeNull();
-    expect(readAutoUpdateHistory(db)).toMatchObject({ version: "9.9.9", outcome: "success" });
+    expect(sentCards.some((card: { content: string }) => card.content.includes("已自动升级"))).toBe(false);
     pipeline.stop();
     vi.useRealTimers();
   });
