@@ -98,7 +98,7 @@ export async function runRestartWorker(env: NodeJS.ProcessEnv = process.env): Pr
     logFile: path.join(logDirectory, `niubot-${localDate()}.log`),
     debugLog: path.join(logDirectory, "restart-debug.log"),
     store: new ReleaseStore(botDirectory),
-    state: new RestartStateWriter(botDirectory, id, startedAt),
+    state: new RestartStateWriter(botDirectory, id, startedAt, env["NIUBOT_AUTO_UPDATE"] === "1"),
   };
   let releaseLock: (() => void) | undefined;
   try {
@@ -116,12 +116,7 @@ export async function runRestartWorker(env: NodeJS.ProcessEnv = process.env): Pr
   try {
     fs.writeFileSync(context.debugLog, "");
     log(context, `restart worker started pid=${process.pid} bot=${botName} source=${sourceDirectory}`);
-    // 自动升级标记：NIUBOT_AUTO_UPDATE=1 写入 state.json，供新引擎早晨汇报判定。
-    // 每次重启整体重写，不继承旧值——手动升级会覆盖自动升级标记，避免误报。
-    context.state.write("started", {
-      oldPid: readProcessState(niubotHome)?.processes.engine.pid,
-      autoUpdate: env["NIUBOT_AUTO_UPDATE"] === "1",
-    });
+    context.state.write("started", { oldPid: readProcessState(niubotHome)?.processes.engine.pid });
     await delay(2_000);
 
     context.store.ensureDirectories();

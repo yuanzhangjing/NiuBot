@@ -22,4 +22,25 @@ describe("restart state", () => {
       fs.rmSync(botDirectory, { recursive: true, force: true });
     }
   });
+
+  it("keeps autoUpdate flag across phase updates for auto-upgrade workers", () => {
+    const botDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-restart-state-"));
+    try {
+      const writer = new RestartStateWriter(botDirectory, "restart-auto", "2026-07-19T00:00:00.000Z", true);
+      writer.write("started");
+      writer.write("preflight_candidate");
+      const final = writer.write("success");
+      // autoUpdate 在构造时固定，后续 write 不丢失（修复：旧实现每次 write 覆盖为 undefined）
+      expect(final.autoUpdate).toBe(true);
+      expect(readRestartState(writer.stateFile, "restart-auto")?.autoUpdate).toBe(true);
+
+      // 手动升级 worker：autoUpdate 默认 false，不误报
+      const manual = new RestartStateWriter(botDirectory, "restart-manual", "2026-07-19T00:00:00.000Z");
+      manual.write("started");
+      manual.write("success");
+      expect(readRestartState(manual.stateFile, "restart-manual")?.autoUpdate).toBe(false);
+    } finally {
+      fs.rmSync(botDirectory, { recursive: true, force: true });
+    }
+  });
 });

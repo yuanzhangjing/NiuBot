@@ -4362,9 +4362,8 @@ ${jobParts.join("\n\n")}
     }
     if (!latest) return;
 
-    // 白天汇报：自动升级已完成（锁存在且版本匹配 latest）→ 发「已升级」卡片并解锁。
-    // 必须在 latest === this.version 守卫之前：升级成功后当前版本即 latest，
-    // 此时需要靠锁识别「这次升级是自动完成的」并汇报。
+    // 白天汇报：最近一次重启是自动升级且成功 → 发「已自动升级」卡片。
+    // 必须在 latest === this.version 守卫之前：升级成功后当前版本即 latest。
     await this.maybeReportUpgradeResult(latest);
 
     if (latest === this.version) return;
@@ -4418,8 +4417,8 @@ ${jobParts.join("\n\n")}
       return;
     }
 
-    // 预下载新版本 tgz（幂等）：先拉包，空闲判定通过后锁内只做本地解压+安装，
-    // 避免锁内长时间网络下载（下载失败不阻塞本次判定，下次检查再试）
+    // 预下载新版本 tgz（幂等）：先拉包，空闲判定通过后升级时只做本地解压+安装，
+    // 避免触发后长时间网络下载（下载失败不阻塞本次判定，下次检查再试）
     const predownloaded = await this.predownloadPackage(latest).catch((err) => {
       this.log.warn("auto-upgrade predownload failed", { latest, error: String(err) });
       return false;
@@ -4468,7 +4467,8 @@ ${jobParts.join("\n\n")}
 
   /** 预下载新版本 tgz 到 packages 目录（幂等：同版本已存在则跳过）。 */
   private async predownloadPackage(latest: string): Promise<boolean> {
-    const packagesDir = path.join(NIUBOT_HOME, this.botIdentity.name, "packages");
+    // 与 worker 的 ReleaseStore 一致：botDirectory/packages（dirname(dbPath) = bot 目录）
+    const packagesDir = path.join(path.dirname(this.dbPath), "packages");
     mkdirSync(packagesDir, { recursive: true });
     const expected = `yuanzhangjing-niubot-${latest}.tgz`;
     if (existsSync(path.join(packagesDir, expected))) {
@@ -4494,8 +4494,8 @@ ${jobParts.join("\n\n")}
     if (!state || !state.autoUpdate) return;
     if (state.phase !== "success") return; // 回滚/失败不汇报（静默保持旧版）
 
-    const reportedVersion = state.candidateRelease?.match(/-\d+\.\d+\.\d+(?:-[\w.]+)?$/)?.[0]?.slice(1)
-      ?? this.version;
+    // 汇报版本 = 当前引擎版本（新引擎启动即升级后的版本，state.json 已确认是自动升级）
+    const reportedVersion = this.version;
     const platformChatIds = this.getAdminPrivatePlatformChatIds();
     const text = `已自动升级到 **${reportedVersion}**。`;
     let delivered = false;

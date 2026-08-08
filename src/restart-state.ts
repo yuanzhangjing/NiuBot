@@ -36,10 +36,13 @@ export function readRestartState(stateFile: string, expectedId?: string): Restar
 export class RestartStateWriter {
   readonly directory: string;
   readonly stateFile: string;
+  /** 本次重启是否自动升级触发：构造时固定，write 自动带上（贯穿整个 worker 生命周期） */
+  private readonly autoUpdate: boolean;
 
-  constructor(readonly botDirectory: string, readonly id: string, readonly startedAt: string) {
+  constructor(readonly botDirectory: string, readonly id: string, readonly startedAt: string, autoUpdate = false) {
     this.directory = path.join(botDirectory, "restart");
     this.stateFile = path.join(this.directory, "state.json");
+    this.autoUpdate = autoUpdate;
   }
 
   write(phase: string, values: Partial<Omit<RestartState, "id" | "phase" | "startedAt" | "updatedAt">> = {}): RestartState {
@@ -55,8 +58,8 @@ export class RestartStateWriter {
       startedAt: this.startedAt,
       updatedAt: new Date().toISOString(),
       error: values.error,
-      // 每次重启重置：autoUpdate 只反映「最近一次重启是否自动升级触发」，不继承旧值
-      autoUpdate: values.autoUpdate,
+      // 本次重启的属性，构造时固定，每次 write 都带上（不被后续 write 覆盖丢失）
+      autoUpdate: this.autoUpdate,
     };
     const tempFile = `${this.stateFile}.${process.pid}.${Date.now()}.tmp`;
     const fd = fs.openSync(tempFile, "wx", 0o600);

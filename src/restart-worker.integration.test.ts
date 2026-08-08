@@ -432,11 +432,18 @@ describe("restart worker integration", () => {
       NIUBOT_RESTART_MODE: "npm-update",
       NIUBOT_UPDATE_VERSION: "9.9.9",
       NIUBOT_ENV: "production",
+      NIUBOT_AUTO_UPDATE: "1",
       NIUBOT_AGENT_SESSION: undefined,
     });
 
     const running = await inspectRunningEngine(home);
     expect(running?.identity.version).toBe("9.9.9");
+    // 自动升级标记写入 state.json 且跨 phase 保留（成功阶段仍为 true）
+    const state = JSON.parse(fs.readFileSync(
+      path.join(home, "TestBot", "restart", "state.json"), "utf-8",
+    )) as { phase: string; autoUpdate?: boolean };
+    expect(state.phase).toBe("success");
+    expect(state.autoUpdate).toBe(true);
   }, 120_000);
 });
 
