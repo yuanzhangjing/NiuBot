@@ -18,7 +18,8 @@ describe("niubot CLI path helpers", () => {
       bin?: Record<string, string>;
     };
 
-    expect(pkg.bin?.["nbt"]).toBe("dist/cli.js");
+    expect(pkg.bin?.["nbt"]).toBe("dist/nbt-launcher.js");
+    expect(pkg.bin?.["niubot"]).toBe("dist/niubot-launcher.js");
   });
 
   it("resolves the repo-local niubot bin directory", () => {
@@ -132,26 +133,26 @@ describe("niubot CLI path helpers", () => {
   it.skipIf(process.platform === "win32")("creates a managed nbt shim under .local/bin", () => {
     const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-shim-home-"));
     const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-shim-project-"));
-    const targetPath = path.join(projectRoot, "bin", "nbt");
+    const targetPath = path.join(projectRoot, "dist", "nbt-launcher.js");
     fs.mkdirSync(path.dirname(targetPath), { recursive: true });
-    fs.writeFileSync(targetPath, "#!/bin/sh\n");
+    fs.writeFileSync(targetPath, "#!/usr/bin/env node\n");
 
     const result = ensureNbtShim({ homeDir, projectRoot });
     const shimPath = path.join(homeDir, ".local", "bin", "nbt");
 
     expect(result.status).toBe("created");
     expect(result.shimPath).toBe(shimPath);
-    expect(fs.readFileSync(shimPath, "utf-8")).toContain(`exec '${targetPath}' "$@"`);
+    expect(fs.readFileSync(shimPath, "utf-8")).toContain(`'${targetPath}' "$@"`);
   });
 
   it.skipIf(process.platform === "win32")("does not overwrite an unmanaged nbt file", () => {
     const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-shim-home-"));
     const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-shim-project-"));
-    const targetPath = path.join(projectRoot, "bin", "nbt");
+    const targetPath = path.join(projectRoot, "dist", "nbt-launcher.js");
     const shimPath = path.join(homeDir, ".local", "bin", "nbt");
     fs.mkdirSync(path.dirname(targetPath), { recursive: true });
     fs.mkdirSync(path.dirname(shimPath), { recursive: true });
-    fs.writeFileSync(targetPath, "#!/bin/sh\n");
+    fs.writeFileSync(targetPath, "#!/usr/bin/env node\n");
     fs.writeFileSync(shimPath, "#!/bin/sh\necho user-owned\n");
 
     const result = ensureNbtShim({ homeDir, projectRoot });
@@ -163,26 +164,26 @@ describe("niubot CLI path helpers", () => {
   it.skipIf(process.platform === "win32")("updates a previously managed nbt shim", () => {
     const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-shim-home-"));
     const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-shim-project-"));
-    const targetPath = path.join(projectRoot, "bin", "nbt");
+    const targetPath = path.join(projectRoot, "dist", "nbt-launcher.js");
     const shimPath = path.join(homeDir, ".local", "bin", "nbt");
     fs.mkdirSync(path.dirname(targetPath), { recursive: true });
     fs.mkdirSync(path.dirname(shimPath), { recursive: true });
-    fs.writeFileSync(targetPath, "#!/bin/sh\n");
+    fs.writeFileSync(targetPath, "#!/usr/bin/env node\n");
     fs.writeFileSync(shimPath, "#!/bin/sh\n# Managed by NiuBot: nbt shim\nexec '/old/nbt' \"$@\"\n");
 
     const result = ensureNbtShim({ homeDir, projectRoot });
 
     expect(result.status).toBe("updated");
-    expect(fs.readFileSync(shimPath, "utf-8")).toContain(`exec '${targetPath}' "$@"`);
+    expect(fs.readFileSync(shimPath, "utf-8")).toContain(`'${targetPath}' "$@"`);
   });
 
   it("does not update the nbt shim during preflight", () => {
     const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-shim-home-"));
     const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-shim-project-"));
-    const targetPath = path.join(projectRoot, "bin", "nbt");
+    const targetPath = path.join(projectRoot, "dist", "nbt-launcher.js");
     const shimPath = path.join(homeDir, ".local", "bin", "nbt");
     fs.mkdirSync(path.dirname(targetPath), { recursive: true });
-    fs.writeFileSync(targetPath, "#!/bin/sh\n");
+    fs.writeFileSync(targetPath, "#!/usr/bin/env node\n");
 
     const result = ensureRuntimeNbtShim({ homeDir, projectRoot, preflight: true });
 
@@ -203,7 +204,7 @@ describe("niubot CLI path helpers", () => {
     const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-shim-project-"));
     const localAppData = path.join(homeDir, "LocalAppData");
     fs.mkdirSync(path.join(projectRoot, "dist"), { recursive: true });
-    fs.writeFileSync(path.join(projectRoot, "dist", "cli.js"), "#!/usr/bin/env node\n");
+    fs.writeFileSync(path.join(projectRoot, "dist", "nbt-launcher.js"), "#!/usr/bin/env node\n");
 
     const result = ensureNbtShim({
       homeDir,

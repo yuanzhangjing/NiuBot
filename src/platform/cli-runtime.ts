@@ -57,9 +57,7 @@ export function ensureNbtShim(options: NbtShimOptions = {}): NbtShimResult {
   const homeDir = options.homeDir ?? os.homedir();
   const platform = options.platform ?? process.platform;
   const pathApi = pathForPlatform(platform);
-  const targetPath = platform === "win32"
-    ? pathApi.join(projectRoot, "dist", "cli.js")
-    : getBundledNbtPath(projectRoot, platform);
+  const targetPath = pathApi.join(projectRoot, "dist", "nbt-launcher.js");
   const shimPath = pathApi.join(
     getNbtShimDirectory(homeDir, platform, options.localAppData),
     platform === "win32" ? "nbt.cmd" : "nbt",
@@ -74,7 +72,7 @@ export function ensureNbtShim(options: NbtShimOptions = {}): NbtShimResult {
 
   const desired = platform === "win32"
     ? buildWindowsNbtShimContent(options.execPath ?? process.execPath, targetPath)
-    : buildNbtShimContent(targetPath);
+    : buildNbtShimContent(options.execPath ?? process.execPath, targetPath);
   fs.mkdirSync(pathApi.dirname(shimPath), { recursive: true });
 
   if (fs.existsSync(shimPath)) {
@@ -100,9 +98,7 @@ export function ensureRuntimeNbtShim(options: RuntimeNbtShimOptions = {}): NbtSh
   const homeDir = options.homeDir ?? os.homedir();
   const platform = options.platform ?? process.platform;
   const pathApi = pathForPlatform(platform);
-  const targetPath = platform === "win32"
-    ? pathApi.join(projectRoot, "dist", "cli.js")
-    : getBundledNbtPath(projectRoot, platform);
+  const targetPath = pathApi.join(projectRoot, "dist", "nbt-launcher.js");
   const shimPath = pathApi.join(
     getNbtShimDirectory(homeDir, platform, options.localAppData),
     platform === "win32" ? "nbt.cmd" : "nbt",
@@ -173,11 +169,14 @@ function uniquePathEntries(entries: string[]): string[] {
   return result;
 }
 
-function buildNbtShimContent(targetPath: string): string {
+function buildNbtShimContent(nodePath: string, targetPath: string): string {
   return [
     "#!/bin/sh",
     NBT_SHIM_MARKER,
-    `exec ${shellSingleQuote(targetPath)} "$@"`,
+    "if command -v niubot >/dev/null 2>&1; then",
+    "  exec niubot __nbt \"$@\"",
+    "fi",
+    `exec ${shellSingleQuote(nodePath)} ${shellSingleQuote(targetPath)} "$@"`,
     "",
   ].join("\n");
 }
@@ -186,6 +185,11 @@ export function buildWindowsNbtShimContent(nodePath: string, targetPath: string)
   return [
     "@echo off",
     `REM ${NBT_SHIM_MARKER}`,
+    "where niubot >nul 2>nul",
+    "if errorlevel 1 goto niubot_nbt_fallback",
+    "niubot __nbt %*",
+    "exit /b %errorlevel%",
+    ":niubot_nbt_fallback",
     `\"${nodePath.replaceAll('"', '""')}\" \"${targetPath.replaceAll('"', '""')}\" %*`,
     "",
   ].join("\r\n");

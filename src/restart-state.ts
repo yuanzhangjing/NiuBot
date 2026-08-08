@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { replaceFileSync } from "./platform/files.js";
+import { recoverFileReplacementSync, replaceFileSync } from "./platform/files.js";
 
 export interface RestartState {
   id: string;
@@ -18,6 +18,7 @@ export interface RestartState {
 
 export function readRestartState(stateFile: string, expectedId?: string): RestartState | undefined {
   try {
+    recoverFileReplacementSync(stateFile);
     const state = JSON.parse(fs.readFileSync(stateFile, "utf-8")) as RestartState;
     if (
       typeof state.id !== "string"

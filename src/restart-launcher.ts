@@ -14,6 +14,8 @@ export interface RestartWorkerLaunchOptions {
   autoUpdate?: boolean;
   notifyChatId?: string;
   updateVersion?: string;
+  /** Preserve a stopped Engine state after update verification, even if the caller exits. */
+  stopAfterCompletion?: boolean;
   restartId?: string;
   restartStartedAt?: string;
   /** 重启完成后注入主会话的任务提示（nbt restart --wake）；不设置则只发通知不唤醒 */
@@ -42,6 +44,7 @@ export function buildRestartWorkerEnvironment(
     NIUBOT_RESTART_STARTED_AT: options.restartStartedAt ?? "",
     NIUBOT_RESTART_WAKE_PROMPT: options.wakePrompt ?? "",
     NIUBOT_AUTO_UPDATE: options.autoUpdate ? "1" : "",
+    NIUBOT_RESTART_STOP_AFTER_COMPLETION: options.stopAfterCompletion ? "1" : "",
   };
   delete env["NIUBOT_AGENT_SESSION"];
   if (options.updateVersion) {

@@ -15,8 +15,8 @@
     ".": "./dist/index.js"
   },
   "bin": {
-    "niubot": "dist/user-cli.js",
-    "nbt": "dist/cli.js"
+    "niubot": "dist/niubot-launcher.js",
+    "nbt": "dist/nbt-launcher.js"
   },
   "files": [
     "dist",
@@ -27,6 +27,7 @@
     "AGENTS.template.md",
     "INSTALL.md",
     "README.md",
+    "npm-shrinkwrap.json",
     "LICENSE"
   ],
   "scripts": {

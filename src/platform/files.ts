@@ -2,8 +2,19 @@ import fs from "node:fs";
 import path from "node:path";
 
 const RETRYABLE_CODES = new Set(["EACCES", "EBUSY", "EPERM"]);
+const REPLACE_BACKUP_SUFFIX = ".replace-backup";
 
-export function replaceFileSync(source: string, destination: string, attempts = 5): void {
+export function replaceFileSync(
+  source: string,
+  destination: string,
+  attempts = 5,
+  platform: NodeJS.Platform = process.platform,
+): void {
+  recoverFileReplacementSync(destination);
+  if (platform === "win32" && fs.existsSync(destination)) {
+    replaceWindowsFileSync(source, destination, attempts);
+    return;
+  }
   let lastError: unknown;
   for (let attempt = 0; attempt < attempts; attempt++) {
     try {
@@ -11,7 +22,7 @@ export function replaceFileSync(source: string, destination: string, attempts = 
       return;
     } catch (err) {
       lastError = err;
-      if (!isRetryableWindowsFileError(err) || attempt === attempts - 1) break;
+      if (!isRetryableWindowsFileError(err, platform) || attempt === attempts - 1) break;
       blockingDelay(20 * (attempt + 1));
     }
   }
@@ -44,8 +55,50 @@ export function samePlatformPath(
   return platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b;
 }
 
-function isRetryableWindowsFileError(err: unknown): boolean {
-  return process.platform === "win32"
+function replaceWindowsFileSync(source: string, destination: string, attempts: number): void {
+  const backup = replacementBackupPath(destination);
+  retryRename(destination, backup, attempts, "win32");
+  try {
+    retryRename(source, destination, attempts, "win32");
+  } catch (err) {
+    try { retryRename(backup, destination, attempts, "win32"); } catch { /* preserve original error */ }
+    throw err;
+  }
+  try { removeFileSync(backup, attempts); } catch { /* stale backup is recoverable on the next read/write */ }
+}
+
+export function recoverFileReplacementSync(destination: string): void {
+  const backup = replacementBackupPath(destination);
+  if (fs.existsSync(destination)) {
+    if (fs.existsSync(backup)) {
+      try { removeFileSync(backup); } catch { /* a valid destination already exists */ }
+    }
+    return;
+  }
+  if (fs.existsSync(backup)) fs.renameSync(backup, destination);
+}
+
+function replacementBackupPath(destination: string): string {
+  return `${destination}${REPLACE_BACKUP_SUFFIX}`;
+}
+
+function retryRename(source: string, destination: string, attempts: number, platform: NodeJS.Platform): void {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    try {
+      fs.renameSync(source, destination);
+      return;
+    } catch (err) {
+      lastError = err;
+      if (!isRetryableWindowsFileError(err, platform) || attempt === attempts - 1) break;
+      blockingDelay(20 * (attempt + 1));
+    }
+  }
+  throw lastError;
+}
+
+function isRetryableWindowsFileError(err: unknown, platform: NodeJS.Platform = process.platform): boolean {
+  return platform === "win32"
     && err instanceof Error
     && "code" in err
     && RETRYABLE_CODES.has(String((err as NodeJS.ErrnoException).code));

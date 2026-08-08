@@ -1,10 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { exec, execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
+import { resolveSharedRuntimeRoot } from "../platform/shared-runtime.js";
+import { SharedReleaseStore } from "../shared-release-store.js";
+import { assertInstallablePackageArchive } from "../package-archive.js";
 import type Database from "better-sqlite3";
 import { escapeYamlContent, renderMessageNodes } from "../im/render.js";
 import { findLatestUserPlatformMsgId } from "../messages/store.js";
@@ -4497,18 +4500,32 @@ ${jobParts.join("\n\n")}
     }
   }
 
-  /** 预下载新版本 tgz 到 packages 目录（幂等：同版本已存在则跳过）。 */
+  /** 预下载新版本 tgz 到用户级共享 packages 目录（幂等：同版本已存在则跳过）。 */
   private async predownloadPackage(latest: string): Promise<boolean> {
-    // 与 worker 的 ReleaseStore 一致：botDirectory/packages（dirname(dbPath) = bot 目录）
-    const packagesDir = path.join(path.dirname(this.dbPath), "packages");
-    mkdirSync(packagesDir, { recursive: true });
+    const store = new SharedReleaseStore(resolveSharedRuntimeRoot());
+    store.ensureDirectories();
+    const packagesDir = store.packagesDirectory;
     const expected = `yuanzhangjing-niubot-${latest}.tgz`;
-    if (existsSync(path.join(packagesDir, expected))) {
-      this.log.info("auto-upgrade predownload already present", { latest, file: expected });
-      return true;
+    const cachedArchive = path.join(packagesDir, expected);
+    if (existsSync(cachedArchive)) {
+      try {
+        await assertInstallablePackageArchive(cachedArchive);
+        this.log.info("auto-upgrade predownload already present", { latest, file: expected });
+        return true;
+      } catch (err) {
+        rmSync(cachedArchive, { force: true });
+        this.log.warn("auto-upgrade discarded invalid package cache", { latest, file: expected, error: String(err) });
+      }
     }
-    // npm pack 到 packages 目录（与 restart worker 的 pack 一致，产物可复用）
-    await this.runNpmCommand(["pack", `${UPDATE_PACKAGE_NAME}@${latest}`, "--pack-destination", packagesDir], 120_000);
+    const downloadDirectory = store.createStagingDirectory("auto-update-package");
+    try {
+      await this.runNpmCommand(["pack", `${UPDATE_PACKAGE_NAME}@${latest}`, "--pack-destination", downloadDirectory], 120_000);
+      const downloadedArchive = path.join(downloadDirectory, expected);
+      await assertInstallablePackageArchive(downloadedArchive);
+      store.publishPackageArchive(downloadedArchive, expected);
+    } finally {
+      rmSync(downloadDirectory, { recursive: true, force: true });
+    }
     const present = existsSync(path.join(packagesDir, expected));
     this.log.info("auto-upgrade predownloaded", { latest, present });
     return present;

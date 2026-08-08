@@ -4,7 +4,6 @@ import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { x as extractTar } from "tar";
 import yaml from "yaml";
 import { loadConfig, resolveHomePath } from "./config.js";
 import { localApiRequest, waitForLocalApiHealth } from "./local-api/client.js";
@@ -15,7 +14,15 @@ import { resolveNpmExecutableForNode, withNodeRuntimeOnPath } from "./platform/e
 import { inspectRunningEngine, launchDetachedEngine, stopEngine } from "./process-manager.js";
 import { readProcessState } from "./process-state.js";
 import { acquireProcessLock } from "./process-lock.js";
-import { ReleaseStore, type ReleaseState } from "./release-store.js";
+import { HomeReleaseStore, type HomeReleaseState } from "./home-release-store.js";
+import { currentNodeRuntimeRef, probeNodeRuntimeRef, type ReleaseRef } from "./release-ref.js";
+import { ReleaseStore } from "./release-store.js";
+import { SharedReleaseInstaller } from "./shared-release-installer.js";
+import { SharedReleaseStore } from "./shared-release-store.js";
+import { assertInstallablePackageArchive } from "./package-archive.js";
+import { resolveSharedRuntimeRoot } from "./platform/shared-runtime.js";
+import { samePlatformPath } from "./platform/files.js";
+import { waitForProcessStartMarker } from "./platform/process.js";
 import { RestartStateWriter } from "./restart-state.js";
 import { dateInTimeZone } from "./tz.js";
 import { readPositiveSecondsAsMs, resolveEngineStartTimeoutMs } from "./lifecycle-timeouts.js";
@@ -56,16 +63,29 @@ interface RestartContext {
   logFile: string;
   debugLog: string;
   store: ReleaseStore;
+  sharedStore: SharedReleaseStore;
+  homeStore: HomeReleaseStore;
   state: RestartStateWriter;
+  verifySharedPackage?: (packageDirectory: string, version: string) => void | Promise<void>;
+  stopAfterCompletion: boolean;
 }
 
 interface RuntimeTarget {
   runtimePath: string;
   version: string;
   runtimeMode: string;
+  nodePath: string;
+  releaseRef?: ReleaseRef;
 }
 
-export async function runRestartWorker(env: NodeJS.ProcessEnv = process.env): Promise<void> {
+export interface RestartWorkerDependencies {
+  verifySharedPackage?: (packageDirectory: string, version: string) => void | Promise<void>;
+}
+
+export async function runRestartWorker(
+  env: NodeJS.ProcessEnv = process.env,
+  dependencies: RestartWorkerDependencies = {},
+): Promise<void> {
   // 允许 Agent 会话内重启：通知目标靠 NIUBOT_CHAT_ID 自动注入（Engine 侧），不需要拦截。
   const niubotHome = env["NIUBOT_HOME"] ? path.resolve(env["NIUBOT_HOME"]) : undefined;
   if (!niubotHome) throw new Error("NIUBOT_HOME is not set");
@@ -82,6 +102,7 @@ export async function runRestartWorker(env: NodeJS.ProcessEnv = process.env): Pr
   });
   const logDirectory = path.join(niubotHome, "logs");
   fs.mkdirSync(logDirectory, { recursive: true });
+  const sharedStore = new SharedReleaseStore(resolveSharedRuntimeRoot({ env }));
   const context: RestartContext = {
     id,
     startedAt,
@@ -98,7 +119,11 @@ export async function runRestartWorker(env: NodeJS.ProcessEnv = process.env): Pr
     logFile: path.join(logDirectory, `niubot-${localDate()}.log`),
     debugLog: path.join(logDirectory, "restart-debug.log"),
     store: new ReleaseStore(botDirectory),
+    sharedStore,
+    homeStore: new HomeReleaseStore(niubotHome, sharedStore),
     state: new RestartStateWriter(botDirectory, id, startedAt, env["NIUBOT_AUTO_UPDATE"] === "1"),
+    verifySharedPackage: dependencies.verifySharedPackage,
+    stopAfterCompletion: env["NIUBOT_RESTART_STOP_AFTER_COMPLETION"] === "1",
   };
   let releaseLock: (() => void) | undefined;
   try {
@@ -116,11 +141,13 @@ export async function runRestartWorker(env: NodeJS.ProcessEnv = process.env): Pr
   try {
     fs.writeFileSync(context.debugLog, "");
     log(context, `restart worker started pid=${process.pid} bot=${botName} source=${sourceDirectory}`);
+    await recoverInterruptedHomeTransaction(context);
     context.state.write("started", { oldPid: readProcessState(niubotHome)?.processes.engine.pid });
     await delay(2_000);
 
     context.store.ensureDirectories();
     context.store.migrateLegacyLinks();
+    context.sharedStore.ensureDirectories();
     const mode = resolveRestartMode(context, env);
     try {
       if (mode === "source") {
@@ -141,8 +168,40 @@ export async function runRestartWorker(env: NodeJS.ProcessEnv = process.env): Pr
       throw err;
     }
   } finally {
+    let stopError: unknown;
+    try { await restoreStoppedEngineState(context); } catch (err) { stopError = err; }
     releaseLock();
+    if (stopError) throw stopError;
   }
+}
+
+async function restoreStoppedEngineState(context: RestartContext): Promise<void> {
+  if (!context.stopAfterCompletion) return;
+  await stopEngine(context.niubotHome);
+  const state = context.homeStore.stateExistsRecovering()
+    ? context.homeStore.readStateStrict()
+    : { schemaVersion: 2 as const };
+  context.homeStore.writeSharedRef({ state });
+  log(context, "restored originally stopped Engine state");
+}
+
+async function recoverInterruptedHomeTransaction(context: RestartContext): Promise<void> {
+  if (!context.homeStore.stateExistsRecovering()) return;
+  const state = context.homeStore.readStateStrict();
+  const transaction = state.transaction;
+  if (!transaction) return;
+  if (context.homeStore.transactionOwnerIsActive(transaction)) {
+    throw new Error(`NiuBot runtime transaction '${transaction.transactionId}' is still active`);
+  }
+  log(context, `recovering interrupted runtime transaction id=${transaction.transactionId}`);
+  await stopEngine(context.niubotHome);
+  if (transaction.databaseSnapshot) {
+    context.homeStore.assertTransactionSnapshotContained(transaction.databaseSnapshot);
+    restoreRestartDatabaseSnapshot(transaction.databaseSnapshot);
+  }
+  context.homeStore.reconcileInterruptedTransaction(state);
+  if (transaction.databaseSnapshot) cleanupRestartDatabaseSnapshot(transaction.databaseSnapshot);
+  log(context, `interrupted runtime transaction recovered id=${transaction.transactionId}`);
 }
 
 async function runSourceRestart(context: RestartContext): Promise<void> {
@@ -181,11 +240,42 @@ async function runNpmUpdate(context: RestartContext): Promise<void> {
 
 async function runProductionRestart(context: RestartContext): Promise<void> {
   const runtimePath = context.sourceDirectory;
+  const selected = resolveSelectedRelease(context);
+  if (selected) {
+    const selectedRuntime = selected.runtimePath;
+    if (!samePlatformPath(selectedRuntime, runtimePath)) {
+      const running = await inspectRunningEngine(context.niubotHome);
+      if (running) {
+        const oldRef = context.homeStore.releaseRefForRuntimePath(
+          running.state.runtimePath,
+          probeNodeRuntimeRef(running.state.nodePath),
+        );
+        if (oldRef) {
+          const transitionState: HomeReleaseState = {
+            schemaVersion: 2,
+            current: oldRef,
+            lastKnownGood: oldRef,
+            unresolvedLegacy: [],
+          };
+          context.homeStore.writeState(transitionState);
+          context.homeStore.writeSharedRef({ state: transitionState, runtimePath: running.state.runtimePath });
+        }
+      }
+      await switchToCandidate(context, {
+        runtimePath: selectedRuntime,
+        version: readPackage(path.join(selectedRuntime, "package.json")).version,
+        runtimeMode: context.environment,
+        nodePath: selected.ref.node.nodePath,
+        releaseRef: selected.ref,
+      }, "重启成功。");
+      return;
+    }
+  }
   context.state.write("production_preflight_snapshot");
   const preflightSnapshot = await createDatabaseSnapshot(context, "preflight");
   try {
     context.state.write("production_preflight");
-    await runPreflight(context, runtimePath, preflightSnapshot.manifestPath);
+    await runPreflight(context, runtimePath, preflightSnapshot.manifestPath, selected?.ref.node.nodePath ?? process.execPath);
   } catch (err) {
     cleanupSnapshot(context, preflightSnapshot);
     throw err;
@@ -214,9 +304,11 @@ async function runProductionRestart(context: RestartContext): Promise<void> {
       runtimePath,
       version: readPackage(path.join(runtimePath, "package.json")).version,
       runtimeMode: context.environment,
+      nodePath: selected?.ref.node.nodePath ?? old?.state.nodePath ?? process.execPath,
     });
     context.state.write("production_health_check", { candidatePid: launched.state.pid });
     if (!await checkRuntimeHealth(context, launched)) throw new Error("health check failed");
+    await restoreStoppedEngineState(context);
     context.state.write("production_success");
   } catch (err) {
     const reason = `production restart failed: ${errorMessage(err)}`;
@@ -232,31 +324,63 @@ async function runProductionRestart(context: RestartContext): Promise<void> {
   await wakeMainSession(context);
 }
 
+function resolveSelectedRelease(context: RestartContext): { ref: ReleaseRef; runtimePath: string } | undefined {
+  const state = context.homeStore.stateExistsRecovering()
+    ? context.homeStore.readStateStrict()
+    : { schemaVersion: 2 as const };
+  for (const ref of [state.current, state.lastKnownGood, state.previous]) {
+    if (!ref) continue;
+    try {
+      return { ref, runtimePath: context.homeStore.resolveRuntime(ref, true) };
+    } catch (err) {
+      log(context, `release selection skipped ${describeReleaseRef(ref)}: ${errorMessage(err)}`);
+    }
+  }
+  return undefined;
+}
+
 async function switchToCandidate(
   context: RestartContext,
-  releaseId: string,
+  candidate: RuntimeTarget,
   successMessage: string,
 ): Promise<void> {
-  const packageDirectory = context.store.packageDirectory(releaseId);
+  const releaseId = candidate.releaseRef?.storage === "shared" ? candidate.releaseRef.artifactId : candidate.runtimePath;
+  const packageDirectory = candidate.runtimePath;
+  const previousReleaseState = context.homeStore.stateExistsRecovering()
+    ? context.homeStore.readStateStrict()
+    : { schemaVersion: 2 as const };
+  const protectedRefs = [candidate.releaseRef, previousReleaseState.current, previousReleaseState.previous, previousReleaseState.lastKnownGood]
+    .filter((ref): ref is ReleaseRef => ref !== undefined);
+  context.homeStore.writeSharedRef({
+    state: previousReleaseState,
+    pending: { transactionId: context.id, protected: protectedRefs, updatedAt: new Date().toISOString() },
+    rollback: protectedRefs.slice(1),
+    runtimePath: readProcessState(context.niubotHome)?.processes.engine.runtimePath,
+  });
   context.state.write("preflight_snapshot", { candidateRelease: releaseId });
-  const preflightSnapshot = await createDatabaseSnapshot(context, "preflight");
+  let preflightSnapshot: RestartDatabaseSnapshot | undefined;
   try {
+    preflightSnapshot = await createDatabaseSnapshot(context, "preflight");
     context.state.write("preflight_candidate", { candidateRelease: releaseId });
-    await runPreflight(context, packageDirectory, preflightSnapshot.manifestPath);
+    await runPreflight(context, packageDirectory, preflightSnapshot.manifestPath, candidate.nodePath);
   } catch (err) {
-    cleanupSnapshot(context, preflightSnapshot);
+    if (preflightSnapshot) cleanupSnapshot(context, preflightSnapshot);
+    context.homeStore.writeSharedRef({
+      state: previousReleaseState,
+      runtimePath: readProcessState(context.niubotHome)?.processes.engine.runtimePath,
+    });
     throw err;
   }
   cleanupSnapshot(context, preflightSnapshot);
 
   const old = await inspectRunningEngine(context.niubotHome);
-  const previousReleaseState = context.store.readState();
   const previous = previousReleaseState.lastKnownGood;
   const rollbackTarget = resolveRollbackTarget(context, old, previous);
+  if (!candidate.releaseRef) throw new Error("candidate release reference is unavailable");
   context.state.write("stop_old_service", {
     oldPid: old?.state.pid,
     candidateRelease: releaseId,
-    previousRelease: previous,
+    previousRelease: previous ? describeReleaseRef(previous) : undefined,
   });
   await stopEngine(context.niubotHome);
   let snapshot: RestartDatabaseSnapshot;
@@ -266,29 +390,51 @@ async function switchToCandidate(
   } catch (err) {
     if (rollbackTarget) {
       const reason = errorMessage(err);
+      context.homeStore.writeState(previousReleaseState);
+      context.homeStore.writeSharedRef({ state: previousReleaseState, runtimePath: rollbackTarget.runtimePath });
       await resumeRuntimeAfterSnapshotFailure(context, rollbackTarget, reason);
       throw new Error(`${reason}; old runtime resumed`, { cause: err });
     }
     throw err;
   }
+  const activatingState: HomeReleaseState = {
+    ...previousReleaseState,
+    transaction: {
+      transactionId: context.id,
+      phase: "activating",
+      candidate: candidate.releaseRef,
+      rollback: {
+        current: previousReleaseState.current,
+        previous: previousReleaseState.previous,
+        lastKnownGood: previousReleaseState.lastKnownGood,
+      },
+      ownerPid: process.pid,
+      ownerStartMarker: waitForProcessStartMarker(process.pid),
+      databaseSnapshot: snapshot,
+    },
+  };
+  context.homeStore.writeState(activatingState);
   try {
-    context.store.activate(releaseId);
+    context.homeStore.activate(candidate.releaseRef);
     sanitizeOneShotEnvironment();
     context.state.write("start_candidate");
     const launched = launchRuntime(context, {
-      runtimePath: packageDirectory,
-      version: readPackage(path.join(packageDirectory, "package.json")).version,
-      runtimeMode: context.environment,
+      ...candidate,
     });
     context.state.write("health_check_candidate", { candidatePid: launched.state.pid });
     if (!await checkRuntimeHealth(context, launched)) throw new Error("candidate health check failed");
 
-    context.store.markLastKnownGood(releaseId);
+    await restoreStoppedEngineState(context);
+    const successfulState = context.homeStore.markLastKnownGood(candidate.releaseRef);
+    context.homeStore.writeSharedRef({
+      state: successfulState,
+      runtimePath: context.stopAfterCompletion ? undefined : packageDirectory,
+    });
     context.state.write("success");
   } catch (err) {
     const reason = errorMessage(err);
     if (!rollbackTarget) {
-      await restoreDatabaseWithoutRuntime(context, snapshot, reason);
+      await restoreDatabaseWithoutRuntime(context, snapshot, reason, previousReleaseState);
       throw new Error(`${reason}; database restored but no recoverable previous runtime`, { cause: err });
     }
     await recoverRuntime(
@@ -301,12 +447,8 @@ async function switchToCandidate(
     );
     return;
   }
-  try {
-    const active = readProcessState(context.niubotHome)?.processes.engine.runtimePath;
-    context.store.cleanup({ protectedRuntimePaths: active ? [active] : [] });
-  } catch (err) {
-    log(context, `release cleanup failed: ${errorMessage(err)}`);
-  }
+  // Legacy and shared cleanup is intentionally explicit/dry-run first. A
+  // successful migration must not delete historical rollback copies.
   cleanupSnapshot(context, snapshot);
   await notify(context, successMessage);
   await wakeMainSession(context);
@@ -319,6 +461,7 @@ function launchRuntime(context: RestartContext, target: RuntimeTarget) {
     runtimePath: target.runtimePath,
     logFile: context.logFile,
     version: target.version,
+    nodePath: target.nodePath,
     runtimeMode: target.runtimeMode,
     env: runtimeEnvironment(context),
   });
@@ -329,21 +472,24 @@ function runtimeTargetFromRunning(running: NonNullable<Awaited<ReturnType<typeof
     runtimePath: running.state.runtimePath,
     version: running.identity.version,
     runtimeMode: running.state.runtimeMode ?? "",
+    nodePath: running.state.nodePath,
   };
 }
 
 function resolveRollbackTarget(
   context: RestartContext,
   old: Awaited<ReturnType<typeof inspectRunningEngine>>,
-  rollbackId?: string,
+  rollbackRef?: ReleaseRef,
 ): RuntimeTarget | undefined {
   try {
-    if (rollbackId) {
-      const runtimePath = context.store.packageDirectory(rollbackId);
+    if (rollbackRef) {
+      const runtimePath = context.homeStore.resolveRuntime(rollbackRef, true);
       return {
         runtimePath,
         version: readPackage(path.join(runtimePath, "package.json")).version,
         runtimeMode: old?.state.runtimeMode ?? context.environment,
+        nodePath: rollbackRef.node.nodePath,
+        releaseRef: rollbackRef,
       };
     }
   } catch (err) {
@@ -358,18 +504,23 @@ async function recoverRuntime(
   snapshot: RestartDatabaseSnapshot,
   reason: string,
   notification: string,
-  restoreReleaseState?: ReleaseState,
+  restoreReleaseState?: HomeReleaseState,
 ): Promise<void> {
   try {
     context.state.write("rollback_stop_candidate", { error: reason });
     await stopEngine(context.niubotHome);
     context.state.write("rollback_restore_database", { error: reason });
     restoreRestartDatabaseSnapshot(snapshot);
+    if (restoreReleaseState) {
+      context.homeStore.writeState(restoreReleaseState);
+      context.homeStore.writeSharedRef({ state: restoreReleaseState, runtimePath: target.runtimePath });
+    }
     context.state.write("rollback_start_lkg", { error: reason });
     const rollback = launchRuntime(context, target);
     context.state.write("health_check_rollback", { candidatePid: rollback.state.pid, error: reason });
     if (!await checkRuntimeHealth(context, rollback)) throw new Error("rollback health check failed");
-    if (restoreReleaseState) context.store.writeState(restoreReleaseState);
+    if (!restoreReleaseState) context.homeStore.writeSharedRef({ state: context.homeStore.readStateStrict(), runtimePath: target.runtimePath });
+    await restoreStoppedEngineState(context);
     context.state.write("rollback_success", { error: reason });
     cleanupSnapshot(context, snapshot);
     await notify(context, notification);
@@ -384,12 +535,17 @@ async function restoreDatabaseWithoutRuntime(
   context: RestartContext,
   snapshot: RestartDatabaseSnapshot,
   reason: string,
+  restoreReleaseState?: HomeReleaseState,
 ): Promise<void> {
   try {
     context.state.write("rollback_stop_candidate", { error: reason });
     await stopEngine(context.niubotHome);
     context.state.write("rollback_restore_database", { error: reason });
     restoreRestartDatabaseSnapshot(snapshot);
+    if (restoreReleaseState) {
+      context.homeStore.writeState(restoreReleaseState);
+      context.homeStore.writeSharedRef({ state: restoreReleaseState });
+    }
     context.state.write("rollback_unavailable", { error: reason });
     cleanupSnapshot(context, snapshot);
   } catch (restoreError) {
@@ -419,17 +575,29 @@ async function resumeRuntimeAfterSnapshotFailure(
 
 async function ensureBootstrapRelease(context: RestartContext): Promise<void> {
   context.state.write("bootstrap_last_known_good");
-  const state = context.store.readState();
+  const state = context.homeStore.stateExistsRecovering()
+    ? context.homeStore.readStateStrict()
+    : context.homeStore.readOrMigrateLegacy(currentNodeRuntimeRef());
   if (state.lastKnownGood) return;
 
   const running = await inspectRunningEngine(context.niubotHome);
-  const existingId = running ? context.store.releaseIdForRuntimePath(running.state.runtimePath) : undefined;
-  if (existingId) {
-    const next: ReleaseState = { schemaVersion: 1, current: existingId, lastKnownGood: existingId };
-    context.store.writeState(next);
+  const node = running
+    ? probeNodeRuntimeRef(running.state.nodePath)
+    : currentNodeRuntimeRef();
+  const existingRef = running
+    ? context.homeStore.releaseRefForRuntimePath(running.state.runtimePath, node)
+    : undefined;
+  if (existingRef) {
+    const next: HomeReleaseState = {
+      schemaVersion: 2,
+      current: existingRef,
+      lastKnownGood: existingRef,
+      unresolvedLegacy: [],
+    };
+    context.homeStore.writeState(next);
+    context.homeStore.writeSharedRef({ state: next, runtimePath: running?.state.runtimePath });
     return;
   }
-
   const packageJson = path.join(context.sourceDirectory, "package.json");
   const dist = path.join(context.sourceDirectory, "dist");
   if (!fs.existsSync(packageJson) || !fs.existsSync(dist)) {
@@ -437,13 +605,21 @@ async function ensureBootstrapRelease(context: RestartContext): Promise<void> {
     return;
   }
   const pkg = readPackage(packageJson);
-  const releaseId = `bootstrap-${compactTimestamp(new Date())}-${pkg.version}`;
-  await packRelease(context, {
-    releaseId,
+  const bootstrap = await packRelease(context, {
+    releaseId: `bootstrap-${compactTimestamp(new Date())}-${pkg.version}`,
     cwd: context.sourceDirectory,
+    expectedVersion: pkg.version,
     installTimeoutMs: installTimeout(context, false),
   });
-  context.store.writeState({ schemaVersion: 1, current: releaseId, lastKnownGood: releaseId });
+  if (!bootstrap.releaseRef) throw new Error("bootstrap release reference is unavailable");
+  const next: HomeReleaseState = {
+    schemaVersion: 2,
+    current: bootstrap.releaseRef,
+    lastKnownGood: bootstrap.releaseRef,
+    unresolvedLegacy: [],
+  };
+  context.homeStore.writeState(next);
+  context.homeStore.writeSharedRef({ state: next });
 }
 
 interface PackReleaseOptions {
@@ -454,32 +630,51 @@ interface PackReleaseOptions {
   installTimeoutMs: number;
 }
 
-async function packRelease(context: RestartContext, options: PackReleaseOptions): Promise<string> {
+async function packRelease(context: RestartContext, options: PackReleaseOptions): Promise<RuntimeTarget> {
   await assertLocalProxyEnvironment();
-  const releaseDirectory = context.store.releaseDirectory(options.releaseId);
-  const packageDirectory = context.store.packageDirectory(options.releaseId);
-  if (fs.existsSync(releaseDirectory)) throw new Error(`release already exists: ${options.releaseId}`);
-  fs.mkdirSync(packageDirectory, { recursive: true });
-  try {
-    const npmCommand = resolveNpmCommandForCurrentNode();
-    const npmEnv = npmEnvironmentForCurrentNode();
-    // 复用预下载的 tgz（自动升级 predownloadPackage 已拉到 packages 目录）：
-    // 命中则跳过 npm pack（本地操作），避免锁内网络下载。
-    let archive: string | undefined;
-    if (options.packageSpec) {
-      const versionMatch = options.packageSpec.match(/@([0-9A-Za-z._-]+)$/);
-      if (versionMatch) {
-        const expected = npmPackFilenameForPackage(options.packageSpec);
-        if (expected) {
-          const existing = path.join(context.store.packagesDirectory, expected);
-          if (fs.existsSync(existing)) archive = existing;
+  const npmCommand = resolveNpmCommandForCurrentNode();
+  const npmEnv = npmEnvironmentForCurrentNode();
+  let archive: string | undefined;
+  if (options.packageSpec) {
+    const expected = npmPackFilenameForPackage(options.packageSpec);
+    if (expected) {
+      const sharedArchive = path.join(context.sharedStore.packagesDirectory, expected);
+      const legacyArchive = path.join(context.store.packagesDirectory, expected);
+      if (fs.existsSync(sharedArchive)) {
+        try {
+          await assertInstallablePackageArchive(sharedArchive);
+          archive = sharedArchive;
+        } catch (err) {
+          fs.rmSync(sharedArchive, { force: true });
+          log(context, `discarded invalid shared package cache: ${String(err)}`);
+        }
+      }
+      if (!archive && fs.existsSync(legacyArchive)) {
+        try {
+          await assertInstallablePackageArchive(legacyArchive);
+        } catch (err) {
+          fs.rmSync(legacyArchive, { force: true });
+          log(context, `discarded invalid legacy package cache: ${String(err)}`);
+        }
+      }
+      if (!archive && fs.existsSync(legacyArchive)) {
+        const downloadDirectory = context.sharedStore.createStagingDirectory("legacy-package-cache");
+        try {
+          const stagedArchive = path.join(downloadDirectory, expected);
+          fs.copyFileSync(legacyArchive, stagedArchive, fs.constants.COPYFILE_EXCL);
+          archive = context.sharedStore.publishPackageArchive(stagedArchive, expected);
+        } finally {
+          fs.rmSync(downloadDirectory, { recursive: true, force: true });
         }
       }
     }
-    if (!archive) {
+  }
+  if (!archive) {
+    const downloadDirectory = context.sharedStore.createStagingDirectory("npm-pack");
+    try {
       const args = ["pack"];
       if (options.packageSpec) args.push(options.packageSpec);
-      args.push("--json", "--pack-destination", context.store.packagesDirectory);
+      args.push("--json", "--pack-destination", downloadDirectory);
       const packed = await runLogged(
         context,
         npmCommand,
@@ -489,35 +684,56 @@ async function packRelease(context: RestartContext, options: PackReleaseOptions)
         npmEnv,
       );
       const filename = parseNpmPackFilename(packed.stdout);
-      archive = path.join(context.store.packagesDirectory, filename);
+      const cacheFilename = options.packageSpec ? filename : `${options.releaseId}-${filename}`;
+      archive = context.sharedStore.publishPackageArchive(path.join(downloadDirectory, filename), cacheFilename);
+    } finally {
+      fs.rmSync(downloadDirectory, { recursive: true, force: true });
     }
-    if (!fs.existsSync(archive)) throw new Error(`npm pack output not found: ${archive}`);
-    await extractTar({ file: archive, cwd: packageDirectory, strip: 1 });
-
-    const pkg = readPackage(path.join(packageDirectory, "package.json"));
-    if (pkg.name !== PACKAGE_NAME || (options.expectedVersion && pkg.version !== options.expectedVersion)) {
-      throw new Error(`candidate metadata mismatch: ${pkg.name}@${pkg.version}`);
-    }
-    await assertLocalProxyEnvironment();
-    await runLogged(
-      context,
-      npmCommand,
-      buildInstallArgs(context.environment === "dev"),
-      packageDirectory,
-      options.installTimeoutMs,
-      npmEnv,
-    );
-    return options.releaseId;
-  } catch (err) {
-    try { fs.rmSync(releaseDirectory, { recursive: true, force: true }); } catch { /* next cleanup can retry */ }
-    throw err;
   }
+  if (!fs.existsSync(archive)) throw new Error(`npm pack output not found: ${archive}`);
+  await assertLocalProxyEnvironment();
+  const installer = new SharedReleaseInstaller(context.sharedStore);
+  const installed = await installer.installArchive({
+    archivePath: archive,
+    sourceKind: options.packageSpec ? "npm" : "source",
+    expectedVersion: options.expectedVersion,
+    nodePath: process.execPath,
+    nodeVersion: process.version,
+    nodeAbi: process.versions.modules,
+    npmCommand,
+    cwd: options.cwd,
+    env: npmEnv,
+    timeoutMs: options.installTimeoutMs,
+    preferOffline: context.environment === "dev",
+    verify: context.verifySharedPackage,
+    run: (command, args, commandOptions = {}) => runLogged(
+      context,
+      command,
+      args,
+      commandOptions.cwd ?? options.cwd,
+      commandOptions.timeoutMs ?? options.installTimeoutMs,
+      commandOptions.env,
+    ),
+  });
+  const releaseRef: ReleaseRef = {
+    storage: "shared",
+    artifactId: installed.artifactId,
+    node: currentNodeRuntimeRef(),
+  };
+  return {
+    runtimePath: installed.packageDirectory,
+    version: installed.manifest.version,
+    runtimeMode: context.environment,
+    nodePath: process.execPath,
+    releaseRef,
+  };
 }
 
 async function runPreflight(
   context: RestartContext,
   runtimePath: string,
   databaseManifestPath: string,
+  nodePath: string,
 ): Promise<void> {
   const timeoutMs = resolvePreflightTimeoutMs();
   const startedAt = Date.now();
@@ -525,12 +741,12 @@ async function runPreflight(
   try {
     await runLogged(
       context,
-      process.execPath,
+      nodePath,
       [path.join(runtimePath, "dist", "index.js"), "--preflight"],
       runtimePath,
       timeoutMs,
       {
-        ...runtimeEnvironment(context),
+        ...withNodeRuntimeOnPath(nodePath, runtimeEnvironment(context)),
         [PREFLIGHT_DATABASE_MANIFEST_ENV]: databaseManifestPath,
         [PREFLIGHT_FULL_VALIDATION_ENV]: "1",
       },
@@ -777,6 +993,7 @@ function sanitizeOneShotEnvironment(): void {
     "NIUBOT_RESTART_ID",
     "NIUBOT_RESTART_STARTED_AT",
     "NIUBOT_UPDATE_VERSION",
+    "NIUBOT_RESTART_STOP_AFTER_COMPLETION",
     "NIUBOT_RESTART_NOTIFY_CHAT_ID",
     "NIUBOT_CHAT_ID",
     "NIUBOT_API_SOCKET",
@@ -864,6 +1081,10 @@ function localDate(): string {
 
 function log(context: RestartContext, message: string): void {
   fs.appendFileSync(context.debugLog, `[${new Date().toISOString()}] ${message}\n`);
+}
+
+function describeReleaseRef(ref: ReleaseRef): string {
+  return ref.storage === "shared" ? ref.artifactId : ref.runtimePath;
 }
 
 function errorMessage(err: unknown): string {

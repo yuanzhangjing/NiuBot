@@ -12,7 +12,7 @@ export function shouldRunFullPreflight(env: NodeJS.ProcessEnv = process.env): bo
   return env[PREFLIGHT_FULL_VALIDATION_ENV] === "1";
 }
 
-interface SnapshotRecord {
+export interface SnapshotRecord {
   databasePath: string;
   existed: boolean;
   rollbackPath?: string;

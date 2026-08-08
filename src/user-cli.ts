@@ -26,6 +26,7 @@ import { INSTALL_GUIDE_COMMAND } from "./install-guide.js";
 import { localToday } from "./tz.js";
 import { localApiRequest, waitForLocalApiHealth } from "./local-api/client.js";
 import { resolveBotEndpoint, type LocalIpcEndpoint } from "./platform/ipc.js";
+import { recoverFileReplacementSync, replaceFileSync } from "./platform/files.js";
 import { probeAllBackendCapabilities, probeBackendCapability } from "./agent/backend-capability.js";
 import { waitForEngineIdentity } from "./local-api/engine-client.js";
 import { resolveEngineStartTimeoutMs } from "./lifecycle-timeouts.js";
@@ -38,9 +39,7 @@ import {
 } from "./restart-progress.js";
 import { runCommand, runCommandSync } from "./platform/command.js";
 import {
-  commandLookupHint,
   deriveNpmPrefixFromPackageRoot,
-  isPackageRootInsideNpmRoot,
   resolveNpmExecutableForNode,
   withNodeRuntimeOnPath,
 } from "./platform/executable.js";
@@ -51,17 +50,15 @@ import {
   queryProcessWorkingDirectory,
 } from "./platform/process.js";
 import { isNewerPackageVersion } from "./version.js";
-import { preflightGlobalNpmInstall, verifyInstalledPackage } from "./npm-install-preflight.js";
 import {
   isSupportedNodeMajor,
   MINIMUM_NODE_MAJOR,
   WINDOWS_TESTED_NODE_MAJORS,
 } from "./node-support.js";
-import {
-  GlobalInstallError,
-  resolvePrimaryGlobalCommand,
-  runRecoverableGlobalInstall,
-} from "./global-npm-install.js";
+import { HomeReleaseStore } from "./home-release-store.js";
+import { cleanupLegacyReleases, cleanupSharedReleases } from "./release-cleanup.js";
+import { resolveSharedRuntimeRoot } from "./platform/shared-runtime.js";
+import { SharedReleaseStore } from "./shared-release-store.js";
 
 // ── Paths ──────────────────────────────────────────────────
 
@@ -143,6 +140,7 @@ interface CliFlags {
   restart?: boolean;
   verbose?: boolean;
   all?: boolean;
+  apply?: boolean;
   home?: string;
 }
 
@@ -158,6 +156,7 @@ function parseCliArgs(args: string[]): { command: string | undefined; flags: Cli
     else if (arg === "--restart") flags.restart = true;
     else if (arg === "--verbose") flags.verbose = true;
     else if (arg === "--all") flags.all = true;
+    else if (arg === "--apply") flags.apply = true;
     else if ((arg === "--version" || arg === "-v") && !command) command = arg;
     else if (arg === "--home" && i + 1 < args.length) {
       flags.home = args[++i];
@@ -219,6 +218,7 @@ function getHomeRegistryPath(): string {
 
 export function readRegisteredHomes(registryPath: string): string[] {
   try {
+    recoverFileReplacementSync(registryPath);
     const raw = JSON.parse(fs.readFileSync(registryPath, "utf-8")) as unknown;
     const homes = Array.isArray(raw)
       ? raw
@@ -255,7 +255,20 @@ export function registerHomePath(registryPath: string, home: string): void {
     homes.push(resolved);
   }
   fs.mkdirSync(path.dirname(registryPath), { recursive: true });
-  fs.writeFileSync(registryPath, `${JSON.stringify({ homes }, null, 2)}\n`);
+  const temporary = path.join(path.dirname(registryPath), `.instances.${process.pid}.${Date.now()}.tmp`);
+  const fd = fs.openSync(temporary, "wx", 0o600);
+  try {
+    fs.writeFileSync(fd, `${JSON.stringify({ homes }, null, 2)}\n`, "utf-8");
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+  try {
+    replaceFileSync(temporary, registryPath);
+  } catch (err) {
+    try { fs.unlinkSync(temporary); } catch { /* ignore */ }
+    throw err;
+  }
 }
 
 function readNpmRoot(npmCommand: string): string | undefined {
@@ -971,7 +984,9 @@ async function cmdStart(niubotHome: string, flags: CliFlags): Promise<void> {
   fs.writeFileSync(path.join(niubotHome, "niubot.version"), getPkgVersion());
   fs.writeFileSync(path.join(niubotHome, "niubot.node"), getNodeRuntimeLabel());
   try {
-    registerHomePath(getHomeRegistryPath(), niubotHome);
+    const registryStore = new SharedReleaseStore(resolveSharedRuntimeRoot());
+    const releaseRegistryLock = registryStore.acquireLock();
+    try { registerHomePath(getHomeRegistryPath(), niubotHome); } finally { releaseRegistryLock(); }
   } catch (err) {
     hint(`Could not update home registry: ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -1147,6 +1162,9 @@ async function printStatusForHome(niubotHome: string): Promise<void> {
     console.log(`Engine: running (PID ${running.state.pid})`);
     console.log(`  Version: ${running.identity.version}`);
     console.log(`  Path: ${running.identity.runtimePath}`);
+    const sharedStore = new SharedReleaseStore(resolveSharedRuntimeRoot());
+    const artifactId = sharedStore.artifactIdForRuntimePath(running.identity.runtimePath);
+    console.log(`  Storage: ${artifactId ? `shared (${artifactId})` : "legacy/external"}`);
     console.log(`  Node: ${running.state.nodePath}`);
     if (uptime) console.log(`  Uptime: ${uptime}`);
     console.log(`  Log: ${logFile}`);
@@ -1248,18 +1266,6 @@ export function parseNiubotVersionOutput(output: string): string | undefined {
   return match?.[1];
 }
 
-function readActiveCliVersion(): string | undefined {
-  try {
-    const output = runCommandSync("niubot", ["version"], {
-      timeoutMs: 8_000,
-      cwd: safeCurrentWorkingDirectory(),
-    }).stdout;
-    return parseNiubotVersionOutput(output);
-  } catch {
-    return undefined;
-  }
-}
-
 function fetchLatestVersion(): string {
   const npmCommand = resolveNpmCommandForCurrentNode();
   const latest = runCommandSync(npmCommand, ["view", `${PKG_NAME}@latest`, "version"], {
@@ -1324,15 +1330,16 @@ async function cmdUpdate(niubotHome: string, flags: CliFlags): Promise<void> {
   console.log(`  New version available: ${latest}`);
   console.log();
 
-  if (running) {
+  {
     const config = loadConfig(path.join(niubotHome, "config.yaml"));
     const worker = launchRestartWorker({
       niubotHome,
       botName: config.bots[0]?.id ?? "NiuBot",
       runtimeRoot: PROJECT_ROOT,
-      sourceDirectory: running.identity.runtimePath,
-      environment: running.state.runtimeMode ?? process.env["NIUBOT_ENV"] ?? "",
+      sourceDirectory: running?.identity.runtimePath ?? PROJECT_ROOT,
+      environment: running?.state.runtimeMode ?? process.env["NIUBOT_ENV"] ?? "production",
       updateVersion: latest,
+      stopAfterCompletion: !running,
     });
     info(`Update started (worker PID ${worker.pid})`);
     info(`Log: ${worker.logFile}`);
@@ -1370,148 +1377,6 @@ async function cmdUpdate(niubotHome: string, flags: CliFlags): Promise<void> {
     return;
   }
 
-  const nodeCheck = checkNodeVersion();
-  if (!nodeCheck.passed) {
-    fail(nodeCheck.label);
-    if (nodeCheck.hint) hint(nodeCheck.hint);
-    console.log();
-    process.exitCode = 1;
-    return;
-  }
-
-  const npmRoot = readNpmRoot(npmCommand);
-  if (!npmRoot) {
-    fail("Refusing to update because the active npm global root could not be determined.");
-    hint(`Current Node: ${process.execPath}`);
-    hint(`npm command: ${npmCommand}`);
-    hint("Fix this Node/npm installation before retrying; do not switch to an unrelated npm global prefix.");
-    console.log();
-    process.exitCode = 1;
-    return;
-  }
-  if (!isPackageRootInsideNpmRoot(PROJECT_ROOT, npmRoot)) {
-    fail("Refusing to update because npm global root does not match the active niubot installation.");
-    hint(`Current niubot package: ${PROJECT_ROOT}`);
-    hint(`Current Node: ${process.execPath}`);
-    hint(`npm command: ${npmCommand}`);
-    hint(`npm root -g: ${npmRoot}`);
-    hint("Use the npm that owns the active niubot install, or fix PATH so niubot and npm use the same Node runtime.");
-    console.log();
-    process.exitCode = 1;
-    return;
-  }
-  const npmPrefix = deriveNpmPrefixFromPackageRoot(PROJECT_ROOT);
-  if (!npmPrefix) {
-    fail("Refusing to update because the npm global prefix could not be derived from the active package.");
-    hint(`Current niubot package: ${PROJECT_ROOT}`);
-    console.log();
-    process.exitCode = 1;
-    return;
-  }
-  const npmUpdateCwd = resolveNpmUpdateWorkingDirectory(PROJECT_ROOT, npmPrefix);
-
-  const npmEnv = npmEnvironmentForCurrentNode();
-  info(`Validating ${PKG_NAME}@${latest} in an isolated installation...`);
-  try {
-    await preflightGlobalNpmInstall({
-      npmCommand,
-      nodePath: process.execPath,
-      packageName: PKG_NAME,
-      packageSpec: `${PKG_NAME}@${latest}`,
-      expectedVersion: latest,
-      cwd: npmUpdateCwd,
-      env: npmEnv,
-      timeoutMs: 600_000,
-    });
-    ok("Isolated installation and native dependency check passed");
-  } catch (err) {
-    fail(`Candidate validation failed: ${err instanceof Error ? err.message : String(err)}`);
-    hint("The active global installation was not modified.");
-    hint("Retry with the same Node/npm installation after fixing the reported problem.");
-    console.log();
-    process.exitCode = 1;
-    return;
-  }
-
-  // Install with a recoverable snapshot of the active package and npm shims.
-  info(`Installing ${PKG_NAME}@${latest} ...`);
-  try {
-    const transaction = await runRecoverableGlobalInstall({
-      packageRoot: PROJECT_ROOT,
-      npmPrefix,
-      commandName: "niubot",
-      install: async () => {
-        await runCommand(npmCommand, ["install", "-g", `${PKG_NAME}@${latest}`], {
-          timeoutMs: 600_000,
-          cwd: npmUpdateCwd,
-          env: npmEnv,
-        });
-      },
-      verify: () => verifyGlobalNpmInstall(PROJECT_ROOT, npmPrefix, latest, npmUpdateCwd, npmEnv),
-      verifyRollback: () => verifyGlobalNpmInstall(PROJECT_ROOT, npmPrefix, current, npmUpdateCwd, npmEnv),
-    });
-    if (transaction.cleanupWarning) hint(transaction.cleanupWarning);
-  } catch (err) {
-    fail(`Install failed: ${err instanceof Error ? err.message : err}`);
-    if (err instanceof GlobalInstallError && err.restored) {
-      hint("The previous NiuBot package and command files were restored.");
-    } else if (err instanceof GlobalInstallError && err.recoveryDirectory) {
-      hint(`Keep the recovery copy for repair: ${err.recoveryDirectory}`);
-    }
-    hint(`Check the active commands with: ${commandLookupHint("node")}, ${commandLookupHint("npm")}, and ${commandLookupHint("niubot")}`);
-    console.log();
-    process.exitCode = 1;
-    return;
-  }
-
-  const activeVersion = readActiveCliVersion();
-  if (activeVersion && activeVersion !== latest) {
-    fail(`Installed ${latest}, but the active niubot command is still ${activeVersion}.`);
-    hint("You probably have multiple global npm installs or PATH is resolving an older binary first.");
-    hint(`Check with: ${commandLookupHint("niubot")}`);
-    hint("Check npm prefix with: npm root -g");
-    console.log();
-    process.exitCode = 1;
-    return;
-  }
-  ok(`Updated to ${latest}`);
-
-  hint(`No running service found in ${niubotHome}. Start it with: niubot start`);
-  console.log();
-}
-
-async function verifyGlobalNpmInstall(
-  packageRoot: string,
-  npmPrefix: string,
-  expectedVersion: string,
-  cwd: string,
-  env: NodeJS.ProcessEnv,
-): Promise<void> {
-  await verifyInstalledPackage({
-    packageRoot,
-    nodePath: process.execPath,
-    packageName: PKG_NAME,
-    expectedVersion,
-    cwd,
-    env,
-  });
-  const command = resolvePrimaryGlobalCommand(npmPrefix, "niubot");
-  const output = (await runCommand(command, ["version"], {
-    timeoutMs: 30_000,
-    cwd,
-    env,
-  })).stdout.trim();
-  const expectedOutput = `niubot v${expectedVersion}`;
-  if (output !== expectedOutput) {
-    throw new Error(`installed command returned ${JSON.stringify(output)}; expected ${JSON.stringify(expectedOutput)}`);
-  }
-}
-
-function resolveNpmUpdateWorkingDirectory(packageRoot: string, npmPrefix: string): string {
-  const cwd = safeCurrentWorkingDirectory();
-  const relative = path.relative(path.resolve(packageRoot), path.resolve(cwd));
-  const cwdIsInsidePackage = relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
-  return cwdIsInsidePackage ? npmPrefix : cwd;
 }
 
 // ── Utilities ──────────────────────────────────────────────
@@ -1536,6 +1401,26 @@ function cmdInstallGuide(): void {
   process.stdout.write(fs.readFileSync(path.join(PROJECT_ROOT, "INSTALL.md"), "utf-8"));
 }
 
+function cmdCleanup(niubotHome: string, flags: CliFlags): void {
+  const sharedStore = new SharedReleaseStore(resolveSharedRuntimeRoot());
+  const homeStore = new HomeReleaseStore(niubotHome, sharedStore);
+  const runtimePath = readProcessState(niubotHome)?.processes.engine.runtimePath;
+  const knownHomes = collectStatusHomes(niubotHome, readRegisteredHomes(getHomeRegistryPath()));
+  const shared = cleanupSharedReleases(sharedStore, { apply: flags.apply, knownHomes });
+  const legacy = cleanupLegacyReleases(niubotHome, homeStore.readState(), {
+    apply: flags.apply,
+    runningRuntimePath: runtimePath,
+  });
+  const candidates = [...shared, ...legacy];
+  if (candidates.length === 0) {
+    ok("No releases are eligible for cleanup.");
+    return;
+  }
+  console.log(flags.apply ? "Moved/deleted eligible releases:" : "Cleanup dry run (no files changed):");
+  for (const candidate of candidates) console.log(`  ${candidate.kind}: ${candidate.sourcePath}`);
+  if (!flags.apply) hint("Run 'niubot cleanup --apply' to apply this exact policy after reviewing the list.");
+}
+
 // ── Usage ──────────────────────────────────────────────────
 
 function getUsageText(): string {
@@ -1551,6 +1436,7 @@ Commands:
   stop       Stop the NiuBot service
   status     Show service status
   update     Check for updates and install latest version
+  cleanup    List safely removable releases (use --apply to move/delete)
   version    Show version
   install-guide  Print the agent installation guide
 
@@ -1567,6 +1453,9 @@ Status options:
 
 Update options:
   --detach   Start the update worker and return immediately (running Engine only)
+
+Cleanup options:
+  --apply    Apply cleanup; default is dry-run
 
 Agent install guide: run \`${INSTALL_GUIDE_COMMAND}\` and follow it.`;
 }
@@ -1604,6 +1493,9 @@ async function main(): Promise<void> {
       break;
     case "update":
       await cmdUpdate(niubotHome, flags);
+      break;
+    case "cleanup":
+      cmdCleanup(niubotHome, flags);
       break;
     case "version":
     case "--version":

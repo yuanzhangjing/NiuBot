@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { replaceFileSync } from "./platform/files.js";
+import { recoverFileReplacementSync, replaceFileSync } from "./platform/files.js";
 
 export const RELEASE_STATE_SCHEMA_VERSION = 1;
 
@@ -29,12 +29,18 @@ export class ReleaseStore {
 
   readState(): ReleaseState {
     try {
+      recoverFileReplacementSync(this.stateFile);
       const value = JSON.parse(fs.readFileSync(this.stateFile, "utf-8")) as unknown;
       if (isReleaseState(value)) return value;
     } catch {
       // Missing state is a valid empty store.
     }
     return { schemaVersion: RELEASE_STATE_SCHEMA_VERSION };
+  }
+
+  stateExistsRecovering(): boolean {
+    recoverFileReplacementSync(this.stateFile);
+    return fs.existsSync(this.stateFile);
   }
 
   writeState(state: ReleaseState): void {

@@ -14,6 +14,7 @@ describe("restart launcher", () => {
       updateVersion: "1.2.3",
       restartId: "restart-a",
       restartStartedAt: "2026-07-30T00:00:00.000Z",
+      stopAfterCompletion: true,
     }, { NIUBOT_AGENT_SESSION: "session-a", KEEP_ME: "yes" });
 
     expect(env["NIUBOT_AGENT_SESSION"]).toBeUndefined();
@@ -25,6 +26,7 @@ describe("restart launcher", () => {
     expect(env["NIUBOT_RESTART_STARTED_AT"]).toBe("2026-07-30T00:00:00.000Z");
     expect(env["NIUBOT_ENV"]).toBe("production");
     expect(env["NIUBOT_RESTART_WAKE_PROMPT"]).toBe("");
+    expect(env["NIUBOT_RESTART_STOP_AFTER_COMPLETION"]).toBe("1");
   });
 
   it("passes wake prompt to the restart worker", () => {

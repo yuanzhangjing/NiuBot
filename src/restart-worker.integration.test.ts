@@ -4,11 +4,15 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { inspectRunningEngine, launchDetachedEngine, stopEngine } from "./process-manager.js";
 import { ReleaseStore } from "./release-store.js";
+import { HomeReleaseStore } from "./home-release-store.js";
+import { computeTreeDigest, createSharedReleaseManifest, SharedReleaseStore } from "./shared-release-store.js";
+import { currentNodeRuntimeRef } from "./release-ref.js";
 import { runRestartWorker } from "./restart-worker.js";
 import { readProcessState } from "./process-state.js";
 import { readEngineIdentity, waitForEngineIdentity } from "./local-api/engine-client.js";
 import { endpointFromAddress } from "./platform/ipc.js";
 import Database from "better-sqlite3";
+import { createRestartDatabaseSnapshot } from "./database/restart-snapshot.js";
 
 const tempDirs: string[] = [];
 
@@ -33,6 +37,110 @@ afterEach(async () => {
 });
 
 describe("restart worker integration", () => {
+  it("restores a stopped Engine state inside the worker after verification", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-stopped-restart-"));
+    tempDirs.push(root);
+    const home = path.join(root, "home");
+    const runtime = path.join(root, "runtime");
+    fs.mkdirSync(path.join(runtime, "dist"), { recursive: true });
+    fs.mkdirSync(home, { recursive: true });
+    fs.writeFileSync(path.join(runtime, "package.json"), JSON.stringify({
+      name: "@yuanzhangjing/niubot",
+      version: "3.0.0",
+      type: "module",
+    }));
+    fs.writeFileSync(path.join(runtime, "dist", "index.js"), fakeEngineSource(true, "3.0.0"));
+    fs.writeFileSync(path.join(home, "config.yaml"), [
+      "bots:",
+      "  - id: TestBot",
+      "    backend: codex",
+      "    appId: test-app",
+      "    appSecret: test-secret",
+      "",
+    ].join("\n"));
+
+    await runTestRestartWorker({
+      ...process.env,
+      NIUBOT_SHARED_STORE: path.join(root, "shared-store"),
+      NIUBOT_HOME: home,
+      NIUBOT_BOT_NAME: "TestBot",
+      NIUBOT_SOURCE_DIR: runtime,
+      NIUBOT_ENV: "production",
+      NIUBOT_RESTART_STOP_AFTER_COMPLETION: "1",
+    });
+
+    expect(await inspectRunningEngine(home)).toBeUndefined();
+    expect(readProcessState(home)).toBeUndefined();
+    const restartState = JSON.parse(fs.readFileSync(
+      path.join(home, "TestBot", "restart", "state.json"),
+      "utf-8",
+    )) as { phase: string };
+    expect(restartState.phase).toBe("production_success");
+  }, 30_000);
+
+  it("recovers a dead transaction and its original database snapshot before restarting", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-dead-transaction-"));
+    tempDirs.push(root);
+    const home = path.join(root, "home");
+    const runtime = path.join(home, "TestBot", "releases", "old", "package");
+    const databasePath = path.join(home, "TestBot", "niubot.db");
+    fs.mkdirSync(path.join(runtime, "dist"), { recursive: true });
+    fs.writeFileSync(path.join(runtime, "package.json"), JSON.stringify({
+      name: "@yuanzhangjing/niubot",
+      version: "1.0.0",
+      type: "module",
+    }));
+    fs.writeFileSync(path.join(runtime, "dist", "index.js"), fakeEngineSource(true, "1.0.0"));
+    fs.writeFileSync(path.join(home, "config.yaml"), [
+      "bots:",
+      "  - id: TestBot",
+      "    backend: codex",
+      "    appId: test-app",
+      "    appSecret: test-secret",
+      `    dbPath: ${JSON.stringify(databasePath)}`,
+      "",
+    ].join("\n"));
+    const database = new Database(databasePath);
+    database.exec("CREATE TABLE marker (value TEXT); INSERT INTO marker VALUES ('before')");
+    database.close();
+    const snapshot = await createRestartDatabaseSnapshot({
+      rootDirectory: path.join(home, "TestBot", "restart", "database-snapshots", "dead-tx"),
+      databasePaths: [databasePath],
+    });
+    const migrated = new Database(databasePath);
+    migrated.exec("UPDATE marker SET value='migrated'");
+    migrated.close();
+    const sharedStore = new SharedReleaseStore(path.join(root, "shared-store"));
+    const homeStore = new HomeReleaseStore(home, sharedStore);
+    const legacy = { storage: "legacy" as const, runtimePath: runtime, node: currentNodeRuntimeRef() };
+    homeStore.writeState({
+      schemaVersion: 2,
+      current: legacy,
+      lastKnownGood: legacy,
+      transaction: {
+        transactionId: "dead-tx",
+        phase: "activating",
+        candidate: legacy,
+        rollback: { current: legacy, lastKnownGood: legacy },
+        ownerPid: 999_999_999,
+        databaseSnapshot: snapshot,
+      },
+    });
+
+    await runTestRestartWorker({
+      ...process.env,
+      NIUBOT_SHARED_STORE: sharedStore.rootDirectory,
+      NIUBOT_HOME: home,
+      NIUBOT_BOT_NAME: "TestBot",
+      NIUBOT_SOURCE_DIR: runtime,
+      NIUBOT_ENV: "production",
+    });
+    const restored = new Database(databasePath, { readonly: true });
+    expect(restored.prepare("SELECT value FROM marker").pluck().get()).toBe("before");
+    restored.close();
+    expect(homeStore.readState().transaction).toBeUndefined();
+  }, 30_000);
+
   it("uses the active runtime as the production restart target, not the worker package", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-production-restart-"));
     tempDirs.push(root);
@@ -68,8 +176,9 @@ describe("restart worker integration", () => {
     });
     expect(initial.state.runtimePath).toBe(runtime);
 
-    await runRestartWorker({
+    await runTestRestartWorker({
       ...process.env,
+      NIUBOT_SHARED_STORE: path.join(root, "shared-store"),
       NIUBOT_HOME: home,
       NIUBOT_BOT_NAME: "TestBot",
       NIUBOT_SOURCE_DIR: runtime,
@@ -89,6 +198,86 @@ describe("restart worker integration", () => {
     await expect(stopEngine(home)).resolves.toMatchObject({ stopped: true });
   }, 30_000);
 
+  it("switches a running legacy Engine to the home-selected shared runtime", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-transition-restart-"));
+    tempDirs.push(root);
+    const home = path.join(root, "home");
+    const legacyRuntime = path.join(home, "TestBot", "releases", "legacy", "package");
+    const sharedStore = new SharedReleaseStore(path.join(root, "shared-store"));
+    const staging = sharedStore.createStagingDirectory("transition");
+    const sharedPackage = path.join(staging, "package");
+    fs.mkdirSync(path.join(legacyRuntime, "dist"), { recursive: true });
+    fs.mkdirSync(path.join(sharedPackage, "dist"), { recursive: true });
+    fs.mkdirSync(home, { recursive: true });
+    fs.writeFileSync(path.join(legacyRuntime, "package.json"), JSON.stringify({ name: "@yuanzhangjing/niubot", version: "1.0.0", type: "module" }));
+    fs.writeFileSync(path.join(legacyRuntime, "dist", "index.js"), fakeEngineSource(true, "1.0.0"));
+    fs.writeFileSync(path.join(sharedPackage, "package.json"), JSON.stringify({ name: "@yuanzhangjing/niubot", version: "2.0.0", type: "module" }));
+    fs.writeFileSync(path.join(sharedPackage, "dist", "index.js"), fakeEngineSource(true, "2.0.0"));
+    const artifactId = "transition-shared";
+    sharedStore.publishStagedArtifact({
+      stagingDirectory: staging,
+      manifest: createSharedReleaseManifest({
+        artifactId,
+        version: "2.0.0",
+        sourceKind: "seed",
+        sourceDigest: "transition",
+        treeDigest: computeTreeDigest(sharedPackage),
+        installedAt: new Date().toISOString(),
+        installerNodePath: process.execPath,
+        nodeVersion: process.version,
+        nodeAbi: process.versions.modules,
+        platform: process.platform,
+        arch: process.arch,
+      }),
+    });
+    const boundNodePath = process.platform === "win32" ? process.execPath : path.join(root, "bound-node");
+    if (process.platform !== "win32") fs.symlinkSync(process.execPath, boundNodePath);
+    const selected = {
+      storage: "shared" as const,
+      artifactId,
+      node: { ...currentNodeRuntimeRef(), nodePath: boundNodePath },
+    };
+    new HomeReleaseStore(home, sharedStore).writeState({ schemaVersion: 2, current: selected });
+    fs.writeFileSync(path.join(home, "config.yaml"), [
+      "bots:",
+      "  - id: TestBot",
+      "    backend: codex",
+      "    appId: test-app",
+      "    appSecret: test-secret",
+      "",
+    ].join("\n"));
+    const initial = launchDetachedEngine({
+      niubotHome: home,
+      engineEntry: path.join(legacyRuntime, "dist", "index.js"),
+      runtimePath: legacyRuntime,
+      logFile: path.join(home, "logs", "legacy.log"),
+      version: "1.0.0",
+      runtimeMode: "production",
+    });
+    await expect(waitForEngineIdentity(initial.endpoint, {
+      instanceId: initial.state.instanceId,
+      pid: initial.state.pid,
+      home,
+      runtimePath: legacyRuntime,
+    }, 5_000, 50)).resolves.toBeTruthy();
+    await runTestRestartWorker({
+      ...process.env,
+      NIUBOT_SHARED_STORE: sharedStore.rootDirectory,
+      NIUBOT_HOME: home,
+      NIUBOT_BOT_NAME: "TestBot",
+      NIUBOT_SOURCE_DIR: legacyRuntime,
+      NIUBOT_ENV: "production",
+    });
+    const running = await inspectRunningEngine(home);
+    expect(running?.identity.version).toBe("2.0.0");
+    expect(fs.realpathSync.native(running!.state.runtimePath)).toBe(fs.realpathSync.native(sharedStore.packageDirectory(artifactId)));
+    expect(running?.state.nodePath).toBe(boundNodePath);
+    const state = new HomeReleaseStore(home, sharedStore).readState();
+    expect(state.lastKnownGood).toEqual(selected);
+    expect(state.previous).toMatchObject({ storage: "legacy" });
+    expect(state.unresolvedLegacy).toEqual([]);
+  }, 30_000);
+
   it("builds, switches, checks health, and commits LKG through the Node implementation", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-restart-integration-"));
     tempDirs.push(root);
@@ -102,12 +291,13 @@ describe("restart worker integration", () => {
       name: "@yuanzhangjing/niubot",
       version: "1.0.0",
       type: "module",
-      files: ["dist", "src"],
+      files: ["dist", "src", "npm-shrinkwrap.json"],
       scripts: {
         build: "node -e \"process.exit(0)\"",
         "pack:check": "node -e \"process.exit(0)\"",
       },
     }, null, 2)}\n`);
+    writeMinimalShrinkwrap(source, "1.0.0");
     fs.writeFileSync(path.join(source, "src", "placeholder.js"), "export {};\n");
     fs.writeFileSync(path.join(source, "dist", "index.js"), fakeEngineSource());
     fs.writeFileSync(path.join(home, "config.yaml"), [
@@ -123,8 +313,9 @@ describe("restart worker integration", () => {
     for (const name of ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"]) {
       vi.stubEnv(name, "");
     }
-    await runRestartWorker({
+    await runTestRestartWorker({
       ...process.env,
+      NIUBOT_SHARED_STORE: path.join(root, "shared-store"),
       NIUBOT_HOME: home,
       NIUBOT_BOT_NAME: "TestBot",
       NIUBOT_SOURCE_DIR: source,
@@ -145,9 +336,9 @@ describe("restart worker integration", () => {
     }
     expect(running?.identity.version).toBe("1.0.0");
     expect(running?.state.runtimePath).toContain(path.join("releases", ""));
-    const releaseState = new ReleaseStore(path.join(home, "TestBot")).readState();
+    const releaseState = new HomeReleaseStore(home, new SharedReleaseStore(path.join(root, "shared-store"))).readState();
     expect(releaseState.current).toBeTruthy();
-    expect(releaseState.lastKnownGood).toBe(releaseState.current);
+    expect(releaseState.lastKnownGood).toEqual(releaseState.current);
     await expect(stopEngine(home)).resolves.toMatchObject({ stopped: true });
   }, 120_000);
 
@@ -170,12 +361,13 @@ describe("restart worker integration", () => {
     databaseDuringPreflight.close();
     fs.writeFileSync(path.join(source, "dist", "index.js"), fakeEngineSource());
     fs.writeFileSync(path.join(source, "dist", "bad.js"), fakeEngineSource(false, "1.0.0", true));
+    writeMinimalShrinkwrap(source, "1.0.0");
     fs.writeFileSync(path.join(source, "src", "placeholder.js"), "export {};\n");
     fs.writeFileSync(path.join(source, "package.json"), `${JSON.stringify({
       name: "@yuanzhangjing/niubot",
       version: "1.0.0",
       type: "module",
-      files: ["dist", "src"],
+      files: ["dist", "src", "npm-shrinkwrap.json"],
       scripts: {
         build: "node -e \"require('node:fs').copyFileSync('dist/bad.js','dist/index.js')\"",
         "pack:check": "node -e \"process.exit(0)\"",
@@ -198,8 +390,9 @@ describe("restart worker integration", () => {
     vi.stubEnv("NIUBOT_TEST_DATABASE_PATH", databasePath);
     vi.stubEnv("NIUBOT_TEST_PREFLIGHT_DATABASE_SOURCE", databaseDuringPreflightPath);
 
-    await runRestartWorker({
+    await runTestRestartWorker({
       ...process.env,
+      NIUBOT_SHARED_STORE: path.join(root, "shared-store"),
       NIUBOT_HOME: home,
       NIUBOT_BOT_NAME: "TestBot",
       NIUBOT_SOURCE_DIR: source,
@@ -207,11 +400,11 @@ describe("restart worker integration", () => {
     });
 
     const running = await inspectRunningEngine(home);
-    expect(running?.state.runtimePath).toContain(`${path.sep}bootstrap-`);
-    const store = new ReleaseStore(path.join(home, "TestBot"));
+    expect(running?.state.runtimePath).toContain(`${path.sep}releases${path.sep}`);
+    const store = new HomeReleaseStore(home, new SharedReleaseStore(path.join(root, "shared-store")));
     const releaseState = store.readState();
-    expect(releaseState.current).toBe(releaseState.lastKnownGood);
-    expect(releaseState.current).toMatch(/^bootstrap-/);
+    expect(releaseState.current).toEqual(releaseState.lastKnownGood);
+    expect(releaseState.current).toMatchObject({ storage: "shared" });
     const restartState = JSON.parse(fs.readFileSync(
       path.join(home, "TestBot", "restart", "state.json"),
       "utf-8",
@@ -244,12 +437,13 @@ describe("restart worker integration", () => {
     })}\n`);
     fs.writeFileSync(path.join(oldRuntime, "dist", "index.js"), fakeEngineSource(true, "0.9.0"));
     fs.writeFileSync(path.join(source, "dist", "index.js"), fakeEngineSource(true, "1.0.0", true, 42));
+    writeMinimalShrinkwrap(source, "1.0.0");
     fs.writeFileSync(path.join(source, "src", "placeholder.js"), "export {};\n");
     fs.writeFileSync(path.join(source, "package.json"), `${JSON.stringify({
       name: "@yuanzhangjing/niubot",
       version: "1.0.0",
       type: "module",
-      files: ["dist", "src"],
+      files: ["dist", "src", "npm-shrinkwrap.json"],
       scripts: {
         build: "node -e \"process.exit(0)\"",
         "pack:check": "node -e \"process.exit(0)\"",
@@ -283,8 +477,9 @@ describe("restart worker integration", () => {
       runtimePath: oldRuntime,
     }, 5_000, 50)).resolves.toBeTruthy();
 
-    await expect(runRestartWorker({
+    await expect(runTestRestartWorker({
       ...process.env,
+      NIUBOT_SHARED_STORE: path.join(root, "shared-store"),
       NIUBOT_HOME: home,
       NIUBOT_BOT_NAME: "TestBot",
       NIUBOT_SOURCE_DIR: source,
@@ -293,7 +488,7 @@ describe("restart worker integration", () => {
 
     const running = await inspectRunningEngine(home);
     expect(running?.state.pid).toBe(initial.state.pid);
-    expect(running?.state.runtimePath).toBe(oldRuntime);
+    expect(fs.realpathSync.native(running!.state.runtimePath)).toBe(fs.realpathSync.native(oldRuntime));
     const live = new Database(databasePath, { readonly: true });
     expect(live.prepare("SELECT value FROM marker").pluck().get()).toBe("before");
     live.close();
@@ -325,12 +520,13 @@ describe("restart worker integration", () => {
     fs.writeFileSync(path.join(oldRuntime, "dist", "index.js"), fakeEngineSource(true, "0.9.0", false, 0, true));
     store.writeState({ schemaVersion: 1, current: "old", lastKnownGood: "old" });
     fs.writeFileSync(path.join(source, "dist", "index.js"), fakeEngineSource());
+    writeMinimalShrinkwrap(source, "1.0.0");
     fs.writeFileSync(path.join(source, "src", "placeholder.js"), "export {};\n");
     fs.writeFileSync(path.join(source, "package.json"), `${JSON.stringify({
       name: "@yuanzhangjing/niubot",
       version: "1.0.0",
       type: "module",
-      files: ["dist", "src"],
+      files: ["dist", "src", "npm-shrinkwrap.json"],
       scripts: { build: "node -e \"process.exit(0)\"", "pack:check": "node -e \"process.exit(0)\"" },
     })}\n`);
     fs.writeFileSync(path.join(home, "config.yaml"), [
@@ -361,15 +557,16 @@ describe("restart worker integration", () => {
       runtimePath: oldRuntime,
     }, 5_000, 50)).resolves.toBeTruthy();
 
-    await expect(runRestartWorker({
+    await expect(runTestRestartWorker({
       ...process.env,
+      NIUBOT_SHARED_STORE: path.join(root, "shared-store"),
       NIUBOT_HOME: home,
       NIUBOT_BOT_NAME: "TestBot",
       NIUBOT_SOURCE_DIR: source,
       NIUBOT_AGENT_SESSION: undefined,
     })).rejects.toThrow();
     const running = await inspectRunningEngine(home);
-    expect(running?.state.runtimePath).toBe(oldRuntime);
+    expect(fs.realpathSync.native(running!.state.runtimePath)).toBe(fs.realpathSync.native(oldRuntime));
     expect(new ReleaseStore(botDirectory).readState().current).toBe("old");
   }, 120_000);
 
@@ -386,9 +583,10 @@ describe("restart worker integration", () => {
       name: "@yuanzhangjing/niubot",
       version: "1.0.0",
       type: "module",
-      files: ["dist", "src"],
+      files: ["dist", "src", "npm-shrinkwrap.json"],
       scripts: { build: "node -e \"process.exit(0)\"", "pack:check": "node -e \"process.exit(0)\"" },
     }, null, 2)}\n`);
+    writeMinimalShrinkwrap(source, "9.9.9");
     fs.writeFileSync(path.join(source, "src", "placeholder.js"), "export {};\n");
     fs.writeFileSync(path.join(source, "dist", "index.js"), fakeEngineSource(true, "9.9.9"));
     fs.writeFileSync(path.join(home, "config.yaml"), [
@@ -416,6 +614,7 @@ describe("restart worker integration", () => {
       type: "module",
     })}\n`);
     fs.writeFileSync(path.join(pkgRoot, "dist", "index.js"), fakeEngineSource(true, "9.9.9"));
+    writeMinimalShrinkwrap(pkgRoot, "9.9.9");
     await new Promise<void>((resolve, reject) => {
       const { execFile } = require("node:child_process") as typeof import("node:child_process");
       execFile("tar", ["-czf", archivePath, "-C", staging, "package"], (err) => err ? reject(err) : resolve());
@@ -424,8 +623,9 @@ describe("restart worker integration", () => {
 
     // 9.9.9 在 npm registry 不存在：如果 worker 没复用本地 tgz，npm pack 会失败；
     // 复用则跳过 pack 直接解压本地包，流程成功。
-    await runRestartWorker({
+    await runTestRestartWorker({
       ...process.env,
+      NIUBOT_SHARED_STORE: path.join(root, "shared-store"),
       NIUBOT_HOME: home,
       NIUBOT_BOT_NAME: "TestBot",
       NIUBOT_SOURCE_DIR: source,
@@ -446,6 +646,22 @@ describe("restart worker integration", () => {
     expect(state.autoUpdate).toBe(true);
   }, 120_000);
 });
+
+function writeMinimalShrinkwrap(packageRoot: string, version: string): void {
+  fs.writeFileSync(path.join(packageRoot, "npm-shrinkwrap.json"), `${JSON.stringify({
+    name: "@yuanzhangjing/niubot",
+    version,
+    lockfileVersion: 3,
+    requires: true,
+    packages: {
+      "": { name: "@yuanzhangjing/niubot", version },
+    },
+  }, null, 2)}\n`);
+}
+
+function runTestRestartWorker(env: NodeJS.ProcessEnv): Promise<void> {
+  return runRestartWorker(env, { verifySharedPackage: () => undefined });
+}
 
 function fakeEngineSource(
   healthy = true,

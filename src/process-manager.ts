@@ -40,6 +40,7 @@ export interface LaunchEngineOptions {
   runtimePath: string;
   logFile: string;
   version: string;
+  nodePath?: string;
   runtimeMode?: string;
   env?: NodeJS.ProcessEnv;
 }
@@ -86,7 +87,8 @@ function launchDetachedEngineLocked(options: LaunchEngineOptions): LaunchedEngin
   const logFd = fs.openSync(options.logFile, "a");
   let child;
   try {
-    child = spawn(process.execPath, [options.engineEntry], {
+    const nodePath = options.nodePath ?? process.execPath;
+    child = spawn(nodePath, [options.engineEntry], {
       cwd: options.runtimePath,
       detached: true,
       windowsHide: true,
@@ -127,7 +129,7 @@ function launchDetachedEngineLocked(options: LaunchEngineOptions): LaunchedEngin
     version: options.version,
     runtimeMode: options.runtimeMode ?? options.env?.["NIUBOT_ENV"] ?? options.env?.["NIUBOT_RUNTIME_MODE"],
     runtimePath: options.runtimePath,
-    nodePath: process.execPath,
+    nodePath: options.nodePath ?? process.execPath,
     logFile: options.logFile,
   };
   try {

@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { LocalIpcEndpointKind } from "./platform/ipc.js";
-import { removeFileSync, replaceFileSync } from "./platform/files.js";
+import { recoverFileReplacementSync, removeFileSync, replaceFileSync } from "./platform/files.js";
 
 export const PROCESS_STATE_SCHEMA_VERSION = 1;
 
@@ -34,6 +34,7 @@ export function getProcessStatePath(niubotHome: string): string {
 export function readProcessState(niubotHome: string): NiuBotProcessState | undefined {
   const filePath = getProcessStatePath(niubotHome);
   try {
+    recoverFileReplacementSync(filePath);
     const value = JSON.parse(fs.readFileSync(filePath, "utf-8")) as unknown;
     return isProcessState(value) ? value : undefined;
   } catch {
