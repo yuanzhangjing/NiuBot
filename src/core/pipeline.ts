@@ -1691,8 +1691,9 @@ export class Pipeline {
           return true;
         }
         if (parts.length === 1 || !parts[1]) {
-          // /update 不带参数：先显示自动升级帮助/状态，再检查版本
-          this.handleAutoUpdateCommand([], chatId, platformChatId, msgId);
+          // /update 不带参数：版本卡片里附带自动升级状态/帮助，单卡片展示
+          this.handleUpdate(chatId, platformChatId, msgId, false, true);
+          return true;
         }
         this.handleUpdate(chatId, platformChatId, msgId, isUpdateConfirmedArg(parts[1]));
         return true;
@@ -4240,21 +4241,32 @@ ${jobParts.join("\n\n")}
     return latest;
   }
 
-  private async handleUpdate(chatId: string, platformChatId: string, msgId?: string, confirmed = false): Promise<void> {
+  private async handleUpdate(chatId: string, platformChatId: string, msgId?: string, confirmed = false, showAutoInfo = false): Promise<void> {
     const currentVersion = this.version;
     const env = process.env["NIUBOT_ENV"] || "production";
+    // /update 不带参数时附带自动升级状态/帮助，单卡片展示
+    const autoInfo = showAutoInfo ? this.buildAutoUpdateStatusLines() : null;
 
     try {
       const latest = await this.fetchLatestVersion();
       if (!latest || !isNewerPackageVersion(latest, currentVersion)) {
-        const text = `已是最新版本 (${currentVersion})。\nEnv: ${env}`;
+        const text = [
+          `已是最新版本 (${currentVersion})。`,
+          `Env: ${env}`,
+          ...(autoInfo ? ["", ...autoInfo] : []),
+        ].join("\n");
         const send = this.transport.sendCard(platformChatId, "Update", text, undefined, msgId);
         send.then((pmid) => { this.storeBotResponse(chatId, text, pmid); }).catch((err) => this.log.warn("update card send failed", { error: String(err) }));
         return;
       }
 
       if (!confirmed) {
-        const text = `发现新版本：${currentVersion} → ${latest}\nEnv: ${env}\n发送 \`${UPDATE_CONFIRM_COMMAND}\` 升级并重启。`;
+        const text = [
+          `发现新版本：${currentVersion} → ${latest}`,
+          `Env: ${env}`,
+          `发送 \`${UPDATE_CONFIRM_COMMAND}\` 升级并重启。`,
+          ...(autoInfo ? ["", ...autoInfo] : []),
+        ].join("\n");
         const send = this.transport.sendCard(platformChatId, "Update", text, undefined, msgId);
         send.then((pmid) => { this.storeBotResponse(chatId, text, pmid); }).catch((err) => this.log.warn("update card send failed", { error: String(err) }));
         return;
@@ -4266,6 +4278,21 @@ ${jobParts.join("\n\n")}
       const msg = err instanceof Error ? err.message : String(err);
       this.replyText(chatId, platformChatId, undefined, `更新失败：${msg.slice(0, 500)}`);
     }
+  }
+
+  /** 自动升级状态/帮助行（供 /update 默认展示，单卡片合并）。 */
+  private buildAutoUpdateStatusLines(): string[] {
+    const config = this.autoUpdateConfig;
+    const enabled = this.isAutoUpdateEnabled();
+    if (!config) return ["自动升级：未配置（config.yaml 缺少 autoUpdate）"];
+    return [
+      `**自动升级：** ${enabled ? "✅ 开启" : "⛔ 关闭"}`,
+      `**窗口：** ${config.windowStartHour}:00-${config.windowEndHour}:00（${config.timezone}）`,
+      `**结果通知：** ${config.notifyOnResult ? "成功白天汇报" : "完全静默"}`,
+      "",
+      "`/update auto on` 开启",
+      "`/update auto off` 关闭",
+    ];
   }
 
   private getAdminPrivatePlatformChatIds(): string[] {
