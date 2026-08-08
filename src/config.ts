@@ -241,24 +241,14 @@ function stringValue(value: unknown): string | undefined {
 }
 
 /** 解析 autoUpdate 配置；未配置或 enabled=false 时不启用。 */
+/**
+ * 解析 autoUpdate 配置：只支持一个布尔开关。
+ * autoUpdate: true → 启用（窗口等用默认值）；false 或缺省 → 未配置（关闭）。
+ * 运行时开关（/update auto on|off）通过 DB 持久化覆盖 config。
+ */
 function parseAutoUpdateConfig(raw: unknown): AutoUpdateConfig | undefined {
-  if (!raw || typeof raw !== "object") return undefined;
-  const obj = raw as Record<string, unknown>;
-  if (obj["enabled"] !== true) return undefined;
-  const defaults = AUTO_UPDATE_DEFAULTS;
-  // 小时字段限 0-23，避免非法配置导致窗口判定异常
-  const clampHour = (value: unknown, fallback: number): number => {
-    const n = numberValue(value, fallback);
-    return Math.min(23, Math.max(0, Math.round(n)));
-  };
-  return {
-    enabled: true,
-    windowStartHour: clampHour(obj["windowStartHour"], defaults.windowStartHour),
-    windowEndHour: clampHour(obj["windowEndHour"], defaults.windowEndHour),
-    timezone: stringValue(obj["timezone"]) ?? defaults.timezone,
-    marginMinutes: numberValue(obj["marginMinutes"], defaults.marginMinutes),
-    notifyOnResult: obj["notifyOnResult"] === undefined ? defaults.notifyOnResult : obj["notifyOnResult"] === true,
-  };
+  if (raw !== true) return undefined;
+  return { enabled: true, ...AUTO_UPDATE_DEFAULTS };
 }
 
 function numberValue(value: unknown, fallback: number): number {

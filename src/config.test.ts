@@ -194,7 +194,7 @@ restart:
     });
   });
 
-  it("parses autoUpdate config with hour clamping", () => {
+  it("parses autoUpdate boolean switch (true enables with defaults, false/absent disables)", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-config-"));
     tempDirs.push(dir);
     const configPath = path.join(dir, "config.yaml");
@@ -204,20 +204,38 @@ bots:
     appId: app-id
     appSecret: app-secret
     workingDirectory: ${dir}/workspace
-autoUpdate:
-  enabled: true
-  windowStartHour: 25
-  windowEndHour: -3
-  timezone: UTC
-  marginMinutes: 5
+autoUpdate: true
 `, "utf-8");
 
     const config = loadConfig(configPath);
     expect(config.autoUpdate?.enabled).toBe(true);
-    expect(config.autoUpdate?.windowStartHour).toBe(23); // 25 → clamp 23
-    expect(config.autoUpdate?.windowEndHour).toBe(0);    // -3 → clamp 0
-    expect(config.autoUpdate?.timezone).toBe("UTC");
-    expect(config.autoUpdate?.marginMinutes).toBe(5);
+    expect(config.autoUpdate?.windowStartHour).toBe(2); // 默认窗口
+    expect(config.autoUpdate?.windowEndHour).toBe(5);
+    expect(config.autoUpdate?.notifyOnResult).toBe(true);
+  });
+
+  it("autoUpdate absent or false means disabled", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-config-"));
+    tempDirs.push(dir);
+    const configPath = path.join(dir, "config.yaml");
+    fs.writeFileSync(configPath, `
+bots:
+  - id: NiuBot
+    appId: app-id
+    appSecret: app-secret
+    workingDirectory: ${dir}/workspace
+autoUpdate: false
+`, "utf-8");
+    expect(loadConfig(configPath).autoUpdate).toBeUndefined();
+
+    fs.writeFileSync(configPath, `
+bots:
+  - id: NiuBot
+    appId: app-id
+    appSecret: app-secret
+    workingDirectory: ${dir}/workspace
+`, "utf-8");
+    expect(loadConfig(configPath).autoUpdate).toBeUndefined();
   });
 
   it("skips autoUpdate config when disabled", () => {
@@ -230,9 +248,7 @@ bots:
     appId: app-id
     appSecret: app-secret
     workingDirectory: ${dir}/workspace
-autoUpdate:
-  enabled: false
-  windowStartHour: 2
+autoUpdate: false
 `, "utf-8");
 
     expect(loadConfig(configPath).autoUpdate).toBeUndefined();

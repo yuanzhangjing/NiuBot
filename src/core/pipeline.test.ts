@@ -17,7 +17,7 @@ import {
 } from "../database/schema.js";
 import type { NormalizedMessage, PlatformAdapter } from "../im/types.js";
 import { COMPACT_RECOVERY_REMINDER } from "../memory/inject.js";
-import { readAutoUpdateEnabled } from "./auto-update.js";
+import { readAutoUpdateEnabled, writeAutoUpdateEnabled } from "./auto-update.js";
 import { SYSTEM_RULES } from "../system-rules.js";
 import { addCronJob, claimDueCronJobs, deleteCronJob } from "./cron.js";
 import { addLoopJob, claimDueLoopJobs, getLoopJob, LoopScheduler } from "./loop.js";
@@ -5261,6 +5261,7 @@ describe("auto-upgrade", () => {
     tempDirs.push(dir);
 
     const db = initDatabase(path.join(dir, "niubot.db"));
+    writeAutoUpdateEnabled(db, true); // 显式开启（/update auto on 的 DB 开关）
     const agent = new RecordingAgent();
     const { im } = createRecordingImStub();
     const pipeline = new Pipeline(
@@ -5302,6 +5303,7 @@ describe("auto-upgrade", () => {
     tempDirs.push(dir);
 
     const db = initDatabase(path.join(dir, "niubot.db"));
+    writeAutoUpdateEnabled(db, true); // 显式开启
     const agent = new RecordingAgent();
     const { im } = createRecordingImStub();
     const pipeline = new Pipeline(
@@ -5386,6 +5388,7 @@ describe("auto-upgrade", () => {
     tempDirs.push(dir);
 
     const db = initDatabase(path.join(dir, "niubot.db"));
+    writeAutoUpdateEnabled(db, true); // 显式开启
     db.prepare(
       "INSERT INTO cron_jobs (chat_id, creator_user_id, cron_expr, prompt, status) VALUES ('c1', 'u2', '0 6 * * *', 'morning', 'active')",
     ).run();
@@ -5621,6 +5624,7 @@ describe("auto-upgrade", () => {
     tempDirs.push(dir);
 
     const db = initDatabase(path.join(dir, "niubot.db"));
+    writeAutoUpdateEnabled(db, true); // 显式开启
     const agent = new RecordingAgent();
     const { im } = createRecordingImStub();
     const pipeline = new Pipeline(

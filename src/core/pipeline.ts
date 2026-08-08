@@ -40,6 +40,7 @@ import {
 import { isNewerPackageVersion, isPrereleaseOrUnrecognizedVersion } from "../version.js";
 import {
   readAutoUpdateEnabled, writeAutoUpdateEnabled,
+  AUTO_UPDATE_DEFAULTS,
   isSafeForUpgrade, isInUpgradeWindow, minutesUntilUpgradeWindowEnd,
   mainRunSource, workerSource, goalSource, cronSource, loopSource,
   UPGRADE_SAFENESS_WINDOW_MS,
@@ -371,11 +372,11 @@ export class Pipeline {
   private autoUpgradeLatestCache: string | null = null;
 
   /** 自动升级是否启用：DB 开关（/autoupdate 写入）优先，其次 config.yaml 初始值。 */
+  /** 自动升级是否启用：/update auto 的 DB 开关优先；无记录时默认关（config 只是声明支持，默认不自动开）。 */
   private isAutoUpdateEnabled(): boolean {
     if (!this.autoUpdateConfig) return false;
     const persisted = readAutoUpdateEnabled(this.db);
-    if (persisted !== null) return persisted;
-    return this.autoUpdateConfig.enabled;
+    return persisted ?? false;
   }
   private botIdentity: BotIdentity;
   private log: ReturnType<typeof createLogger>;
@@ -3935,11 +3936,8 @@ ${jobParts.join("\n\n")}
 
   /** /autoupdate：查看/开关自动升级。 */
   private handleAutoUpdateCommand(args: string[], chatId: string, platformChatId: string, msgId?: string): void {
-    const config = this.autoUpdateConfig;
-    if (!config) {
-      this.sendAgentCard(chatId, platformChatId, msgId, "AutoUpdate", "未配置自动升级（config.yaml 缺少 autoUpdate 配置）。");
-      return;
-    }
+    // config.yaml 可配 autoUpdate: true 声明支持；不配时用默认窗口（开关仍可用 /update auto on|off）
+    const config = this.autoUpdateConfig ?? { enabled: true, ...AUTO_UPDATE_DEFAULTS };
 
     const action = args[0]?.toLowerCase();
     if (action === "on" || action === "enable" || action === "1") {
