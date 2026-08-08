@@ -255,6 +255,9 @@ async function main(): Promise<void> {
     let initialized = false;
     try {
       const autoUpdateNotificationsEnabled = bots.length === 0;
+      // 自动升级是进程级事务：只在主 bot（bots[0]）启用，触发一次重启整个引擎。
+      // 若每个 bot 都传 autoUpdate，会各自启动检查循环、各自触发 worker → 交叉污染。
+      const autoUpdateConfig = bots.length === 0 ? config.autoUpdate : undefined;
       const runtimeState = loadPersistedBotRuntimeState(botConfig.dbPath, botConfig.id);
       const availableBackends = getAvailableBackends();
       const runtimeBackend = normalizeBackend(runtimeState?.backendType);
@@ -277,7 +280,7 @@ async function main(): Promise<void> {
         runtimeConfig,
         config.restart,
         autoUpdateNotificationsEnabled,
-        config.autoUpdate,
+        autoUpdateConfig,
         getBackendCapabilities,
         { preflight },
       );
