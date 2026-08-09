@@ -3,12 +3,14 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { recoverFileReplacementSync, replaceFileSync } from "./platform/files.js";
-import { isReleaseRef, type NodeRuntimeRef, type ReleaseRef, type ReleaseSlots } from "./release-ref.js";
+import { isReleaseRef, sameReleaseRef, type NodeRuntimeRef, type ReleaseRef } from "./release-ref.js";
 import { ReleaseStore, type ReleaseState } from "./release-store.js";
 import type { RestartDatabaseSnapshot } from "./database/restart-snapshot.js";
 import { isProcessAlive, processStartMarkersMatch, queryProcessStartMarker } from "./platform/process.js";
 import { createHomeId, type SharedHomeRef, SharedReleaseStore } from "./shared-release-store.js";
 
+// Keep schema 2 for rollback compatibility: released 0.2.x runtimes accept
+// missing previous/LKG slots and ignore unknown stable-state fields.
 export const HOME_RELEASE_STATE_SCHEMA_VERSION = 2;
 
 export interface UnresolvedLegacyRelease {
@@ -16,8 +18,10 @@ export interface UnresolvedLegacyRelease {
   reason: string;
 }
 
-export interface HomeReleaseState extends ReleaseSlots {
+export interface HomeReleaseState {
   schemaVersion: typeof HOME_RELEASE_STATE_SCHEMA_VERSION;
+  current?: ReleaseRef;
+  rejectedRecommendation?: RejectedRecommendation;
   unresolvedLegacy?: UnresolvedLegacyRelease[];
   firstSharedSuccessAt?: string;
   sharedSuccessfulStarts?: number;
@@ -28,10 +32,36 @@ export interface HomeReleaseTransaction {
   transactionId: string;
   phase: "activating";
   candidate: ReleaseRef;
-  rollback: ReleaseSlots;
+  rollbackCurrent?: ReleaseRef;
   ownerPid?: number;
   ownerStartMarker?: string;
   databaseSnapshot?: RestartDatabaseSnapshot;
+}
+
+export interface RejectedRecommendation {
+  generation: number;
+  artifactId: string;
+  failedAt: string;
+  reason?: string;
+}
+
+interface HomeReleaseStateV2 {
+  schemaVersion: typeof HOME_RELEASE_STATE_SCHEMA_VERSION;
+  current?: ReleaseRef;
+  previous?: ReleaseRef;
+  lastKnownGood?: ReleaseRef;
+  unresolvedLegacy?: UnresolvedLegacyRelease[];
+  firstSharedSuccessAt?: string;
+  sharedSuccessfulStarts?: number;
+  transaction?: {
+    transactionId: string;
+    phase: "activating";
+    candidate: ReleaseRef;
+    rollback: { current?: ReleaseRef; previous?: ReleaseRef; lastKnownGood?: ReleaseRef };
+    ownerPid?: number;
+    ownerStartMarker?: string;
+    databaseSnapshot?: RestartDatabaseSnapshot;
+  };
 }
 
 export interface LegacyMigrationRuntime {
@@ -55,13 +85,19 @@ export class HomeReleaseStore {
   }
 
   readState(): HomeReleaseState {
+    let value: unknown;
     try {
       recoverFileReplacementSync(this.stateFile);
-      const value = JSON.parse(fs.readFileSync(this.stateFile, "utf-8")) as unknown;
-      if (isHomeReleaseState(value)) return value;
+      value = JSON.parse(fs.readFileSync(this.stateFile, "utf-8")) as unknown;
     } catch {
       // An absent state is valid before lazy migration/bootstrap.
+      return { schemaVersion: HOME_RELEASE_STATE_SCHEMA_VERSION };
     }
+    if (isHomeReleaseState(value)) return value;
+    // Do not hide a failed compatibility migration as an empty home. A write
+    // or reference failure here must stop activation instead of discarding the
+    // only known-good selection in memory.
+    if (isHomeReleaseStateV2(value)) return this.migrateV2State(value);
     return { schemaVersion: HOME_RELEASE_STATE_SCHEMA_VERSION };
   }
 
@@ -70,11 +106,14 @@ export class HomeReleaseStore {
     return fs.existsSync(this.stateFile);
   }
 
-  readStateStrict(): HomeReleaseState {
+  readStateStrict(options: { persistMigration?: boolean } = {}): HomeReleaseState {
     recoverFileReplacementSync(this.stateFile);
     const value = JSON.parse(fs.readFileSync(this.stateFile, "utf-8")) as unknown;
-    if (!isHomeReleaseState(value)) throw new Error(`Invalid home release state: ${this.stateFile}`);
-    return value;
+    if (isHomeReleaseState(value)) return value;
+    if (isHomeReleaseStateV2(value)) {
+      return options.persistMigration === false ? this.normalizeV2State(value) : this.migrateV2State(value);
+    }
+    throw new Error(`Invalid home release state: ${this.stateFile}`);
   }
 
   readOrMigrateLegacy(
@@ -85,8 +124,9 @@ export class HomeReleaseStore {
     recoverFileReplacementSync(this.stateFile);
     if (fs.existsSync(this.stateFile)) {
       const value = JSON.parse(fs.readFileSync(this.stateFile, "utf-8")) as unknown;
-      if (!isHomeReleaseState(value)) throw new Error(`Invalid home release state: ${this.stateFile}`);
-      return value;
+      if (isHomeReleaseState(value)) return value;
+      if (isHomeReleaseStateV2(value)) return this.migrateV2State(value, running?.runtimePath);
+      throw new Error(`Invalid home release state: ${this.stateFile}`);
     }
     const migrated = this.migrateLegacyState(node, running, verify);
     if (migrated) return migrated;
@@ -129,9 +169,7 @@ export class HomeReleaseStore {
     };
     const state: HomeReleaseState = {
       schemaVersion: HOME_RELEASE_STATE_SCHEMA_VERSION,
-      current: toRef(selected.state.current),
-      previous: toRef(selected.state.previous),
-      lastKnownGood: toRef(selected.state.lastKnownGood),
+      current: selectLegacyReleaseRef(selected.state, running?.runtimePath, selected.botDirectory, toRef),
     };
     if (unresolved.length) state.unresolvedLegacy = unresolved;
     this.writeState(state);
@@ -146,7 +184,7 @@ export class HomeReleaseStore {
     }
     const next: HomeReleaseState = {
       ...state,
-      ...state.transaction.rollback,
+      current: state.transaction.rollbackCurrent ?? state.current,
       transaction: undefined,
     };
     this.writeState(next);
@@ -177,8 +215,13 @@ export class HomeReleaseStore {
     }
   }
 
-  writeState(state: HomeReleaseState): void {
-    if (!isHomeReleaseState(state)) throw new Error("Invalid home release state");
+  writeState(input: HomeReleaseState | HomeReleaseStateV2): void {
+    const state = isHomeReleaseState(input)
+      ? input
+      : isHomeReleaseStateV2(input)
+        ? this.normalizeV2State(input)
+        : undefined;
+    if (!state) throw new Error("Invalid home release state");
     for (const ref of releaseRefs(state)) this.assertResolvableRef(ref);
     fs.mkdirSync(this.runtimeDirectory, { recursive: true, mode: 0o700 });
     const temporary = path.join(this.runtimeDirectory, `.release-state.${process.pid}.${randomUUID()}.tmp`);
@@ -252,32 +295,37 @@ export class HomeReleaseStore {
     return result.sort((left, right) => left.runtimePath.localeCompare(right.runtimePath));
   }
 
-  activate(ref: ReleaseRef): HomeReleaseState {
+  commitHealthy(ref: ReleaseRef): HomeReleaseState {
     this.resolveRuntime(ref);
-    const state = this.readState();
-    const next: HomeReleaseState = {
-      ...state,
-      schemaVersion: HOME_RELEASE_STATE_SCHEMA_VERSION,
-      current: ref,
-      previous: state.lastKnownGood ?? state.current,
-    };
-    this.writeState(next);
-    return next;
-  }
-
-  markLastKnownGood(ref: ReleaseRef): HomeReleaseState {
-    this.resolveRuntime(ref);
-    const state = this.readState();
+    const state = this.readStateStrict();
     const firstSharedSuccessAt = ref.storage === "shared"
       ? state.firstSharedSuccessAt ?? new Date().toISOString()
       : state.firstSharedSuccessAt;
     const next: HomeReleaseState = {
       ...state,
       current: ref,
-      lastKnownGood: ref,
       transaction: undefined,
+      rejectedRecommendation: undefined,
       firstSharedSuccessAt,
       sharedSuccessfulStarts: ref.storage === "shared" ? (state.sharedSuccessfulStarts ?? 0) + 1 : state.sharedSuccessfulStarts,
+    };
+    this.writeState(next);
+    return next;
+  }
+
+  recordRejectedRecommendation(generation: number, release: ReleaseRef & { storage: "shared" }, reason?: string): HomeReleaseState {
+    if (!Number.isSafeInteger(generation) || generation <= 0) throw new Error("Invalid recommendation generation");
+    this.resolveRuntime(release, true);
+    const state = this.readStateStrict();
+    const next: HomeReleaseState = {
+      ...state,
+      rejectedRecommendation: {
+        generation,
+        artifactId: release.artifactId,
+        failedAt: new Date().toISOString(),
+        reason,
+      },
+      transaction: undefined,
     };
     this.writeState(next);
     return next;
@@ -298,14 +346,9 @@ export class HomeReleaseStore {
     if (!sameReleaseRef(state.current, expected)) {
       throw new Error("Current release changed before equivalent runtime migration completed");
     }
-    const replace = (ref: ReleaseRef | undefined): ReleaseRef | undefined => (
-      ref && sameReleaseRef(ref, expected) ? replacement : ref
-    );
     const next: HomeReleaseState = {
       ...state,
       current: replacement,
-      previous: replace(state.previous),
-      lastKnownGood: replace(state.lastKnownGood),
     };
     this.writeState(next);
     return next;
@@ -324,8 +367,6 @@ export class HomeReleaseStore {
       homePath: this.niubotHome,
       active: {
         current: state.current,
-        previous: state.previous,
-        lastKnownGood: state.lastKnownGood,
       },
       pending: options.pending,
       rollback: options.rollback ?? [],
@@ -353,14 +394,55 @@ export class HomeReleaseStore {
       throw new Error(`Legacy runtime does not match the managed release layout: ${runtimePath}`);
     }
   }
+
+  private migrateV2State(state: HomeReleaseStateV2, runningRuntimePath?: string): HomeReleaseState {
+    const next = this.normalizeV2State(state, runningRuntimePath);
+    // A released worker may still own and update the old transaction shape.
+    // Rewriting it underneath that process would make the old worker unable to
+    // read its own state. Normalize in memory only until the owner exits.
+    if (next.transaction && this.transactionOwnerIsActive(next.transaction)) return next;
+    this.writeState(next);
+    this.writeSharedRef({ state: next });
+    return next;
+  }
+
+  private normalizeV2State(state: HomeReleaseStateV2, runningRuntimePath?: string): HomeReleaseState {
+    const candidates = [state.current, state.lastKnownGood, state.previous];
+    const running = runningRuntimePath
+      ? candidates.find((ref) => ref && sameRuntimePath(this, ref, runningRuntimePath))
+      : undefined;
+    const current = running ?? candidates.find((ref) => ref && isUsableRef(this, ref));
+    const transaction = state.transaction ? {
+      transactionId: state.transaction.transactionId,
+      phase: "activating" as const,
+      candidate: state.transaction.candidate,
+      rollbackCurrent: state.transaction.rollback.current
+        ?? state.transaction.rollback.lastKnownGood
+        ?? state.transaction.rollback.previous
+        ?? current,
+      ownerPid: state.transaction.ownerPid,
+      ownerStartMarker: state.transaction.ownerStartMarker,
+      databaseSnapshot: state.transaction.databaseSnapshot,
+    } : undefined;
+    return {
+      schemaVersion: HOME_RELEASE_STATE_SCHEMA_VERSION,
+      current,
+      unresolvedLegacy: state.unresolvedLegacy,
+      firstSharedSuccessAt: state.firstSharedSuccessAt,
+      sharedSuccessfulStarts: state.sharedSuccessfulStarts,
+      transaction,
+    };
+  }
 }
 
 export function isHomeReleaseState(value: unknown): value is HomeReleaseState {
   if (!value || typeof value !== "object") return false;
   const item = value as Record<string, unknown>;
   return item["schemaVersion"] === HOME_RELEASE_STATE_SCHEMA_VERSION
-    && [item["current"], item["previous"], item["lastKnownGood"]]
-      .every((ref) => ref === undefined || isReleaseRef(ref))
+    && !("previous" in item)
+    && !("lastKnownGood" in item)
+    && (item["current"] === undefined || isReleaseRef(item["current"]))
+    && (item["rejectedRecommendation"] === undefined || isRejectedRecommendation(item["rejectedRecommendation"]))
     && (item["unresolvedLegacy"] === undefined || (
       Array.isArray(item["unresolvedLegacy"])
       && item["unresolvedLegacy"].every(isUnresolvedLegacyRelease)
@@ -374,16 +456,8 @@ export function isHomeReleaseState(value: unknown): value is HomeReleaseState {
 }
 
 function releaseRefs(state: HomeReleaseState): ReleaseRef[] {
-  return [state.current, state.previous, state.lastKnownGood].filter((ref): ref is ReleaseRef => ref !== undefined);
-}
-
-function sameReleaseRef(left: ReleaseRef | undefined, right: ReleaseRef | undefined): boolean {
-  if (!left || !right || left.storage !== right.storage) return false;
-  if (left.node.nodePath !== right.node.nodePath || left.node.nodeAbi !== right.node.nodeAbi) return false;
-  return left.storage === "shared" && right.storage === "shared"
-    ? left.artifactId === right.artifactId
-    : left.storage === "legacy" && right.storage === "legacy"
-      && sameCanonicalPath(left.runtimePath, right.runtimePath);
+  return [state.current, state.transaction?.candidate, state.transaction?.rollbackCurrent]
+    .filter((ref): ref is ReleaseRef => ref !== undefined);
 }
 
 function isUnresolvedLegacyRelease(value: unknown): value is UnresolvedLegacyRelease {
@@ -400,8 +474,9 @@ function isHomeReleaseTransaction(value: unknown): value is HomeReleaseTransacti
   return typeof item["transactionId"] === "string"
     && item["transactionId"].length > 0
     && item["phase"] === "activating"
+    && !("rollback" in item)
     && isReleaseRef(item["candidate"])
-    && isReleaseSlots(item["rollback"])
+    && (item["rollbackCurrent"] === undefined || isReleaseRef(item["rollbackCurrent"]))
     && (item["ownerPid"] === undefined || (Number.isInteger(item["ownerPid"]) && Number(item["ownerPid"]) > 0))
     && (item["ownerStartMarker"] === undefined || typeof item["ownerStartMarker"] === "string")
     && (item["databaseSnapshot"] === undefined || isDatabaseSnapshot(item["databaseSnapshot"]));
@@ -426,11 +501,61 @@ function isDatabaseSnapshot(value: unknown): value is RestartDatabaseSnapshot {
     });
 }
 
-function isReleaseSlots(value: unknown): value is ReleaseSlots {
+function isHomeReleaseStateV2(value: unknown): value is HomeReleaseStateV2 {
   if (!value || typeof value !== "object") return false;
   const item = value as Record<string, unknown>;
-  return [item["current"], item["previous"], item["lastKnownGood"]]
-    .every((ref) => ref === undefined || isReleaseRef(ref));
+  return item["schemaVersion"] === 2
+    && ("previous" in item || "lastKnownGood" in item || isHomeReleaseTransactionV2(item["transaction"]))
+    && [item["current"], item["previous"], item["lastKnownGood"]].every((ref) => ref === undefined || isReleaseRef(ref))
+    && (item["transaction"] === undefined || isHomeReleaseTransactionV2(item["transaction"]));
+}
+
+function isHomeReleaseTransactionV2(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  const item = value as Record<string, unknown>;
+  return typeof item["transactionId"] === "string" && item["phase"] === "activating"
+    && isReleaseRef(item["candidate"])
+    && Boolean(item["rollback"] && typeof item["rollback"] === "object")
+    && Object.values(item["rollback"] as Record<string, unknown>).every((ref) => ref === undefined || isReleaseRef(ref))
+    && (item["ownerPid"] === undefined || (Number.isInteger(item["ownerPid"]) && Number(item["ownerPid"]) > 0))
+    && (item["ownerStartMarker"] === undefined || typeof item["ownerStartMarker"] === "string")
+    && (item["databaseSnapshot"] === undefined || isDatabaseSnapshot(item["databaseSnapshot"]));
+}
+
+function isRejectedRecommendation(value: unknown): value is RejectedRecommendation {
+  if (!value || typeof value !== "object") return false;
+  const item = value as Record<string, unknown>;
+  return Number.isSafeInteger(item["generation"]) && Number(item["generation"]) > 0
+    && typeof item["artifactId"] === "string" && item["artifactId"].length > 0
+    && isIsoDate(item["failedAt"])
+    && (item["reason"] === undefined || typeof item["reason"] === "string");
+}
+
+function isUsableRef(store: HomeReleaseStore, ref: ReleaseRef): boolean {
+  try { store.resolveRuntime(ref); return true; } catch { return false; }
+}
+
+function sameRuntimePath(store: HomeReleaseStore, ref: ReleaseRef, runtimePath: string): boolean {
+  try { return sameCanonicalPath(store.resolveRuntime(ref), runtimePath); } catch { return false; }
+}
+
+function selectLegacyReleaseRef(
+  state: ReleaseState,
+  runningRuntimePath: string | undefined,
+  botDirectory: string,
+  toRef: (id: string | undefined) => ReleaseRef | undefined,
+): ReleaseRef | undefined {
+  const ids = [state.current, state.lastKnownGood, state.previous];
+  if (runningRuntimePath) {
+    const running = ids.find((id) => id && sameCanonicalPath(path.join(botDirectory, "releases", id, "package"), runningRuntimePath));
+    const ref = toRef(running);
+    if (ref) return ref;
+  }
+  for (const id of ids) {
+    const ref = toRef(id);
+    if (ref) return ref;
+  }
+  return undefined;
 }
 
 function isValidLegacyPackage(runtimePath: string): boolean {

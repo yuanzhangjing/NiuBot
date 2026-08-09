@@ -19,6 +19,7 @@ const smokeEnv = {
   NIUBOT_HOME: path.join(temporaryRoot, "niubot-home"),
   NIUBOT_SHARED_STORE: path.join(temporaryRoot, "shared-store"),
   NIUBOT_ALLOW_ROOT_STORE: "1",
+  NIUBOT_ENV: "production",
 };
 fs.mkdirSync(packageDirectory, { recursive: true });
 
@@ -50,6 +51,39 @@ try {
   });
   if (!fs.existsSync(path.join(archiveInstallRoot, "node_modules", "better-sqlite3"))) {
     throw new Error("Archive npm ci did not install runtime dependencies");
+  }
+
+  // Exercise the packaged Engine lifecycle boundary without touching the real
+  // machine: registry access and restart worker launch are injected, while the
+  // public service still performs version/status/source selection.
+  const { EngineLifecycleService } = await import(
+    pathToFileURL(path.join(archiveInstallRoot, "dist", "engine-lifecycle.js"))
+  );
+  const lifecycleCalls = [];
+  const packagedLifecycle = new EngineLifecycleService({
+    version: packageJson.version,
+    startedAt: "2026-08-10T00:00:00.000Z",
+    runtimePath: archiveInstallRoot,
+    niubotHome: smokeEnv.NIUBOT_HOME,
+    env: smokeEnv,
+    dependencies: {
+      runCommand: async (_command, args, options) => {
+        lifecycleCalls.push({ kind: "check", args, timeoutMs: options.timeoutMs });
+        return { stdout: `${packageJson.version}\n`, stderr: "" };
+      },
+      launchRestartWorker: (options) => {
+        lifecycleCalls.push({ kind: "restart", options });
+        return { pid: 123, logFile: path.join(temporaryRoot, "restart.log") };
+      },
+    },
+  });
+  const packagedUpdate = await packagedLifecycle.checkForUpdate();
+  packagedLifecycle.restart({ botName: "SmokeBot", chatId: "c1" });
+  if (packagedUpdate.updateAvailable
+    || lifecycleCalls[0]?.timeoutMs !== 15_000
+    || lifecycleCalls[1]?.options?.botName !== "SmokeBot"
+    || packagedLifecycle.getStatus().runtimePath !== archiveInstallRoot) {
+    throw new Error("Packaged Engine lifecycle service did not preserve its status/update/restart contract");
   }
 
   execFileSync(process.execPath, [
@@ -122,6 +156,11 @@ try {
   if (sharedReleases.length !== 1 || homeRefs.length !== 2) {
     throw new Error(`Shared bootstrap mismatch: ${sharedReleases.length} releases, ${homeRefs.length} home refs`);
   }
+  const recommendation = JSON.parse(fs.readFileSync(path.join(smokeEnv.NIUBOT_SHARED_STORE, "recommended.json"), "utf8"));
+  if (recommendation.schemaVersion !== 1 || recommendation.generation !== 1
+    || recommendation.release?.artifactId !== sharedReleases[0].name) {
+    throw new Error("Shared bootstrap did not publish one stable production recommendation");
+  }
 
   // Simulate the first Engine boot after an old updater placed the package in
   // a per-home release directory. The built package must adopt that exact
@@ -131,10 +170,11 @@ try {
   fs.mkdirSync(path.dirname(legacyRuntime), { recursive: true });
   fs.renameSync(archiveInstallRoot, legacyRuntime);
   const legacySharedRoot = path.join(temporaryRoot, "legacy-shared-store");
-  const [{ HomeReleaseStore }, { SharedReleaseStore }, { completeRuntimeHomeMigrationAfterStartup }] = await Promise.all([
+  const [{ HomeReleaseStore }, { SharedReleaseStore }, { completeRuntimeHomeMigrationAfterStartup }, { RecommendedReleaseStore }] = await Promise.all([
     import(pathToFileURL(path.join(legacyRuntime, "dist", "home-release-store.js"))),
     import(pathToFileURL(path.join(legacyRuntime, "dist", "shared-release-store.js"))),
     import(pathToFileURL(path.join(legacyRuntime, "dist", "runtime-home-migration.js"))),
+    import(pathToFileURL(path.join(legacyRuntime, "dist", "recommended-release.js"))),
   ]);
   const sharedStore = new SharedReleaseStore(legacySharedRoot);
   const homeStore = new HomeReleaseStore(legacyHome, sharedStore);
@@ -144,7 +184,12 @@ try {
     nodeAbi: process.versions.modules,
   };
   const legacyRef = { storage: "legacy", runtimePath: legacyRuntime, node };
-  homeStore.writeState({ schemaVersion: 2, current: legacyRef, lastKnownGood: legacyRef });
+  fs.mkdirSync(path.dirname(homeStore.stateFile), { recursive: true });
+  fs.writeFileSync(homeStore.stateFile, JSON.stringify({
+    schemaVersion: 2,
+    current: legacyRef,
+    lastKnownGood: legacyRef,
+  }));
   const migration = await completeRuntimeHomeMigrationAfterStartup({
     niubotHome: legacyHome,
     runtimePath: legacyRuntime,
@@ -157,11 +202,16 @@ try {
     throw new Error("Packaged legacy runtime was not migrated to the shared store");
   }
   const migratedManifest = sharedStore.readManifest(migration.state.current.artifactId);
-  if (migratedManifest?.version !== packageJson.version || migration.state.lastKnownGood?.storage !== "shared") {
-    throw new Error("Packaged legacy migration did not preserve the active version and last-known-good slot");
+  if (migratedManifest?.version !== packageJson.version
+    || "previous" in migration.state || "lastKnownGood" in migration.state) {
+    throw new Error("Packaged legacy migration did not preserve one healthy current slot");
+  }
+  const migratedRecommendation = new RecommendedReleaseStore(sharedStore).promote(migration.sharedRef);
+  if (migratedRecommendation.release.artifactId !== migration.state.current.artifactId) {
+    throw new Error("Migrated packaged runtime did not become the production recommendation");
   }
 
-  console.log(`Package smoke passed: ${expected}; two homes share one artifact; legacy runtime adopted in one start`);
+  console.log(`Package smoke passed: ${expected}; two homes share one recommended artifact; legacy runtime adopted with current-only state`);
 } finally {
   fs.rmSync(temporaryRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
 }

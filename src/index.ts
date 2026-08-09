@@ -37,9 +37,13 @@ import {
   shouldRunFullPreflight,
 } from "./database/restart-snapshot.js";
 import { assertSupportedNodeRuntime } from "./node-support.js";
-import { currentNodeRuntimeRef } from "./release-ref.js";
+import { currentNodeRuntimeRef, sameReleaseRef } from "./release-ref.js";
 import { resolveSharedRuntimeRoot } from "./platform/shared-runtime.js";
 import { SharedReleaseStore } from "./shared-release-store.js";
+import { HomeReleaseStore } from "./home-release-store.js";
+import { RecommendedReleaseStore } from "./recommended-release.js";
+import { EngineAutoUpdateCoordinator } from "./engine-auto-update.js";
+import { EngineLifecycleService } from "./engine-lifecycle.js";
 import {
   completeRuntimeHomeMigrationAfterStartup,
 } from "./runtime-home-migration.js";
@@ -227,14 +231,23 @@ async function main(): Promise<void> {
   const getAvailableBackends = () => capabilityCache.availableBackends();
 
   const bots: BotInstance[] = [];
+  let engineAutoUpdateCoordinator: EngineAutoUpdateCoordinator | undefined;
+  const version = readRuntimeVersion(runtimePath);
+  const startedAt = process.env["NIUBOT_STARTED_AT"] || new Date().toISOString();
+  const engineLifecycle = new EngineLifecycleService({
+    version,
+    startedAt,
+    runtimePath,
+    niubotHome: NIUBOT_HOME,
+    restartConfig: config.restart,
+    configPath: config.configPath,
+    initialAutoUpdateConfig: config.autoUpdate,
+    onAutoUpdateConfigChanged: () => engineAutoUpdateCoordinator?.configChanged(),
+  });
   for (const botConfig of config.bots) {
     const botStartedAt = Date.now();
     let initialized = false;
     try {
-      const autoUpdateNotificationsEnabled = bots.length === 0;
-      // 自动升级是进程级事务：只在主 bot（bots[0]）启用，触发一次重启整个引擎。
-      // 若每个 bot 都传 autoUpdate，会各自启动检查循环、各自触发 worker → 交叉污染。
-      const autoUpdateConfig = bots.length === 0 ? config.autoUpdate : undefined;
       const runtimeState = loadPersistedBotRuntimeState(botConfig.dbPath, botConfig.id);
       const availableBackends = getAvailableBackends();
       const runtimeBackend = normalizeBackend(runtimeState?.backendType);
@@ -255,12 +268,11 @@ async function main(): Promise<void> {
         getOrCreateBackend,
         getAvailableBackends,
         runtimeConfig,
-        config.restart,
-        autoUpdateNotificationsEnabled,
-        autoUpdateConfig,
         getBackendCapabilities,
-        config.configPath,
-        { preflight },
+        {
+          preflight,
+          engineLifecycle,
+        },
       );
       bots.push(instance);
       initialized = true;
@@ -270,7 +282,6 @@ async function main(): Promise<void> {
         configBackend: botConfig.backend,
         runtimeBackend: runtimeState?.backendType,
         model: runtimeConfig.model,
-        autoUpdateNotifications: autoUpdateNotificationsEnabled,
       });
     } catch (err) {
       log.error("failed to create bot instance", { bot: botConfig.id, error: String(err) });
@@ -309,10 +320,8 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
-  const version = readRuntimeVersion(runtimePath);
   const instanceId = process.env["NIUBOT_INSTANCE_ID"] || randomUUID();
   const controlToken = process.env["NIUBOT_CONTROL_TOKEN"] || randomBytes(32).toString("hex");
-  const startedAt = process.env["NIUBOT_STARTED_AT"] || new Date().toISOString();
   const engineEndpoint = resolveEngineEndpoint(NIUBOT_HOME);
   const identity: EngineIdentity = {
     pid: process.pid,
@@ -331,6 +340,7 @@ async function main(): Promise<void> {
     shuttingDown = true;
 
     log.info("shutting down...");
+    engineAutoUpdateCoordinator?.stop();
 
     const schedulerStopPromises: Array<Promise<void>> = [];
     for (const bot of bots) {
@@ -397,12 +407,30 @@ async function main(): Promise<void> {
     process.exit(0);
   };
 
+  const runningBots: BotInstance[] = [];
   for (const bot of bots) {
     try {
       await startBotRuntime(bot, { log });
+      runningBots.push(bot);
     } catch (err) {
       log.error("failed to start bot", { name: bot.id, error: String(err) });
     }
+  }
+
+  if (runningBots.length > 0) {
+    const notificationBot = runningBots[0]!;
+    engineAutoUpdateCoordinator = new EngineAutoUpdateCoordinator({
+      lifecycle: engineLifecycle,
+      participants: runningBots.map((bot) => bot.pipeline),
+      notificationTarget: {
+        id: notificationBot.id,
+        db: notificationBot.db,
+        dbPath: notificationBot.config.dbPath,
+        transport: notificationBot.transport,
+        platform: "feishu",
+      },
+    });
+    engineAutoUpdateCoordinator.start();
   }
 
   engineControlServer = new EngineControlServer(engineEndpoint, identity, controlToken, shutdown);
@@ -442,11 +470,12 @@ async function main(): Promise<void> {
 
   {
     const timer = setTimeout(() => {
+      const sharedStore = new SharedReleaseStore(resolveSharedRuntimeRoot());
       void completeRuntimeHomeMigrationAfterStartup({
         niubotHome: NIUBOT_HOME,
         runtimePath,
         node: currentNodeRuntimeRef(),
-        sharedStore: new SharedReleaseStore(resolveSharedRuntimeRoot()),
+        sharedStore,
         env: process.env,
         settleMs: 0,
         timeoutMs: resolveRuntimeMigrationWaitMs(),
@@ -456,9 +485,26 @@ async function main(): Promise<void> {
           const { homeStore, sharedRef, state } = migration;
           log.info("legacy runtime reference migrated to shared store", {
             artifactId: sharedRef.artifactId,
-            lastKnownGoodStorage: state.lastKnownGood?.storage,
+            currentStorage: state.current?.storage,
           });
           launcherRuntimePath = homeStore.resolveRuntime(sharedRef, true);
+        }
+        if (process.env["NIUBOT_ENV"] !== "dev") {
+          const homeStore = migration?.homeStore ?? new HomeReleaseStore(NIUBOT_HOME, sharedStore);
+          const runningRef = migration?.sharedRef
+            ?? homeStore.releaseRefForRuntimePath(runtimePath, currentNodeRuntimeRef());
+          const stableState = homeStore.stateExistsRecovering() ? homeStore.readStateStrict() : undefined;
+          if (runningRef?.storage === "shared" && !stableState?.transaction && sameReleaseRef(stableState?.current, runningRef)) {
+            try {
+              const recommended = new RecommendedReleaseStore(sharedStore).promote(runningRef);
+              log.info("production recommendation ready", {
+                artifactId: recommended.release.artifactId,
+                generation: recommended.generation,
+              });
+            } catch (err) {
+              log.info("production recommendation unchanged", { reason: String(err) });
+            }
+          }
         }
         setupRuntimeCliShims(launcherRuntimePath);
       }).catch((err) => {

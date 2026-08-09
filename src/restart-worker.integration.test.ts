@@ -13,6 +13,7 @@ import { readEngineIdentity, waitForEngineIdentity } from "./local-api/engine-cl
 import { endpointFromAddress } from "./platform/ipc.js";
 import Database from "better-sqlite3";
 import { createRestartDatabaseSnapshot } from "./database/restart-snapshot.js";
+import { RecommendedReleaseStore } from "./recommended-release.js";
 
 const tempDirs: string[] = [];
 
@@ -37,6 +38,88 @@ afterEach(async () => {
 });
 
 describe("restart worker integration", () => {
+  it("activates the production recommendation for a stopped home", async () => {
+    const fixture = createRecommendedFixture(true);
+    await runTestRestartWorker({
+      ...process.env,
+      NIUBOT_SHARED_STORE: fixture.sharedStore.rootDirectory,
+      NIUBOT_HOME: fixture.home,
+      NIUBOT_BOT_NAME: "TestBot",
+      NIUBOT_SOURCE_DIR: fixture.currentRuntime,
+      NIUBOT_ENV: "production",
+      NIUBOT_RESTART_MODE: "recommended",
+      NIUBOT_RECOMMENDED_ARTIFACT_ID: fixture.candidate.artifactId,
+      NIUBOT_RECOMMENDED_GENERATION: String(fixture.generation),
+    });
+    const running = await inspectRunningEngine(fixture.home);
+    expect(running?.identity.version).toBe("2.0.0");
+    expect(fixture.homeStore.readState().current).toEqual(fixture.candidate);
+    expect(fixture.homeStore.readState().rejectedRecommendation).toBeUndefined();
+  }, 30_000);
+
+  it("restores current and remembers a rejected recommendation", async () => {
+    const fixture = createRecommendedFixture(false);
+    vi.stubEnv("NIUBOT_RESTART_HEALTH_TIMEOUT", "1");
+    await runTestRestartWorker({
+      ...process.env,
+      NIUBOT_SHARED_STORE: fixture.sharedStore.rootDirectory,
+      NIUBOT_HOME: fixture.home,
+      NIUBOT_BOT_NAME: "TestBot",
+      NIUBOT_SOURCE_DIR: fixture.currentRuntime,
+      NIUBOT_ENV: "production",
+      NIUBOT_RESTART_MODE: "recommended",
+      NIUBOT_RECOMMENDED_ARTIFACT_ID: fixture.candidate.artifactId,
+      NIUBOT_RECOMMENDED_GENERATION: String(fixture.generation),
+    });
+    const running = await inspectRunningEngine(fixture.home);
+    expect(running?.identity.version).toBe("1.0.0");
+    const state = fixture.homeStore.readState();
+    expect(state.current).toEqual(fixture.current);
+    expect(state.rejectedRecommendation).toMatchObject({
+      generation: fixture.generation,
+      artifactId: fixture.candidate.artifactId,
+    });
+  }, 30_000);
+
+  it("remembers a recommendation rejected during preflight without stopping the old Engine", async () => {
+    const fixture = createRecommendedFixture(true, 23);
+    await expect(runTestRestartWorker({
+      ...process.env,
+      NIUBOT_SHARED_STORE: fixture.sharedStore.rootDirectory,
+      NIUBOT_HOME: fixture.home,
+      NIUBOT_BOT_NAME: "TestBot",
+      NIUBOT_SOURCE_DIR: fixture.currentRuntime,
+      NIUBOT_ENV: "production",
+      NIUBOT_RESTART_MODE: "recommended",
+      NIUBOT_RECOMMENDED_ARTIFACT_ID: fixture.candidate.artifactId,
+      NIUBOT_RECOMMENDED_GENERATION: String(fixture.generation),
+    })).rejects.toThrow(/preflight/i);
+    expect(await inspectRunningEngine(fixture.home)).toBeUndefined();
+    expect(fixture.homeStore.readState()).toMatchObject({
+      current: fixture.current,
+      rejectedRecommendation: {
+        generation: fixture.generation,
+        artifactId: fixture.candidate.artifactId,
+      },
+    });
+  }, 30_000);
+
+  it("refuses to automatically downgrade a newer home", async () => {
+    const fixture = createRecommendedFixture(true, 0, "3.0.0");
+    await expect(runTestRestartWorker({
+      ...process.env,
+      NIUBOT_SHARED_STORE: fixture.sharedStore.rootDirectory,
+      NIUBOT_HOME: fixture.home,
+      NIUBOT_BOT_NAME: "TestBot",
+      NIUBOT_SOURCE_DIR: fixture.currentRuntime,
+      NIUBOT_ENV: "production",
+      NIUBOT_RESTART_MODE: "recommended",
+      NIUBOT_RECOMMENDED_ARTIFACT_ID: fixture.candidate.artifactId,
+      NIUBOT_RECOMMENDED_GENERATION: String(fixture.generation),
+    })).rejects.toThrow(/downgrade/);
+    expect(fixture.homeStore.readState().current).toEqual(fixture.current);
+  }, 30_000);
+
   it("restores a stopped Engine state inside the worker after verification", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-stopped-restart-"));
     tempDirs.push(root);
@@ -273,12 +356,13 @@ describe("restart worker integration", () => {
     expect(fs.realpathSync.native(running!.state.runtimePath)).toBe(fs.realpathSync.native(sharedStore.packageDirectory(artifactId)));
     expect(running?.state.nodePath).toBe(boundNodePath);
     const state = new HomeReleaseStore(home, sharedStore).readState();
-    expect(state.lastKnownGood).toEqual(selected);
-    expect(state.previous).toMatchObject({ storage: "legacy" });
+    expect(state.current).toEqual(selected);
+    expect(state).not.toHaveProperty("lastKnownGood");
+    expect(state).not.toHaveProperty("previous");
     expect(state.unresolvedLegacy).toEqual([]);
   }, 30_000);
 
-  it("builds, switches, checks health, and commits LKG through the Node implementation", async () => {
+  it("builds, switches, checks health, and commits current through the Node implementation", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-restart-integration-"));
     tempDirs.push(root);
     const home = path.join(root, "home");
@@ -338,11 +422,12 @@ describe("restart worker integration", () => {
     expect(running?.state.runtimePath).toContain(path.join("releases", ""));
     const releaseState = new HomeReleaseStore(home, new SharedReleaseStore(path.join(root, "shared-store"))).readState();
     expect(releaseState.current).toBeTruthy();
-    expect(releaseState.lastKnownGood).toEqual(releaseState.current);
+    expect(releaseState).not.toHaveProperty("lastKnownGood");
+    expect(new RecommendedReleaseStore(new SharedReleaseStore(path.join(root, "shared-store"))).read()).toBeUndefined();
     await expect(stopEngine(home)).resolves.toMatchObject({ stopped: true });
   }, 120_000);
 
-  it("rolls back to the bootstrap LKG when the candidate fails health checks", async () => {
+  it("rolls back to the last healthy current when the candidate fails health checks", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-restart-rollback-"));
     tempDirs.push(root);
     const home = path.join(root, "home");
@@ -403,8 +488,8 @@ describe("restart worker integration", () => {
     expect(running?.state.runtimePath).toContain(`${path.sep}releases${path.sep}`);
     const store = new HomeReleaseStore(home, new SharedReleaseStore(path.join(root, "shared-store")));
     const releaseState = store.readState();
-    expect(releaseState.current).toEqual(releaseState.lastKnownGood);
     expect(releaseState.current).toMatchObject({ storage: "shared" });
+    expect(releaseState).not.toHaveProperty("lastKnownGood");
     const restartState = JSON.parse(fs.readFileSync(
       path.join(home, "TestBot", "restart", "state.json"),
       "utf-8",
@@ -646,6 +731,53 @@ describe("restart worker integration", () => {
     expect(state.autoUpdate).toBe(true);
   }, 120_000);
 });
+
+function createRecommendedFixture(candidateHealthy: boolean, preflightExitCode = 0, currentVersion = "1.0.0") {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-recommended-worker-"));
+  tempDirs.push(root);
+  const home = path.join(root, "home");
+  const currentRuntime = path.join(home, "TestBot", "releases", "current", "package");
+  fs.mkdirSync(path.join(currentRuntime, "dist"), { recursive: true });
+  fs.writeFileSync(path.join(currentRuntime, "package.json"), JSON.stringify({
+    name: "@yuanzhangjing/niubot", version: currentVersion, type: "module",
+  }));
+  fs.writeFileSync(path.join(currentRuntime, "dist", "index.js"), fakeEngineSource(true, currentVersion));
+  fs.writeFileSync(path.join(home, "config.yaml"), [
+    "bots:",
+    "  - id: TestBot",
+    "    backend: codex",
+    "    appId: test-app",
+    "    appSecret: test-secret",
+    "",
+  ].join("\n"));
+
+  const sharedStore = new SharedReleaseStore(path.join(root, "shared"));
+  const staging = sharedStore.createStagingDirectory("recommended");
+  const packageDirectory = path.join(staging, "package");
+  fs.mkdirSync(path.join(packageDirectory, "dist"), { recursive: true });
+  fs.writeFileSync(path.join(packageDirectory, "package.json"), JSON.stringify({
+    name: "@yuanzhangjing/niubot", version: "2.0.0", type: "module",
+  }));
+  fs.writeFileSync(path.join(packageDirectory, "dist", "index.js"), fakeEngineSource(candidateHealthy, "2.0.0", false, preflightExitCode));
+  const artifactId = candidateHealthy ? "recommended-good" : "recommended-bad";
+  sharedStore.publishStagedArtifact({
+    stagingDirectory: staging,
+    manifest: createSharedReleaseManifest({
+      artifactId, version: "2.0.0", sourceKind: "npm", sourceDigest: artifactId,
+      treeDigest: computeTreeDigest(packageDirectory), installedAt: new Date().toISOString(),
+      installerNodePath: process.execPath, nodeVersion: process.version,
+      nodeAbi: process.versions.modules, platform: process.platform, arch: process.arch,
+    }),
+  });
+  const node = currentNodeRuntimeRef();
+  const current = { storage: "legacy" as const, runtimePath: currentRuntime, node };
+  const candidate = { storage: "shared" as const, artifactId, node };
+  const homeStore = new HomeReleaseStore(home, sharedStore);
+  homeStore.writeState({ schemaVersion: 2, current });
+  homeStore.writeSharedRef({ state: homeStore.readStateStrict() });
+  const recommendation = new RecommendedReleaseStore(sharedStore).promote(candidate);
+  return { home, currentRuntime, sharedStore, homeStore, current, candidate, generation: recommendation.generation };
+}
 
 function writeMinimalShrinkwrap(packageRoot: string, version: string): void {
   fs.writeFileSync(path.join(packageRoot, "npm-shrinkwrap.json"), `${JSON.stringify({

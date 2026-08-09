@@ -46,8 +46,8 @@ describe("runtime home migration", () => {
 
     expect(completed).toBeDefined();
     expect(completed!.state.current).toEqual(completed!.sharedRef);
-    expect(completed!.state.lastKnownGood).toEqual(completed!.sharedRef);
-    expect(completed!.state.previous).toEqual(previousRef);
+    expect(completed!.state).not.toHaveProperty("lastKnownGood");
+    expect(completed!.state).not.toHaveProperty("previous");
     expect(completed!.state.firstSharedSuccessAt).toBeUndefined();
     expect(completed!.state.sharedSuccessfulStarts).toBeUndefined();
     expect(fixture.sharedStore.readManifest(completed!.sharedRef.artifactId)?.sourceKind).toBe("legacy");
@@ -112,7 +112,7 @@ describe("runtime home migration", () => {
 
     expect(waits).toBe(1);
     expect(completed?.state.current).toMatchObject({ storage: "shared" });
-    expect(completed?.state.lastKnownGood).toEqual(completed?.sharedRef);
+    expect(completed?.state).not.toHaveProperty("lastKnownGood");
     expect(fixture.sharedStore.readHomeRef(fixture.homeStore.homeId)?.pending).toBeUndefined();
   });
 
@@ -156,8 +156,8 @@ describe("runtime home migration", () => {
 
     expect(completed).toBeDefined();
     expect(completed!.state.current).toEqual(completed!.sharedRef);
-    expect(completed!.state.lastKnownGood).toEqual(completed!.sharedRef);
-    expect(completed!.state.previous).toEqual(staleSharedRef);
+    expect(completed!.state).not.toHaveProperty("lastKnownGood");
+    expect(completed!.state).not.toHaveProperty("previous");
     expect(completed!.state.firstSharedSuccessAt).toBeUndefined();
     expect(completed!.state.sharedSuccessfulStarts).toBeUndefined();
     expect(fixture.sharedStore.readManifest(completed!.sharedRef.artifactId)?.version).toBe("0.2.7");
@@ -237,7 +237,7 @@ describe("runtime home migration", () => {
     expect(repaired).toBeUndefined();
     const homeRef = fixture.sharedStore.readHomeRef(fixture.homeStore.homeId);
     expect(homeRef?.active.current).toEqual(sharedRef);
-    expect(homeRef?.active.lastKnownGood).toEqual(sharedRef);
+    expect(homeRef?.active.lastKnownGood).toBeUndefined();
     expect(homeRef?.pending).toBeUndefined();
   });
 

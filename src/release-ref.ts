@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import fs from "node:fs";
 import path from "node:path";
 
 export interface NodeRuntimeRef {
@@ -71,4 +72,21 @@ export function isSafeIdentifier(value: unknown): value is string {
     && !value.includes("/")
     && !value.includes("\\")
     && path.basename(value) === value;
+}
+
+export function sameReleaseRef(left: ReleaseRef | undefined, right: ReleaseRef | undefined): boolean {
+  if (!left || !right || left.storage !== right.storage) return false;
+  if (canonicalPath(left.node.nodePath) !== canonicalPath(right.node.nodePath)
+    || left.node.nodeVersion !== right.node.nodeVersion
+    || left.node.nodeAbi !== right.node.nodeAbi) return false;
+  return left.storage === "shared" && right.storage === "shared"
+    ? left.artifactId === right.artifactId
+    : left.storage === "legacy" && right.storage === "legacy"
+      && canonicalPath(left.runtimePath) === canonicalPath(right.runtimePath);
+}
+
+function canonicalPath(value: string): string {
+  let resolved = path.resolve(value);
+  try { resolved = path.join(fs.realpathSync.native(resolved)); } catch { /* unavailable paths compare resolved */ }
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
 }

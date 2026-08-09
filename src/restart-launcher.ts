@@ -14,6 +14,8 @@ export interface RestartWorkerLaunchOptions {
   autoUpdate?: boolean;
   notifyChatId?: string;
   updateVersion?: string;
+  recommendedArtifactId?: string;
+  recommendedGeneration?: number;
   /** Preserve a stopped Engine state after update verification, even if the caller exits. */
   stopAfterCompletion?: boolean;
   restartId?: string;
@@ -50,9 +52,18 @@ export function buildRestartWorkerEnvironment(
   if (options.updateVersion) {
     env["NIUBOT_RESTART_MODE"] = "npm-update";
     env["NIUBOT_UPDATE_VERSION"] = options.updateVersion;
+    delete env["NIUBOT_RECOMMENDED_ARTIFACT_ID"];
+    delete env["NIUBOT_RECOMMENDED_GENERATION"];
+  } else if (options.recommendedArtifactId && options.recommendedGeneration) {
+    env["NIUBOT_RESTART_MODE"] = "recommended";
+    env["NIUBOT_RECOMMENDED_ARTIFACT_ID"] = options.recommendedArtifactId;
+    env["NIUBOT_RECOMMENDED_GENERATION"] = String(options.recommendedGeneration);
+    delete env["NIUBOT_UPDATE_VERSION"];
   } else {
     delete env["NIUBOT_RESTART_MODE"];
     delete env["NIUBOT_UPDATE_VERSION"];
+    delete env["NIUBOT_RECOMMENDED_ARTIFACT_ID"];
+    delete env["NIUBOT_RECOMMENDED_GENERATION"];
   }
   return env;
 }

@@ -6,6 +6,7 @@ import { HomeReleaseStore, type HomeReleaseState } from "./home-release-store.js
 import { cleanupLegacyReleases, cleanupSharedReleases } from "./release-cleanup.js";
 import { currentNodeRuntimeRef, type ReleaseRef } from "./release-ref.js";
 import { computeTreeDigest, createHomeId, createSharedReleaseManifest, SharedReleaseStore } from "./shared-release-store.js";
+import { RecommendedReleaseStore } from "./recommended-release.js";
 
 const tempDirectories: string[] = [];
 
@@ -15,7 +16,7 @@ function temporaryRoot(): string {
   return root;
 }
 
-function publish(store: SharedReleaseStore, id: string): void {
+function publish(store: SharedReleaseStore, id: string, sourceKind: "legacy" | "npm" = "legacy"): void {
   const staging = store.createStagingDirectory(id);
   const packageDirectory = path.join(staging, "package");
   fs.mkdirSync(packageDirectory);
@@ -28,7 +29,7 @@ function publish(store: SharedReleaseStore, id: string): void {
     manifest: createSharedReleaseManifest({
       artifactId: id,
       version: "1.0.0",
-      sourceKind: "legacy",
+      sourceKind,
       sourceDigest: id,
       treeDigest: computeTreeDigest(packageDirectory),
       installedAt: new Date(0).toISOString(),
@@ -47,6 +48,19 @@ afterEach(() => {
 });
 
 describe("shared release cleanup", () => {
+  it("protects the global production recommendation", () => {
+    const store = new SharedReleaseStore(path.join(temporaryRoot(), "shared"));
+    publish(store, "recommended", "npm");
+    publish(store, "unused");
+    new RecommendedReleaseStore(store).promote({
+      storage: "shared",
+      artifactId: "recommended",
+      node: currentNodeRuntimeRef(),
+    });
+    const candidates = cleanupSharedReleases(store, { now: Date.now(), releaseGraceMs: 0, keepRecent: 0 });
+    expect(candidates.map((item) => path.basename(item.sourcePath))).toEqual(["unused"]);
+  });
+
   it("protects active, pending, rollback, and running artifacts", () => {
     const root = temporaryRoot();
     const store = new SharedReleaseStore(path.join(root, "shared"));
@@ -107,6 +121,13 @@ describe("shared release cleanup", () => {
     expect(() => cleanupSharedReleases(store, { apply: true })).toThrow(/Invalid shared home ref/);
   });
 
+  it("refuses cleanup when the recommendation state is damaged", () => {
+    const store = new SharedReleaseStore(path.join(temporaryRoot(), "shared"));
+    store.ensureDirectories();
+    fs.writeFileSync(path.join(store.rootDirectory, "recommended.json"), "not-json\n");
+    expect(() => cleanupSharedReleases(store, { apply: true })).toThrow(/Invalid recommended release state/);
+  });
+
   it("refuses cleanup when a known home state has no matching ref", () => {
     const root = temporaryRoot();
     const home = path.join(root, "home");
@@ -119,6 +140,29 @@ describe("shared release cleanup", () => {
       current: { storage: "shared", artifactId: "active", node: currentNodeRuntimeRef() },
     });
     expect(() => cleanupSharedReleases(store, { apply: true, knownHomes: [home] })).toThrow(/ref is missing/);
+  });
+
+  it("normalizes an old home state without recursively taking the store lock", () => {
+    const root = temporaryRoot();
+    const home = path.join(root, "home");
+    fs.mkdirSync(path.join(home, "runtime"), { recursive: true });
+    const store = new SharedReleaseStore(path.join(root, "shared"));
+    publish(store, "active");
+    const current: ReleaseRef = { storage: "shared", artifactId: "active", node: currentNodeRuntimeRef() };
+    const homeStore = new HomeReleaseStore(home, store);
+    fs.writeFileSync(homeStore.stateFile, JSON.stringify({ schemaVersion: 2, current, lastKnownGood: current }));
+    store.writeHomeRef({
+      schemaVersion: 1,
+      homeId: createHomeId(home),
+      homePath: fs.realpathSync.native(home),
+      active: { current },
+      rollback: [],
+      updatedAt: new Date().toISOString(),
+    });
+    expect(() => cleanupSharedReleases(store, {
+      knownHomes: [home], now: Date.now(), releaseGraceMs: 0, keepRecent: 0,
+    })).not.toThrow();
+    expect(JSON.parse(fs.readFileSync(homeStore.stateFile, "utf-8"))).toHaveProperty("lastKnownGood");
   });
 });
 
@@ -135,7 +179,12 @@ describe("legacy release cleanup", () => {
     const ready: HomeReleaseState = {
       schemaVersion: 2,
       current: { storage: "shared", artifactId: "shared", node },
-      previous: protectedRef,
+      transaction: {
+        transactionId: "migration",
+        phase: "activating",
+        candidate: { storage: "shared", artifactId: "shared", node },
+        rollbackCurrent: protectedRef,
+      },
       firstSharedSuccessAt: new Date(0).toISOString(),
       sharedSuccessfulStarts: 1,
     };
@@ -162,7 +211,7 @@ describe("legacy release cleanup", () => {
         transactionId: "tx",
         phase: "activating",
         candidate: { storage: "shared", artifactId: "candidate", node },
-        rollback: { current: { storage: "legacy", runtimePath: protectedRuntime, node } },
+        rollbackCurrent: { storage: "legacy", runtimePath: protectedRuntime, node },
       },
     };
     const trash = path.join(home, "runtime", "legacy-trash", "old-trash");

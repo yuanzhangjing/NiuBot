@@ -13,9 +13,12 @@ describe("restart.sh compatibility entry", () => {
     expect(script).not.toContain("nohup");
   });
 
-  test("the application calls the Node launcher directly", () => {
+  test("the Engine lifecycle service calls the Node launcher directly", () => {
     const pipeline = readFileSync(path.resolve(__dirname, "core/pipeline.ts"), "utf-8");
-    expect(pipeline).toContain("launchRestartWorker");
+    const lifecycle = readFileSync(path.resolve(__dirname, "engine-lifecycle.ts"), "utf-8");
+    expect(lifecycle).toContain("launchRestartWorker");
+    expect(pipeline).not.toContain("launchRestartWorker");
     expect(pipeline).not.toContain('spawn("bash"');
+    expect(lifecycle).not.toContain('spawn("bash"');
   });
 });

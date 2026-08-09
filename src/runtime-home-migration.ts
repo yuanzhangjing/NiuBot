@@ -71,8 +71,6 @@ async function prepareRuntimeHomeMigration(
     state = {
       ...state,
       current: runtimeRef,
-      previous: state.current ?? state.previous,
-      lastKnownGood: runtimeRef,
       firstSharedSuccessAt: undefined,
       sharedSuccessfulStarts: undefined,
     };
@@ -223,7 +221,7 @@ function legacyStoreCommittedHealthyRuntime(runtimePath: string): boolean {
 }
 
 function releaseRefs(state: HomeReleaseState): ReleaseRef[] {
-  return [state.current, state.previous, state.lastKnownGood]
+  return [state.current, state.transaction?.candidate, state.transaction?.rollbackCurrent]
     .filter((ref): ref is ReleaseRef => ref !== undefined);
 }
 

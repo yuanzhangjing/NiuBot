@@ -56,6 +56,8 @@ import {
   WINDOWS_TESTED_NODE_MAJORS,
 } from "./node-support.js";
 import { HomeReleaseStore } from "./home-release-store.js";
+import { sameReleaseRef } from "./release-ref.js";
+import { RecommendedReleaseStore, shouldAdoptRecommendedRelease } from "./recommended-release.js";
 import { cleanupLegacyReleases, cleanupSharedReleases } from "./release-cleanup.js";
 import { resolveSharedRuntimeRoot } from "./platform/shared-runtime.js";
 import { SharedReleaseStore } from "./shared-release-store.js";
@@ -978,6 +980,8 @@ async function cmdStart(niubotHome: string, flags: CliFlags): Promise<void> {
     process.exit(1);
   }
 
+  if (await activateRecommendedReleaseIfNeeded(niubotHome, config)) return;
+
   // Ensure working directories exist
   for (const bot of config.bots) {
     const workDir = path.join(niubotHome, bot.id, "workspace");
@@ -1082,6 +1086,78 @@ async function cmdStart(niubotHome: string, flags: CliFlags): Promise<void> {
   console.log();
 }
 
+async function activateRecommendedReleaseIfNeeded(niubotHome: string, config: NiuBotConfig): Promise<boolean> {
+  if (process.env["NIUBOT_ENV"] === "dev" || fs.existsSync(path.join(PROJECT_ROOT, "src"))) return false;
+  const sharedStore = new SharedReleaseStore(resolveSharedRuntimeRoot());
+  const homeStore = new HomeReleaseStore(niubotHome, sharedStore);
+  if (!homeStore.stateExistsRecovering()) return false;
+  const state = homeStore.readStateStrict();
+  const recommendationStore = new RecommendedReleaseStore(sharedStore);
+  let recommended: ReturnType<RecommendedReleaseStore["read"]>;
+  try {
+    recommended = recommendationStore.stateExistsRecovering() ? recommendationStore.readStrict() : undefined;
+  } catch (err) {
+    hint(`Recommended version is unavailable; starting the last healthy version: ${err instanceof Error ? err.message : String(err)}`);
+    return false;
+  }
+  if (!recommended || sameReleaseRef(state.current, recommended.release)) return false;
+  if (state.rejectedRecommendation?.generation === recommended.generation
+    && state.rejectedRecommendation.artifactId === recommended.release.artifactId) {
+    hint(`Recommended version was previously rejected by this home; starting the last healthy version.`);
+    return false;
+  }
+
+  const manifest = sharedStore.assertUsableArtifact(recommended.release.artifactId, undefined, true);
+  let currentVersion: string | undefined;
+  if (state.current) {
+    try {
+      const pkg = JSON.parse(fs.readFileSync(path.join(homeStore.resolveRuntime(state.current), "package.json"), "utf-8")) as { version?: unknown };
+      currentVersion = typeof pkg.version === "string" ? pkg.version : undefined;
+    } catch {
+      // A valid recommendation may recover an unusable current.
+    }
+  }
+  if (!shouldAdoptRecommendedRelease(state.current, currentVersion, recommended.release, manifest.version)) return false;
+  info(`Safely activating recommended version ${manifest.version}...`);
+  const worker = launchRestartWorker({
+    niubotHome,
+    botName: config.bots[0]?.id ?? "NiuBot",
+    runtimeRoot: PROJECT_ROOT,
+    sourceDirectory: PROJECT_ROOT,
+    environment: "production",
+    recommendedArtifactId: recommended.release.artifactId,
+    recommendedGeneration: recommended.generation,
+  });
+  try {
+    const result = await waitForRestartCompletion({
+      stateFile: worker.stateFile,
+      restartId: worker.restartId,
+      workerPid: worker.pid,
+      onPhase: (restartState) => {
+        if (!restartCompletion(restartState)) info(restartPhaseLabel(restartState.phase, manifest.version));
+      },
+    });
+    if (result.completion === "success") {
+      ok(`NiuBot is running on recommended version ${manifest.version}.`);
+      return true;
+    }
+    if (result.completion === "rolled-back") {
+      fail(`Recommended version ${manifest.version} failed; the last healthy version is running.`);
+      if (result.state.error) hint(result.state.error);
+      process.exitCode = 1;
+      return true;
+    }
+    fail(`Could not start recommended version ${manifest.version}${result.state.error ? `: ${result.state.error}` : "."}`);
+    process.exitCode = 1;
+    return true;
+  } catch (err) {
+    fail(err instanceof Error ? err.message : String(err));
+    hint(`Check ${worker.logFile}`);
+    process.exitCode = 1;
+    return true;
+  }
+}
+
 // ── Stop ───────────────────────────────────────────────────
 
 async function cmdStop(niubotHome: string): Promise<void> {
@@ -1100,6 +1176,7 @@ async function cmdRestart(niubotHome: string): Promise<void> {
     return;
   }
   const config = loadConfig(path.join(niubotHome, "config.yaml"));
+  if (await activateRecommendedReleaseIfNeeded(niubotHome, config)) return;
   const worker = launchRestartWorker({
     niubotHome,
     botName: config.bots[0]?.id ?? "NiuBot",

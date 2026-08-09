@@ -19,6 +19,7 @@ import { currentNodeRuntimeRef, probeNodeRuntimeRef, type ReleaseRef } from "./r
 import { ReleaseStore } from "./release-store.js";
 import { SharedReleaseInstaller } from "./shared-release-installer.js";
 import { SharedReleaseStore } from "./shared-release-store.js";
+import { RecommendedReleaseStore, shouldAdoptRecommendedRelease } from "./recommended-release.js";
 import { assertInstallablePackageArchive } from "./package-archive.js";
 import { resolveSharedRuntimeRoot } from "./platform/shared-runtime.js";
 import { samePlatformPath } from "./platform/files.js";
@@ -36,13 +37,14 @@ import {
 } from "./database/restart-snapshot.js";
 import { assertNoPendingBotTransfer } from "./bot-transfer.js";
 import { recoverStaleBotTransferLifecycles } from "./bot-transfer-worker.js";
+import { ensureRuntimeCliShims } from "./platform/cli-runtime.js";
 
 const PACKAGE_NAME = "@yuanzhangjing/niubot";
 const DEFAULT_INSTALL_TIMEOUT_MS = 120_000;
 const UPDATE_INSTALL_TIMEOUT_MS = 600_000;
 export const DEFAULT_PREFLIGHT_TIMEOUT_MS = 120_000;
 
-type RestartMode = "source" | "npm-update" | "production";
+type RestartMode = "source" | "npm-update" | "recommended" | "production";
 
 /** 运行环境标识：dev（本地开发）vs production（正式服务）。显式声明优先，否则推导，兜底保守取 production。 */
 export type RuntimeEnvironment = "dev" | "production";
@@ -58,6 +60,8 @@ interface RestartContext {
   /** dev/production 运行环境（NIUBOT_ENV 显式声明或推导） */
   environment: RuntimeEnvironment;
   updateVersion?: string;
+  recommendedArtifactId?: string;
+  recommendedGeneration?: number;
   notifyChatId?: string;
   legacyNotifyEndpoint?: string;
   /** 重启完成后注入主会话的任务提示（nbt restart --wake 传入） */
@@ -66,6 +70,7 @@ interface RestartContext {
   debugLog: string;
   store: ReleaseStore;
   sharedStore: SharedReleaseStore;
+  recommendedStore: RecommendedReleaseStore;
   homeStore: HomeReleaseStore;
   state: RestartStateWriter;
   verifySharedPackage?: (packageDirectory: string, version: string) => void | Promise<void>;
@@ -115,6 +120,8 @@ export async function runRestartWorker(
     workerRuntimePath,
     environment: resolveRuntimeEnvironment(env, sourceDirectory, workerRuntimePath),
     updateVersion: env["NIUBOT_UPDATE_VERSION"],
+    recommendedArtifactId: env["NIUBOT_RECOMMENDED_ARTIFACT_ID"],
+    recommendedGeneration: parsePositiveInteger(env["NIUBOT_RECOMMENDED_GENERATION"]),
     notifyChatId: env["NIUBOT_RESTART_NOTIFY_CHAT_ID"] || env["NIUBOT_CHAT_ID"],
     legacyNotifyEndpoint: env["NIUBOT_API_SOCKET"],
     wakePrompt: env["NIUBOT_RESTART_WAKE_PROMPT"] || undefined,
@@ -122,6 +129,7 @@ export async function runRestartWorker(
     debugLog: path.join(logDirectory, "restart-debug.log"),
     store: new ReleaseStore(botDirectory),
     sharedStore,
+    recommendedStore: new RecommendedReleaseStore(sharedStore),
     homeStore: new HomeReleaseStore(niubotHome, sharedStore),
     state: new RestartStateWriter(botDirectory, id, startedAt, env["NIUBOT_AUTO_UPDATE"] === "1"),
     verifySharedPackage: dependencies.verifySharedPackage,
@@ -165,6 +173,8 @@ export async function runRestartWorker(
         await runSourceRestart(context);
       } else if (mode === "npm-update") {
         await runNpmUpdate(context);
+      } else if (mode === "recommended") {
+        await runRecommendedActivation(context);
       } else {
         await runProductionRestart(context);
       }
@@ -238,6 +248,7 @@ async function runNpmUpdate(context: RestartContext): Promise<void> {
   const version = context.updateVersion;
   if (!version || !/^[0-9A-Za-z._-]+$/.test(version)) throw new Error(`invalid npm update version: ${version ?? ""}`);
   await ensureBootstrapRelease(context);
+  const expectedRecommendationGeneration = context.recommendedStore.read()?.generation ?? 0;
   context.state.write("build_npm_candidate");
   const releaseId = `${compactTimestamp(new Date())}-${version}-npm`;
   const candidate = await packRelease(context, {
@@ -247,7 +258,46 @@ async function runNpmUpdate(context: RestartContext): Promise<void> {
     expectedVersion: version,
     installTimeoutMs: installTimeout(context, true),
   });
-  await switchToCandidate(context, candidate, "更新并重启成功。");
+  await switchToCandidate(context, candidate, "更新并重启成功。", {
+    promoteRecommendationAtGeneration: expectedRecommendationGeneration,
+  });
+}
+
+async function runRecommendedActivation(context: RestartContext): Promise<void> {
+  if (context.environment !== "production") throw new Error("Development homes do not follow the production recommendation");
+  const recommended = context.recommendedStore.readStrict();
+  if (recommended.generation !== context.recommendedGeneration
+    || recommended.release.artifactId !== context.recommendedArtifactId) {
+    throw new Error("Recommended release changed before activation started");
+  }
+  const state = context.homeStore.readStateStrict();
+  if (state.rejectedRecommendation?.generation === recommended.generation
+    && state.rejectedRecommendation.artifactId === recommended.release.artifactId) {
+    throw new Error(`Recommended release generation ${recommended.generation} was already rejected by this home`);
+  }
+  const runtimePath = context.homeStore.resolveRuntime(recommended.release, true);
+  const manifest = context.sharedStore.assertUsableArtifact(recommended.release.artifactId, undefined, true);
+  let currentVersion: string | undefined;
+  if (state.current) {
+    try {
+      const currentRuntime = context.homeStore.resolveRuntime(state.current, true);
+      currentVersion = readPackage(path.join(currentRuntime, "package.json")).version;
+    } catch {
+      // A valid recommendation may recover an unusable current.
+    }
+  }
+  if (!shouldAdoptRecommendedRelease(state.current, currentVersion, recommended.release, manifest.version)) {
+    throw new Error(`Refusing to automatically downgrade from ${currentVersion ?? "unknown"} to recommended ${manifest.version}`);
+  }
+  await switchToCandidate(context, {
+    runtimePath,
+    version: manifest.version,
+    runtimeMode: "production",
+    nodePath: recommended.release.node.nodePath,
+    releaseRef: recommended.release,
+  }, `已启动推荐版本 ${manifest.version}。`, {
+    rejectedRecommendation: { generation: recommended.generation, release: recommended.release },
+  });
 }
 
 async function runProductionRestart(context: RestartContext): Promise<void> {
@@ -266,7 +316,6 @@ async function runProductionRestart(context: RestartContext): Promise<void> {
           const transitionState: HomeReleaseState = {
             schemaVersion: 2,
             current: oldRef,
-            lastKnownGood: oldRef,
             unresolvedLegacy: [],
           };
           context.homeStore.writeState(transitionState);
@@ -340,7 +389,7 @@ function resolveSelectedRelease(context: RestartContext): { ref: ReleaseRef; run
   const state = context.homeStore.stateExistsRecovering()
     ? context.homeStore.readStateStrict()
     : { schemaVersion: 2 as const };
-  for (const ref of [state.current, state.lastKnownGood, state.previous]) {
+  for (const ref of [state.current]) {
     if (!ref) continue;
     try {
       return { ref, runtimePath: context.homeStore.resolveRuntime(ref, true) };
@@ -355,13 +404,20 @@ async function switchToCandidate(
   context: RestartContext,
   candidate: RuntimeTarget,
   successMessage: string,
+  options: {
+    promoteRecommendationAtGeneration?: number;
+    rejectedRecommendation?: {
+      generation: number;
+      release: ReleaseRef & { storage: "shared" };
+    };
+  } = {},
 ): Promise<void> {
   const releaseId = candidate.releaseRef?.storage === "shared" ? candidate.releaseRef.artifactId : candidate.runtimePath;
   const packageDirectory = candidate.runtimePath;
   const previousReleaseState = context.homeStore.stateExistsRecovering()
     ? context.homeStore.readStateStrict()
     : { schemaVersion: 2 as const };
-  const protectedRefs = [candidate.releaseRef, previousReleaseState.current, previousReleaseState.previous, previousReleaseState.lastKnownGood]
+  const protectedRefs = [candidate.releaseRef, previousReleaseState.current]
     .filter((ref): ref is ReleaseRef => ref !== undefined);
   context.homeStore.writeSharedRef({
     state: previousReleaseState,
@@ -381,12 +437,18 @@ async function switchToCandidate(
       state: previousReleaseState,
       runtimePath: readProcessState(context.niubotHome)?.processes.engine.runtimePath,
     });
+    recordRejectedRecommendation(
+      context,
+      options.rejectedRecommendation,
+      errorMessage(err),
+      readProcessState(context.niubotHome)?.processes.engine.runtimePath,
+    );
     throw err;
   }
   cleanupSnapshot(context, preflightSnapshot);
 
   const old = await inspectRunningEngine(context.niubotHome);
-  const previous = previousReleaseState.lastKnownGood;
+  const previous = previousReleaseState.current;
   const rollbackTarget = resolveRollbackTarget(context, old, previous);
   if (!candidate.releaseRef) throw new Error("candidate release reference is unavailable");
   context.state.write("stop_old_service", {
@@ -415,11 +477,7 @@ async function switchToCandidate(
       transactionId: context.id,
       phase: "activating",
       candidate: candidate.releaseRef,
-      rollback: {
-        current: previousReleaseState.current,
-        previous: previousReleaseState.previous,
-        lastKnownGood: previousReleaseState.lastKnownGood,
-      },
+      rollbackCurrent: previousReleaseState.current,
       ownerPid: process.pid,
       ownerStartMarker: waitForProcessStartMarker(process.pid),
       databaseSnapshot: snapshot,
@@ -427,7 +485,6 @@ async function switchToCandidate(
   };
   context.homeStore.writeState(activatingState);
   try {
-    context.homeStore.activate(candidate.releaseRef);
     sanitizeOneShotEnvironment();
     context.state.write("start_candidate");
     const launched = launchRuntime(context, {
@@ -437,16 +494,26 @@ async function switchToCandidate(
     if (!await checkRuntimeHealth(context, launched)) throw new Error("candidate health check failed");
 
     await restoreStoppedEngineState(context);
-    const successfulState = context.homeStore.markLastKnownGood(candidate.releaseRef);
+    const successfulState = context.homeStore.commitHealthy(candidate.releaseRef);
     context.homeStore.writeSharedRef({
       state: successfulState,
       runtimePath: context.stopAfterCompletion ? undefined : packageDirectory,
     });
+    if (options.promoteRecommendationAtGeneration !== undefined && candidate.releaseRef.storage === "shared") {
+      try {
+        context.recommendedStore.promote(candidate.releaseRef, {
+          expectedGeneration: options.promoteRecommendationAtGeneration,
+        });
+      } catch (err) {
+        log(context, `recommended release was not changed after successful activation: ${errorMessage(err)}`);
+      }
+    }
     context.state.write("success");
   } catch (err) {
     const reason = errorMessage(err);
     if (!rollbackTarget) {
       await restoreDatabaseWithoutRuntime(context, snapshot, reason, previousReleaseState);
+      recordRejectedRecommendation(context, options.rejectedRecommendation, reason);
       throw new Error(`${reason}; database restored but no recoverable previous runtime`, { cause: err });
     }
     await recoverRuntime(
@@ -457,6 +524,12 @@ async function switchToCandidate(
       "新版本启动失败，已回滚到上一版本。",
       previousReleaseState,
     );
+    recordRejectedRecommendation(
+      context,
+      options.rejectedRecommendation,
+      reason,
+      context.stopAfterCompletion ? undefined : rollbackTarget.runtimePath,
+    );
     return;
   }
   // Legacy and shared cleanup is intentionally explicit/dry-run first. A
@@ -464,6 +537,17 @@ async function switchToCandidate(
   cleanupSnapshot(context, snapshot);
   await notify(context, successMessage);
   await wakeMainSession(context);
+}
+
+function recordRejectedRecommendation(
+  context: RestartContext,
+  rejected: { generation: number; release: ReleaseRef & { storage: "shared" } } | undefined,
+  reason: string,
+  runtimePath?: string,
+): void {
+  if (!rejected) return;
+  const state = context.homeStore.recordRejectedRecommendation(rejected.generation, rejected.release, reason);
+  context.homeStore.writeSharedRef({ state, runtimePath });
 }
 
 function launchRuntime(context: RestartContext, target: RuntimeTarget) {
@@ -532,6 +616,7 @@ async function recoverRuntime(
     const rollback = launchRuntime(context, target);
     context.state.write("health_check_rollback", { candidatePid: rollback.state.pid, error: reason });
     if (!await checkRuntimeHealth(context, rollback)) throw new Error("rollback health check failed");
+    restoreManagedLaunchers(context);
     if (!restoreReleaseState) context.homeStore.writeSharedRef({ state: context.homeStore.readStateStrict(), runtimePath: target.runtimePath });
     await restoreStoppedEngineState(context);
     context.state.write("rollback_success", { error: reason });
@@ -541,6 +626,14 @@ async function recoverRuntime(
     const message = `${reason}; recovery failed: ${errorMessage(recoveryError)}`;
     context.state.write("rollback_failed", { error: message });
     throw new Error(message, { cause: recoveryError });
+  }
+}
+
+function restoreManagedLaunchers(context: RestartContext): void {
+  try {
+    ensureRuntimeCliShims({ projectRoot: context.workerRuntimePath, includeNiubot: true });
+  } catch (err) {
+    log(context, `failed to restore managed launchers after rollback: ${errorMessage(err)}`);
   }
 }
 
@@ -591,7 +684,7 @@ async function ensureBootstrapRelease(context: RestartContext): Promise<void> {
   const state = context.homeStore.stateExistsRecovering()
     ? context.homeStore.readStateStrict()
     : context.homeStore.readOrMigrateLegacy(currentNodeRuntimeRef());
-  if (state.lastKnownGood) return;
+  if (state.current) return;
 
   const running = await inspectRunningEngine(context.niubotHome);
   const node = running
@@ -604,7 +697,6 @@ async function ensureBootstrapRelease(context: RestartContext): Promise<void> {
     const next: HomeReleaseState = {
       schemaVersion: 2,
       current: existingRef,
-      lastKnownGood: existingRef,
       unresolvedLegacy: [],
     };
     context.homeStore.writeState(next);
@@ -628,7 +720,6 @@ async function ensureBootstrapRelease(context: RestartContext): Promise<void> {
   const next: HomeReleaseState = {
     schemaVersion: 2,
     current: bootstrap.releaseRef,
-    lastKnownGood: bootstrap.releaseRef,
     unresolvedLegacy: [],
   };
   context.homeStore.writeState(next);
@@ -961,8 +1052,15 @@ export function resolveRestartSourceDirectory(options: {
 
 function resolveRestartMode(context: RestartContext, env: NodeJS.ProcessEnv): RestartMode {
   if (env["NIUBOT_RESTART_MODE"] === "npm-update") return "npm-update";
+  if (env["NIUBOT_RESTART_MODE"] === "recommended") return "recommended";
   if (fs.existsSync(path.join(context.sourceDirectory, "src"))) return "source";
   return "production";
+}
+
+function parsePositiveInteger(value: string | undefined): number | undefined {
+  if (!value || !/^\d+$/.test(value)) return undefined;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
 }
 
 /**
@@ -1006,6 +1104,8 @@ function sanitizeOneShotEnvironment(): void {
     "NIUBOT_RESTART_ID",
     "NIUBOT_RESTART_STARTED_AT",
     "NIUBOT_UPDATE_VERSION",
+    "NIUBOT_RECOMMENDED_ARTIFACT_ID",
+    "NIUBOT_RECOMMENDED_GENERATION",
     "NIUBOT_RESTART_STOP_AFTER_COMPLETION",
     "NIUBOT_RESTART_NOTIFY_CHAT_ID",
     "NIUBOT_CHAT_ID",

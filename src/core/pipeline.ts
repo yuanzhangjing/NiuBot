@@ -1,13 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { exec, execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
-import os from "node:os";
+import { existsSync, mkdirSync, realpathSync, rmSync } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
-import { fileURLToPath } from "node:url";
-import { resolveSharedRuntimeRoot } from "../platform/shared-runtime.js";
-import { SharedReleaseStore } from "../shared-release-store.js";
-import { assertInstallablePackageArchive } from "../package-archive.js";
 import type Database from "better-sqlite3";
 import { escapeYamlContent, renderMessageNodes } from "../im/render.js";
 import { findLatestUserPlatformMsgId } from "../messages/store.js";
@@ -19,9 +14,7 @@ import {
   BUILTIN_BACKEND_LIST,
   NIUBOT_HOME,
   normalizeBackend,
-  writeAutoUpdateEnabledToConfig,
   type AgentBackendType,
-  type RestartConfig,
 } from "../config.js";
 import { ChatManager } from "./chat-manager.js";
 import type { QueuedMessage } from "./queue.js";
@@ -42,17 +35,13 @@ import {
   getUserShortLabel, getChatShortLabel, getMessageByPlatformId, updateMessageContent, updateMessagePlatformId,
   setUserAdminRole, getAdminUserIds, getUserAdminRole, type AdminRole,
   getBotBackendModelState, setBotBackendModelState, setBotRuntimeState, clearBotRuntimeModels,
-  hasUpdateNotification, recordUpdateNotification,
   getRecentRuntimeEvents,
   markUnfinishedRuntimeRunsFailedByRestart,
   recordRuntimeEvent,
 } from "../database/schema.js";
-import { isNewerPackageVersion, isPrereleaseOrUnrecognizedVersion } from "../version.js";
 import {
   AUTO_UPDATE_DEFAULTS,
-  isSafeForUpgrade, isInUpgradeWindow, minutesUntilUpgradeWindowEnd,
   mainRunSource, workerSource, goalSource, cronSource, loopSource,
-  UPGRADE_SAFENESS_WINDOW_MS,
   type AutoUpdateConfig, type UpgradeSafenessSource,
 } from "./auto-update.js";
 import {
@@ -70,10 +59,8 @@ import {
   type StableSystemContextOptions,
 } from "../memory/inject.js";
 import {
-  dateInTimeZone,
   dateTimeInTimeZone,
   formatLocalDateTimeWithTZ,
-  millisecondsUntilLocalHour,
   TZ,
   userDateTimeToUtcSql,
   utcDateTimeForSql,
@@ -110,14 +97,7 @@ import {
   type GoalFinishCommand,
   GOAL_DEFAULTS,
 } from "./goal.js";
-import { launchRestartWorker } from "../restart-launcher.js";
-import { markAutoUpdateReported, readRestartState } from "../restart-state.js";
-import {
-  resolveExecutable,
-  resolveNpmExecutableForNode,
-  withNodeRuntimeOnPath,
-} from "../platform/executable.js";
-import { runCommand } from "../platform/command.js";
+import { resolveExecutable } from "../platform/executable.js";
 import type { BackendCapability } from "../agent/backend-capability.js";
 import { buildResponseFooter } from "./footer.js";
 import { ResponseSender } from "./response-sender.js";
@@ -126,6 +106,9 @@ import { RuntimeStateStore, type RunStage, type RuntimeStateEvent } from "./runt
 import { RunManager, type RunAgentResult } from "./run-manager.js";
 import { archiveAgentSession, getSessionArchiveDirectory } from "../session-archive/archive.js";
 import { wrapInjectedUserMessage } from "../session-archive/native-transcript.js";
+import type { EngineLifecycle } from "../engine-lifecycle.js";
+
+export { resolveUpdateCommandCwd } from "../update-command.js";
 
 const execAsync = promisify(exec);
 
@@ -133,23 +116,11 @@ const PROCESSING_EMOJI = "Get";
 const MERGED_EMOJI = "Pin";
 const EMPTY_RESPONSE_FALLBACK = "（处理完成，但未生成回复。如果没收到预期结果，请重试）";
 const UPDATE_CONFIRM_COMMAND = "/update 1";
-const UPDATE_PACKAGE_NAME = "@yuanzhangjing/niubot";
 /** /effort 可选级别（与 claude --effort 值域一致） */
 const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
 /** 支持 effort 透传的内置 backend（CLI 能力静态声明；不支持的 backend 保存但不生效） */
 const EFFORT_SUPPORTED_BACKENDS = new Set(["claude", "codex", "pi", "opencode", "traecli"]);
 export const SHELL_COMMAND_TIMEOUT_MS = 300_000;
-
-export function resolveUpdateCommandCwd(niubotHome: string, fallbackHome = os.homedir()): string {
-  const candidates = [niubotHome, fallbackHome];
-  try { candidates.push(process.cwd()); } catch { /* current directory may have been deleted */ }
-  for (const candidate of candidates) {
-    try {
-      if (existsSync(candidate) && statSync(candidate).isDirectory()) return candidate;
-    } catch { /* try the next stable directory */ }
-  }
-  throw new Error("No existing directory is available for the npm update check");
-}
 
 /** 过期消息阈值（ms）：超过 2 分钟的消息丢弃 */
 const STALE_MESSAGE_THRESHOLD_MS = 2 * 60 * 1000;
@@ -205,10 +176,6 @@ const AGENT_LONG_RUNNING_REPEAT_NOTIFY_MS = 3_600_000; // 1 小时：主会话�
 const AGENT_RUN_HARD_TIMEOUT_MS = 7_200_000;  // 2 小时：主会话 run 硬超时，无 completion 时强制中止（防进程挂起卡死队列）
 const INDEPENDENT_IDLE_KILL_MS = 3_600_000;    // 1 小时：独立 session 无活动自动 kill
 const INDEPENDENT_LONG_RUNNING_NOTIFY_MS = 3_600_000;  // 1 小时：独立 session 仍活跃时提醒
-const UPDATE_CHECK_HOUR = 10;                  // 本地时间 10:00 检查 npm latest
-/** 自动升级独立检查间隔（30 分钟）：窗口内周期性判定，不依赖白天通知窗口 */
-const AUTO_UPGRADE_CHECK_INTERVAL_MS = 30 * 60_000;
-const LEGACY_AUTO_UPDATE_ENABLED_KEY = "auto_update_enabled";
 const WORKER_DELIVERY_MARKER = "> ⚙️ 本回复基于 Worker 后台任务结果整理";
 const WORKER_DISPATCH_MARKER = "> ⚙️ 已交由 Worker 后台执行";
 const LOOP_TASK_PREVIEW_MAX_CHARS = 80;
@@ -370,24 +337,15 @@ export class Pipeline {
   private responseSender: ResponseSender;
   private runtimeState: RuntimeStateStore;
   private runManager: RunManager;
-  private restartConfig?: RestartConfig;
-  private autoUpdateNotificationsEnabled: boolean;
-  private autoUpdateConfig?: AutoUpdateConfig;
-  private configPath?: string;
-  private pipelineStarted = false;
-  private upgradeHistoryRecorded = new Set<string>();
-  /** 自动升级当天已 fetch 过的日期（YYYY-MM-DD，本地时区）；同一天不重复 fetch */
-  private autoUpgradeFetchedDay = "";
-  /** 当天 fetch 到的最新版本缓存；null = 当天尚未 fetch 或暂无新版本 */
-  private autoUpgradeLatestCache: string | null = null;
+  private engineLifecycle?: EngineLifecycle;
 
   /** 自动升级是否启用：唯一来源是服务配置文件的 autoUpdate 布尔值。 */
   private isAutoUpdateEnabled(): boolean {
-    return this.autoUpdateNotificationsEnabled && this.autoUpdateConfig?.enabled === true;
+    return this.engineLifecycle?.getAutoUpdateConfig()?.enabled === true;
   }
 
   private effectiveAutoUpdateConfig(): AutoUpdateConfig {
-    return this.autoUpdateConfig ?? { enabled: true, ...AUTO_UPDATE_DEFAULTS };
+    return this.engineLifecycle?.getAutoUpdateConfig() ?? { enabled: true, ...AUTO_UPDATE_DEFAULTS };
   }
   private botIdentity: BotIdentity;
   private log: ReturnType<typeof createLogger>;
@@ -426,17 +384,6 @@ export class Pipeline {
   /** 数据库路径（传递给 agent 子进程） */
   private dbPath: string;
 
-  /** 启动时间戳，用于 /service 计算 uptime */
-  private startedAt = Date.now();
-
-  /** 启动时缓存的版本号，不受后续 update 影响 */
-  private readonly version: string = (() => {
-    try {
-      const pkgRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
-      return JSON.parse(readFileSync(path.join(pkgRoot, "package.json"), "utf-8")).version ?? "unknown";
-    } catch { return "unknown"; }
-  })();
-
   /** 已处理的消息 ID 去重集合（有上限防内存泄漏） */
   private processedMsgIds = new Set<string>();
   private static readonly MAX_PROCESSED_IDS = 10000;
@@ -466,11 +413,6 @@ export class Pipeline {
 
   /** 已加载的 Worker 配置版本（Pipeline 写入后立即刷新，watchdog 负责异常恢复兜底） */
   private lastTeamConfigVersion?: string;
-
-  /** 更新检查定时器 */
-  private updateCheckTimer: ReturnType<typeof setTimeout> | null = null;
-  private updateCheckGeneration = 0;
-  private autoUpgradeTimer: ReturnType<typeof setInterval> | null = null;
 
   /** 已发送 compact 通知的 session（避免重复通知） */
   private compactNotifiedSessions = new Set<string>();
@@ -518,13 +460,15 @@ export class Pipeline {
     getAvailableBackends?: () => string[],
     refreshAgentContextFiles?: () => void,
     stableContextOptions?: StableSystemContextOptions,
-    restartConfig?: RestartConfig,
-    autoUpdateNotificationsEnabled = true,
+    _legacyRestartConfig?: unknown,
+    _legacyAutoUpdateCoordinator?: boolean,
     archiveHome?: string,
     getBackendCapabilities?: () => BackendCapability[] | Promise<BackendCapability[]>,
     workerConfig?: WorkerPipelineConfig,
-    autoUpdateConfig?: AutoUpdateConfig,
-    configPath?: string,
+    _legacyAutoUpdateConfig?: unknown,
+    _legacyConfigPath?: string,
+    _legacyOnAutoUpdateConfigChanged?: () => void,
+    engineLifecycle?: EngineLifecycle,
   ) {
     this.db = db;
     this.transport = transport;
@@ -545,10 +489,7 @@ export class Pipeline {
     this.dbPath = dbPath;
     this.refreshAgentContextFiles = refreshAgentContextFiles;
     this.stableContextOptions = stableContextOptions ?? {};
-    this.restartConfig = restartConfig;
-    this.autoUpdateNotificationsEnabled = autoUpdateNotificationsEnabled;
-    this.autoUpdateConfig = autoUpdateConfig;
-    this.configPath = configPath;
+    this.engineLifecycle = engineLifecycle;
     this.archiveHome = archiveHome ?? (process.env["VITEST"]
       ? path.join(path.dirname(dbPath), ".niubot-test")
       : NIUBOT_HOME);
@@ -650,19 +591,6 @@ export class Pipeline {
       this.cleanupWorkerJobsAfterRestart();
       this.workerScheduler.start();
     }
-    this.migrateLegacyAutoUpdateSetting();
-    this.pipelineStarted = true;
-    if (this.autoUpdateNotificationsEnabled) {
-      const generation = ++this.updateCheckGeneration;
-      this.scheduleNextUpdateCheck(generation);
-    } else {
-      this.log.info("automatic update notifications disabled for bot");
-    }
-    // 自动升级独立检查循环：每 30 分钟跑一次，不依赖 10:00 通知窗口
-    // （升级窗口是凌晨 02:00-05:00，必须独立调度才能触发）
-    if (this.isAutoUpdateEnabled()) {
-      this.scheduleAutoUpgradeCheck();
-    }
     this.runStartupPlatformProbes();
 
     this.log.info("pipeline started", {
@@ -671,7 +599,6 @@ export class Pipeline {
       adminCount: this.adminRoles.size,
       backend: this.backendType,
       model: this.botIdentity.model ?? "default",
-      autoUpdateNotifications: this.autoUpdateNotificationsEnabled,
     });
 
   }
@@ -718,19 +645,9 @@ export class Pipeline {
 
   /** 停止管道：清除队列计时器 */
   stop(): void {
-    this.pipelineStarted = false;
-    this.updateCheckGeneration++;
     if (this.watchdogTimer) {
       clearInterval(this.watchdogTimer);
       this.watchdogTimer = null;
-    }
-    if (this.updateCheckTimer) {
-      clearTimeout(this.updateCheckTimer);
-      this.updateCheckTimer = null;
-    }
-    if (this.autoUpgradeTimer) {
-      clearInterval(this.autoUpgradeTimer);
-      this.autoUpgradeTimer = null;
     }
     this.workerScheduler?.stop();
     this.queue.stop();
@@ -739,19 +656,9 @@ export class Pipeline {
 
   /** 优雅关闭：cancel 所有活跃 session，清理资源（DB 中 session 保持 active，下次启动恢复） */
   async shutdown(): Promise<void> {
-    this.pipelineStarted = false;
-    this.updateCheckGeneration++;
     if (this.watchdogTimer) {
       clearInterval(this.watchdogTimer);
       this.watchdogTimer = null;
-    }
-    if (this.updateCheckTimer) {
-      clearTimeout(this.updateCheckTimer);
-      this.updateCheckTimer = null;
-    }
-    if (this.autoUpgradeTimer) {
-      clearInterval(this.autoUpgradeTimer);
-      this.autoUpgradeTimer = null;
     }
     for (const [chatId, session] of this.chatSessions) {
       try {
@@ -2329,8 +2236,8 @@ export class Pipeline {
   }
 
   private sendStatus(chatId: string, platformChatId: string, msgId?: string): void {
-    const uptimeMs = Date.now() - this.startedAt;
-    const uptimeStr = formatUptime(uptimeMs);
+    const engine = this.engineLifecycle?.getStatus();
+    const uptimeStr = engine ? formatUptime(engine.uptimeMs) : "unknown";
 
     const activeSessions = this.chatSessions.size;
 
@@ -2345,8 +2252,8 @@ export class Pipeline {
 
     const content = [
       `**Bot:** ${this.botIdentity.name}`,
-      `**Version:** ${this.version}`,
-      `**Env:** ${process.env["NIUBOT_ENV"] || "production"}`,
+      `**Version:** ${engine?.version ?? "unknown"}`,
+      `**Env:** ${engine?.environment ?? "unknown"}`,
       `**Platform:** ${this.botIdentity.platform}`,
       `**Backend:** ${displayBackendType(this.backendType)}`,
       `**Model:** ${this.botIdentity.model ?? "default"}`,
@@ -2354,7 +2261,7 @@ export class Pipeline {
       `**Active sessions:** ${activeSessions}`,
       `**Cron jobs:** ${cronCount}`,
       `**Loop jobs:** ${loopCount}`,
-      `**Path:** \`${path.dirname(path.resolve(process.argv[1]))}\``,
+      `**Path:** \`${engine?.runtimePath ?? "unknown"}\``,
       `**Working directory:** \`${this.workingDirectory}\``,
     ].join("\n");
 
@@ -3954,16 +3861,9 @@ ${jobParts.join("\n\n")}
   private handleAutoUpdateCommand(args: string[], chatId: string, platformChatId: string, msgId?: string): void {
     const config = this.effectiveAutoUpdateConfig();
 
-    if (!this.autoUpdateNotificationsEnabled) {
-      this.sendAgentCard(chatId, platformChatId, msgId, "AutoUpdate", "自动升级只可由当前服务的主 Bot 管理。");
-      return;
-    }
-
     const action = args[0]?.toLowerCase();
     if (action === "on" || action === "enable" || action === "1") {
       if (!this.persistAutoUpdateSetting(true, chatId, platformChatId, msgId)) return;
-      this.autoUpdateConfig = { enabled: true, ...AUTO_UPDATE_DEFAULTS };
-      if (this.pipelineStarted && !this.autoUpgradeTimer) this.scheduleAutoUpgradeCheck();
       this.sendAgentCard(
         chatId, platformChatId, msgId, "AutoUpdate",
         `自动升级已**开启**。\n窗口：${config.windowStartHour}:00-${config.windowEndHour}:00（${config.timezone}），引擎空闲时自动升级。`,
@@ -3973,11 +3873,6 @@ ${jobParts.join("\n\n")}
     }
     if (action === "off" || action === "disable" || action === "0") {
       if (!this.persistAutoUpdateSetting(false, chatId, platformChatId, msgId)) return;
-      this.autoUpdateConfig = undefined;
-      if (this.autoUpgradeTimer) {
-        clearInterval(this.autoUpgradeTimer);
-        this.autoUpgradeTimer = null;
-      }
       this.sendAgentCard(chatId, platformChatId, msgId, "AutoUpdate", "自动升级已**关闭**。");
       this.log.info("auto-update disabled (runtime)", { userId: chatId });
       return;
@@ -3987,7 +3882,7 @@ ${jobParts.join("\n\n")}
     const enabled = this.isAutoUpdateEnabled();
     const lines = [
       `**自动升级：** ${enabled ? "✅ 开启" : "⛔ 关闭"}`,
-      `**Env：** ${process.env["NIUBOT_ENV"] || "production"}`,
+      `**Env：** ${this.engineLifecycle?.getStatus().environment ?? "unknown"}`,
       `**窗口：** ${config.windowStartHour}:00-${config.windowEndHour}:00（${config.timezone}）`,
       `**空闲判定：** 无进行中任务 + 无排队 + 窗口内无定时触发`,
       `**结果通知：** ${config.notifyOnResult ? "成功白天汇报" : "完全静默"}`,
@@ -4005,19 +3900,11 @@ ${jobParts.join("\n\n")}
     platformChatId: string,
     msgId?: string,
   ): boolean {
-    if (!this.configPath) {
-      this.sendAgentCard(
-        chatId,
-        platformChatId,
-        msgId,
-        "AutoUpdate",
-        "当前服务没有配置文件，无法持久化自动升级开关。",
-      );
-      return false;
-    }
     try {
-      writeAutoUpdateEnabledToConfig(this.configPath, enabled);
-      this.deleteLegacyAutoUpdateSetting();
+      if (!this.engineLifecycle) {
+        throw new Error("Engine 生命周期服务不可用。");
+      }
+      this.engineLifecycle.setAutoUpdateEnabled(enabled);
       return true;
     } catch (err) {
       this.log.warn("failed to update auto-update config", { error: String(err) });
@@ -4029,48 +3916,6 @@ ${jobParts.join("\n\n")}
         `自动升级设置保存失败：${err instanceof Error ? err.message : String(err)}`,
       );
       return false;
-    }
-  }
-
-  /**
-   * 0.2.7 及更早版本把 `/update auto on|off` 写在主 Bot DB。
-   * 只在旧值存在时一次性写入服务配置，成功后删除旧值，不形成长期 DB 依赖。
-   */
-  private migrateLegacyAutoUpdateSetting(): void {
-    if (!this.autoUpdateNotificationsEnabled) return;
-    let row: { value: string } | undefined;
-    try {
-      row = this.db.prepare("SELECT value FROM settings WHERE key = ?")
-        .get(LEGACY_AUTO_UPDATE_ENABLED_KEY) as { value: string } | undefined;
-    } catch (err) {
-      this.log.warn("failed to read legacy auto-update setting", { error: String(err) });
-      return;
-    }
-    if (!row || (row.value !== "0" && row.value !== "1")) return;
-
-    // 旧版语义是「config 先声明支持，DB 再开启」：任一侧关闭都不能自动升级。
-    // 因此旧 DB=1 只能在当前 config 本来就是 true 时迁为开启。
-    const enabled = row.value === "1" && this.autoUpdateConfig?.enabled === true;
-    this.autoUpdateConfig = enabled ? { enabled: true, ...AUTO_UPDATE_DEFAULTS } : undefined;
-    if (!this.configPath) {
-      this.deleteLegacyAutoUpdateSetting();
-      this.log.info("legacy auto-update setting discarded because no config file enables it");
-      return;
-    }
-    try {
-      writeAutoUpdateEnabledToConfig(this.configPath, enabled);
-      this.deleteLegacyAutoUpdateSetting();
-      this.log.info("legacy auto-update setting migrated to config", { enabled });
-    } catch (err) {
-      this.log.warn("failed to migrate legacy auto-update setting", { enabled, error: String(err) });
-    }
-  }
-
-  private deleteLegacyAutoUpdateSetting(): void {
-    try {
-      this.db.prepare("DELETE FROM settings WHERE key = ?").run(LEGACY_AUTO_UPDATE_ENABLED_KEY);
-    } catch (err) {
-      this.log.warn("failed to delete legacy auto-update setting", { error: String(err) });
     }
   }
 
@@ -4319,37 +4164,16 @@ ${jobParts.join("\n\n")}
       .catch(() => {});
   }
 
-  private async runNpmCommand(args: string[], timeout: number): Promise<{ stdout: string; stderr: string }> {
-    const npmCommand = resolveNpmExecutableForNode(process.execPath) ?? "npm";
-    return runCommand(npmCommand, args, {
-      timeoutMs: timeout,
-      cwd: resolveUpdateCommandCwd(NIUBOT_HOME),
-      env: withNodeRuntimeOnPath(process.execPath),
-    });
-  }
-
-  private isValidVersion(version: string): boolean {
-    return /^\d+\.\d+\.\d+(-[\w.]+)?$/.test(version);
-  }
-
-  private async fetchLatestVersion(): Promise<string | null> {
-    const { stdout } = await this.runNpmCommand(["view", `${UPDATE_PACKAGE_NAME}@latest`, "version"], 15_000);
-    const latest = stdout.trim();
-    if (!this.isValidVersion(latest)) {
-      throw new Error(`版本号格式异常：${latest.slice(0, 50)}`);
-    }
-    return latest;
-  }
-
   private async handleUpdate(chatId: string, platformChatId: string, msgId?: string, confirmed = false, showAutoInfo = false): Promise<void> {
-    const currentVersion = this.version;
-    const env = process.env["NIUBOT_ENV"] || "production";
     // /update 不带参数时附带自动升级状态/帮助，单卡片展示
     const autoInfo = showAutoInfo ? this.buildAutoUpdateStatusLines() : null;
 
     try {
-      const latest = await this.fetchLatestVersion();
-      if (!latest || !isNewerPackageVersion(latest, currentVersion)) {
+      if (!this.engineLifecycle) throw new Error("Engine 生命周期服务不可用。");
+      const update = await this.engineLifecycle.checkForUpdate();
+      const { currentVersion, latestVersion, updateAvailable } = update;
+      const env = this.engineLifecycle.getStatus().environment;
+      if (!updateAvailable) {
         const text = [
           `已是最新版本 (${currentVersion})。`,
           `Env: ${env}`,
@@ -4362,7 +4186,7 @@ ${jobParts.join("\n\n")}
 
       if (!confirmed) {
         const text = [
-          `发现新版本：${currentVersion} → ${latest}`,
+          `发现新版本：${currentVersion} → ${latestVersion}`,
           `Env: ${env}`,
           `发送 \`${UPDATE_CONFIRM_COMMAND}\` 升级并重启。`,
           ...(autoInfo ? ["", ...autoInfo] : []),
@@ -4372,8 +4196,8 @@ ${jobParts.join("\n\n")}
         return;
       }
 
-      this.replyText(chatId, platformChatId, undefined, `正在准备 ${latest} 的独立 release；旧服务会保留到新版本预检通过。`);
-      this.triggerRestart({ platformChatId, updateVersion: latest });
+      this.replyText(chatId, platformChatId, undefined, `正在准备 ${latestVersion} 的独立 release；旧服务会保留到新版本预检通过。`);
+      this.triggerRestart({ platformChatId, updateVersion: latestVersion });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       this.replyText(chatId, platformChatId, undefined, `更新失败：${msg.slice(0, 500)}`);
@@ -4394,282 +4218,8 @@ ${jobParts.join("\n\n")}
     ];
   }
 
-  private getAdminPrivatePlatformChatIds(): string[] {
-    const rows = this.db.prepare(`
-      SELECT DISTINCT c.platform_id
-      FROM chats c
-      JOIN users u ON u.platform = c.platform AND u.platform_id = c.user_id
-      WHERE c.type = 'p2p'
-        AND u.is_admin IN ('admin', 'owner')
-        AND c.platform = ?
-    `).all(this.botIdentity.platform) as Array<{ platform_id: string }>;
-    return rows.map((row) => row.platform_id);
-  }
-
-  private getNextUpdateCheckDelayMs(now: Date): number {
-    return millisecondsUntilLocalHour(now, UPDATE_CHECK_HOUR, TZ);
-  }
-
-  private scheduleNextUpdateCheck(generation: number): void {
-    if (generation !== this.updateCheckGeneration) return;
-    if (this.updateCheckTimer) {
-      clearTimeout(this.updateCheckTimer);
-    }
-    this.updateCheckTimer = setTimeout(() => {
-      this.checkForUpdatesAndNotifyAdmins()
-        .catch((err) => {
-          this.log.warn("scheduled update check failed", { error: String(err) });
-        })
-        .finally(() => this.scheduleNextUpdateCheck(generation));
-    }, this.getNextUpdateCheckDelayMs(new Date()));
-  }
-
-  /** 自动升级独立检查循环：每 30 分钟跑一次窗口+空闲判定，不依赖白天通知窗口。 */
-  private scheduleAutoUpgradeCheck(): void {
-    if (this.autoUpgradeTimer) {
-      clearInterval(this.autoUpgradeTimer);
-    }
-    const runCheck = (): void => {
-      if (!this.isAutoUpdateEnabled()) return;
-      this.runAutoUpgradeCheck().catch((err) => {
-        this.log.warn("auto-upgrade check failed", { error: String(err) });
-      });
-    };
-    runCheck();
-    this.autoUpgradeTimer = setInterval(runCheck, AUTO_UPGRADE_CHECK_INTERVAL_MS);
-  }
-
-  /** 自动升级检查循环入口：当天只 fetch 一次（无新版本则当天不再查），有锁汇报例外。 */
-  private async runAutoUpgradeCheck(): Promise<void> {
-    if (isPrereleaseOrUnrecognizedVersion(this.version)) return;
-    const config = this.effectiveAutoUpdateConfig();
-    if (!this.isAutoUpdateEnabled()) return;
-
-    const now = new Date();
-    const today = dateInTimeZone(now, config.timezone);
-
-    let latest = this.autoUpgradeLatestCache;
-    if (today === this.autoUpgradeFetchedDay) {
-      // 当天已 fetch 过：直接用缓存结果（当天窗口内不重复查 npm）
-      if (latest === null || latest === this.version) return;
-    } else {
-      // 当天首次检查：fetch 一次并缓存结果，当天后续检查复用
-      try {
-        latest = await this.fetchLatestVersion();
-      } catch (err) {
-        this.log.warn("auto-upgrade check: fetch failed", { error: String(err) });
-        return;
-      }
-      this.autoUpgradeFetchedDay = today;
-      this.autoUpgradeLatestCache = latest;
-    }
-    if (!latest) return;
-
-    if (latest === this.version) return;
-
-    // 升级判定：窗口外直接返回
-    if (!isInUpgradeWindow(now, config)) return;
-    if (minutesUntilUpgradeWindowEnd(now, config) < config.marginMinutes) return;
-
-    await this.maybeRunAutoUpgrade(latest);
-  }
-
-  private async checkForUpdatesAndNotifyAdmins(): Promise<void> {
-    if (isPrereleaseOrUnrecognizedVersion(this.version)) {
-      this.log.info("skipping update check for dev/prerelease version", { version: this.version });
-      return;
-    }
-
-    let latest: string | null = null;
-    try {
-      latest = await this.fetchLatestVersion();
-    } catch (err) {
-      this.log.warn("update check failed", { error: String(err) });
-      return;
-    }
-    if (!latest) return;
-
-    // 白天汇报：最近一次重启是自动升级且成功 → 发「已自动升级」卡片。
-    // 必须在 latest === this.version 守卫之前：升级成功后当前版本即 latest。
-    await this.maybeReportUpgradeResult(latest);
-
-    if (latest === this.version) return;
-
-    // 自动升级开启：窗口内 + 空闲判定通过 → 直接升级（静默），无需 admin 确认
-    if (this.isAutoUpdateEnabled()) {
-      await this.maybeRunAutoUpgrade(latest);
-      return;
-    }
-
-    if (hasUpdateNotification(this.db, this.botIdentity.name, latest)) return;
-
-    const platformChatIds = this.getAdminPrivatePlatformChatIds();
-    if (platformChatIds.length === 0) return;
-
-    const text = `发现新版本：${this.version} → ${latest}\n发送 \`${UPDATE_CONFIRM_COMMAND}\` 升级并重启。`;
-
-    let delivered = false;
-    for (const platformChatId of platformChatIds) {
-      try {
-        await this.transport.sendCard(platformChatId, "Update", text);
-        delivered = true;
-      } catch (err) {
-        this.log.warn("failed to send update notification", { platformChatId, error: String(err) });
-      }
-    }
-    if (delivered) {
-      recordUpdateNotification(this.db, this.botIdentity.name, latest);
-    }
-  }
-
-  /** 自动升级：窗口内 + 空闲判定通过 → 上锁并触发升级；否则顺延。 */
-  private async maybeRunAutoUpgrade(latest: string): Promise<void> {
-    if (!this.pipelineStarted || !this.isAutoUpdateEnabled()) return;
-    const config = this.effectiveAutoUpdateConfig();
-
-    // 避开 dev/prerelease 版本：自动升级只升正式版
-    if (isPrereleaseOrUnrecognizedVersion(latest)) {
-      this.log.info("auto-upgrade skipped: target is prerelease", { latest });
-      return;
-    }
-
-    const now = Date.now();
-    if (!isInUpgradeWindow(new Date(now), config)) {
-      this.log.info("auto-upgrade skipped: outside window", { latest });
-      return;
-    }
-    // 窗口结束余量：升级耗时可能跨出窗口，临近结束不再启动
-    if (minutesUntilUpgradeWindowEnd(new Date(now), config) < config.marginMinutes) {
-      this.log.info("auto-upgrade skipped: too close to window end", { latest, marginMinutes: config.marginMinutes });
-      return;
-    }
-
-    // 预下载新版本 tgz（幂等）：先拉包，空闲判定通过后升级时只做本地解压+安装，
-    // 避免触发后长时间网络下载（下载失败不阻塞本次判定，下次检查再试）
-    const predownloaded = await this.predownloadPackage(latest).catch((err) => {
-      this.log.warn("auto-upgrade predownload failed", { latest, error: String(err) });
-      return false;
-    });
-    if (!this.pipelineStarted || !this.isAutoUpdateEnabled()) return;
-
-    // 预下载可能耗时数分钟：重取当前时间，窗口/余量/空闲判定都用新时间
-    const afterDownload = Date.now();
-    if (!isInUpgradeWindow(new Date(afterDownload), config)) {
-      this.log.info("auto-upgrade skipped: window passed during predownload", { latest });
-      return;
-    }
-    if (minutesUntilUpgradeWindowEnd(new Date(afterDownload), config) < config.marginMinutes) {
-      this.log.info("auto-upgrade skipped: too close to window end after predownload", { latest });
-      return;
-    }
-
-    // cron/loop 未来触发检查窗口 = 升级执行耗时 + 余量（30 分钟），
-    // 不沿用整个可升级窗口：避免窗口内远端 cron 白白顺延，同时仍避开真正撞上升级的触发
-    const windowMs = UPGRADE_SAFENESS_WINDOW_MS;
-    const sources = this.buildSafenessSources();
-    const { safe, blockers } = isSafeForUpgrade(sources, afterDownload, windowMs);
-    if (!safe) {
-      this.log.info("auto-upgrade deferred: engine busy", { latest, blockers });
-      return;
-    }
-
-    // double check：触发前最后确认空闲。互斥交给 worker 的 restart.lock（唯一防线），
-    // 主引擎不再持有锁——这里只是避免「判定到触发之间」任务插进来白起 worker。
-    const doubleCheck = isSafeForUpgrade(this.buildSafenessSources(), Date.now(), windowMs);
-    if (!doubleCheck.safe) {
-      this.log.info("auto-upgrade aborted: task arrived before trigger", { latest, blockers: doubleCheck.blockers });
-      return;
-    }
-    if (!this.pipelineStarted || !this.isAutoUpdateEnabled()) return;
-
-    this.log.info("auto-upgrade starting", { latest, version: this.version, predownloaded });
-    try {
-      // 自动升级静默：不发"正在重启..."通知（避免半夜打扰）；成功结果白天汇报。
-      // autoUpdate=true：worker 写入 restart/state.json 标记，供新引擎早晨汇报判定。
-      // 互斥交给 worker 的 restart.lock（唯一防线），这里不再持有 DB 锁。
-      this.triggerRestart({ updateVersion: latest, silent: true, autoUpdate: true });
-    } catch (err) {
-      // 触发失败：自动升级未发生，无需清理任何状态（无锁、无标记）
-      this.log.warn("auto-upgrade trigger failed", { latest, error: String(err) });
-    }
-  }
-
-  /** 预下载新版本 tgz 到用户级共享 packages 目录（幂等：同版本已存在则跳过）。 */
-  private async predownloadPackage(latest: string): Promise<boolean> {
-    const store = new SharedReleaseStore(resolveSharedRuntimeRoot());
-    store.ensureDirectories();
-    const packagesDir = store.packagesDirectory;
-    const expected = `yuanzhangjing-niubot-${latest}.tgz`;
-    const cachedArchive = path.join(packagesDir, expected);
-    if (existsSync(cachedArchive)) {
-      try {
-        await assertInstallablePackageArchive(cachedArchive);
-        this.log.info("auto-upgrade predownload already present", { latest, file: expected });
-        return true;
-      } catch (err) {
-        rmSync(cachedArchive, { force: true });
-        this.log.warn("auto-upgrade discarded invalid package cache", { latest, file: expected, error: String(err) });
-      }
-    }
-    const downloadDirectory = store.createStagingDirectory("auto-update-package");
-    try {
-      await this.runNpmCommand(["pack", `${UPDATE_PACKAGE_NAME}@${latest}`, "--pack-destination", downloadDirectory], 120_000);
-      const downloadedArchive = path.join(downloadDirectory, expected);
-      await assertInstallablePackageArchive(downloadedArchive);
-      store.publishPackageArchive(downloadedArchive, expected);
-    } finally {
-      rmSync(downloadDirectory, { recursive: true, force: true });
-    }
-    const present = existsSync(path.join(packagesDir, expected));
-    this.log.info("auto-upgrade predownloaded", { latest, present });
-    return present;
-  }
-
-
-  /** 白天汇报：读 restart/state.json 的 autoUpdate 标记（worker 写入）→ 发「已自动升级」卡片。 */
-  private async maybeReportUpgradeResult(_latest: string): Promise<void> {
-    if (!this.effectiveAutoUpdateConfig().notifyOnResult) return;
-    if (this.upgradeHistoryRecorded.has("reported")) return;
-
-    // 只有「最近一次重启由自动升级触发且成功」才汇报。
-    // 手动升级/其他重启会重写 state.json（autoUpdate 不继承），不会误报。
-    const state = readRestartState(this.restartStateFile());
-    if (!state || !state.autoUpdate) return;
-    if (state.phase !== "success") return; // 回滚/失败不汇报（静默保持旧版）
-    if (state.autoUpdateReportedAt) return;
-
-    // 汇报版本 = 当前引擎版本（新引擎启动即升级后的版本，state.json 已确认是自动升级）
-    const reportedVersion = this.version;
-    const platformChatIds = this.getAdminPrivatePlatformChatIds();
-    const text = `已自动升级到 **${reportedVersion}**。`;
-    let delivered = false;
-    for (const platformChatId of platformChatIds) {
-      try {
-        await this.transport.sendCard(platformChatId, "Update", text);
-        delivered = true;
-      } catch (err) {
-        this.log.warn("failed to send auto-upgrade result", { platformChatId, error: String(err) });
-      }
-    }
-    if (delivered) {
-      try {
-        markAutoUpdateReported(this.restartStateFile(), state.id);
-      } catch (err) {
-        this.log.warn("failed to persist auto-upgrade report marker", { error: String(err) });
-      }
-      recordUpdateNotification(this.db, this.botIdentity.name, reportedVersion);
-      this.upgradeHistoryRecorded.add("reported");
-      this.log.info("auto-upgrade result reported", { version: reportedVersion, delivered });
-    }
-  }
-
-  /** restart/state.json 路径（与 worker 的 botDirectory 一致：dirname(dbPath) = bot 目录）。 */
-  private restartStateFile(): string {
-    return path.join(path.dirname(this.dbPath), "restart", "state.json");
-  }
-
-  /** 组装空闲判定 Source（各执行链自己实现）。 */
-  private buildSafenessSources(): UpgradeSafenessSource[] {
+  /** 向 Engine 暴露本 Bot 的只读空闲状态；Pipeline 不执行升级决策。 */
+  getUpgradeSafenessSources(): UpgradeSafenessSource[] {
     const jobService = this.workerConfig?.jobService;
     return [
       mainRunSource({
@@ -4694,20 +4244,8 @@ ${jobParts.join("\n\n")}
     ];
   }
 
-  /** 启动独立的 Node restart worker；worker 完成预检后再停止旧 Engine。 */
-  triggerRestart(opts?: { platformChatId?: string; chatId?: string; updateVersion?: string; silent?: boolean; autoUpdate?: boolean }): void {
-    const runtimeRoot = path.resolve(
-      path.dirname(fileURLToPath(import.meta.url)),
-      "../..",
-    );
-    // 环境判定：显式 NIUBOT_ENV 优先，npm-release 旧标记兼容；生产环境升级走 runtimeRoot
-    const environment = process.env["NIUBOT_ENV"]
-      || (process.env["NIUBOT_RUNTIME_MODE"] === "npm-release" ? "production" : undefined);
-    const useNpmRelease = environment === "production";
-    const projectRoot = opts?.updateVersion || useNpmRelease
-      ? runtimeRoot
-      : (this.restartConfig?.sourceDirectory ?? runtimeRoot);
-
+  /** 请求 Engine 启动 restart worker；Pipeline 只负责定位通知会话和展示结果。 */
+  triggerRestart(opts?: { platformChatId?: string; chatId?: string; updateVersion?: string; silent?: boolean }): void {
     // 解析 chatId 和 platformChatId（互相反查）
     let chatId = opts?.chatId;
     let platformChatId = opts?.platformChatId;
@@ -4725,20 +4263,16 @@ ${jobParts.join("\n\n")}
     }
 
     try {
-      const worker = launchRestartWorker({
-        niubotHome: NIUBOT_HOME,
+      if (!this.engineLifecycle) throw new Error("Engine 生命周期服务不可用。");
+      const worker = this.engineLifecycle.restart({
         botName: this.botIdentity.name,
-        runtimeRoot,
-        sourceDirectory: projectRoot,
-        environment: process.env["NIUBOT_ENV"] || "",
-        autoUpdate: opts?.autoUpdate,
-        notifyChatId: chatId,
+        chatId,
         updateVersion: opts?.updateVersion,
       });
       this.log.info("restart worker launched", {
         pid: worker.pid,
         chatId,
-        sourceDirectory: projectRoot,
+        sourceDirectory: worker.sourceDirectory,
         logFile: worker.logFile,
       });
     } catch (err) {

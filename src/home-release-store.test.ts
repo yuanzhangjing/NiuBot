@@ -76,23 +76,16 @@ describe("home release store", () => {
     expect(store.readStateStrict()).toEqual({ schemaVersion: 2 });
   });
 
-  it("stores legacy and shared slots together", () => {
+  it("keeps current unchanged until a candidate is committed healthy", () => {
     const { home, shared, store } = setup();
     createShared(shared);
     const node = currentNodeRuntimeRef();
     const legacy: ReleaseRef = { storage: "legacy", runtimePath: createLegacy(home), node };
     const current: ReleaseRef = { storage: "shared", artifactId: "shared-a", node };
     store.writeState({ schemaVersion: 2, current: legacy, lastKnownGood: legacy });
-    expect(store.activate(current)).toEqual({
-      schemaVersion: 2,
+    expect(store.readStateStrict().current).toEqual(legacy);
+    expect(store.commitHealthy(current)).toMatchObject({
       current,
-      previous: legacy,
-      lastKnownGood: legacy,
-    });
-    expect(store.markLastKnownGood(current)).toMatchObject({
-      current,
-      previous: legacy,
-      lastKnownGood: current,
       sharedSuccessfulStarts: 1,
     });
   });
@@ -148,7 +141,7 @@ describe("home release store", () => {
       runtimePath: legacy.runtimePath,
     });
     expect(shared.readHomeRef(store.homeId)).toMatchObject({
-      active: { current: legacy, lastKnownGood: legacy },
+      active: { current: legacy },
       pending: { transactionId: "restart-1" },
       rollback: [legacy],
     });
@@ -164,7 +157,7 @@ describe("home release store", () => {
     }]);
   });
 
-  it("migrates schema v1 slots without losing rollback order", () => {
+  it("migrates schema v1 to one healthy current", () => {
     const { home, store } = setup();
     const current = createLegacy(home, "Bot", "current");
     const previous = createLegacy(home, "Bot", "previous");
@@ -178,8 +171,8 @@ describe("home release store", () => {
 
     const state = store.readOrMigrateLegacy(currentNodeRuntimeRef(), undefined, () => true);
     expect(state.current).toMatchObject({ storage: "legacy", runtimePath: fs.realpathSync.native(current) });
-    expect(state.previous).toMatchObject({ storage: "legacy", runtimePath: fs.realpathSync.native(previous) });
-    expect(state.lastKnownGood).toMatchObject({ storage: "legacy", runtimePath: fs.realpathSync.native(lkg) });
+    expect(state).not.toHaveProperty("previous");
+    expect(state).not.toHaveProperty("lastKnownGood");
     expect(state.unresolvedLegacy).toBeUndefined();
     expect(store.readState()).toEqual(state);
   });
@@ -192,19 +185,64 @@ describe("home release store", () => {
     const candidate: ReleaseRef = { storage: "shared", artifactId: "shared-a", node };
     store.writeState({
       schemaVersion: 2,
-      current: candidate,
-      lastKnownGood: legacy,
+      current: legacy,
       transaction: {
         transactionId: "interrupted",
         phase: "activating",
         candidate,
-        rollback: { current: legacy, lastKnownGood: legacy },
+        rollbackCurrent: legacy,
       },
     });
     const recovered = store.reconcileInterruptedTransaction();
     expect(recovered.current).toEqual(legacy);
-    expect(recovered.lastKnownGood).toEqual(legacy);
+    expect(recovered).not.toHaveProperty("lastKnownGood");
     expect(recovered.transaction).toBeUndefined();
+  });
+
+  it("migrates the released schema-2 transaction rollback target", () => {
+    const { home, shared, store } = setup();
+    createShared(shared);
+    const node = currentNodeRuntimeRef();
+    const rollbackCurrent: ReleaseRef = { storage: "legacy", runtimePath: createLegacy(home), node };
+    const candidate: ReleaseRef = { storage: "shared", artifactId: "shared-a", node };
+    fs.mkdirSync(path.dirname(store.stateFile), { recursive: true });
+    fs.writeFileSync(store.stateFile, JSON.stringify({
+      schemaVersion: 2,
+      current: candidate,
+      lastKnownGood: rollbackCurrent,
+      transaction: {
+        transactionId: "old-transaction",
+        phase: "activating",
+        candidate,
+        rollback: { current: rollbackCurrent, lastKnownGood: rollbackCurrent },
+      },
+    }));
+    const migrated = store.readStateStrict();
+    expect(migrated.transaction).toMatchObject({ candidate, rollbackCurrent });
+    expect(store.reconcileInterruptedTransaction(migrated).current).toEqual(rollbackCurrent);
+  });
+
+  it("does not rewrite a released transaction while its old worker is alive", () => {
+    const { home, shared, store } = setup();
+    createShared(shared);
+    const node = currentNodeRuntimeRef();
+    const rollbackCurrent: ReleaseRef = { storage: "legacy", runtimePath: createLegacy(home), node };
+    const candidate: ReleaseRef = { storage: "shared", artifactId: "shared-a", node };
+    const oldState = {
+      schemaVersion: 2,
+      current: candidate,
+      transaction: {
+        transactionId: "owned-old-transaction",
+        phase: "activating",
+        candidate,
+        rollback: { current: rollbackCurrent },
+        ownerPid: process.pid,
+      },
+    };
+    fs.mkdirSync(path.dirname(store.stateFile), { recursive: true });
+    fs.writeFileSync(store.stateFile, JSON.stringify(oldState));
+    expect(store.readStateStrict().transaction?.rollbackCurrent).toEqual(rollbackCurrent);
+    expect(JSON.parse(fs.readFileSync(store.stateFile, "utf-8"))).toEqual(oldState);
   });
 
   it("prefers the legacy store and Node used by the verified running process", () => {
@@ -225,6 +263,21 @@ describe("home release store", () => {
       node: runningNode,
     }, () => false);
     expect(state.current).toEqual({ storage: "legacy", runtimePath: fs.realpathSync.native(runningPath), node: runningNode });
+  });
+
+  it("falls back from an unusable old current to the old last-known-good", () => {
+    const { home, shared, store } = setup();
+    createShared(shared);
+    const node = currentNodeRuntimeRef();
+    fs.mkdirSync(path.join(home, "runtime"), { recursive: true });
+    fs.writeFileSync(store.stateFile, JSON.stringify({
+      schemaVersion: 2,
+      current: { storage: "shared", artifactId: "missing", node },
+      lastKnownGood: { storage: "shared", artifactId: "shared-a", node },
+    }));
+    const migrated = store.readStateStrict();
+    expect(migrated.current).toMatchObject({ storage: "shared", artifactId: "shared-a" });
+    expect(migrated).not.toHaveProperty("lastKnownGood");
   });
 
   it("rejects transaction snapshots outside the home restart directory", () => {

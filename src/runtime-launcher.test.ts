@@ -5,7 +5,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { HomeReleaseStore } from "./home-release-store.js";
 import { parseLauncherHome, bootstrapFromInstalledSeed, runRuntimeLauncher } from "./runtime-launcher.js";
 import { SharedReleaseStore } from "./shared-release-store.js";
-import { currentNodeRuntimeRef } from "./release-ref.js";
+import { currentNodeRuntimeRef, type ReleaseRef } from "./release-ref.js";
+import { RecommendedReleaseStore } from "./recommended-release.js";
 
 const tempDirectories: string[] = [];
 
@@ -15,8 +16,8 @@ function temporaryRoot(): string {
   return root;
 }
 
-function createSeed(root: string, version = "1.0.0"): string {
-  const seed = path.join(root, "seed");
+function createSeed(root: string, version = "1.0.0", name = "seed", label?: string): string {
+  const seed = path.join(root, name);
   fs.mkdirSync(path.join(seed, "dist"), { recursive: true });
   fs.mkdirSync(path.join(seed, "node_modules"));
   fs.writeFileSync(path.join(seed, "package.json"), JSON.stringify({
@@ -27,7 +28,7 @@ function createSeed(root: string, version = "1.0.0"): string {
   for (const entry of ["user-cli.js", "cli.js"]) {
     fs.writeFileSync(path.join(seed, "dist", entry), [
       "import fs from 'node:fs';",
-      "fs.writeFileSync(process.env.NIUBOT_TEST_LAUNCH_MARKER, JSON.stringify({ args: process.argv.slice(2), home: process.env.NIUBOT_HOME }));",
+      `fs.writeFileSync(process.env.NIUBOT_TEST_LAUNCH_MARKER, JSON.stringify({ args: process.argv.slice(2), home: process.env.NIUBOT_HOME${label ? `, label: ${JSON.stringify(label)}, runtimeEnvironment: process.env.NIUBOT_ENV` : ""} }));`,
       "",
     ].join("\n"));
   }
@@ -122,6 +123,71 @@ describe("runtime launcher", () => {
     expect(shared.readAllHomeRefs()).toHaveLength(2);
   });
 
+  it("uses the recommended management CLI for another production home's next start", async () => {
+    const root = temporaryRoot();
+    const shared = new SharedReleaseStore(path.join(root, "shared"));
+    const oldHome = path.join(root, "old-home");
+    const newHome = path.join(root, "new-home");
+    fs.mkdirSync(oldHome);
+    fs.mkdirSync(newHome);
+    const oldStore = new HomeReleaseStore(oldHome, shared);
+    const oldState = await bootstrapFromInstalledSeed({
+      homeStore: oldStore,
+      seedRoot: createSeed(root, "1.0.0", "old-seed", "old"),
+      env: { NIUBOT_ALLOW_ROOT_STORE: "1" },
+      verify: () => undefined,
+    });
+    await bootstrapFromInstalledSeed({
+      homeStore: new HomeReleaseStore(newHome, shared),
+      seedRoot: createSeed(root, "2.0.0", "new-seed", "recommended"),
+      env: { NIUBOT_ALLOW_ROOT_STORE: "1" },
+      verify: () => undefined,
+    });
+    const marker = path.join(root, "recommended-start.json");
+    const code = await runRuntimeLauncher({
+      command: "niubot",
+      argv: ["start", "--home", oldHome],
+      env: {
+        NIUBOT_SHARED_STORE: shared.rootDirectory,
+        NIUBOT_TEST_LAUNCH_MARKER: marker,
+        NIUBOT_ALLOW_ROOT_STORE: "1",
+      },
+    });
+    expect(code).toBe(0);
+    expect(JSON.parse(fs.readFileSync(marker, "utf-8"))).toMatchObject({ label: "recommended" });
+    expect(oldStore.readState().current).toEqual(oldState.current);
+  });
+
+  it("uses the recommended management CLI for an explicit restart", async () => {
+    const root = temporaryRoot();
+    const shared = new SharedReleaseStore(path.join(root, "shared"));
+    const oldHome = path.join(root, "old-home");
+    const newHome = path.join(root, "new-home");
+    fs.mkdirSync(oldHome);
+    fs.mkdirSync(newHome);
+    await bootstrapFromInstalledSeed({
+      homeStore: new HomeReleaseStore(oldHome, shared),
+      seedRoot: createSeed(root, "1.0.0", "old-restart-seed", "old"),
+      env: { NIUBOT_ALLOW_ROOT_STORE: "1" }, verify: () => undefined,
+    });
+    await bootstrapFromInstalledSeed({
+      homeStore: new HomeReleaseStore(newHome, shared),
+      seedRoot: createSeed(root, "2.0.0", "new-restart-seed", "recommended"),
+      env: { NIUBOT_ALLOW_ROOT_STORE: "1" }, verify: () => undefined,
+    });
+    const marker = path.join(root, "recommended-restart.json");
+    const code = await runRuntimeLauncher({
+      command: "niubot", argv: ["restart", "--home", oldHome],
+      env: {
+        NIUBOT_SHARED_STORE: shared.rootDirectory,
+        NIUBOT_TEST_LAUNCH_MARKER: marker,
+        NIUBOT_ALLOW_ROOT_STORE: "1",
+      },
+    });
+    expect(code).toBe(0);
+    expect(JSON.parse(fs.readFileSync(marker, "utf-8"))).toMatchObject({ label: "recommended" });
+  });
+
   it("recovers from unusable slots by importing the installed seed", async () => {
     const root = temporaryRoot();
     const home = path.join(root, "home");
@@ -187,7 +253,7 @@ describe("runtime launcher", () => {
     expect(code).toBe(0);
     const state = new HomeReleaseStore(home, new SharedReleaseStore(sharedRoot)).readState();
     expect(state.current).toMatchObject({ storage: "legacy", runtimePath: fs.realpathSync.native(legacy) });
-    expect(state.lastKnownGood).toMatchObject({ storage: "legacy", runtimePath: fs.realpathSync.native(legacy) });
+    expect(state).not.toHaveProperty("lastKnownGood");
     expect(fs.readdirSync(path.join(sharedRoot, "releases"))).toEqual([]);
   });
 
@@ -274,5 +340,111 @@ describe("runtime launcher", () => {
     });
     expect(code).toBe(0);
     expect(fs.readFileSync(marker, "utf-8")).toBe("legacy");
+  });
+
+  it("initializes an empty production home from the recommendation before an older seed", async () => {
+    const root = temporaryRoot();
+    const shared = new SharedReleaseStore(path.join(root, "shared"));
+    const sourceHome = path.join(root, "source-home");
+    const emptyHome = path.join(root, "empty-home");
+    fs.mkdirSync(sourceHome);
+    fs.mkdirSync(emptyHome);
+    await bootstrapFromInstalledSeed({
+      homeStore: new HomeReleaseStore(sourceHome, shared),
+      seedRoot: createSeed(root, "2.0.0", "recommended-empty-seed", "recommended"),
+      env: { NIUBOT_ALLOW_ROOT_STORE: "1" },
+      verify: () => undefined,
+    });
+    const marker = path.join(root, "empty-home.json");
+    const code = await runRuntimeLauncher({
+      command: "nbt",
+      argv: ["status", "--home", emptyHome],
+      seedRoot: createSeed(root, "1.0.0", "older-empty-seed", "old"),
+      env: {
+        NIUBOT_SHARED_STORE: shared.rootDirectory,
+        NIUBOT_TEST_LAUNCH_MARKER: marker,
+        NIUBOT_ALLOW_ROOT_STORE: "1",
+      },
+    });
+    expect(code).toBe(0);
+    expect(JSON.parse(fs.readFileSync(marker, "utf-8"))).toMatchObject({ label: "recommended" });
+    const state = new HomeReleaseStore(emptyHome, shared).readStateStrict();
+    expect(state.current).toEqual(new RecommendedReleaseStore(shared).readStrict().release);
+  });
+
+  it("keeps a source home on dev during restart even when production has a newer recommendation", async () => {
+    const root = temporaryRoot();
+    const shared = new SharedReleaseStore(path.join(root, "shared"));
+    const devHome = path.join(root, "dev-home");
+    const productionHome = path.join(root, "production-home");
+    fs.mkdirSync(devHome);
+    fs.mkdirSync(productionHome);
+    const devState = await bootstrapFromInstalledSeed({
+      homeStore: new HomeReleaseStore(devHome, shared),
+      seedRoot: createSeed(root, "1.0.0-dev.1", "dev-seed", "dev"),
+      env: { NIUBOT_ALLOW_ROOT_STORE: "1", NIUBOT_ENV: "dev" }, verify: () => undefined,
+    });
+    const devArtifactId = (devState.current as { artifactId: string }).artifactId;
+    const devManifest = shared.readManifest(devArtifactId)!;
+    fs.writeFileSync(shared.manifestFile(devArtifactId), `${JSON.stringify({ ...devManifest, sourceKind: "source" }, null, 2)}\n`);
+    await bootstrapFromInstalledSeed({
+      homeStore: new HomeReleaseStore(productionHome, shared),
+      seedRoot: createSeed(root, "2.0.0", "production-seed", "production"),
+      env: { NIUBOT_ALLOW_ROOT_STORE: "1" }, verify: () => undefined,
+    });
+    const marker = path.join(root, "dev-restart.json");
+    const code = await runRuntimeLauncher({
+      command: "niubot", argv: ["restart", "--home", devHome],
+      env: {
+        NIUBOT_SHARED_STORE: shared.rootDirectory,
+        NIUBOT_TEST_LAUNCH_MARKER: marker,
+        NIUBOT_ALLOW_ROOT_STORE: "1",
+      },
+    });
+    expect(code).toBe(0);
+    expect(JSON.parse(fs.readFileSync(marker, "utf-8"))).toMatchObject({
+      label: "dev",
+      runtimeEnvironment: "dev",
+    });
+  });
+
+  it("ignores a structurally valid recommendation that points at a source artifact", async () => {
+    const root = temporaryRoot();
+    const shared = new SharedReleaseStore(path.join(root, "shared"));
+    const home = path.join(root, "home");
+    fs.mkdirSync(home);
+    const state = await bootstrapFromInstalledSeed({
+      homeStore: new HomeReleaseStore(home, shared),
+      seedRoot: createSeed(root, "1.0.0", "stable-seed", "stable"),
+      env: { NIUBOT_ALLOW_ROOT_STORE: "1" }, verify: () => undefined,
+    });
+    const sourceHome = path.join(root, "source-home");
+    fs.mkdirSync(sourceHome);
+    const sourceState = await bootstrapFromInstalledSeed({
+      homeStore: new HomeReleaseStore(sourceHome, shared),
+      seedRoot: createSeed(root, "2.0.0-dev.1", "source-seed", "source"),
+      env: { NIUBOT_ALLOW_ROOT_STORE: "1", NIUBOT_ENV: "dev" }, verify: () => undefined,
+    });
+    const sourceRef = sourceState.current as ReleaseRef & { storage: "shared" };
+    const sourceManifest = shared.readManifest(sourceRef.artifactId)!;
+    fs.writeFileSync(shared.manifestFile(sourceRef.artifactId), `${JSON.stringify({ ...sourceManifest, sourceKind: "source" }, null, 2)}\n`);
+    fs.writeFileSync(path.join(shared.rootDirectory, "recommended.json"), `${JSON.stringify({
+      schemaVersion: 1,
+      generation: 2,
+      release: sourceRef,
+      updatedAt: new Date().toISOString(),
+    }, null, 2)}\n`);
+    const marker = path.join(root, "source-recommendation.json");
+    const code = await runRuntimeLauncher({
+      command: "niubot", argv: ["restart", "--home", home],
+      env: {
+        NIUBOT_SHARED_STORE: shared.rootDirectory,
+        NIUBOT_TEST_LAUNCH_MARKER: marker,
+        NIUBOT_ALLOW_ROOT_STORE: "1",
+      },
+    });
+    expect(code).toBe(0);
+    expect(JSON.parse(fs.readFileSync(marker, "utf-8"))).toMatchObject({ label: "stable" });
+    expect(new HomeReleaseStore(home, shared).readState().current).toEqual(state.current);
   });
 });

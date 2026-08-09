@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { HomeReleaseStore, type HomeReleaseState } from "./home-release-store.js";
+import { RecommendedReleaseStore } from "./recommended-release.js";
 import { readProcessState } from "./process-state.js";
 import type { ReleaseRef } from "./release-ref.js";
 import { SharedReleaseStore } from "./shared-release-store.js";
@@ -103,11 +104,11 @@ export function cleanupLegacyReleases(
 
   const canonicalHome = canonicalPath(niubotHome);
   const protectedPaths = new Set<string>();
-  for (const ref of [state.current, state.previous, state.lastKnownGood]) {
+  for (const ref of [state.current]) {
     if (ref?.storage === "legacy") protectedPaths.add(canonicalPath(ref.runtimePath));
   }
   for (const ref of state.transaction
-    ? [state.transaction.candidate, state.transaction.rollback.current, state.transaction.rollback.previous, state.transaction.rollback.lastKnownGood]
+    ? [state.transaction.candidate, state.transaction.rollbackCurrent]
     : []) {
     if (ref?.storage === "legacy") protectedPaths.add(canonicalPath(ref.runtimePath));
   }
@@ -150,6 +151,8 @@ export function cleanupLegacyReleases(
 
 function collectProtectedArtifactIds(store: SharedReleaseStore, knownHomes: string[]): Set<string> {
   const result = new Set<string>();
+  const recommendedStore = new RecommendedReleaseStore(store);
+  addSharedRef(result, recommendedStore.stateExistsRecovering() ? recommendedStore.readStrict().release : undefined);
   const refs = store.readAllHomeRefsStrict();
   const refsByHome = new Map(refs.map((ref) => [canonicalPath(ref.homePath), ref]));
   for (const homeRef of refs) {
@@ -168,7 +171,7 @@ function collectProtectedArtifactIds(store: SharedReleaseStore, knownHomes: stri
   for (const home of new Set([...knownHomes.map(canonicalPath), ...refs.map((ref) => canonicalPath(ref.homePath))])) {
     const homeStore = new HomeReleaseStore(home, store);
     if (homeStore.stateExistsRecovering()) {
-      const state = homeStore.readStateStrict();
+      const state = homeStore.readStateStrict({ persistMigration: false });
       const sharedIds = releaseStateArtifactIds(state);
       const homeRef = refsByHome.get(home);
       if (sharedIds.size > 0 && !homeRef) throw new Error(`Cleanup refused: shared ref is missing for ${home}`);
@@ -190,10 +193,7 @@ function collectProtectedArtifactIds(store: SharedReleaseStore, knownHomes: stri
 
 function releaseStateArtifactIds(state: HomeReleaseState): Set<string> {
   const ids = new Set<string>();
-  for (const ref of [state.current, state.previous, state.lastKnownGood, state.transaction?.candidate]) addSharedRef(ids, ref);
-  for (const ref of state.transaction ? [state.transaction.rollback.current, state.transaction.rollback.previous, state.transaction.rollback.lastKnownGood] : []) {
-    addSharedRef(ids, ref);
-  }
+  for (const ref of [state.current, state.transaction?.candidate, state.transaction?.rollbackCurrent]) addSharedRef(ids, ref);
   return ids;
 }
 

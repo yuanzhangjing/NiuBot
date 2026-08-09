@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { AgentBackend } from "./agent/types.js";
 import { installBuiltinSkills } from "./platform/skills-install.js";
-import { NIUBOT_HOME, type BotConfig, type AgentBackendType, type RestartConfig } from "./config.js";
+import { NIUBOT_HOME, type BotConfig, type AgentBackendType } from "./config.js";
 import {
   initDatabase,
   ensureUser,
@@ -13,7 +13,7 @@ import {
 import { FeishuAdapter } from "./im/feishu/adapter.js";
 import { PersistentTransport } from "./transport/persistent-transport.js";
 import { Pipeline, type BotIdentity } from "./core/pipeline.js";
-import type { AutoUpdateConfig } from "./core/auto-update.js";
+import type { EngineLifecycle } from "./engine-lifecycle.js";
 import { SqliteJobService } from "./worker/job-service.js";
 import { WorkerProfileRegistry } from "./worker/profiles.js";
 import { TeamConfigStore } from "./worker/team-config.js";
@@ -50,14 +50,13 @@ export async function createBotInstance(
   backendResolver?: (type: AgentBackendType) => Promise<AgentBackend>,
   getAvailableBackends?: () => string[],
   runtimeConfig?: ResolvedBotRuntimeConfig,
-  restartConfig?: RestartConfig,
-  autoUpdateNotificationsEnabled = true,
-  autoUpdateConfig?: AutoUpdateConfig,
   getBackendCapabilities?: () => BackendCapability[] | Promise<BackendCapability[]>,
-  configPath?: string,
-  options: { preflight?: boolean } = {},
+  options: { preflight?: boolean; engineLifecycle?: EngineLifecycle } = {},
 ): Promise<BotInstance> {
   const log = createLogger("bot-instance", botConfig.id);
+  if (!options.engineLifecycle) {
+    throw new Error("Engine lifecycle service is required");
+  }
 
   // 1. 确保目录和默认文件存在
   fs.mkdirSync(path.dirname(botConfig.dbPath), { recursive: true });
@@ -146,8 +145,8 @@ export async function createBotInstance(
       personaPath: botConfig.personaPath,
       instructionsPath: botConfig.instructionsPath,
     },
-    restartConfig,
-    autoUpdateNotificationsEnabled,
+    undefined, // legacy restart config; EngineLifecycle owns restart
+    undefined, // legacy Pipeline coordinator slot; Engine now owns auto-update
     undefined, // archiveHome
     getBackendCapabilities,
     {
@@ -156,8 +155,10 @@ export async function createBotInstance(
       teamConfigStore: new TeamConfigStore(db, botConfig.id),
       resolveBackend: backendResolver,
     },
-    autoUpdateConfig,
-    configPath,
+    undefined, // legacy auto-update config
+    undefined, // legacy config path
+    undefined, // legacy config observer
+    options.engineLifecycle,
   );
   transport.onInbound((delivery) => pipeline.handleInbound(delivery));
 

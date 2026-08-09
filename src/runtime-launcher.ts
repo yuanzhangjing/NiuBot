@@ -4,12 +4,13 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { HomeReleaseStore, type HomeReleaseState } from "./home-release-store.js";
-import { type ReleaseRef } from "./release-ref.js";
+import { sameReleaseRef, type ReleaseRef } from "./release-ref.js";
 import { currentNodeRuntimeRef, probeNodeRuntimeRef } from "./release-ref.js";
 import { withNodeRuntimeOnPath } from "./platform/executable.js";
 import { resolveSharedRuntimeRoot } from "./platform/shared-runtime.js";
 import { SharedReleaseInstaller } from "./shared-release-installer.js";
 import { SharedReleaseStore } from "./shared-release-store.js";
+import { RecommendedReleaseStore, shouldAdoptRecommendedRelease } from "./recommended-release.js";
 import { inspectRunningEngine, stopEngine } from "./process-manager.js";
 import { cleanupRestartDatabaseSnapshot, restoreRestartDatabaseSnapshot } from "./database/restart-snapshot.js";
 
@@ -29,9 +30,9 @@ export async function runRuntimeLauncher(options: RuntimeLauncherOptions): Promi
   const parsed = parseLauncherHome(argv, env);
   const sharedStore = new SharedReleaseStore(resolveSharedRuntimeRoot({ env }));
   const homeStore = new HomeReleaseStore(parsed.home, sharedStore);
+  const running = await inspectRunningEngine(parsed.home);
   let migrationRuntime;
   if (!homeStore.stateExistsRecovering()) {
-    const running = await inspectRunningEngine(parsed.home);
     if (running) {
       migrationRuntime = {
         runtimePath: running.state.runtimePath,
@@ -40,24 +41,49 @@ export async function runRuntimeLauncher(options: RuntimeLauncherOptions): Promi
     }
   }
   let state = homeStore.readOrMigrateLegacy(currentNodeRuntimeRef(), migrationRuntime);
+  let runningRef: ReleaseRef | undefined;
+  if (running) {
+    try {
+      runningRef = homeStore.releaseRefForRuntimePath(running.state.runtimePath, probeNodeRuntimeRef(running.state.nodePath));
+    } catch {
+      // Fall back to the committed home current when the recorded Node vanished.
+    }
+  }
   if (state.transaction) {
     if (homeStore.transactionOwnerIsActive(state.transaction)) {
-      throw new Error(`NiuBot runtime transaction '${state.transaction.transactionId}' is still active`);
+      if (!(options.command === "nbt" && runningRef && sameReleaseRef(runningRef, state.transaction.candidate))) {
+        throw new Error(`NiuBot runtime transaction '${state.transaction.transactionId}' is still active`);
+      }
+    } else {
+      await stopEngine(parsed.home);
+      if (state.transaction.databaseSnapshot) {
+        homeStore.assertTransactionSnapshotContained(state.transaction.databaseSnapshot);
+        restoreRestartDatabaseSnapshot(state.transaction.databaseSnapshot);
+      }
+      const snapshot = state.transaction.databaseSnapshot;
+      state = homeStore.reconcileInterruptedTransaction(state);
+      if (snapshot) cleanupRestartDatabaseSnapshot(snapshot);
     }
-    await stopEngine(parsed.home);
-    if (state.transaction.databaseSnapshot) {
-      homeStore.assertTransactionSnapshotContained(state.transaction.databaseSnapshot);
-      restoreRestartDatabaseSnapshot(state.transaction.databaseSnapshot);
-    }
-    const snapshot = state.transaction.databaseSnapshot;
-    state = homeStore.reconcileInterruptedTransaction(state);
-    if (snapshot) cleanupRestartDatabaseSnapshot(snapshot);
   }
   const failures: string[] = [];
   // A valid legacy release is already an authoritative runtime selection.
   // The installed npm seed is only a bootstrap/recovery source; importing it
   // must never replace a usable release merely because it is not shared yet.
-  if (!state.current && !state.lastKnownGood && !state.previous) {
+  if (!state.current && env["NIUBOT_ENV"] !== "dev") {
+    try {
+      const recommendedStore = new RecommendedReleaseStore(sharedStore);
+      const recommended = recommendedStore.stateExistsRecovering() ? recommendedStore.readStrict() : undefined;
+      if (recommended) {
+        homeStore.resolveRuntime(recommended.release, true);
+        state = { schemaVersion: 2, current: recommended.release };
+        homeStore.writeState(state);
+        homeStore.writeSharedRef({ state });
+      }
+    } catch (err) {
+      failures.push(`recommended bootstrap failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  if (!state.current) {
     try {
       state = await bootstrapFromInstalledSeed({
         homeStore,
@@ -71,24 +97,31 @@ export async function runRuntimeLauncher(options: RuntimeLauncherOptions): Promi
     }
   }
 
-  for (const ref of orderedFallbacks(state)) {
+  const recommendation = recommendedStartRef(options.command, argv, state, homeStore, sharedStore);
+  const launchRefs = options.command === "nbt" && runningRef
+    ? uniqueReleaseRefs([runningRef, ...orderedFallbacks(state)])
+    : recommendation
+      ? uniqueReleaseRefs([recommendation, ...orderedFallbacks(state)])
+      : orderedFallbacks(state);
+  for (const ref of launchRefs) {
     try {
       const runtimePath = homeStore.resolveRuntime(ref, true);
       assertNodeAbi(ref);
       const entry = path.join(runtimePath, "dist", options.command === "niubot" ? "user-cli.js" : "cli.js");
       if (!fs.existsSync(entry)) throw new Error(`CLI entry is missing: ${entry}`);
       const args = options.command === "nbt" ? parsed.forwardedArgs : argv;
+      const selectedEnvironment = env["NIUBOT_ENV"] === "dev" || env["NIUBOT_ENV"] === "production"
+        ? env["NIUBOT_ENV"]
+        : runningRef && sameReleaseRef(runningRef, ref) && running?.state.runtimeMode === "dev"
+          ? "dev"
+          : releaseEnvironment(sharedStore, ref);
       const result = spawnSync(ref.node.nodePath, [entry, ...args], {
         cwd: safeWorkingDirectory(runtimePath),
-        env: { ...env, NIUBOT_HOME: parsed.home },
+        env: { ...env, NIUBOT_HOME: parsed.home, NIUBOT_ENV: selectedEnvironment },
         stdio: "inherit",
         windowsHide: true,
       });
       if (result.error) throw result.error;
-      if (result.status === 0 && options.command === "niubot" && argv[0] === "start") {
-        const successful = homeStore.markLastKnownGood(ref);
-        homeStore.writeSharedRef({ state: successful, runtimePath });
-      }
       return result.status ?? 1;
     } catch (err) {
       failures.push(err instanceof Error ? err.message : String(err));
@@ -107,9 +140,12 @@ export async function runRuntimeLauncher(options: RuntimeLauncherOptions): Promi
     assertNodeAbi(ref);
     const entry = path.join(runtimePath, "dist", options.command === "niubot" ? "user-cli.js" : "cli.js");
     const args = options.command === "nbt" ? parsed.forwardedArgs : argv;
+    const selectedEnvironment = env["NIUBOT_ENV"] === "dev" || env["NIUBOT_ENV"] === "production"
+      ? env["NIUBOT_ENV"]
+      : releaseEnvironment(sharedStore, ref);
     const result = spawnSync(ref.node.nodePath, [entry, ...args], {
       cwd: safeWorkingDirectory(runtimePath),
-      env: { ...env, NIUBOT_HOME: parsed.home },
+      env: { ...env, NIUBOT_HOME: parsed.home, NIUBOT_ENV: selectedEnvironment },
       stdio: "inherit",
       windowsHide: true,
     });
@@ -156,8 +192,6 @@ export async function bootstrapFromInstalledSeed(options: {
     ...previousState,
     schemaVersion: 2,
     current: ref,
-    previous: usablePrevious.current ?? usablePrevious.previous,
-    lastKnownGood: usablePrevious.lastKnownGood,
     transaction: undefined,
     unresolvedLegacy: previousState.unresolvedLegacy ?? [],
   };
@@ -179,6 +213,13 @@ export async function bootstrapFromInstalledSeed(options: {
       updatedAt: new Date().toISOString(),
     },
   });
+  if (options.env["NIUBOT_ENV"] !== "dev") {
+    try {
+      new RecommendedReleaseStore(options.homeStore.sharedStore).promote(ref);
+    } catch {
+      // A bootstrap seed must not replace a newer or explicitly different recommendation.
+    }
+  }
   return state;
 }
 
@@ -190,8 +231,6 @@ function usableSlots(homeStore: HomeReleaseStore, state: HomeReleaseState): Home
   return {
     schemaVersion: 2,
     current: usable(state.current),
-    previous: usable(state.previous),
-    lastKnownGood: usable(state.lastKnownGood),
   };
 }
 
@@ -223,7 +262,7 @@ function resolveLauncherHomePath(value: string): string {
 function orderedFallbacks(state: HomeReleaseState): ReleaseRef[] {
   const result: ReleaseRef[] = [];
   const seen = new Set<string>();
-  for (const ref of [state.current, state.lastKnownGood, state.previous]) {
+  for (const ref of [state.current]) {
     if (!ref) continue;
     const key = ref.storage === "shared" ? `shared:${ref.artifactId}` : `legacy:${ref.runtimePath}`;
     if (seen.has(key)) continue;
@@ -231,6 +270,56 @@ function orderedFallbacks(state: HomeReleaseState): ReleaseRef[] {
     result.push(ref);
   }
   return result;
+}
+
+function uniqueReleaseRefs(refs: ReleaseRef[]): ReleaseRef[] {
+  const result: ReleaseRef[] = [];
+  for (const ref of refs) {
+    if (!result.some((existing) => sameReleaseRef(existing, ref))) result.push(ref);
+  }
+  return result;
+}
+
+function recommendedStartRef(
+  command: LauncherCommand,
+  argv: string[],
+  state: HomeReleaseState,
+  homeStore: HomeReleaseStore,
+  sharedStore: SharedReleaseStore,
+): (ReleaseRef & { storage: "shared" }) | undefined {
+  if (command !== "niubot" || (argv[0] !== "start" && argv[0] !== "restart")) return undefined;
+  if (state.current?.storage === "shared") {
+    const currentManifest = sharedStore.readManifest(state.current.artifactId);
+    if (currentManifest?.sourceKind === "source") return undefined;
+  }
+  const recommendedStore = new RecommendedReleaseStore(sharedStore);
+  let recommended;
+  try {
+    recommended = recommendedStore.stateExistsRecovering() ? recommendedStore.readStrict() : undefined;
+  } catch {
+    return undefined;
+  }
+  if (!recommended || sameReleaseRef(state.current, recommended.release)) return undefined;
+  const recommendedVersion = sharedStore.readManifest(recommended.release.artifactId)?.version;
+  if (!recommendedVersion) return undefined;
+  let currentVersion: string | undefined;
+  if (state.current) {
+    try {
+      const pkg = JSON.parse(fs.readFileSync(path.join(homeStore.resolveRuntime(state.current), "package.json"), "utf-8")) as { version?: unknown };
+      currentVersion = typeof pkg.version === "string" ? pkg.version : undefined;
+    } catch {
+      // An unusable current may be recovered by a valid recommendation.
+    }
+  }
+  if (!shouldAdoptRecommendedRelease(state.current, currentVersion, recommended.release, recommendedVersion)) return undefined;
+  if (state.rejectedRecommendation?.generation === recommended.generation
+    && state.rejectedRecommendation.artifactId === recommended.release.artifactId) return undefined;
+  return recommended.release;
+}
+
+function releaseEnvironment(sharedStore: SharedReleaseStore, ref: ReleaseRef): "dev" | "production" {
+  if (ref.storage === "shared" && sharedStore.readManifest(ref.artifactId)?.sourceKind === "source") return "dev";
+  return "production";
 }
 
 function assertNodeAbi(ref: ReleaseRef): void {

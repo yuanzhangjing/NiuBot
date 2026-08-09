@@ -470,7 +470,7 @@ function resolveStoppedHomeRuntime(home: string, fallback: TransferRuntimeTarget
     const shared = new SharedReleaseStore(resolveSharedRuntimeRoot());
     const store = new HomeReleaseStore(home, shared);
     const state = store.readStateStrict();
-    for (const ref of [state.current, state.lastKnownGood, state.previous]) {
+    for (const ref of [state.current]) {
       if (!ref) continue;
       try {
         const runtimePath = store.resolveRuntime(ref, true);
