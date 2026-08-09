@@ -148,6 +148,7 @@ function createFixtureEngineRuntime(runtime: string): string {
 }
 
 function fixtureEngineSource(): string {
+  const windowsPipePrefix = JSON.stringify("\\\\.\\pipe\\niubot-");
   return `
     import crypto from "node:crypto";
     import fs from "node:fs";
@@ -162,9 +163,9 @@ function fixtureEngineSource(): string {
       const hash = crypto.createHash("sha256").update(value).digest("hex").slice(0, 8);
       return (readable || "id") + "-" + hash;
     };
-    const engineAddress = process.platform === "win32" ? "\\\\.\\pipe\\niubot-" + homeHash + "-engine" : path.join(home, "run", "engine.sock");
+    const engineAddress = process.platform === "win32" ? ${windowsPipePrefix} + homeHash + "-engine" : path.join(home, "run", "engine.sock");
     const botAddress = (id) => process.platform === "win32"
-      ? "\\\\.\\pipe\\niubot-" + homeHash + "-bot-" + stable(id)
+      ? ${windowsPipePrefix} + homeHash + "-bot-" + stable(id)
       : path.join(home, id, "api.sock");
     const servers = [];
     const prepare = (address) => {
