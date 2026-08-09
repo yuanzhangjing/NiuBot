@@ -18,6 +18,24 @@ afterEach(() => {
 });
 
 describe("process manager", () => {
+  it("runs the final pre-launch check while holding the start lock", () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-process-manager-check-"));
+    tempDirs.push(home);
+    const startLock = path.join(home, "run", "engine-start.lock");
+    expect(() => launchDetachedEngine({
+      niubotHome: home,
+      engineEntry: path.join(home, "missing.js"),
+      runtimePath: home,
+      logFile: path.join(home, "engine.log"),
+      version: "1.0.0",
+      beforeLaunch: () => {
+        expect(fs.existsSync(startLock)).toBe(true);
+        throw new Error("pending transfer");
+      },
+    })).toThrow(/pending transfer/);
+    expect(fs.existsSync(startLock)).toBe(false);
+  });
+
   it("serializes starts and rejects a second Engine for the same home", async () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-process-manager-"));
     tempDirs.push(home);

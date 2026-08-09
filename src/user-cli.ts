@@ -59,6 +59,10 @@ import { HomeReleaseStore } from "./home-release-store.js";
 import { cleanupLegacyReleases, cleanupSharedReleases } from "./release-cleanup.js";
 import { resolveSharedRuntimeRoot } from "./platform/shared-runtime.js";
 import { SharedReleaseStore } from "./shared-release-store.js";
+import { parseArgs } from "./cli/args.js";
+import { assertNoPendingBotTransfer, exportBotBundle, moveBot } from "./bot-transfer.js";
+import { launchBotTransferWorker } from "./bot-transfer-launcher.js";
+import { recoverStaleBotTransferLifecycles } from "./bot-transfer-worker.js";
 
 // ── Paths ──────────────────────────────────────────────────
 
@@ -144,9 +148,10 @@ interface CliFlags {
   home?: string;
 }
 
-function parseCliArgs(args: string[]): { command: string | undefined; flags: CliFlags } {
+function parseCliArgs(args: string[]): { command: string | undefined; commandIndex: number; flags: CliFlags } {
   const flags: CliFlags = {};
   let command: string | undefined;
+  let commandIndex = -1;
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
@@ -157,15 +162,19 @@ function parseCliArgs(args: string[]): { command: string | undefined; flags: Cli
     else if (arg === "--verbose") flags.verbose = true;
     else if (arg === "--all") flags.all = true;
     else if (arg === "--apply") flags.apply = true;
-    else if ((arg === "--version" || arg === "-v") && !command) command = arg;
+    else if ((arg === "--version" || arg === "-v") && !command) {
+      command = arg;
+      commandIndex = i;
+    }
     else if (arg === "--home" && i + 1 < args.length) {
       flags.home = args[++i];
     } else if (!arg.startsWith("-") && !command) {
       command = arg;
+      commandIndex = i;
     }
   }
 
-  return { command, flags };
+  return { command, commandIndex, flags };
 }
 
 // ── Output helpers ─────────────────────────────────────────
@@ -848,6 +857,8 @@ export function generateBotProfileTemplate(): string {
 
 async function cmdStart(niubotHome: string, flags: CliFlags): Promise<void> {
   console.log();
+  await recoverStaleBotTransferLifecycles(niubotHome);
+  assertNoPendingBotTransfer(niubotHome);
 
   // Pre-start checks
   console.log("Pre-start checks");
@@ -975,6 +986,10 @@ async function cmdStart(niubotHome: string, flags: CliFlags): Promise<void> {
     runtimePath: PROJECT_ROOT,
     logFile,
     version: getPkgVersion(),
+    beforeLaunch: () => {
+      assertNoPendingBotTransfer(niubotHome);
+      config = loadConfig(configPath);
+    },
     env: {
       NIUBOT_LOG_LEVEL: process.env["NIUBOT_LOG_LEVEL"] ?? "info",
       NIUBOT_DEBUG_AGENT_STDOUT: process.env["NIUBOT_DEBUG_AGENT_STDOUT"] ?? "",
@@ -1437,6 +1452,7 @@ Commands:
   status     Show service status
   update     Check for updates and install latest version
   cleanup    List safely removable releases (use --apply to move/delete)
+  bot        Export, import, or move one Bot
   version    Show version
   install-guide  Print the agent installation guide
 
@@ -1457,6 +1473,13 @@ Update options:
 Cleanup options:
   --apply    Apply cleanup; default is dry-run
 
+Bot transfer:
+  niubot bot export <bot-id> --output <file> [--home <path>] [--include-secrets]
+  niubot bot import <file> [--home <path>] [--app-id <id> --app-secret-file <path>]
+  niubot bot move <bot-id> --from-home <path> --to-home <path> [--apply]
+
+Export is an online backup. Import and applied move automatically stop and restore affected Engines. Move is dry-run by default.
+
 Agent install guide: run \`${INSTALL_GUIDE_COMMAND}\` and follow it.`;
 }
 
@@ -1464,10 +1487,148 @@ function printUsage(): void {
   console.log(getUsageText());
 }
 
+async function cmdBot(rawArgs: string[], envHome: string | undefined): Promise<void> {
+  if (process.env["NIUBOT_AGENT_SESSION"] === "1" && process.env["NIUBOT_IS_ADMIN"] !== "true") {
+    throw new Error("Bot export, import, and move require an admin session");
+  }
+  const parsed = parseArgs(rawArgs);
+  const [subcommand, ...positional] = parsed.positional;
+  switch (subcommand) {
+    case "export": {
+      assertBotCommandFlags(parsed.flags, ["home", "output", "include-secrets"]);
+      if (positional.length !== 1 || !parsed.flags["output"]) {
+        throw new Error("Usage: niubot bot export <bot-id> --output <file> [--home <path>] [--include-secrets]");
+      }
+      const home = resolveNiubotHome(parsed.flags["home"], envHome);
+      await exportBotBundle({
+        home,
+        botId: positional[0]!,
+        outputPath: parsed.flags["output"],
+        includeSecrets: booleanBotFlag(parsed.flags, "include-secrets"),
+        sourceVersion: getPkgVersion(),
+      });
+      ok(`Bot '${positional[0]}' exported to ${path.resolve(parsed.flags["output"])}`);
+      if (!booleanBotFlag(parsed.flags, "include-secrets")) {
+        hint("Credentials were omitted; import requires --app-id and --app-secret-file.");
+      }
+      break;
+    }
+    case "import": {
+      assertBotCommandFlags(parsed.flags, ["home", "app-id", "app-secret-file", "working-directory"]);
+      if (positional.length !== 1) {
+        throw new Error("Usage: niubot bot import <file> [--home <path>] [--app-id <id> --app-secret-file <path>] [--working-directory <path>]");
+      }
+      const home = resolveNiubotHome(parsed.flags["home"], envHome);
+      const launch = launchBotTransferWorker({
+        runtimeRoot: PROJECT_ROOT,
+        request: {
+          kind: "import",
+          home,
+          bundlePath: path.resolve(positional[0]!),
+          appId: parsed.flags["app-id"],
+          appSecret: parsed.flags["app-secret-file"] ? readSecretFile(parsed.flags["app-secret-file"]) : undefined,
+          workingDirectory: parsed.flags["working-directory"],
+          runtime: currentTransferRuntime(),
+          notifyChatId: process.env["NIUBOT_CHAT_ID"],
+          notifyBotId: process.env["NIUBOT_BOT_NAME"],
+          notifyHome: process.env["NIUBOT_HOME"],
+        },
+      });
+      ok(`Bot import worker started (PID ${launch.pid})`);
+      info(`  State: ${launch.stateFile}`);
+      hint("The target Engine will stop automatically, then restart after import and health checks.");
+      break;
+    }
+    case "move": {
+      assertBotCommandFlags(parsed.flags, ["from-home", "to-home", "apply"]);
+      if (positional.length !== 1 || !parsed.flags["from-home"] || !parsed.flags["to-home"]) {
+        throw new Error("Usage: niubot bot move <bot-id> --from-home <path> --to-home <path> [--apply]");
+      }
+      const sourceHome = resolveHomePath(parsed.flags["from-home"]);
+      const targetHome = resolveHomePath(parsed.flags["to-home"]);
+      const apply = booleanBotFlag(parsed.flags, "apply");
+      if (apply) {
+        const launch = launchBotTransferWorker({
+          runtimeRoot: PROJECT_ROOT,
+          request: {
+            kind: "move",
+            botId: positional[0]!,
+            sourceHome,
+            targetHome,
+            sourceVersion: getPkgVersion(),
+            runtime: currentTransferRuntime(),
+            notifyChatId: process.env["NIUBOT_CHAT_ID"],
+            notifyBotId: process.env["NIUBOT_BOT_NAME"],
+            notifyHome: process.env["NIUBOT_HOME"],
+          },
+        });
+        ok(`Bot move worker started (PID ${launch.pid})`);
+        info(`  State: ${launch.stateFile}`);
+        hint("Affected Engines will stop automatically and return to the required running state after health checks.");
+        break;
+      }
+      const result = await moveBot({
+        botId: positional[0]!,
+        sourceHome,
+        targetHome,
+        apply: false,
+        sourceVersion: getPkgVersion(),
+      });
+      if (!result.applied) {
+        info(`Dry-run: move Bot '${result.botId}'`);
+        info(`  from ${result.sourceHome}`);
+        info(`  to   ${result.targetHome}`);
+        hint("The source is valid and the target has no conflict. Add --apply to execute with automatic Engine stop/start.");
+      }
+      break;
+    }
+    default:
+      throw new Error("Usage: niubot bot <export|import|move> ...");
+  }
+}
+
+function currentTransferRuntime() {
+  return {
+    runtimePath: PROJECT_ROOT,
+    nodePath: process.execPath,
+    version: getPkgVersion(),
+    runtimeMode: process.env["NIUBOT_ENV"],
+    sourceDirectory: process.env["NIUBOT_SOURCE_DIR"] ?? PROJECT_ROOT,
+    logLevel: process.env["NIUBOT_LOG_LEVEL"],
+    debugAgentStdout: process.env["NIUBOT_DEBUG_AGENT_STDOUT"],
+  };
+}
+
+function readSecretFile(filePath: string): string {
+  const resolved = resolveHomePath(filePath);
+  const stat = fs.statSync(resolved);
+  if (!stat.isFile()) throw new Error(`app secret file is not a regular file: ${resolved}`);
+  if (process.platform !== "win32" && (stat.mode & 0o077) !== 0) {
+    throw new Error(`app secret file must not be readable by group or others: ${resolved}`);
+  }
+  const value = fs.readFileSync(resolved, "utf-8").trim();
+  if (!value) throw new Error(`app secret file is empty: ${resolved}`);
+  return value;
+}
+
+function assertBotCommandFlags(flags: Record<string, string>, allowed: string[]): void {
+  const allowedSet = new Set(allowed);
+  const unknown = Object.keys(flags).filter((flag) => !allowedSet.has(flag));
+  if (unknown.length > 0) throw new Error(`Unknown option: --${unknown[0]}`);
+}
+
+function booleanBotFlag(flags: Record<string, string>, name: string): boolean {
+  const value = flags[name];
+  if (value === undefined) return false;
+  if (value !== "true") throw new Error(`--${name} does not accept a value`);
+  return true;
+}
+
 // ── Main ───────────────────────────────────────────────────
 
 async function main(): Promise<void> {
-  const { command, flags } = parseCliArgs(process.argv.slice(2));
+  const rawArgs = process.argv.slice(2);
+  const { command, commandIndex, flags } = parseCliArgs(rawArgs);
   const envHome = process.env["NIUBOT_HOME"];
   const hasExplicitHome = flags.home !== undefined || envHome !== undefined;
   const niubotHome = resolveNiubotHome(flags.home, envHome);
@@ -1496,6 +1657,9 @@ async function main(): Promise<void> {
       break;
     case "cleanup":
       cmdCleanup(niubotHome, flags);
+      break;
+    case "bot":
+      await cmdBot(rawArgs.slice(commandIndex + 1), envHome);
       break;
     case "version":
     case "--version":

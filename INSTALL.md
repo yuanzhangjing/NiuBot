@@ -570,3 +570,61 @@ After the engine is running with the new bot:
 2. **事件订阅** → add `im.message.receive_v1`
 3. **Create a version** → publish the app
 4. **Verify**: send a message to the bot in Feishu
+
+## Export, Import, or Move One Bot
+
+The Bot bundle contains only one Bot's config entry, a consistent SQLite snapshot, and
+`bot_profile.md`. It does not contain the workspace, session archives, installed NiuBot
+program, skills, logs, or caches.
+
+Export omits Feishu credentials by default:
+
+```bash
+niubot bot export MyBot --home ~/.niubot --output ./MyBot.nbot
+```
+
+Import the bundle into another NiuBot home. The command starts an independent worker,
+automatically stops the target Engine, imports the Bot, starts the Engine, and checks every
+Bot. Supply new credentials when the export did not include them:
+
+```bash
+# macOS / Linux (hidden input)
+read -s NIUBOT_APP_SECRET
+echo
+(umask 077; printf '%s' "$NIUBOT_APP_SECRET" > ./app-secret.txt)
+unset NIUBOT_APP_SECRET
+niubot bot import ./MyBot.nbot --home ~/.niubot-stable \
+  --app-id '<app-id>' --app-secret-file ./app-secret.txt
+rm ./app-secret.txt
+```
+
+PowerShell 7:
+
+```powershell
+$secret = Read-Host "App secret" -MaskInput
+Set-Content -NoNewline -Path ./app-secret.txt -Value $secret
+Remove-Variable secret
+niubot bot import ./MyBot.nbot --home ~/.niubot-stable `
+  --app-id '<app-id>' --app-secret-file ./app-secret.txt
+Remove-Item ./app-secret.txt
+```
+
+Use `--include-secrets` only when the bundle must carry credentials. The generated file is
+private (`0600` on Unix), but it must still be handled as a secret.
+
+For a same-device move, the command is dry-run unless `--apply` is set. Applying starts an
+independent worker: it stops both Engines, moves the Bot, always starts the target, and
+restarts the source only when it was running before the move and still contains another Bot:
+
+```bash
+niubot bot move MyBot --from-home ~/.niubot --to-home ~/.niubot-stable
+niubot bot move MyBot --from-home ~/.niubot --to-home ~/.niubot-stable --apply
+```
+
+After a successful move, the old database, profile, and recovery metadata remain under
+`<source-home>/.bot-move-trash/`. If migration or health checks fail, the worker restores
+the original data and Engine running states automatically.
+
+Ordinary import clears device-local backend session references and uses the target device's
+default workspace path unless `--working-directory <path>` is provided. Same-device move
+keeps both references because their local files remain available.

@@ -252,6 +252,25 @@ describe("user-cli init model configuration", () => {
     );
 
     expect(output).toContain(`Agent install guide: run \`${expectedCommand}\` and follow it.`);
+    expect(output).toContain("niubot bot export <bot-id>");
+    expect(output).toContain("niubot bot import <file>");
+    expect(output).toContain("niubot bot move <bot-id>");
+  });
+
+  it("rejects Bot transfer commands from a non-admin agent session", () => {
+    const srcDir = path.dirname(fileURLToPath(import.meta.url));
+    const tsxCliPath = path.join(srcDir, "..", "node_modules", "tsx", "dist", "cli.mjs");
+    const result = spawnSync(
+      process.execPath,
+      [tsxCliPath, path.join(srcDir, "user-cli.ts"), "bot", "export", "TestBot", "--output", "ignored.nbot"],
+      {
+        encoding: "utf8",
+        env: { ...process.env, NIUBOT_AGENT_SESSION: "1", NIUBOT_IS_ADMIN: "false" },
+      },
+    );
+
+    expect(result.status).toBe(1);
+    expect(`${result.stdout}${result.stderr}`).toContain("require an admin session");
   });
 
   it("prints the packaged installation guide without relying on cat", () => {

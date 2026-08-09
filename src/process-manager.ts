@@ -43,6 +43,7 @@ export interface LaunchEngineOptions {
   nodePath?: string;
   runtimeMode?: string;
   env?: NodeJS.ProcessEnv;
+  beforeLaunch?: () => void;
 }
 
 export interface LaunchedEngine {
@@ -72,6 +73,7 @@ export function launchDetachedEngine(options: LaunchEngineOptions): LaunchedEngi
   );
   try {
     rejectConcurrentEngineStart(options.niubotHome);
+    options.beforeLaunch?.();
     return launchDetachedEngineLocked(options);
   } finally {
     releaseLaunchLock();
@@ -131,6 +133,9 @@ function launchDetachedEngineLocked(options: LaunchEngineOptions): LaunchedEngin
     runtimePath: options.runtimePath,
     nodePath: options.nodePath ?? process.execPath,
     logFile: options.logFile,
+    sourceDirectory: options.env?.["NIUBOT_SOURCE_DIR"],
+    logLevel: options.env?.["NIUBOT_LOG_LEVEL"],
+    debugAgentStdout: options.env?.["NIUBOT_DEBUG_AGENT_STDOUT"],
   };
   try {
     writeProcessState(options.niubotHome, state);

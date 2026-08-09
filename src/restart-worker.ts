@@ -34,6 +34,8 @@ import {
   restoreRestartDatabaseSnapshot,
   type RestartDatabaseSnapshot,
 } from "./database/restart-snapshot.js";
+import { assertNoPendingBotTransfer } from "./bot-transfer.js";
+import { recoverStaleBotTransferLifecycles } from "./bot-transfer-worker.js";
 
 const PACKAGE_NAME = "@yuanzhangjing/niubot";
 const DEFAULT_INSTALL_TIMEOUT_MS = 120_000;
@@ -126,12 +128,21 @@ export async function runRestartWorker(
     stopAfterCompletion: env["NIUBOT_RESTART_STOP_AFTER_COMPLETION"] === "1",
   };
   let releaseLock: (() => void) | undefined;
+  let lifecycleLock: (() => void) | undefined;
   try {
+    await recoverStaleBotTransferLifecycles(context.niubotHome);
+    lifecycleLock = acquireProcessLock(
+      path.join(context.niubotHome, "run", "engine-lifecycle.lock"),
+      "Engine lifecycle",
+    );
+    assertNoPendingBotTransfer(context.niubotHome);
     releaseLock = acquireProcessLock(
       path.join(context.niubotHome, "run", "restart.lock"),
       "Restart",
     );
   } catch (err) {
+    releaseLock?.();
+    lifecycleLock?.();
     // 并发重启：后到者明确告知用户，而不是静默退出
     const message = errorMessage(err);
     log(context, `restart aborted: ${message}`);
@@ -170,7 +181,8 @@ export async function runRestartWorker(
   } finally {
     let stopError: unknown;
     try { await restoreStoppedEngineState(context); } catch (err) { stopError = err; }
-    releaseLock();
+    releaseLock?.();
+    lifecycleLock?.();
     if (stopError) throw stopError;
   }
 }
@@ -463,6 +475,7 @@ function launchRuntime(context: RestartContext, target: RuntimeTarget) {
     version: target.version,
     nodePath: target.nodePath,
     runtimeMode: target.runtimeMode,
+    beforeLaunch: () => assertNoPendingBotTransfer(context.niubotHome),
     env: runtimeEnvironment(context),
   });
 }
