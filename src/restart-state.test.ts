@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { readRestartState, RestartStateWriter } from "./restart-state.js";
+import { markAutoUpdateReported, readRestartState, RestartStateWriter } from "./restart-state.js";
 
 describe("restart state", () => {
   it("keeps restart metadata across phase updates", () => {
@@ -39,6 +39,21 @@ describe("restart state", () => {
       manual.write("started");
       manual.write("success");
       expect(readRestartState(manual.stateFile, "restart-manual")?.autoUpdate).toBe(false);
+    } finally {
+      fs.rmSync(botDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("persists the auto-update report marker across state reads", () => {
+    const botDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-restart-state-"));
+    try {
+      const writer = new RestartStateWriter(botDirectory, "restart-auto", "2026-07-19T00:00:00.000Z", true);
+      writer.write("success");
+
+      expect(markAutoUpdateReported(writer.stateFile, "restart-auto")).toBe(true);
+      expect(readRestartState(writer.stateFile, "restart-auto")?.autoUpdateReportedAt).toBeTruthy();
+      expect(markAutoUpdateReported(writer.stateFile, "restart-auto")).toBe(true);
+      expect(markAutoUpdateReported(writer.stateFile, "another-restart")).toBe(false);
     } finally {
       fs.rmSync(botDirectory, { recursive: true, force: true });
     }

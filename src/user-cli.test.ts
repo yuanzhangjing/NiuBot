@@ -3,9 +3,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import fs from "node:fs";
 import os from "node:os";
+import yaml from "yaml";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { INSTALL_GUIDE_COMMAND } from "./install-guide.js";
 import {
+  appendBotToConfig,
   generateBotProfileTemplate,
   generateConfigTemplate,
   getTodayLogFilePath,
@@ -17,6 +19,7 @@ import {
   readRegisteredHomes,
   registerHomePath,
 } from "./user-cli.js";
+import { writeAutoUpdateEnabledToConfig } from "./config.js";
 
 const tempDirs: string[] = [];
 
@@ -31,6 +34,25 @@ afterEach(() => {
   for (const dir of tempDirs.splice(0)) {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+describe("add-bot config update", () => {
+  it("re-reads the locked config and preserves an auto-update change made during earlier interaction", () => {
+    const dir = makeTempDir("niubot-add-bot-config-");
+    const configPath = path.join(dir, "config.yaml");
+    fs.writeFileSync(configPath, yaml.stringify({
+      bots: [{ id: "Existing", appId: "id", appSecret: "secret" }],
+      autoUpdate: false,
+    }));
+
+    // 模拟 add-bot 已读过旧配置，但交互期间 Engine 开启了自动升级。
+    writeAutoUpdateEnabledToConfig(configPath, true);
+    appendBotToConfig(configPath, { id: "Added", backend: "codex", appId: "new-id", appSecret: "new-secret" });
+
+    const updated = yaml.parse(fs.readFileSync(configPath, "utf-8"));
+    expect(updated.autoUpdate).toBe(true);
+    expect(updated.bots.map((bot: { id: string }) => bot.id)).toEqual(["Existing", "Added"]);
+  });
 });
 
 describe("user-cli init model configuration", () => {

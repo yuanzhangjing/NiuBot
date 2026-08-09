@@ -54,6 +54,7 @@ export async function createBotInstance(
   autoUpdateNotificationsEnabled = true,
   autoUpdateConfig?: AutoUpdateConfig,
   getBackendCapabilities?: () => BackendCapability[] | Promise<BackendCapability[]>,
+  configPath?: string,
   options: { preflight?: boolean } = {},
 ): Promise<BotInstance> {
   const log = createLogger("bot-instance", botConfig.id);
@@ -156,6 +157,7 @@ export async function createBotInstance(
       resolveBackend: backendResolver,
     },
     autoUpdateConfig,
+    configPath,
   );
   transport.onInbound((delivery) => pipeline.handleInbound(delivery));
 

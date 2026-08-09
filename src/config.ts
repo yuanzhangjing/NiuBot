@@ -1,9 +1,12 @@
 import dotenv from "dotenv";
 import fs from "node:fs";
+import { randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import yaml from "yaml";
 import { AUTO_UPDATE_DEFAULTS, type AutoUpdateConfig } from "./core/auto-update.js";
+import { recoverFileReplacementSync, replaceFileSync } from "./platform/files.js";
+import { acquireProcessLock } from "./process-lock.js";
 
 /** 展开路径中的 ~ 为用户 home 目录 */
 export function expandHome(p: string): string {
@@ -103,6 +106,8 @@ export interface RestartConfig {
 }
 
 export interface NiuBotConfig {
+  /** 实际加载的配置文件；纯环境变量启动时为空。 */
+  configPath?: string;
   bots: BotConfig[];
   /** 可选：重启脚本配置。默认使用当前运行包目录。 */
   restart?: RestartConfig;
@@ -152,6 +157,7 @@ export function loadConfig(configPath?: string): NiuBotConfig {
   let fileConfig: Record<string, unknown> = {};
   const filePath = configPath ?? findConfigFile();
   const configHome = filePath ? path.dirname(path.resolve(filePath)) : NIUBOT_HOME;
+  if (filePath) recoverConfigFileReplacement(filePath);
   if (filePath && fs.existsSync(filePath)) {
     const raw = fs.readFileSync(filePath, "utf-8");
     fileConfig = filePath.endsWith(".json") ? JSON.parse(raw) : yaml.parse(raw);
@@ -229,6 +235,7 @@ export function loadConfig(configPath?: string): NiuBotConfig {
   }
 
   return {
+    configPath: filePath ? path.resolve(filePath) : undefined,
     bots,
     restart: parseRestartConfig(fileConfig["restart"]),
     autoUpdate: parseAutoUpdateConfig(fileConfig["autoUpdate"]),
@@ -240,15 +247,73 @@ function stringValue(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
-/** 解析 autoUpdate 配置；未配置或 enabled=false 时不启用。 */
 /**
  * 解析 autoUpdate 配置：只支持一个布尔开关。
  * autoUpdate: true → 启用（窗口等用默认值）；false 或缺省 → 未配置（关闭）。
- * 运行时开关（/update auto on|off）通过 DB 持久化覆盖 config。
+ * /update auto on|off 直接原子修改同一配置文件。
  */
 function parseAutoUpdateConfig(raw: unknown): AutoUpdateConfig | undefined {
   if (raw !== true) return undefined;
   return { enabled: true, ...AUTO_UPDATE_DEFAULTS };
+}
+
+/** 原子修改配置文件中的 autoUpdate 布尔值，并保留 YAML 注释。 */
+export function writeAutoUpdateEnabledToConfig(configPath: string, enabled: boolean): void {
+  updateConfigFileAtomically(configPath, (raw, format) => {
+    if (format === "json") {
+      const parsed = JSON.parse(raw) as unknown;
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error("配置文件根节点必须是对象");
+      }
+      (parsed as Record<string, unknown>)["autoUpdate"] = enabled;
+      return `${JSON.stringify(parsed, null, 2)}\n`;
+    }
+    const document = yaml.parseDocument(raw);
+    if (document.errors.length > 0) throw document.errors[0];
+    if (document.contents !== null && !yaml.isMap(document.contents)) {
+      throw new Error("配置文件根节点必须是对象");
+    }
+    document.set("autoUpdate", enabled);
+    return document.toString({ lineWidth: 0 });
+  });
+}
+
+/** 在公用锁内重读最新配置，再原子替换；避免多个程序内写入者相互覆盖。 */
+export function updateConfigFileAtomically(
+  configPath: string,
+  update: (raw: string, format: "yaml" | "json") => string,
+): void {
+  const source = path.resolve(configPath);
+  const releaseLock = acquireProcessLock(configMutationLockPath(source), "Config update");
+  try {
+    const target = fs.realpathSync.native(source);
+    const raw = fs.readFileSync(target, "utf-8");
+    const serialized = update(raw, source.endsWith(".json") ? "json" : "yaml");
+
+    const temporary = path.join(path.dirname(target), `.${path.basename(target)}.${randomUUID()}.tmp`);
+    const originalStats = fs.statSync(target);
+    const mode = originalStats.mode & 0o777;
+    fs.writeFileSync(temporary, serialized, { encoding: "utf-8", mode, flag: "wx" });
+    try {
+      if (process.platform !== "win32") {
+        const temporaryStats = fs.statSync(temporary);
+        if (temporaryStats.uid !== originalStats.uid || temporaryStats.gid !== originalStats.gid) {
+          fs.chownSync(temporary, originalStats.uid, originalStats.gid);
+        }
+        fs.chmodSync(temporary, mode);
+      }
+      replaceFileSync(temporary, target);
+    } finally {
+      fs.rmSync(temporary, { force: true });
+    }
+  } finally {
+    releaseLock();
+  }
+}
+
+/** 所有程序内的服务配置写入共用同一把跨进程锁。 */
+export function configMutationLockPath(configPath: string): string {
+  return path.join(path.dirname(path.resolve(configPath)), "run", "config.lock");
 }
 
 function numberValue(value: unknown, fallback: number): number {
@@ -304,7 +369,39 @@ function findConfigFile(): string | undefined {
     path.join(NIUBOT_HOME, "config.yaml"),
     path.join(NIUBOT_HOME, "config.json"),
   ];
-  return candidates.find((f) => fs.existsSync(f));
+  return candidates.find((candidate) => {
+    recoverConfigFileReplacement(candidate);
+    return fs.existsSync(candidate);
+  });
+}
+
+/**
+ * Windows 替换文件要经过 destination → backup → destination 两步。
+ * 若进程在中间退出，下次读配置时先恢复旧文件。
+ */
+function recoverConfigFileReplacement(configPath: string): void {
+  recoverFileReplacementSync(resolveConfigStoragePath(configPath));
+}
+
+/** 即使软链的最终目标暂时缺失，也能定位其 backup。 */
+function resolveConfigStoragePath(configPath: string): string {
+  let current = path.resolve(configPath);
+  const seen = new Set<string>();
+  for (let depth = 0; depth < 32; depth++) {
+    if (seen.has(current)) throw new Error(`Config error: symlink cycle at '${configPath}'`);
+    seen.add(current);
+    let stats: fs.Stats;
+    try {
+      stats = fs.lstatSync(current);
+    } catch (err) {
+      if (err instanceof Error && "code" in err && (err as NodeJS.ErrnoException).code === "ENOENT") return current;
+      throw err;
+    }
+    if (!stats.isSymbolicLink()) return current;
+    const target = fs.readlinkSync(current);
+    current = path.resolve(path.dirname(current), target);
+  }
+  throw new Error(`Config error: too many symlinks at '${configPath}'`);
 }
 
 /** 解析数字环境变量，undefined 或 NaN 返回 undefined（不会把 0 当 falsy） */

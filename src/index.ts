@@ -259,6 +259,7 @@ async function main(): Promise<void> {
         autoUpdateNotificationsEnabled,
         autoUpdateConfig,
         getBackendCapabilities,
+        config.configPath,
         { preflight },
       );
       bots.push(instance);

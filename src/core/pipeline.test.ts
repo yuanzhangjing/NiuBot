@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import Database from "better-sqlite3";
@@ -17,7 +17,7 @@ import {
 } from "../database/schema.js";
 import type { NormalizedMessage, PlatformAdapter } from "../im/types.js";
 import { COMPACT_RECOVERY_REMINDER } from "../memory/inject.js";
-import { readAutoUpdateEnabled, writeAutoUpdateEnabled } from "./auto-update.js";
+import { loadConfig } from "../config.js";
 import { SYSTEM_RULES } from "../system-rules.js";
 import { addCronJob, claimDueCronJobs, deleteCronJob } from "./cron.js";
 import { addLoopJob, claimDueLoopJobs, getLoopJob, LoopScheduler } from "./loop.js";
@@ -390,6 +390,20 @@ function initDatabase(filePath: string): Database.Database {
   const db = openDatabase(filePath);
   openDatabases.add(db);
   return db;
+}
+
+function writeAutoUpdateTestConfig(directory: string, enabled: boolean): string {
+  const configPath = path.join(directory, "config.yaml");
+  writeFileSync(configPath, [
+    "bots:",
+    "  - id: NiuBot",
+    "    appId: app-id",
+    "    appSecret: app-secret",
+    `    workingDirectory: ${JSON.stringify(directory)}`,
+    `autoUpdate: ${enabled}`,
+    "",
+  ].join("\n"));
+  return configPath;
 }
 
 afterEach(() => {
@@ -1764,7 +1778,7 @@ describe("Pipeline runtime", () => {
     expect(sentCards[0]?.content).toContain("/update 1");
   });
 
-  test("checks for updates immediately when startup is inside the daytime window", async () => {
+  test("does not check for updates at startup and waits for the next daily check", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date(2026, 3, 25, 11, 0, 0));
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
@@ -1786,14 +1800,14 @@ describe("Pipeline runtime", () => {
     (pipeline as any).checkForUpdatesAndNotifyAdmins = async () => { checks++; };
 
     await pipeline.start();
-    expect(checks).toBe(1);
+    expect(checks).toBe(0);
 
     await vi.advanceTimersByTimeAsync(23 * 60 * 60 * 1000);
-    expect(checks).toBe(2);
+    expect(checks).toBe(1);
 
     pipeline.stop();
     await vi.advanceTimersByTimeAsync(24 * 60 * 60 * 1000);
-    expect(checks).toBe(2);
+    expect(checks).toBe(1);
   });
 
   test("defers update notifications to the next daytime check when startup is at night", async () => {
@@ -1824,6 +1838,66 @@ describe("Pipeline runtime", () => {
     expect(checks).toBe(1);
 
     pipeline.stop();
+  });
+
+  test("startup at exactly 10:00 waits until 10:00 the next day", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 3, 25, 10, 0, 0));
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const pipeline = new Pipeline(
+      db,
+      createImStub(),
+      new RecordingAgent(),
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+    let checks = 0;
+    (pipeline as any).checkForUpdatesAndNotifyAdmins = async () => { checks++; };
+
+    await pipeline.start();
+    expect(checks).toBe(0);
+    await vi.advanceTimersByTimeAsync(24 * 60 * 60 * 1000 - 1);
+    expect(checks).toBe(0);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(checks).toBe(1);
+    pipeline.stop();
+  });
+
+  test("does not reschedule a daily update check that finishes after stop", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 3, 25, 9, 59, 0));
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const pipeline = new Pipeline(
+      db,
+      createImStub(),
+      new RecordingAgent(),
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+    let finishCheck!: () => void;
+    let checks = 0;
+    (pipeline as any).checkForUpdatesAndNotifyAdmins = () => {
+      checks++;
+      return new Promise<void>((resolve) => { finishCheck = resolve; });
+    };
+
+    await pipeline.start();
+    await vi.advanceTimersByTimeAsync(60 * 1000);
+    expect(checks).toBe(1);
+    pipeline.stop();
+    finishCheck();
+    await vi.advanceTimersByTimeAsync(24 * 60 * 60 * 1000);
+    expect(checks).toBe(1);
   });
 
   test("skips automatic update notifications when disabled", async () => {
@@ -2364,6 +2438,7 @@ describe("Pipeline runtime", () => {
     tempDirs.push(dir);
 
     const db = initDatabase(path.join(dir, "niubot.db"));
+    const configPath = writeAutoUpdateTestConfig(dir, true);
     const pipeline = new Pipeline(
       db,
       createImStub(),
@@ -2383,15 +2458,284 @@ describe("Pipeline runtime", () => {
       undefined,
       undefined,
       { enabled: true, windowStartHour: 2, windowEndHour: 5, timezone: "Asia/Shanghai", marginMinutes: 10, notifyOnResult: true },
+      configPath,
     );
 
     (pipeline as any).handleAutoUpdateCommand(["off"], "c1", "chat-open-id");
-    expect(readAutoUpdateEnabled(db)).toBe(false);
+    expect(loadConfig(configPath).autoUpdate).toBeUndefined();
     expect((pipeline as any).isAutoUpdateEnabled()).toBe(false);
 
     (pipeline as any).handleAutoUpdateCommand(["on"], "c1", "chat-open-id");
-    expect(readAutoUpdateEnabled(db)).toBe(true);
+    expect(loadConfig(configPath).autoUpdate?.enabled).toBe(true);
     expect((pipeline as any).isAutoUpdateEnabled()).toBe(true);
+  });
+
+  test("migrates an explicit legacy DB off setting to config without re-enabling auto update", async () => {
+    vi.useFakeTimers();
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare("INSERT INTO settings (key, value) VALUES ('auto_update_enabled', '0')").run();
+    const configPath = writeAutoUpdateTestConfig(dir, true);
+    const pipeline = new Pipeline(
+      db,
+      createImStub(),
+      new RecordingAgent(),
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { enabled: true, windowStartHour: 2, windowEndHour: 5, timezone: "Asia/Shanghai", marginMinutes: 10, notifyOnResult: true },
+      configPath,
+    );
+
+    await pipeline.start();
+
+    expect(loadConfig(configPath).autoUpdate).toBeUndefined();
+    expect((pipeline as any).isAutoUpdateEnabled()).toBe(false);
+    expect(db.prepare("SELECT value FROM settings WHERE key = 'auto_update_enabled'").get()).toBeUndefined();
+    pipeline.stop();
+  });
+
+  test("does not migrate legacy DB on when config has already disabled auto update", async () => {
+    vi.useFakeTimers();
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare("INSERT INTO settings (key, value) VALUES ('auto_update_enabled', '1')").run();
+    const configPath = writeAutoUpdateTestConfig(dir, false);
+    const pipeline = new Pipeline(
+      db,
+      createImStub(),
+      new RecordingAgent(),
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      configPath,
+    );
+
+    await pipeline.start();
+
+    expect(loadConfig(configPath).autoUpdate).toBeUndefined();
+    expect((pipeline as any).isAutoUpdateEnabled()).toBe(false);
+    expect(db.prepare("SELECT value FROM settings WHERE key = 'auto_update_enabled'").get()).toBeUndefined();
+    pipeline.stop();
+  });
+
+  test("does not enable legacy DB on when the service has no config file", async () => {
+    vi.useFakeTimers();
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare("INSERT INTO settings (key, value) VALUES ('auto_update_enabled', '1')").run();
+    const pipeline = new Pipeline(
+      db,
+      createImStub(),
+      new RecordingAgent(),
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+
+    await pipeline.start();
+
+    expect((pipeline as any).isAutoUpdateEnabled()).toBe(false);
+    expect(db.prepare("SELECT value FROM settings WHERE key = 'auto_update_enabled'").get()).toBeUndefined();
+    pipeline.stop();
+  });
+
+  test("/update auto on works with default settings and /update reports it enabled", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const configPath = writeAutoUpdateTestConfig(dir, false);
+    const { im, sentCards } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db,
+      im,
+      new RecordingAgent(),
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+    (pipeline as any).configPath = configPath;
+    (pipeline as any).runNpmCommand = async () => ({ stdout: "0.2.7\n", stderr: "" });
+
+    (pipeline as any).handleAutoUpdateCommand(["on"], "c1", "chat-open-id");
+    await (pipeline as any).handleUpdate("c1", "chat-open-id", undefined, false, true);
+
+    expect(loadConfig(configPath).autoUpdate?.enabled).toBe(true);
+    expect((pipeline as any).isAutoUpdateEnabled()).toBe(true);
+    expect(sentCards.at(-1)?.content).toContain("**自动升级：** ✅ 开启");
+    expect(sentCards.at(-1)?.content).toContain("窗口：** 2:00-5:00");
+  });
+
+  test("enabling auto update at runtime starts its loop and disabling stops it", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 3, 25, 15, 0, 0));
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const configPath = writeAutoUpdateTestConfig(dir, false);
+    const pipeline = new Pipeline(
+      db,
+      createImStub(),
+      new RecordingAgent(),
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+    (pipeline as any).configPath = configPath;
+    let checks = 0;
+    (pipeline as any).runAutoUpgradeCheck = async () => { checks++; };
+    await pipeline.start();
+
+    (pipeline as any).handleAutoUpdateCommand(["on"], "c1", "chat-open-id");
+    expect(checks).toBe(1);
+    (pipeline as any).handleAutoUpdateCommand(["off"], "c1", "chat-open-id");
+    await vi.advanceTimersByTimeAsync(30 * 60 * 1000);
+    expect(checks).toBe(1);
+    pipeline.stop();
+  });
+
+  test("disabling auto update prevents an in-flight check from restarting the Engine", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 3, 25, 3, 0, 0));
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const configPath = writeAutoUpdateTestConfig(dir, false);
+    const pipeline = new Pipeline(
+      db,
+      createImStub(),
+      new RecordingAgent(),
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+    (pipeline as any).configPath = configPath;
+    let finishFetch!: (value: { stdout: string; stderr: string }) => void;
+    (pipeline as any).runNpmCommand = () => new Promise((resolve) => { finishFetch = resolve; });
+    let restarted = false;
+    (pipeline as any).triggerRestart = () => { restarted = true; };
+    await pipeline.start();
+
+    (pipeline as any).handleAutoUpdateCommand(["on"], "c1", "chat-open-id");
+    (pipeline as any).handleAutoUpdateCommand(["off"], "c1", "chat-open-id");
+    finishFetch({ stdout: "9.9.9\n", stderr: "" });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(restarted).toBe(false);
+    pipeline.stop();
+  });
+
+  test("a non-primary Bot cannot enable the Engine auto-update loop", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const configPath = writeAutoUpdateTestConfig(dir, false);
+    const { im, sentCards } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db,
+      im,
+      new RecordingAgent(),
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      false,
+    );
+    (pipeline as any).configPath = configPath;
+
+    (pipeline as any).handleAutoUpdateCommand(["on"], "c1", "chat-open-id");
+
+    expect(loadConfig(configPath).autoUpdate).toBeUndefined();
+    expect(sentCards.at(-1)?.content).toContain("只可由当前服务的主 Bot 管理");
+  });
+
+  test("does not enable auto update when no config file can persist it", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const { im, sentCards } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db,
+      im,
+      new RecordingAgent(),
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+
+    (pipeline as any).handleAutoUpdateCommand(["on"], "c1", "chat-open-id");
+
+    expect((pipeline as any).isAutoUpdateEnabled()).toBe(false);
+    expect(sentCards.at(-1)?.content).toContain("当前服务没有配置文件");
+  });
+
+  test("does not change runtime state when the config file is invalid", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const configPath = path.join(dir, "config.yaml");
+    writeFileSync(configPath, "[invalid");
+    const { im, sentCards } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db,
+      im,
+      new RecordingAgent(),
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+    (pipeline as any).configPath = configPath;
+
+    (pipeline as any).handleAutoUpdateCommand(["on"], "c1", "chat-open-id");
+
+    expect((pipeline as any).isAutoUpdateEnabled()).toBe(false);
+    expect(sentCards.at(-1)?.content).toContain("自动升级设置保存失败");
+    expect(readFileSync(configPath, "utf-8")).toBe("[invalid");
   });
 
   test("switches reasoning effort via /effort and persists it", () => {
@@ -5261,7 +5605,6 @@ describe("auto-upgrade", () => {
     tempDirs.push(dir);
 
     const db = initDatabase(path.join(dir, "niubot.db"));
-    writeAutoUpdateEnabled(db, true); // 显式开启（/update auto on 的 DB 开关）
     const agent = new RecordingAgent();
     const { im } = createRecordingImStub();
     const pipeline = new Pipeline(
@@ -5303,7 +5646,6 @@ describe("auto-upgrade", () => {
     tempDirs.push(dir);
 
     const db = initDatabase(path.join(dir, "niubot.db"));
-    writeAutoUpdateEnabled(db, true); // 显式开启
     const agent = new RecordingAgent();
     const { im } = createRecordingImStub();
     const pipeline = new Pipeline(
@@ -5388,7 +5730,6 @@ describe("auto-upgrade", () => {
     tempDirs.push(dir);
 
     const db = initDatabase(path.join(dir, "niubot.db"));
-    writeAutoUpdateEnabled(db, true); // 显式开启
     db.prepare(
       "INSERT INTO cron_jobs (chat_id, creator_user_id, cron_expr, prompt, status) VALUES ('c1', 'u2', '0 6 * * *', 'morning', 'active')",
     ).run();
@@ -5518,7 +5859,77 @@ describe("auto-upgrade", () => {
 
     expect(sentCards.some((card: { content: string }) => card.content.includes("已自动升级"))).toBe(true);
     pipeline.stop();
+
+    const secondPipeline = new Pipeline(
+      db,
+      im,
+      agent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      autoUpdateConfig,
+    );
+    (secondPipeline as any).runNpmCommand = async () => ({ stdout: "9.9.9\n", stderr: "" });
+    (secondPipeline as any).version = "9.9.9";
+    await secondPipeline.start();
+    await (secondPipeline as any).checkForUpdatesAndNotifyAdmins();
+
+    expect(sentCards.filter((card: { content: string }) => card.content.includes("已自动升级"))).toHaveLength(1);
+    secondPipeline.stop();
     vi.useRealTimers();
+  });
+
+  test("does not report a successful auto-upgrade from the nighttime auto-upgrade loop", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-07T19:00:00Z"));
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-autoupdate-test-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const { im, sentCards } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db,
+      im,
+      new RecordingAgent(),
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      autoUpdateConfig,
+    );
+    const restartDir = path.join(dir, "restart");
+    mkdirSync(restartDir, { recursive: true });
+    writeFileSync(path.join(restartDir, "state.json"), JSON.stringify({
+      id: "r1", phase: "success", startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      candidateRelease: "20260808-000000-000Z-9.9.9-abc", autoUpdate: true,
+    }));
+    (pipeline as any).version = "9.9.9";
+    (pipeline as any).pipelineStarted = true;
+    (pipeline as any).runNpmCommand = async () => ({ stdout: "9.9.9\n", stderr: "" });
+
+    await (pipeline as any).runAutoUpgradeCheck();
+
+    expect(sentCards.some((card) => card.content.includes("已自动升级"))).toBe(false);
   });
 
   test("skips auto upgrade when target is a prerelease/dev version", async () => {
@@ -5624,7 +6035,6 @@ describe("auto-upgrade", () => {
     tempDirs.push(dir);
 
     const db = initDatabase(path.join(dir, "niubot.db"));
-    writeAutoUpdateEnabled(db, true); // 显式开启
     const agent = new RecordingAgent();
     const { im } = createRecordingImStub();
     const pipeline = new Pipeline(

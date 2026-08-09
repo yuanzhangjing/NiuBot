@@ -23,9 +23,6 @@ export const UPGRADE_WAIT_RUN_TIMEOUT_MS = 5 * 60_000;
  */
 export const UPGRADE_SAFENESS_WINDOW_MS = 30 * 60_000;
 
-/** 自动升级开关在 DB 中的键名（/autoupdate on|off 持久化）。 */
-export const AUTO_UPDATE_ENABLED_KEY = "auto_update_enabled";
-
 export interface AutoUpdateConfig {
   enabled: boolean;
   /** 当地时区固定可升级窗口（24h 制） */
@@ -248,23 +245,4 @@ export function minutesUntilUpgradeWindowEnd(date: Date, config: AutoUpdateConfi
   let minutes = (windowEndHour - hour) * 60 - minute;
   if (minutes < 0) minutes += 24 * 60; // 跨天窗口：已过午夜，补到次日结束
   return minutes;
-}
-
-// ─── 升级锁（DB 持久化）───────────────────────────────────────────
-
-/** 读取自动升级开关（DB 持久化，/autoupdate 命令写入）；无记录返回 null。 */
-export function readAutoUpdateEnabled(db: Database): boolean | null {
-  const row = db.prepare("SELECT value FROM settings WHERE key = ?").get(AUTO_UPDATE_ENABLED_KEY) as
-    | { value: string }
-    | undefined;
-  if (!row) return null;
-  return row.value === "1";
-}
-
-/** 写入自动升级开关。 */
-export function writeAutoUpdateEnabled(db: Database, enabled: boolean): void {
-  db.prepare(
-    `INSERT INTO settings (key, value, updated_at) VALUES (?, ?, datetime('now'))
-     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`,
-  ).run(AUTO_UPDATE_ENABLED_KEY, enabled ? "1" : "0");
 }

@@ -2,7 +2,15 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { BUILTIN_BACKEND_LIST, loadConfig, normalizeBackend, resolveHomePath } from "./config.js";
+import {
+  BUILTIN_BACKEND_LIST,
+  configMutationLockPath,
+  loadConfig,
+  normalizeBackend,
+  resolveHomePath,
+  writeAutoUpdateEnabledToConfig,
+} from "./config.js";
+import { acquireProcessLock } from "./process-lock.js";
 
 const tempDirs: string[] = [];
 
@@ -252,5 +260,139 @@ autoUpdate: false
 `, "utf-8");
 
     expect(loadConfig(configPath).autoUpdate).toBeUndefined();
+  });
+
+  it("persists autoUpdate in YAML and keeps comments and other fields", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-config-write-"));
+    tempDirs.push(dir);
+    const configPath = path.join(dir, "config.yaml");
+    fs.writeFileSync(configPath, [
+      "# keep this comment",
+      "bots:",
+      "  - id: NiuBot",
+      "    appId: app-id",
+      "    appSecret: app-secret",
+      `    workingDirectory: ${dir}/workspace`,
+      "queue:",
+      "  bufferMs: 1234",
+      "",
+    ].join("\n"), { mode: 0o640 });
+    const originalOwner = fs.statSync(configPath);
+
+    writeAutoUpdateEnabledToConfig(configPath, true);
+    expect(loadConfig(configPath).autoUpdate?.enabled).toBe(true);
+    expect(fs.readFileSync(configPath, "utf-8")).toContain("# keep this comment");
+    expect(loadConfig(configPath).queue.bufferMs).toBe(1234);
+    expect(fs.statSync(configPath).mode & 0o777).toBe(0o640);
+    expect(fs.statSync(configPath).uid).toBe(originalOwner.uid);
+    expect(fs.statSync(configPath).gid).toBe(originalOwner.gid);
+
+    writeAutoUpdateEnabledToConfig(configPath, false);
+    expect(loadConfig(configPath).autoUpdate).toBeUndefined();
+  });
+
+  it("persists autoUpdate in JSON config", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-config-write-"));
+    tempDirs.push(dir);
+    const configPath = path.join(dir, "config.json");
+    fs.writeFileSync(configPath, JSON.stringify({
+      bots: [{
+        id: "NiuBot",
+        appId: "app-id",
+        appSecret: "app-secret",
+        workingDirectory: path.join(dir, "workspace"),
+      }],
+    }));
+
+    writeAutoUpdateEnabledToConfig(configPath, true);
+
+    expect(loadConfig(configPath).autoUpdate?.enabled).toBe(true);
+  });
+
+  it("does not overwrite config while another process-level config mutation holds the lock", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-config-lock-"));
+    tempDirs.push(dir);
+    const configPath = path.join(dir, "config.yaml");
+    const original = [
+      "bots:",
+      "  - id: NiuBot",
+      "    appId: app-id",
+      "    appSecret: app-secret",
+      `    workingDirectory: ${dir}/workspace`,
+      "autoUpdate: false",
+      "",
+    ].join("\n");
+    fs.writeFileSync(configPath, original);
+    const release = acquireProcessLock(configMutationLockPath(configPath), "Test config update");
+    try {
+      expect(() => writeAutoUpdateEnabledToConfig(configPath, true)).toThrow(/already running/);
+      expect(fs.readFileSync(configPath, "utf-8")).toBe(original);
+    } finally {
+      release();
+    }
+  });
+
+  it("keeps the configured format when config path is a symlink", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-config-write-"));
+    tempDirs.push(dir);
+    const targetPath = path.join(dir, "active-config");
+    const configPath = path.join(dir, "config.json");
+    fs.writeFileSync(targetPath, JSON.stringify({
+      bots: [{
+        id: "NiuBot",
+        appId: "app-id",
+        appSecret: "app-secret",
+        workingDirectory: path.join(dir, "workspace"),
+      }],
+    }));
+    fs.symlinkSync(targetPath, configPath);
+
+    writeAutoUpdateEnabledToConfig(configPath, true);
+
+    expect(fs.lstatSync(configPath).isSymbolicLink()).toBe(true);
+    expect(loadConfig(configPath).autoUpdate?.enabled).toBe(true);
+    expect(JSON.parse(fs.readFileSync(targetPath, "utf-8")).autoUpdate).toBe(true);
+  });
+
+  it("recovers an interrupted Windows-style replacement before loading", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-config-recover-"));
+    tempDirs.push(dir);
+    const configPath = path.join(dir, "config.yaml");
+    fs.writeFileSync(configPath, [
+      "bots:",
+      "  - id: NiuBot",
+      "    appId: app-id",
+      "    appSecret: app-secret",
+      `    workingDirectory: ${dir}/workspace`,
+      "autoUpdate: true",
+      "",
+    ].join("\n"));
+    fs.renameSync(configPath, `${configPath}.replace-backup`);
+
+    expect(loadConfig(configPath).autoUpdate?.enabled).toBe(true);
+    expect(fs.existsSync(configPath)).toBe(true);
+    expect(fs.existsSync(`${configPath}.replace-backup`)).toBe(false);
+  });
+
+  it("recovers an interrupted replacement behind a config symlink", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-config-recover-"));
+    tempDirs.push(dir);
+    const targetPath = path.join(dir, "active-config");
+    const configPath = path.join(dir, "config.yaml");
+    fs.writeFileSync(targetPath, [
+      "bots:",
+      "  - id: NiuBot",
+      "    appId: app-id",
+      "    appSecret: app-secret",
+      `    workingDirectory: ${dir}/workspace`,
+      "autoUpdate: true",
+      "",
+    ].join("\n"));
+    fs.symlinkSync(targetPath, configPath);
+    fs.renameSync(targetPath, `${targetPath}.replace-backup`);
+
+    expect(loadConfig(configPath).autoUpdate?.enabled).toBe(true);
+    expect(fs.lstatSync(configPath).isSymbolicLink()).toBe(true);
+    expect(fs.existsSync(targetPath)).toBe(true);
   });
 });

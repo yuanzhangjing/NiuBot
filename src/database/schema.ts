@@ -728,8 +728,9 @@ const migrations: Migration[] = [
   },
   {
     version: 29,
-    description: "Add settings kv table for auto-update lock and upgrade history",
+    description: "Historical settings kv table (kept for schema compatibility; no active runtime dependency)",
     up: (db) => {
+      // 已发布的 migration 不删除，避免旧库的 schema 水位倒退。当前运行码不读写此表。
       db.exec(`
         CREATE TABLE IF NOT EXISTS settings (
           key        TEXT PRIMARY KEY,

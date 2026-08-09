@@ -6,7 +6,7 @@ import Database from "better-sqlite3";
 import { c as createTar, t as listTar, x as extractTar } from "tar";
 import yaml from "yaml";
 import { DEFAULT_BOT_PROFILE } from "./bot-profile.js";
-import { loadConfig, resolveHomePath } from "./config.js";
+import { configMutationLockPath, loadConfig, resolveHomePath } from "./config.js";
 import { createRestartDatabaseSnapshot, cleanupRestartDatabaseSnapshot } from "./database/restart-snapshot.js";
 import { LATEST_SCHEMA_VERSION } from "./database/schema.js";
 import { replaceFileSync, samePlatformPath } from "./platform/files.js";
@@ -784,6 +784,7 @@ async function withHomeTransferLocks<T>(homes: string[], operation: () => Promis
       ensurePrivateInternalDirectory(runDirectory);
       releases.push(acquireProcessLock(path.join(runDirectory, "bot-transfer.lock"), "Bot transfer"));
       releases.push(acquireProcessLock(path.join(runDirectory, "engine-start.lock"), "Engine start"));
+      releases.push(acquireProcessLock(configMutationLockPath(path.join(home, "config.yaml")), "Config update"));
     }
     return await operation();
   } finally {

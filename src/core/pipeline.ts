@@ -15,7 +15,14 @@ import type { InboundDelivery, NormalizedMessage, TransportClient } from "../tra
 import { ERROR_DISPLAY_MAX_LEN } from "../agent/types.js";
 import { AgentSessionNotStartedError, type AgentBackend, type AgentResponse, type AgentSession, type AgentSessionActivity, type SessionConfig } from "../agent/types.js";
 import { CliAgentBackend, buildNiubotEnv } from "../agent/cli-base.js";
-import { BUILTIN_BACKEND_LIST, NIUBOT_HOME, normalizeBackend, type AgentBackendType, type RestartConfig } from "../config.js";
+import {
+  BUILTIN_BACKEND_LIST,
+  NIUBOT_HOME,
+  normalizeBackend,
+  writeAutoUpdateEnabledToConfig,
+  type AgentBackendType,
+  type RestartConfig,
+} from "../config.js";
 import { ChatManager } from "./chat-manager.js";
 import type { QueuedMessage } from "./queue.js";
 import { WorkerRuntime } from "../worker/runtime.js";
@@ -42,7 +49,6 @@ import {
 } from "../database/schema.js";
 import { isNewerPackageVersion, isPrereleaseOrUnrecognizedVersion } from "../version.js";
 import {
-  readAutoUpdateEnabled, writeAutoUpdateEnabled,
   AUTO_UPDATE_DEFAULTS,
   isSafeForUpgrade, isInUpgradeWindow, minutesUntilUpgradeWindowEnd,
   mainRunSource, workerSource, goalSource, cronSource, loopSource,
@@ -67,7 +73,6 @@ import {
   dateInTimeZone,
   dateTimeInTimeZone,
   formatLocalDateTimeWithTZ,
-  isInLocalHourWindow,
   millisecondsUntilLocalHour,
   TZ,
   userDateTimeToUtcSql,
@@ -106,7 +111,7 @@ import {
   GOAL_DEFAULTS,
 } from "./goal.js";
 import { launchRestartWorker } from "../restart-launcher.js";
-import { readRestartState } from "../restart-state.js";
+import { markAutoUpdateReported, readRestartState } from "../restart-state.js";
 import {
   resolveExecutable,
   resolveNpmExecutableForNode,
@@ -203,10 +208,10 @@ const INDEPENDENT_LONG_RUNNING_NOTIFY_MS = 3_600_000;  // 1 小时：独立 sess
 const UPDATE_CHECK_HOUR = 10;                  // 本地时间 10:00 检查 npm latest
 /** 自动升级独立检查间隔（30 分钟）：窗口内周期性判定，不依赖白天通知窗口 */
 const AUTO_UPGRADE_CHECK_INTERVAL_MS = 30 * 60_000;
+const LEGACY_AUTO_UPDATE_ENABLED_KEY = "auto_update_enabled";
 const WORKER_DELIVERY_MARKER = "> ⚙️ 本回复基于 Worker 后台任务结果整理";
 const WORKER_DISPATCH_MARKER = "> ⚙️ 已交由 Worker 后台执行";
 const LOOP_TASK_PREVIEW_MAX_CHARS = 80;
-const UPDATE_NOTIFY_END_HOUR = 18;             // 10:00-18:00 启动时允许立即通知
 const STARTUP_PLATFORM_TIMEOUT_MS = 5_000;      // 平台启动探测超时后降级继续启动
 
 /** 关闭阶段取消/关闭 backend session 的超时保护：后端卡住时不让 shutdown 永久阻塞。 */
@@ -368,18 +373,21 @@ export class Pipeline {
   private restartConfig?: RestartConfig;
   private autoUpdateNotificationsEnabled: boolean;
   private autoUpdateConfig?: AutoUpdateConfig;
+  private configPath?: string;
+  private pipelineStarted = false;
   private upgradeHistoryRecorded = new Set<string>();
   /** 自动升级当天已 fetch 过的日期（YYYY-MM-DD，本地时区）；同一天不重复 fetch */
   private autoUpgradeFetchedDay = "";
   /** 当天 fetch 到的最新版本缓存；null = 当天尚未 fetch 或暂无新版本 */
   private autoUpgradeLatestCache: string | null = null;
 
-  /** 自动升级是否启用：DB 开关（/autoupdate 写入）优先，其次 config.yaml 初始值。 */
-  /** 自动升级是否启用：/update auto 的 DB 开关优先；无记录时默认关（config 只是声明支持，默认不自动开）。 */
+  /** 自动升级是否启用：唯一来源是服务配置文件的 autoUpdate 布尔值。 */
   private isAutoUpdateEnabled(): boolean {
-    if (!this.autoUpdateConfig) return false;
-    const persisted = readAutoUpdateEnabled(this.db);
-    return persisted ?? false;
+    return this.autoUpdateNotificationsEnabled && this.autoUpdateConfig?.enabled === true;
+  }
+
+  private effectiveAutoUpdateConfig(): AutoUpdateConfig {
+    return this.autoUpdateConfig ?? { enabled: true, ...AUTO_UPDATE_DEFAULTS };
   }
   private botIdentity: BotIdentity;
   private log: ReturnType<typeof createLogger>;
@@ -461,6 +469,7 @@ export class Pipeline {
 
   /** 更新检查定时器 */
   private updateCheckTimer: ReturnType<typeof setTimeout> | null = null;
+  private updateCheckGeneration = 0;
   private autoUpgradeTimer: ReturnType<typeof setInterval> | null = null;
 
   /** 已发送 compact 通知的 session（避免重复通知） */
@@ -515,6 +524,7 @@ export class Pipeline {
     getBackendCapabilities?: () => BackendCapability[] | Promise<BackendCapability[]>,
     workerConfig?: WorkerPipelineConfig,
     autoUpdateConfig?: AutoUpdateConfig,
+    configPath?: string,
   ) {
     this.db = db;
     this.transport = transport;
@@ -538,6 +548,7 @@ export class Pipeline {
     this.restartConfig = restartConfig;
     this.autoUpdateNotificationsEnabled = autoUpdateNotificationsEnabled;
     this.autoUpdateConfig = autoUpdateConfig;
+    this.configPath = configPath;
     this.archiveHome = archiveHome ?? (process.env["VITEST"]
       ? path.join(path.dirname(dbPath), ".niubot-test")
       : NIUBOT_HOME);
@@ -639,13 +650,11 @@ export class Pipeline {
       this.cleanupWorkerJobsAfterRestart();
       this.workerScheduler.start();
     }
+    this.migrateLegacyAutoUpdateSetting();
+    this.pipelineStarted = true;
     if (this.autoUpdateNotificationsEnabled) {
-      if (this.isUpdateNotificationWindow(new Date())) {
-        this.checkForUpdatesAndNotifyAdmins().catch((err) => {
-          this.log.warn("startup update check failed", { error: String(err) });
-        });
-      }
-      this.scheduleNextUpdateCheck();
+      const generation = ++this.updateCheckGeneration;
+      this.scheduleNextUpdateCheck(generation);
     } else {
       this.log.info("automatic update notifications disabled for bot");
     }
@@ -709,6 +718,8 @@ export class Pipeline {
 
   /** 停止管道：清除队列计时器 */
   stop(): void {
+    this.pipelineStarted = false;
+    this.updateCheckGeneration++;
     if (this.watchdogTimer) {
       clearInterval(this.watchdogTimer);
       this.watchdogTimer = null;
@@ -728,6 +739,8 @@ export class Pipeline {
 
   /** 优雅关闭：cancel 所有活跃 session，清理资源（DB 中 session 保持 active，下次启动恢复） */
   async shutdown(): Promise<void> {
+    this.pipelineStarted = false;
+    this.updateCheckGeneration++;
     if (this.watchdogTimer) {
       clearInterval(this.watchdogTimer);
       this.watchdogTimer = null;
@@ -3939,12 +3952,18 @@ ${jobParts.join("\n\n")}
 
   /** /autoupdate：查看/开关自动升级。 */
   private handleAutoUpdateCommand(args: string[], chatId: string, platformChatId: string, msgId?: string): void {
-    // config.yaml 可配 autoUpdate: true 声明支持；不配时用默认窗口（开关仍可用 /update auto on|off）
-    const config = this.autoUpdateConfig ?? { enabled: true, ...AUTO_UPDATE_DEFAULTS };
+    const config = this.effectiveAutoUpdateConfig();
+
+    if (!this.autoUpdateNotificationsEnabled) {
+      this.sendAgentCard(chatId, platformChatId, msgId, "AutoUpdate", "自动升级只可由当前服务的主 Bot 管理。");
+      return;
+    }
 
     const action = args[0]?.toLowerCase();
     if (action === "on" || action === "enable" || action === "1") {
-      writeAutoUpdateEnabled(this.db, true);
+      if (!this.persistAutoUpdateSetting(true, chatId, platformChatId, msgId)) return;
+      this.autoUpdateConfig = { enabled: true, ...AUTO_UPDATE_DEFAULTS };
+      if (this.pipelineStarted && !this.autoUpgradeTimer) this.scheduleAutoUpgradeCheck();
       this.sendAgentCard(
         chatId, platformChatId, msgId, "AutoUpdate",
         `自动升级已**开启**。\n窗口：${config.windowStartHour}:00-${config.windowEndHour}:00（${config.timezone}），引擎空闲时自动升级。`,
@@ -3953,7 +3972,12 @@ ${jobParts.join("\n\n")}
       return;
     }
     if (action === "off" || action === "disable" || action === "0") {
-      writeAutoUpdateEnabled(this.db, false);
+      if (!this.persistAutoUpdateSetting(false, chatId, platformChatId, msgId)) return;
+      this.autoUpdateConfig = undefined;
+      if (this.autoUpgradeTimer) {
+        clearInterval(this.autoUpgradeTimer);
+        this.autoUpgradeTimer = null;
+      }
       this.sendAgentCard(chatId, platformChatId, msgId, "AutoUpdate", "自动升级已**关闭**。");
       this.log.info("auto-update disabled (runtime)", { userId: chatId });
       return;
@@ -3973,6 +3997,81 @@ ${jobParts.join("\n\n")}
       "（`/autoupdate` 为兼容别名）",
     ];
     this.sendAgentCard(chatId, platformChatId, msgId, "AutoUpdate", lines.join("\n"));
+  }
+
+  private persistAutoUpdateSetting(
+    enabled: boolean,
+    chatId: string,
+    platformChatId: string,
+    msgId?: string,
+  ): boolean {
+    if (!this.configPath) {
+      this.sendAgentCard(
+        chatId,
+        platformChatId,
+        msgId,
+        "AutoUpdate",
+        "当前服务没有配置文件，无法持久化自动升级开关。",
+      );
+      return false;
+    }
+    try {
+      writeAutoUpdateEnabledToConfig(this.configPath, enabled);
+      this.deleteLegacyAutoUpdateSetting();
+      return true;
+    } catch (err) {
+      this.log.warn("failed to update auto-update config", { error: String(err) });
+      this.sendAgentCard(
+        chatId,
+        platformChatId,
+        msgId,
+        "AutoUpdate",
+        `自动升级设置保存失败：${err instanceof Error ? err.message : String(err)}`,
+      );
+      return false;
+    }
+  }
+
+  /**
+   * 0.2.7 及更早版本把 `/update auto on|off` 写在主 Bot DB。
+   * 只在旧值存在时一次性写入服务配置，成功后删除旧值，不形成长期 DB 依赖。
+   */
+  private migrateLegacyAutoUpdateSetting(): void {
+    if (!this.autoUpdateNotificationsEnabled) return;
+    let row: { value: string } | undefined;
+    try {
+      row = this.db.prepare("SELECT value FROM settings WHERE key = ?")
+        .get(LEGACY_AUTO_UPDATE_ENABLED_KEY) as { value: string } | undefined;
+    } catch (err) {
+      this.log.warn("failed to read legacy auto-update setting", { error: String(err) });
+      return;
+    }
+    if (!row || (row.value !== "0" && row.value !== "1")) return;
+
+    // 旧版语义是「config 先声明支持，DB 再开启」：任一侧关闭都不能自动升级。
+    // 因此旧 DB=1 只能在当前 config 本来就是 true 时迁为开启。
+    const enabled = row.value === "1" && this.autoUpdateConfig?.enabled === true;
+    this.autoUpdateConfig = enabled ? { enabled: true, ...AUTO_UPDATE_DEFAULTS } : undefined;
+    if (!this.configPath) {
+      this.deleteLegacyAutoUpdateSetting();
+      this.log.info("legacy auto-update setting discarded because no config file enables it");
+      return;
+    }
+    try {
+      writeAutoUpdateEnabledToConfig(this.configPath, enabled);
+      this.deleteLegacyAutoUpdateSetting();
+      this.log.info("legacy auto-update setting migrated to config", { enabled });
+    } catch (err) {
+      this.log.warn("failed to migrate legacy auto-update setting", { enabled, error: String(err) });
+    }
+  }
+
+  private deleteLegacyAutoUpdateSetting(): void {
+    try {
+      this.db.prepare("DELETE FROM settings WHERE key = ?").run(LEGACY_AUTO_UPDATE_ENABLED_KEY);
+    } catch (err) {
+      this.log.warn("failed to delete legacy auto-update setting", { error: String(err) });
+    }
   }
 
   /** 保存当前 agent/model 运行时选择；失败不影响当前命令执行。 */
@@ -4283,8 +4382,7 @@ ${jobParts.join("\n\n")}
 
   /** 自动升级状态/帮助行（供 /update 默认展示，单卡片合并）。 */
   private buildAutoUpdateStatusLines(): string[] {
-    // config.yaml 可配 autoUpdate: true 声明支持；不配时用默认窗口（开关仍可用 /update auto on|off）
-    const config = this.autoUpdateConfig ?? { enabled: true, ...AUTO_UPDATE_DEFAULTS };
+    const config = this.effectiveAutoUpdateConfig();
     const enabled = this.isAutoUpdateEnabled();
     return [
       `**自动升级：** ${enabled ? "✅ 开启" : "⛔ 关闭"}`,
@@ -4308,15 +4406,12 @@ ${jobParts.join("\n\n")}
     return rows.map((row) => row.platform_id);
   }
 
-  private isUpdateNotificationWindow(now: Date): boolean {
-    return isInLocalHourWindow(now, UPDATE_CHECK_HOUR, UPDATE_NOTIFY_END_HOUR, TZ);
-  }
-
   private getNextUpdateCheckDelayMs(now: Date): number {
     return millisecondsUntilLocalHour(now, UPDATE_CHECK_HOUR, TZ);
   }
 
-  private scheduleNextUpdateCheck(): void {
+  private scheduleNextUpdateCheck(generation: number): void {
+    if (generation !== this.updateCheckGeneration) return;
     if (this.updateCheckTimer) {
       clearTimeout(this.updateCheckTimer);
     }
@@ -4325,7 +4420,7 @@ ${jobParts.join("\n\n")}
         .catch((err) => {
           this.log.warn("scheduled update check failed", { error: String(err) });
         })
-        .finally(() => this.scheduleNextUpdateCheck());
+        .finally(() => this.scheduleNextUpdateCheck(generation));
     }, this.getNextUpdateCheckDelayMs(new Date()));
   }
 
@@ -4347,8 +4442,8 @@ ${jobParts.join("\n\n")}
   /** 自动升级检查循环入口：当天只 fetch 一次（无新版本则当天不再查），有锁汇报例外。 */
   private async runAutoUpgradeCheck(): Promise<void> {
     if (isPrereleaseOrUnrecognizedVersion(this.version)) return;
-    const config = this.autoUpdateConfig;
-    if (!config || !this.isAutoUpdateEnabled()) return;
+    const config = this.effectiveAutoUpdateConfig();
+    if (!this.isAutoUpdateEnabled()) return;
 
     const now = new Date();
     const today = dateInTimeZone(now, config.timezone);
@@ -4369,9 +4464,6 @@ ${jobParts.join("\n\n")}
       this.autoUpgradeLatestCache = latest;
     }
     if (!latest) return;
-
-    // 汇报读 restart/state.json 的 autoUpdate 标记（worker 写入），不依赖锁
-    await this.maybeReportUpgradeResult(latest);
 
     if (latest === this.version) return;
 
@@ -4432,8 +4524,8 @@ ${jobParts.join("\n\n")}
 
   /** 自动升级：窗口内 + 空闲判定通过 → 上锁并触发升级；否则顺延。 */
   private async maybeRunAutoUpgrade(latest: string): Promise<void> {
-    const config = this.autoUpdateConfig;
-    if (!config) return;
+    if (!this.pipelineStarted || !this.isAutoUpdateEnabled()) return;
+    const config = this.effectiveAutoUpdateConfig();
 
     // 避开 dev/prerelease 版本：自动升级只升正式版
     if (isPrereleaseOrUnrecognizedVersion(latest)) {
@@ -4458,6 +4550,7 @@ ${jobParts.join("\n\n")}
       this.log.warn("auto-upgrade predownload failed", { latest, error: String(err) });
       return false;
     });
+    if (!this.pipelineStarted || !this.isAutoUpdateEnabled()) return;
 
     // 预下载可能耗时数分钟：重取当前时间，窗口/余量/空闲判定都用新时间
     const afterDownload = Date.now();
@@ -4487,6 +4580,7 @@ ${jobParts.join("\n\n")}
       this.log.info("auto-upgrade aborted: task arrived before trigger", { latest, blockers: doubleCheck.blockers });
       return;
     }
+    if (!this.pipelineStarted || !this.isAutoUpdateEnabled()) return;
 
     this.log.info("auto-upgrade starting", { latest, version: this.version, predownloaded });
     try {
@@ -4534,7 +4628,7 @@ ${jobParts.join("\n\n")}
 
   /** 白天汇报：读 restart/state.json 的 autoUpdate 标记（worker 写入）→ 发「已自动升级」卡片。 */
   private async maybeReportUpgradeResult(_latest: string): Promise<void> {
-    if (!this.autoUpdateConfig?.notifyOnResult) return;
+    if (!this.effectiveAutoUpdateConfig().notifyOnResult) return;
     if (this.upgradeHistoryRecorded.has("reported")) return;
 
     // 只有「最近一次重启由自动升级触发且成功」才汇报。
@@ -4542,6 +4636,7 @@ ${jobParts.join("\n\n")}
     const state = readRestartState(this.restartStateFile());
     if (!state || !state.autoUpdate) return;
     if (state.phase !== "success") return; // 回滚/失败不汇报（静默保持旧版）
+    if (state.autoUpdateReportedAt) return;
 
     // 汇报版本 = 当前引擎版本（新引擎启动即升级后的版本，state.json 已确认是自动升级）
     const reportedVersion = this.version;
@@ -4557,6 +4652,11 @@ ${jobParts.join("\n\n")}
       }
     }
     if (delivered) {
+      try {
+        markAutoUpdateReported(this.restartStateFile(), state.id);
+      } catch (err) {
+        this.log.warn("failed to persist auto-upgrade report marker", { error: String(err) });
+      }
       recordUpdateNotification(this.db, this.botIdentity.name, reportedVersion);
       this.upgradeHistoryRecorded.add("reported");
       this.log.info("auto-upgrade result reported", { version: reportedVersion, delivered });

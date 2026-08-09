@@ -21,7 +21,7 @@ import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 import yaml from "yaml";
 import { DEFAULT_BOT_PROFILE } from "./bot-profile.js";
-import { AGENT_REGISTRY, expandHome, loadConfig, normalizeBackend, resolveHomePath, type NiuBotConfig } from "./config.js";
+import { AGENT_REGISTRY, expandHome, loadConfig, normalizeBackend, resolveHomePath, updateConfigFileAtomically, type NiuBotConfig } from "./config.js";
 import { INSTALL_GUIDE_COMMAND } from "./install-guide.js";
 import { localToday } from "./tz.js";
 import { localApiRequest, waitForLocalApiHealth } from "./local-api/client.js";
@@ -772,10 +772,7 @@ async function cmdAddBot(niubotHome: string): Promise<void> {
   };
   if (model) newBot["model"] = model;
 
-  existingBots.push(newBot);
-  doc["bots"] = existingBots;
-
-  fs.writeFileSync(configPath, yaml.stringify(doc, { lineWidth: 0 }));
+  appendBotToConfig(configPath, newBot);
   ok("Updated config.yaml");
 
   // ── Summary ─────────────────────────────────────────────
@@ -811,6 +808,22 @@ async function cmdAddBot(niubotHome: string): Promise<void> {
     }
   }
   console.log();
+}
+
+/** 重读并合并最新配置，避免 add-bot 交互期间覆盖其他设置。 */
+export function appendBotToConfig(configPath: string, newBot: Record<string, string>): void {
+  updateConfigFileAtomically(configPath, (raw, format) => {
+    if (format !== "yaml") throw new Error("add-bot only supports config.yaml");
+    const latest = yaml.parse(raw) as Record<string, unknown>;
+    if (!Array.isArray(latest["bots"])) throw new Error("config.yaml uses legacy format (no 'bots' array)");
+    const bots = latest["bots"] as Array<Record<string, unknown>>;
+    const botId = newBot["id"] ?? "";
+    if (bots.some((bot) => String(bot["id"] ?? bot["name"] ?? "") === botId)) {
+      throw new Error(`Bot ID '${botId}' already exists in config.yaml`);
+    }
+    latest["bots"] = [...bots, newBot];
+    return yaml.stringify(latest, { lineWidth: 0 });
+  });
 }
 
 // ── Templates ──────────────────────────────────────────────

@@ -11,8 +11,6 @@ import {
   loopSource,
   mainRunSource,
   minutesUntilUpgradeWindowEnd,
-  readAutoUpdateEnabled,
-  writeAutoUpdateEnabled,
   workerSource,
   type AutoUpdateConfig,
 } from "./auto-update.js";
@@ -139,19 +137,5 @@ describe("loop source", () => {
       listJobs: () => [{ status: "active", nextRunAt: "2026-08-07T22:00:00Z" }],
     });
     expect(source.isIdle(new Date("2026-08-07T19:00:00Z").getTime(), 30 * 60_000)).toBe(true);
-  });
-});
-
-describe("upgrade enabled toggle", () => {
-  it("persists auto-update enabled toggle in real DB", () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-autoupdate-toggle-"));
-    tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
-    expect(readAutoUpdateEnabled(db)).toBeNull();
-    writeAutoUpdateEnabled(db, true);
-    expect(readAutoUpdateEnabled(db)).toBe(true);
-    writeAutoUpdateEnabled(db, false);
-    expect(readAutoUpdateEnabled(db)).toBe(false);
-    db.close();
   });
 });

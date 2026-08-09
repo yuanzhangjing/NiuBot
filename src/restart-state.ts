@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { recoverFileReplacementSync, replaceFileSync } from "./platform/files.js";
 
@@ -14,6 +15,8 @@ export interface RestartState {
   error?: string;
   /** 本次重启是否由自动升级触发（NIUBOT_AUTO_UPDATE=1 写入）；供新引擎早晨汇报判定。 */
   autoUpdate?: boolean;
+  /** 自动升级成功通知已送达；跨 Engine 重启去重。 */
+  autoUpdateReportedAt?: string;
 }
 
 export function readRestartState(stateFile: string, expectedId?: string): RestartState | undefined {
@@ -61,6 +64,7 @@ export class RestartStateWriter {
       error: values.error,
       // 本次重启的属性，构造时固定，每次 write 都带上（不被后续 write 覆盖丢失）
       autoUpdate: this.autoUpdate,
+      autoUpdateReportedAt: values.autoUpdateReportedAt ?? previous?.autoUpdateReportedAt,
     };
     const tempFile = `${this.stateFile}.${process.pid}.${Date.now()}.tmp`;
     const fd = fs.openSync(tempFile, "wx", 0o600);
@@ -76,5 +80,32 @@ export class RestartStateWriter {
 
   read(): RestartState | undefined {
     return readRestartState(this.stateFile, this.id);
+  }
+}
+
+/** 持久标记自动升级结果已通知，避免进程重启后重复发送。 */
+export function markAutoUpdateReported(stateFile: string, expectedId: string): boolean {
+  const state = readRestartState(stateFile, expectedId);
+  if (!state || !state.autoUpdate || state.phase !== "success") return false;
+  if (state.autoUpdateReportedAt) return true;
+  const updated: RestartState = {
+    ...state,
+    autoUpdateReportedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+  const temporary = `${stateFile}.${process.pid}.${randomUUID()}.tmp`;
+  fs.mkdirSync(path.dirname(stateFile), { recursive: true });
+  try {
+    const fd = fs.openSync(temporary, "wx", 0o600);
+    try {
+      fs.writeFileSync(fd, `${JSON.stringify(updated, null, 2)}\n`, "utf-8");
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+    replaceFileSync(temporary, stateFile);
+    return true;
+  } finally {
+    fs.rmSync(temporary, { force: true });
   }
 }
