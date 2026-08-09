@@ -100,7 +100,9 @@ describe("Bot transfer bundle", () => {
       outputPath: bundle,
       sourceVersion: "1.2.3",
     });
-    expect(fs.statSync(bundle).mode & 0o777).toBe(0o600);
+    if (process.platform !== "win32") {
+      expect(fs.statSync(bundle).mode & 0o777).toBe(0o600);
+    }
 
     const unpacked = path.join(root, "unpacked");
     fs.mkdirSync(unpacked);

@@ -40,7 +40,9 @@ describe("Bot transfer worker launcher", () => {
     });
 
     const requestFile = path.join(path.dirname(launched.stateFile), "request.json");
-    expect(fs.statSync(requestFile).mode & 0o777).toBe(0o600);
+    if (process.platform !== "win32") {
+      expect(fs.statSync(requestFile).mode & 0o777).toBe(0o600);
+    }
     expect(fs.existsSync(path.join(source, "run", "bot-transfer-active", `${launched.id}.json`))).toBe(true);
     expect(fs.existsSync(path.join(target, "run", "bot-transfer-active", `${launched.id}.json`))).toBe(true);
     await waitForFile(sentinel);

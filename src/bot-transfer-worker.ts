@@ -568,7 +568,6 @@ function readRequest(requestFile: string): BotTransferWorkerRequest {
 
 function adoptActiveMarkers(homes: string[], id: string, primaryHome: string, stateFile: string): void {
   const processStartMarker = queryProcessStartMarker(process.pid);
-  if (!processStartMarker) throw new Error("Bot transfer worker has no verifiable process marker");
   for (const home of new Set(homes.map((item) => path.resolve(item)))) {
     const markerFile = path.join(home, "run", "bot-transfer-active", `${id}.json`);
     if (!fs.existsSync(markerFile)) continue;

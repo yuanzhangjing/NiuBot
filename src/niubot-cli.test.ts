@@ -271,8 +271,8 @@ describe("niubot CLI path helpers", () => {
 
     expect(results.niubot).toMatchObject({ status: "skipped", reason: "source runtime" });
     expect(results.nbt.status).toBe("created");
-    expect(fs.existsSync(path.join(homeDir, ".local", "bin", "niubot"))).toBe(false);
-    expect(fs.existsSync(path.join(homeDir, ".local", "bin", "nbt"))).toBe(true);
+    expect(fs.existsSync(results.niubot.shimPath)).toBe(false);
+    expect(fs.existsSync(results.nbt.shimPath)).toBe(true);
   });
 
   it("builds a native Windows command shim without a Unix shell", () => {

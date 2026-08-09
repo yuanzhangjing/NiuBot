@@ -112,13 +112,10 @@ function launchDetachedEngineLocked(options: LaunchEngineOptions): LaunchedEngin
     try { fs.appendFileSync(options.logFile, `[${new Date().toISOString()}] Engine spawn failed: ${err.message}\n`); } catch { /* ignore */ }
   });
   if (!child.pid) throw new Error("Engine process did not provide a PID");
-  const platformStartMarker = waitForProcessStartMarker(child.pid);
-  if (!platformStartMarker) {
-    // Use the ChildProcess handle here: no verified OS marker exists yet, so
-    // a PID-based tree kill could target a reused PID if the child exited.
-    try { terminateSpawnedProcessTree(child.pid, true); } catch { /* already stopped */ }
-    throw new Error(`Engine process ${child.pid} started, but its identity marker could not be read`);
-  }
+  // This marker only protects the PID-based emergency stop path. Engine IPC
+  // identity remains the primary health and shutdown check, so a platform
+  // that cannot expose process creation time must not make launch fail.
+  const platformStartMarker = queryProcessStartMarker(child.pid);
 
   const state: EngineProcessState = {
     pid: child.pid,

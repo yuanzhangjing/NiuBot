@@ -27,7 +27,7 @@ import { BackendCapabilityCache } from "./agent/backend-capability-cache.js";
 import { normalizeBackend } from "./config.js";
 import { EngineControlServer, type EngineIdentity } from "./local-api/engine-server.js";
 import { clearProcessState, readProcessState, writeProcessState } from "./process-state.js";
-import { waitForProcessStartMarker } from "./platform/process.js";
+import { queryProcessStartMarker } from "./platform/process.js";
 import { samePlatformPath } from "./platform/files.js";
 import { resolveInFlightShutdownTimeoutMs } from "./lifecycle-timeouts.js";
 import {
@@ -445,10 +445,7 @@ async function main(): Promise<void> {
   if (launcherManagesState) {
     log.info("launcher-managed process state retained", { instanceId, endpoint: engineEndpoint.address });
   } else {
-    const platformStartMarker = waitForProcessStartMarker(process.pid);
-    if (!platformStartMarker) {
-      throw new Error(`Engine process ${process.pid} identity marker is unavailable`);
-    }
+    const platformStartMarker = queryProcessStartMarker(process.pid);
     writeProcessState(NIUBOT_HOME, {
       pid: process.pid,
       instanceId,

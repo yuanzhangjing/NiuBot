@@ -4,7 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { acquireProcessLock } from "./process-lock.js";
 import { replaceFileSync } from "./platform/files.js";
-import { waitForProcessStartMarker } from "./platform/process.js";
+import { queryProcessStartMarker } from "./platform/process.js";
 
 export interface TransferRuntimeTarget {
   runtimePath: string;
@@ -75,8 +75,7 @@ export function launchBotTransferWorker(options: LaunchBotTransferOptions): BotT
   const logFile = path.join(primaryHome, "logs", "bot-transfer.log");
   const releases: Array<() => void> = [];
   const markerFiles: string[] = [];
-  const launcherStartMarker = waitForProcessStartMarker(process.pid);
-  if (!launcherStartMarker) throw new Error("Bot transfer launcher has no verifiable process marker");
+  const launcherStartMarker = queryProcessStartMarker(process.pid);
   let spawned = false;
   try {
     for (const home of orderedHomes) {
@@ -124,8 +123,7 @@ export function launchBotTransferWorker(options: LaunchBotTransferOptions): BotT
       fs.closeSync(logFd);
     }
     if (!child.pid) throw new Error("Bot transfer worker did not provide a PID");
-    const workerStartMarker = waitForProcessStartMarker(child.pid);
-    if (!workerStartMarker) throw new Error(`Bot transfer worker ${child.pid} has no verifiable process marker`);
+    const workerStartMarker = queryProcessStartMarker(child.pid);
     for (const markerFile of markerFiles) {
       replacePrivateJson(markerFile, {
         schemaVersion: 1,

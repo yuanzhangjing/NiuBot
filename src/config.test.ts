@@ -283,9 +283,11 @@ autoUpdate: false
     expect(loadConfig(configPath).autoUpdate?.enabled).toBe(true);
     expect(fs.readFileSync(configPath, "utf-8")).toContain("# keep this comment");
     expect(loadConfig(configPath).queue.bufferMs).toBe(1234);
-    expect(fs.statSync(configPath).mode & 0o777).toBe(0o640);
-    expect(fs.statSync(configPath).uid).toBe(originalOwner.uid);
-    expect(fs.statSync(configPath).gid).toBe(originalOwner.gid);
+    if (process.platform !== "win32") {
+      expect(fs.statSync(configPath).mode & 0o777).toBe(0o640);
+      expect(fs.statSync(configPath).uid).toBe(originalOwner.uid);
+      expect(fs.statSync(configPath).gid).toBe(originalOwner.gid);
+    }
 
     writeAutoUpdateEnabledToConfig(configPath, false);
     expect(loadConfig(configPath).autoUpdate).toBeUndefined();

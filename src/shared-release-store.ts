@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { recoverFileReplacementSync, replaceFileSync } from "./platform/files.js";
 import { acquireProcessLock } from "./process-lock.js";
-import { isProcessAlive, processStartMarkersMatch, queryProcessStartMarker, waitForProcessStartMarker } from "./platform/process.js";
+import { isProcessAlive, processStartMarkersMatch, queryProcessStartMarker } from "./platform/process.js";
 import { isReleaseRef, isSafeIdentifier, type ReleaseRef, type ReleaseSlots } from "./release-ref.js";
 
 const PACKAGE_NAME = "@yuanzhangjing/niubot";
@@ -117,7 +117,7 @@ export class SharedReleaseStore {
     const directory = fs.mkdtempSync(path.join(this.stagingDirectory, `${safePrefix}-${randomUUID()}-`));
     writePrivateJson(path.join(directory, STAGING_OWNER), {
       pid: process.pid,
-      processStartMarker: waitForProcessStartMarker(process.pid),
+      processStartMarker: queryProcessStartMarker(process.pid),
       createdAt: new Date().toISOString(),
     });
     return directory;

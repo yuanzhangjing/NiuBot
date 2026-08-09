@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { exec, execFileSync } from "node:child_process";
+import { exec } from "node:child_process";
 import { existsSync, mkdirSync, realpathSync, rmSync } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
