@@ -17,7 +17,9 @@ afterEach(async () => {
   for (const home of homes.splice(0)) {
     try { await stopEngine(home); } catch { /* already stopped */ }
   }
-  for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
+  for (const root of roots.splice(0)) {
+    fs.rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
 });
 
 describe("Bot transfer detached worker integration", () => {
