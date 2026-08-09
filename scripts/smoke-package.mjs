@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { x as extractTar } from "tar";
 
 const npmEntry = process.env.npm_execpath;
@@ -122,7 +123,45 @@ try {
     throw new Error(`Shared bootstrap mismatch: ${sharedReleases.length} releases, ${homeRefs.length} home refs`);
   }
 
-  console.log(`Package smoke passed: ${expected}; two homes share one artifact`);
+  // Simulate the first Engine boot after an old updater placed the package in
+  // a per-home release directory. The built package must adopt that exact
+  // runtime automatically without selecting a different installed seed.
+  const legacyHome = path.join(temporaryRoot, "legacy-home");
+  const legacyRuntime = path.join(legacyHome, "LegacyBot", "releases", `${packageJson.version}-npm`, "package");
+  fs.mkdirSync(path.dirname(legacyRuntime), { recursive: true });
+  fs.renameSync(archiveInstallRoot, legacyRuntime);
+  const legacySharedRoot = path.join(temporaryRoot, "legacy-shared-store");
+  const [{ HomeReleaseStore }, { SharedReleaseStore }, { completeRuntimeHomeMigrationAfterStartup }] = await Promise.all([
+    import(pathToFileURL(path.join(legacyRuntime, "dist", "home-release-store.js"))),
+    import(pathToFileURL(path.join(legacyRuntime, "dist", "shared-release-store.js"))),
+    import(pathToFileURL(path.join(legacyRuntime, "dist", "runtime-home-migration.js"))),
+  ]);
+  const sharedStore = new SharedReleaseStore(legacySharedRoot);
+  const homeStore = new HomeReleaseStore(legacyHome, sharedStore);
+  const node = {
+    nodePath: process.execPath,
+    nodeVersion: process.version,
+    nodeAbi: process.versions.modules,
+  };
+  const legacyRef = { storage: "legacy", runtimePath: legacyRuntime, node };
+  homeStore.writeState({ schemaVersion: 2, current: legacyRef, lastKnownGood: legacyRef });
+  const migration = await completeRuntimeHomeMigrationAfterStartup({
+    niubotHome: legacyHome,
+    runtimePath: legacyRuntime,
+    node,
+    sharedStore,
+    env: smokeEnv,
+    settleMs: 0,
+  });
+  if (migration?.state.current?.storage !== "shared") {
+    throw new Error("Packaged legacy runtime was not migrated to the shared store");
+  }
+  const migratedManifest = sharedStore.readManifest(migration.state.current.artifactId);
+  if (migratedManifest?.version !== packageJson.version || migration.state.lastKnownGood?.storage !== "shared") {
+    throw new Error("Packaged legacy migration did not preserve the active version and last-known-good slot");
+  }
+
+  console.log(`Package smoke passed: ${expected}; two homes share one artifact; legacy runtime adopted in one start`);
 } finally {
   fs.rmSync(temporaryRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
 }

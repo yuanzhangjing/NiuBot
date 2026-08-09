@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID } from "node:crypto";
-import { readFileSync, writeFileSync, unlinkSync, mkdirSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, unlinkSync, mkdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -17,7 +17,7 @@ import {
   loadPersistedBotRuntimeState,
 } from "./database/schema.js";
 import { createLogger, setLogLevel } from "./logger.js";
-import { ensureRuntimeNbtShim, prependNiubotBinToPath } from "./platform/cli-runtime.js";
+import { ensureRuntimeCliShims, prependNiubotBinToPath } from "./platform/cli-runtime.js";
 import { summarizeProxyEnvironment } from "./proxy-env.js";
 import { resolveBotRuntimeConfig } from "./runtime-config.js";
 import { startBotRuntime } from "./bot-startup.js";
@@ -37,6 +37,12 @@ import {
   shouldRunFullPreflight,
 } from "./database/restart-snapshot.js";
 import { assertSupportedNodeRuntime } from "./node-support.js";
+import { currentNodeRuntimeRef } from "./release-ref.js";
+import { resolveSharedRuntimeRoot } from "./platform/shared-runtime.js";
+import { SharedReleaseStore } from "./shared-release-store.js";
+import {
+  completeRuntimeHomeMigrationAfterStartup,
+} from "./runtime-home-migration.js";
 
 const log = createLogger("main");
 
@@ -75,6 +81,7 @@ async function loadBackendClass(
 async function main(): Promise<void> {
   assertSupportedNodeRuntime();
   const preflight = process.argv.includes("--preflight");
+  const runtimePath = resolve(fileURLToPath(new URL(".", import.meta.url)), "..");
   const preflightStartedAt = Date.now();
   const logPreflightStage = (
     stage: string,
@@ -97,36 +104,6 @@ async function main(): Promise<void> {
   log.info(preflight ? "NiuBot preflight check starting..." : "NiuBot starting...");
   log.info("proxy environment", summarizeProxyEnvironment());
   process.env["PATH"] = prependNiubotBinToPath();
-  try {
-    const nbtShim = ensureRuntimeNbtShim({ preflight });
-    if (nbtShim.status === "conflict") {
-      log.warn("nbt shim not installed because target already exists", {
-        shimPath: nbtShim.shimPath,
-        targetPath: nbtShim.targetPath,
-        reason: nbtShim.reason,
-      });
-    } else if (nbtShim.status === "skipped" && nbtShim.reason === "preflight run") {
-      log.info("nbt shim setup skipped", {
-        shimPath: nbtShim.shimPath,
-        targetPath: nbtShim.targetPath,
-        reason: nbtShim.reason,
-      });
-    } else if (nbtShim.status === "skipped") {
-      log.warn("nbt shim setup skipped", {
-        shimPath: nbtShim.shimPath,
-        targetPath: nbtShim.targetPath,
-        reason: nbtShim.reason,
-      });
-    } else {
-      log.info("nbt shim ready", {
-        status: nbtShim.status,
-        shimPath: nbtShim.shimPath,
-        targetPath: nbtShim.targetPath,
-      });
-    }
-  } catch (err) {
-    log.warn("nbt shim setup failed", { error: String(err) });
-  }
 
   const configStartedAt = Date.now();
   let config = loadConfig();
@@ -331,7 +308,6 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
-  const runtimePath = resolve(fileURLToPath(new URL(".", import.meta.url)), "..");
   const version = readRuntimeVersion(runtimePath);
   const instanceId = process.env["NIUBOT_INSTANCE_ID"] || randomUUID();
   const controlToken = process.env["NIUBOT_CONTROL_TOKEN"] || randomBytes(32).toString("hex");
@@ -463,6 +439,34 @@ async function main(): Promise<void> {
 
   log.info("NiuBot is running", { activeBots: bots.length });
 
+  {
+    const timer = setTimeout(() => {
+      void completeRuntimeHomeMigrationAfterStartup({
+        niubotHome: NIUBOT_HOME,
+        runtimePath,
+        node: currentNodeRuntimeRef(),
+        sharedStore: new SharedReleaseStore(resolveSharedRuntimeRoot()),
+        env: process.env,
+        settleMs: 0,
+        timeoutMs: resolveRuntimeMigrationWaitMs(),
+      }).then((migration) => {
+        let launcherRuntimePath = runtimePath;
+        if (migration) {
+          const { homeStore, sharedRef, state } = migration;
+          log.info("legacy runtime reference migrated to shared store", {
+            artifactId: sharedRef.artifactId,
+            lastKnownGoodStorage: state.lastKnownGood?.storage,
+          });
+          launcherRuntimePath = homeStore.resolveRuntime(sharedRef, true);
+        }
+        setupRuntimeCliShims(launcherRuntimePath);
+      }).catch((err) => {
+        log.warn("legacy runtime reference migration deferred", { error: String(err) });
+      });
+    }, resolveRuntimeMigrationSettleMs());
+    timer.unref();
+  }
+
   // Legacy compatibility for one migration cycle.
   try {
     mkdirSync(NIUBOT_HOME, { recursive: true });
@@ -495,6 +499,42 @@ function readRuntimeVersion(runtimePath: string): string {
     return pkg.version ?? "unknown";
   } catch {
     return "unknown";
+  }
+}
+
+function resolveRuntimeMigrationSettleMs(): number {
+  const parsed = Number(process.env["NIUBOT_RUNTIME_MIGRATION_SETTLE_MS"]);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 2_000;
+}
+
+function resolveRuntimeMigrationWaitMs(): number {
+  const parsed = Number(process.env["NIUBOT_RUNTIME_MIGRATION_WAIT_MS"]);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 120_000;
+}
+
+function setupRuntimeCliShims(runtimePath: string): void {
+  try {
+    const shims = ensureRuntimeCliShims({
+      projectRoot: runtimePath,
+      includeNiubot: !existsSync(resolve(runtimePath, "src")),
+    });
+    for (const [command, shim] of Object.entries(shims)) {
+      if (shim.status === "conflict" || shim.status === "skipped") {
+        log.warn(`${command} shim setup skipped`, {
+          status: shim.status,
+          reason: shim.reason,
+          shimPath: shim.shimPath,
+        });
+      } else {
+        log.info(`${command} shim ready`, {
+          status: shim.status,
+          shimPath: shim.shimPath,
+          targetPath: shim.targetPath,
+        });
+      }
+    }
+  } catch (err) {
+    log.warn("CLI shim setup failed", { error: String(err) });
   }
 }
 

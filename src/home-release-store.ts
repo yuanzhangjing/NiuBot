@@ -283,6 +283,34 @@ export class HomeReleaseStore {
     return next;
   }
 
+  /**
+   * Replace storage references after an installed legacy tree has been copied
+   * byte-for-byte into the shared store. This is a storage migration, not a
+   * version activation: slot meaning and ordering must remain unchanged.
+   */
+  replaceEquivalentRelease(expected: ReleaseRef, replacement: ReleaseRef): HomeReleaseState {
+    this.resolveRuntime(expected, true);
+    this.resolveRuntime(replacement, true);
+    const state = this.readStateStrict();
+    if (state.transaction) {
+      throw new Error(`Cannot migrate runtime storage during transaction '${state.transaction.transactionId}'`);
+    }
+    if (!sameReleaseRef(state.current, expected)) {
+      throw new Error("Current release changed before equivalent runtime migration completed");
+    }
+    const replace = (ref: ReleaseRef | undefined): ReleaseRef | undefined => (
+      ref && sameReleaseRef(ref, expected) ? replacement : ref
+    );
+    const next: HomeReleaseState = {
+      ...state,
+      current: replacement,
+      previous: replace(state.previous),
+      lastKnownGood: replace(state.lastKnownGood),
+    };
+    this.writeState(next);
+    return next;
+  }
+
   writeSharedRef(options: {
     state?: HomeReleaseState;
     pending?: SharedHomeRef["pending"];
@@ -347,6 +375,15 @@ export function isHomeReleaseState(value: unknown): value is HomeReleaseState {
 
 function releaseRefs(state: HomeReleaseState): ReleaseRef[] {
   return [state.current, state.previous, state.lastKnownGood].filter((ref): ref is ReleaseRef => ref !== undefined);
+}
+
+function sameReleaseRef(left: ReleaseRef | undefined, right: ReleaseRef | undefined): boolean {
+  if (!left || !right || left.storage !== right.storage) return false;
+  if (left.node.nodePath !== right.node.nodePath || left.node.nodeAbi !== right.node.nodeAbi) return false;
+  return left.storage === "shared" && right.storage === "shared"
+    ? left.artifactId === right.artifactId
+    : left.storage === "legacy" && right.storage === "legacy"
+      && sameCanonicalPath(left.runtimePath, right.runtimePath);
 }
 
 function isUnresolvedLegacyRelease(value: unknown): value is UnresolvedLegacyRelease {

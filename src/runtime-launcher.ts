@@ -54,7 +54,10 @@ export async function runRuntimeLauncher(options: RuntimeLauncherOptions): Promi
     if (snapshot) cleanupRestartDatabaseSnapshot(snapshot);
   }
   const failures: string[] = [];
-  if ((!state.current && !state.lastKnownGood && !state.previous) || !hasSharedSlot(state)) {
+  // A valid legacy release is already an authoritative runtime selection.
+  // The installed npm seed is only a bootstrap/recovery source; importing it
+  // must never replace a usable release merely because it is not shared yet.
+  if (!state.current && !state.lastKnownGood && !state.previous) {
     try {
       state = await bootstrapFromInstalledSeed({
         homeStore,
@@ -228,11 +231,6 @@ function orderedFallbacks(state: HomeReleaseState): ReleaseRef[] {
     result.push(ref);
   }
   return result;
-}
-
-function hasSharedSlot(state: HomeReleaseState): boolean {
-  return [state.current, state.previous, state.lastKnownGood]
-    .some((ref) => ref?.storage === "shared");
 }
 
 function assertNodeAbi(ref: ReleaseRef): void {
