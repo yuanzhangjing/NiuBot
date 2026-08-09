@@ -2,7 +2,6 @@ import fs from "node:fs";
 import { randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import yaml from "yaml";
 import { afterEach, describe, expect, it } from "vitest";
 import { exportBotBundle, moveBot } from "./bot-transfer.js";
@@ -225,6 +224,7 @@ describe("Bot transfer lifecycle worker", () => {
 
 async function createImportFixture() {
   const root = temporaryRoot("niubot-transfer-worker-import-");
+  createFakeRuntime(root);
   const source = createHome(path.join(root, "source"), "Mover");
   const target = createHome(path.join(root, "target"), "Existing");
   const bundle = path.join(root, "Mover.nbot");
@@ -245,6 +245,7 @@ async function createImportFixture() {
 
 async function createMoveFixture() {
   const root = temporaryRoot("niubot-transfer-worker-move-");
+  createFakeRuntime(root);
   const source = createHome(path.join(root, "source"), "Mover");
   const target = createHome(path.join(root, "target"), "Existing");
   const request: BotTransferWorkerRequest = {
@@ -310,15 +311,19 @@ function fakeState(home: string) {
     endpointKind: "unix-socket" as const,
     controlToken: "token",
     version: "1.0.0",
-    runtimePath: path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."),
+    runtimePath: path.dirname(home),
     nodePath: process.execPath,
   };
 }
 
 function runtimeTarget(root: string) {
-  void root;
-  const runtimePath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-  return { runtimePath, nodePath: process.execPath, version: "1.0.0", runtimeMode: "dev" };
+  return { runtimePath: root, nodePath: process.execPath, version: "1.0.0", runtimeMode: "dev" };
+}
+
+function createFakeRuntime(root: string): void {
+  const dist = path.join(root, "dist");
+  fs.mkdirSync(dist, { recursive: true });
+  fs.writeFileSync(path.join(dist, "index.js"), "// fixture Engine entry\n");
 }
 
 function writeRequest(home: string, request: BotTransferWorkerRequest): string {
