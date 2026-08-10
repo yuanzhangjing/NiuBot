@@ -9,11 +9,18 @@ import { exportBotBundle } from "./bot-transfer.js";
 import { initDatabase } from "./database/schema.js";
 import { waitForEngineIdentity } from "./local-api/engine-client.js";
 import { launchDetachedEngine, inspectRunningEngine, stopEngine } from "./process-manager.js";
+import { terminateSpawnedProcessTree, waitForProcessExit } from "./platform/process.js";
 
 const roots: string[] = [];
 const homes: string[] = [];
+const workerPids: number[] = [];
 
 afterEach(async () => {
+  for (const pid of workerPids.splice(0)) {
+    if (await waitForProcessExit(pid, 10_000, 100)) continue;
+    terminateSpawnedProcessTree(pid, true);
+    await waitForProcessExit(pid, 5_000, 100);
+  }
   for (const home of homes.splice(0)) {
     try { await stopEngine(home); } catch { /* already stopped */ }
   }
@@ -50,6 +57,7 @@ describe("Bot transfer detached worker integration", () => {
         },
       },
     });
+    workerPids.push(launched.pid);
 
     const state = await waitForTerminalState(launched.stateFile, 20_000);
     if (state.phase !== "success") {
@@ -57,6 +65,7 @@ describe("Bot transfer detached worker integration", () => {
       throw new Error(`worker state: ${JSON.stringify(state)}; source log: ${sourceLog}`);
     }
     expect(state).toMatchObject({ phase: "success" });
+    expect(await waitForProcessExit(launched.pid, 10_000, 100)).toBe(true);
     expect(readBotIds(source)).toEqual([]);
     expect(readBotIds(target)).toEqual(["Existing", "Mover"]);
     const sourceAfter = await inspectRunningEngine(source);
@@ -95,9 +104,11 @@ describe("Bot transfer detached worker integration", () => {
         },
       },
     });
+    workerPids.push(launched.pid);
 
     const state = await waitForTerminalState(launched.stateFile, 20_000);
     expect(state).toMatchObject({ phase: "success" });
+    expect(await waitForProcessExit(launched.pid, 10_000, 100)).toBe(true);
     expect(readBotIds(target)).toEqual(["Existing", "Mover"]);
     const targetAfter = await inspectRunningEngine(target);
     expect(targetAfter?.state.pid).not.toBe(targetBefore.state.pid);
