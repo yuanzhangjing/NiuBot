@@ -9,7 +9,13 @@ import { exportBotBundle } from "./bot-transfer.js";
 import { initDatabase } from "./database/schema.js";
 import { waitForEngineIdentity } from "./local-api/engine-client.js";
 import { launchDetachedEngine, inspectRunningEngine, stopEngine } from "./process-manager.js";
-import { terminateSpawnedProcessTree, waitForProcessExit } from "./platform/process.js";
+import { readProcessState } from "./process-state.js";
+import {
+  processStartMarkersMatch,
+  queryProcessStartMarker,
+  terminateSpawnedProcessTree,
+  waitForProcessExit,
+} from "./platform/process.js";
 
 const roots: string[] = [];
 const homes: string[] = [];
@@ -22,10 +28,16 @@ afterEach(async () => {
     await waitForProcessExit(pid, 5_000, 100);
   }
   for (const home of homes.splice(0)) {
-    try { await stopEngine(home); } catch { /* already stopped */ }
+    const recorded = readProcessState(home)?.processes.engine;
+    try { await stopEngine(home); } catch { /* force the test-owned process below */ }
+    if (recorded && !await waitForProcessExit(recorded.pid, 5_000, 100)
+      && processStartMarkersMatch(recorded.platformStartMarker, queryProcessStartMarker(recorded.pid))) {
+      terminateSpawnedProcessTree(recorded.pid, true);
+      await waitForProcessExit(recorded.pid, 5_000, 100);
+    }
   }
   for (const root of roots.splice(0)) {
-    fs.rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+    fs.rmSync(root, { recursive: true, force: true, maxRetries: 100, retryDelay: 100 });
   }
 });
 
@@ -71,7 +83,7 @@ describe("Bot transfer detached worker integration", () => {
     const sourceAfter = await inspectRunningEngine(source);
     const targetAfter = await inspectRunningEngine(target);
     expect(sourceAfter).toBeUndefined();
-    expect(targetAfter?.state.pid).not.toBe(targetBefore.state.pid);
+    expect(targetAfter?.state.instanceId).not.toBe(targetBefore.state.instanceId);
     expect(fs.existsSync(path.join(source, "run", "bot-transfer-active"))).toBe(false);
     expect(fs.existsSync(path.join(target, "run", "bot-transfer-active"))).toBe(false);
   }, 60_000);
@@ -111,7 +123,7 @@ describe("Bot transfer detached worker integration", () => {
     expect(await waitForProcessExit(launched.pid, 10_000, 100)).toBe(true);
     expect(readBotIds(target)).toEqual(["Existing", "Mover"]);
     const targetAfter = await inspectRunningEngine(target);
-    expect(targetAfter?.state.pid).not.toBe(targetBefore.state.pid);
+    expect(targetAfter?.state.instanceId).not.toBe(targetBefore.state.instanceId);
     expect(fs.existsSync(launched.stateFile.replace(/state\.json$/, "request.json"))).toBe(false);
   }, 60_000);
 });

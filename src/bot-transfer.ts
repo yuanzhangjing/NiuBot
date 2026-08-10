@@ -563,7 +563,11 @@ async function extractAndValidateBundle(bundlePath: string): Promise<{
     if (observedSchema !== manifest.databaseSchemaVersion) throw new Error("database schema differs from manifest.json");
     return { root, manifest, bot: bot as RawBot };
   } catch (err) {
-    fs.rmSync(root, { recursive: true, force: true });
+    // Windows may keep archive handles briefly after tar rejects an entry.
+    // Cleanup must not replace the validation error with a transient EBUSY/ENOTEMPTY.
+    try {
+      fs.rmSync(root, { recursive: true, force: true, maxRetries: 100, retryDelay: 100 });
+    } catch { /* preserve the original bundle validation error */ }
     throw err;
   }
 }
