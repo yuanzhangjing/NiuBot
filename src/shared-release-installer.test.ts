@@ -24,7 +24,13 @@ async function createArchive(options: { shrinkwrap?: boolean; version?: string }
   }));
   fs.writeFileSync(path.join(packageDirectory, "dist", "user-cli.js"), "console.log('ok');\n");
   if (options.shrinkwrap !== false) {
-    fs.writeFileSync(path.join(packageDirectory, "npm-shrinkwrap.json"), JSON.stringify({ lockfileVersion: 3 }));
+    const version = options.version ?? "1.2.3";
+    fs.writeFileSync(path.join(packageDirectory, "npm-shrinkwrap.json"), JSON.stringify({
+      name: "@yuanzhangjing/niubot",
+      version,
+      lockfileVersion: 3,
+      packages: { "": { name: "@yuanzhangjing/niubot", version } },
+    }));
   }
   const archive = path.join(root, "package.tgz");
   await createTar({ gzip: true, cwd: root, file: archive }, ["package"]);
@@ -97,6 +103,35 @@ describe("shared release installer", () => {
       run: vi.fn(),
       verify: vi.fn(),
     })).rejects.toThrow(/npm-shrinkwrap/);
+  });
+
+  it("rewrites local source package metadata to its allocated DEV version", async () => {
+    const root = temporaryRoot("niubot-installer-dev-");
+    const installer = new SharedReleaseInstaller(new SharedReleaseStore(root));
+    const result = await installer.installArchive({
+      archivePath: await createArchive({ version: "1.2.3" }),
+      sourceKind: "source",
+      expectedVersion: "1.2.3-dev.4",
+      versionOverride: "1.2.3-dev.4",
+      nodePath: process.execPath,
+      nodeVersion: process.version,
+      nodeAbi: process.versions.modules,
+      npmCommand: "npm",
+      cwd: root,
+      env: {},
+      timeoutMs: 10_000,
+      run: vi.fn(async (_command, args, options) => {
+        fs.mkdirSync(path.join(options.cwd!, "node_modules"));
+        return { command: "npm", args, stdout: "", stderr: "", exitCode: 0 };
+      }),
+      verify: vi.fn(),
+    });
+    expect(result.manifest.version).toBe("1.2.3-dev.4");
+    const packageJson = JSON.parse(fs.readFileSync(path.join(result.packageDirectory, "package.json"), "utf-8"));
+    const shrinkwrap = JSON.parse(fs.readFileSync(path.join(result.packageDirectory, "npm-shrinkwrap.json"), "utf-8"));
+    expect(packageJson.version).toBe("1.2.3-dev.4");
+    expect(shrinkwrap.version).toBe("1.2.3-dev.4");
+    expect(shrinkwrap.packages[""].version).toBe("1.2.3-dev.4");
   });
 
   it("imports a self-contained installed tree without npm", async () => {

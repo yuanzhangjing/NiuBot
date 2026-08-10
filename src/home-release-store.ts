@@ -313,6 +313,34 @@ export class HomeReleaseStore {
     return next;
   }
 
+  /**
+   * Commit the first runtime only after that runtime has completed normal
+   * Engine startup. The launcher deliberately leaves an empty home unbound
+   * until this method runs, so a broken imported package can never become the
+   * persisted current merely because its files were copied successfully.
+   */
+  commitInitialHealthy(ref: ReleaseRef): HomeReleaseState {
+    this.resolveRuntime(ref);
+    const state = this.readState();
+    if (state.transaction) throw new Error(`Runtime transaction '${state.transaction.transactionId}' is still active`);
+    if (state.current) {
+      if (!sameReleaseRef(state.current, ref)) {
+        throw new Error("Home current changed while the first runtime was starting");
+      }
+      return state;
+    }
+    const next: HomeReleaseState = {
+      ...state,
+      schemaVersion: HOME_RELEASE_STATE_SCHEMA_VERSION,
+      current: ref,
+      rejectedRecommendation: undefined,
+      firstSharedSuccessAt: ref.storage === "shared" ? state.firstSharedSuccessAt ?? new Date().toISOString() : state.firstSharedSuccessAt,
+      sharedSuccessfulStarts: ref.storage === "shared" ? (state.sharedSuccessfulStarts ?? 0) + 1 : state.sharedSuccessfulStarts,
+    };
+    this.writeState(next);
+    return next;
+  }
+
   recordRejectedRecommendation(generation: number, release: ReleaseRef & { storage: "shared" }, reason?: string): HomeReleaseState {
     if (!Number.isSafeInteger(generation) || generation <= 0) throw new Error("Invalid recommendation generation");
     this.resolveRuntime(release, true);

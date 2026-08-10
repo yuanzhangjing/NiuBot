@@ -3,6 +3,33 @@ interface ParsedVersion {
   prerelease: string[];
 }
 
+export type RuntimeEnvironment = "dev" | "production";
+
+const PRODUCTION_VERSION_RE = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
+const DEVELOPMENT_VERSION_RE = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)-dev\.([1-9]\d*)$/;
+
+/** Stable release versions are the only production runtime channel. */
+export function isProductionVersion(version: string): boolean {
+  return PRODUCTION_VERSION_RE.test(version);
+}
+
+/** Local development artifacts use one exact, ordered SemVer form. */
+export function isDevVersion(version: string): boolean {
+  return DEVELOPMENT_VERSION_RE.test(version);
+}
+
+export function runtimeEnvironmentForVersion(version: string): RuntimeEnvironment | undefined {
+  if (isProductionVersion(version)) return "production";
+  if (isDevVersion(version)) return "dev";
+  return undefined;
+}
+
+export function devVersionParts(version: string): { baseVersion: string; sequence: number } | undefined {
+  const match = DEVELOPMENT_VERSION_RE.exec(version);
+  if (!match) return undefined;
+  return { baseVersion: `${match[1]}.${match[2]}.${match[3]}`, sequence: Number(match[4]) };
+}
+
 /** Compare SemVer strings. Returns undefined when either value is not SemVer. */
 export function comparePackageVersions(left: string, right: string): number | undefined {
   const a = parseVersion(left);

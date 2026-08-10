@@ -9,6 +9,7 @@
 import type { Database } from "better-sqlite3";
 import { matchesCron } from "./cron.js";
 import { listLoopJobs } from "./loop.js";
+import { getZonedDateTimeParts } from "../tz.js";
 
 /** 升级窗口余量（分钟）：窗口结束前不再启动新升级，覆盖升级耗时。 */
 export const DEFAULT_UPGRADE_MARGIN_MINUTES = 10;
@@ -216,13 +217,7 @@ function parseSqlUtc(value: string): Date {
 /** 本地时区小时是否在 [startHour, endHour) 窗口内（跨天支持）。 */
 export function isInUpgradeWindow(date: Date, config: AutoUpdateConfig): boolean {
   const { windowStartHour, windowEndHour, timezone } = config;
-  const hour = Number(
-    new Intl.DateTimeFormat("en-US", {
-      hour: "numeric",
-      hour12: false,
-      timeZone: timezone,
-    }).format(date),
-  );
+  const hour = getZonedDateTimeParts(date, timezone).hour;
   if (windowStartHour <= windowEndHour) {
     return hour >= windowStartHour && hour < windowEndHour;
   }
@@ -234,15 +229,8 @@ export function isInUpgradeWindow(date: Date, config: AutoUpdateConfig): boolean
 export function minutesUntilUpgradeWindowEnd(date: Date, config: AutoUpdateConfig): number {
   if (!isInUpgradeWindow(date, config)) return 0;
   const { windowEndHour, timezone } = config;
-  const parts = new Intl.DateTimeFormat("en-US", {
-    hour: "numeric",
-    minute: "numeric",
-    hour12: false,
-    timeZone: timezone,
-  }).formatToParts(date);
-  const hour = Number(parts.find((p) => p.type === "hour")?.value ?? 0);
-  const minute = Number(parts.find((p) => p.type === "minute")?.value ?? 0);
-  let minutes = (windowEndHour - hour) * 60 - minute;
+  const { hour, minute, second } = getZonedDateTimeParts(date, timezone);
+  let minutes = (windowEndHour - hour) * 60 - minute - second / 60;
   if (minutes < 0) minutes += 24 * 60; // 跨天窗口：已过午夜，补到次日结束
   return minutes;
 }

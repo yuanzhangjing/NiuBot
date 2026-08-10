@@ -8,6 +8,8 @@ export interface RestartWorkerLaunchOptions {
   botName: string;
   runtimeRoot: string;
   sourceDirectory: string;
+  /** One-cycle compatibility for legacy source homes whose package version had no DEV suffix. */
+  restartMode?: "source";
   /** dev/production 运行环境；透传给 worker 作为 NIUBOT_ENV（旧版 runtimeMode 透传已废弃） */
   environment?: string;
   /** 本次重启是否自动升级触发；worker 写入 restart/state.json 的 autoUpdate 标记 */
@@ -16,6 +18,8 @@ export interface RestartWorkerLaunchOptions {
   updateVersion?: string;
   recommendedArtifactId?: string;
   recommendedGeneration?: number;
+  /** Exact shared artifact selected by Launcher for safe first-start/recovery activation. */
+  candidateArtifactId?: string;
   /** Preserve a stopped Engine state after update verification, even if the caller exits. */
   stopAfterCompletion?: boolean;
   restartId?: string;
@@ -54,16 +58,31 @@ export function buildRestartWorkerEnvironment(
     env["NIUBOT_UPDATE_VERSION"] = options.updateVersion;
     delete env["NIUBOT_RECOMMENDED_ARTIFACT_ID"];
     delete env["NIUBOT_RECOMMENDED_GENERATION"];
+    delete env["NIUBOT_CANDIDATE_ARTIFACT_ID"];
   } else if (options.recommendedArtifactId && options.recommendedGeneration) {
     env["NIUBOT_RESTART_MODE"] = "recommended";
     env["NIUBOT_RECOMMENDED_ARTIFACT_ID"] = options.recommendedArtifactId;
     env["NIUBOT_RECOMMENDED_GENERATION"] = String(options.recommendedGeneration);
     delete env["NIUBOT_UPDATE_VERSION"];
+    delete env["NIUBOT_CANDIDATE_ARTIFACT_ID"];
+  } else if (options.candidateArtifactId) {
+    env["NIUBOT_RESTART_MODE"] = "candidate";
+    env["NIUBOT_CANDIDATE_ARTIFACT_ID"] = options.candidateArtifactId;
+    delete env["NIUBOT_UPDATE_VERSION"];
+    delete env["NIUBOT_RECOMMENDED_ARTIFACT_ID"];
+    delete env["NIUBOT_RECOMMENDED_GENERATION"];
+  } else if (options.restartMode === "source") {
+    env["NIUBOT_RESTART_MODE"] = "source";
+    delete env["NIUBOT_UPDATE_VERSION"];
+    delete env["NIUBOT_RECOMMENDED_ARTIFACT_ID"];
+    delete env["NIUBOT_RECOMMENDED_GENERATION"];
+    delete env["NIUBOT_CANDIDATE_ARTIFACT_ID"];
   } else {
     delete env["NIUBOT_RESTART_MODE"];
     delete env["NIUBOT_UPDATE_VERSION"];
     delete env["NIUBOT_RECOMMENDED_ARTIFACT_ID"];
     delete env["NIUBOT_RECOMMENDED_GENERATION"];
+    delete env["NIUBOT_CANDIDATE_ARTIFACT_ID"];
   }
   return env;
 }

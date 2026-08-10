@@ -16,19 +16,24 @@ function temporaryRoot(): string {
   return root;
 }
 
-function publish(store: SharedReleaseStore, id: string, sourceKind: "legacy" | "npm" = "legacy"): void {
+function publish(
+  store: SharedReleaseStore,
+  id: string,
+  sourceKind: "legacy" | "npm" | "source" = "legacy",
+  version = "1.0.0",
+): void {
   const staging = store.createStagingDirectory(id);
   const packageDirectory = path.join(staging, "package");
   fs.mkdirSync(packageDirectory);
   fs.writeFileSync(path.join(packageDirectory, "package.json"), JSON.stringify({
     name: "@yuanzhangjing/niubot",
-    version: "1.0.0",
+    version,
   }));
   store.publishStagedArtifact({
     stagingDirectory: staging,
     manifest: createSharedReleaseManifest({
       artifactId: id,
-      version: "1.0.0",
+      version,
       sourceKind,
       sourceDigest: id,
       treeDigest: computeTreeDigest(packageDirectory),
@@ -111,6 +116,20 @@ describe("shared release cleanup", () => {
     expect(candidates.some((item) => item.sourcePath === active)).toBe(false);
     expect(candidates.some((item) => item.sourcePath === abandoned && item.kind === "staging")).toBe(true);
     expect(candidates.filter((item) => item.kind === "package-cache")).toHaveLength(1);
+  });
+
+  it("keeps recent production and DEV artifacts independently", () => {
+    const store = new SharedReleaseStore(path.join(temporaryRoot(), "shared"));
+    publish(store, "production-old", "npm", "1.0.0");
+    publish(store, "production-new", "npm", "1.1.0");
+    publish(store, "dev-old", "source", "1.1.0-dev.1");
+    publish(store, "dev-new", "source", "1.1.0-dev.2");
+    fs.utimesSync(store.releaseDirectory("production-new"), new Date(2_000), new Date(2_000));
+    fs.utimesSync(store.releaseDirectory("dev-new"), new Date(2_000), new Date(2_000));
+
+    const candidates = cleanupSharedReleases(store, { now: Date.now(), releaseGraceMs: 0, keepRecent: 1 });
+    expect(candidates.filter((item) => item.kind === "shared-release").map((item) => path.basename(item.sourcePath)).sort())
+      .toEqual(["dev-old", "production-old"]);
   });
 
   it("refuses cleanup when a shared ref is damaged", () => {

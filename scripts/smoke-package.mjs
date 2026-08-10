@@ -153,13 +153,11 @@ try {
     .filter((entry) => entry.isDirectory());
   const homeRefs = fs.readdirSync(path.join(smokeEnv.NIUBOT_SHARED_STORE, "refs"), { withFileTypes: true })
     .filter((entry) => entry.isFile() && entry.name.endsWith(".json"));
-  if (sharedReleases.length !== 1 || homeRefs.length !== 2) {
-    throw new Error(`Shared bootstrap mismatch: ${sharedReleases.length} releases, ${homeRefs.length} home refs`);
+  if (sharedReleases.length !== 1 || homeRefs.length !== 0) {
+    throw new Error(`Shared import mismatch: ${sharedReleases.length} releases, ${homeRefs.length} premature home refs`);
   }
-  const recommendation = JSON.parse(fs.readFileSync(path.join(smokeEnv.NIUBOT_SHARED_STORE, "recommended.json"), "utf8"));
-  if (recommendation.schemaVersion !== 1 || recommendation.generation !== 1
-    || recommendation.release?.artifactId !== sharedReleases[0].name) {
-    throw new Error("Shared bootstrap did not publish one stable production recommendation");
+  if (fs.existsSync(path.join(smokeEnv.NIUBOT_SHARED_STORE, "recommended.json"))) {
+    throw new Error("A read-only CLI command published a recommendation before health confirmation");
   }
 
   // Simulate the first Engine boot after an old updater placed the package in
@@ -211,7 +209,7 @@ try {
     throw new Error("Migrated packaged runtime did not become the production recommendation");
   }
 
-  console.log(`Package smoke passed: ${expected}; two homes share one recommended artifact; legacy runtime adopted with current-only state`);
+  console.log(`Package smoke passed: ${expected}; two homes share one uncommitted artifact; legacy runtime adopted with current-only state`);
 } finally {
   fs.rmSync(temporaryRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
 }

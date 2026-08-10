@@ -169,9 +169,15 @@ export async function completeRuntimeHomeMigrationAfterStartup(
       }
 
       const homeStore = new HomeReleaseStore(options.niubotHome, options.sharedStore);
-      const state = homeStore.readState();
+      let state = homeStore.readState();
       transactionId = state.transaction?.transactionId;
       if (!transactionId) {
+        const runtimeRef = homeStore.releaseRefForRuntimePath(options.runtimePath, options.node);
+        if (!state.current && runtimeRef?.storage === "shared") {
+          state = homeStore.commitInitialHealthy(runtimeRef);
+          homeStore.writeSharedRef({ state, runtimePath: options.runtimePath });
+          return { homeStore, sharedRef: runtimeRef, state };
+        }
         reconcileSharedRuntimeRef(homeStore, state, options.runtimePath, options.node);
         return undefined;
       }

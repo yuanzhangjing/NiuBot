@@ -336,7 +336,7 @@ export function buildArtifactId(identity: ArtifactIdentity): string {
 }
 
 export function buildImportedArtifactId(options: {
-  sourceKind: "seed" | "legacy";
+  sourceKind: "npm" | "seed" | "legacy";
   version: string;
   nodeAbi: string;
   platform: NodeJS.Platform;

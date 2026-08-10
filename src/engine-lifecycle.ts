@@ -11,7 +11,7 @@ import { resolveSharedRuntimeRoot } from "./platform/shared-runtime.js";
 import { launchRestartWorker, type RestartWorkerLaunch } from "./restart-launcher.js";
 import { SharedReleaseStore } from "./shared-release-store.js";
 import { resolveUpdateCommandCwd } from "./update-command.js";
-import { isNewerPackageVersion } from "./version.js";
+import { isNewerPackageVersion, isProductionVersion, runtimeEnvironmentForVersion, type RuntimeEnvironment } from "./version.js";
 
 const UPDATE_PACKAGE_NAME = "@yuanzhangjing/niubot";
 
@@ -74,6 +74,8 @@ export interface EngineLifecycleServiceOptions {
 export class EngineLifecycleService implements EngineLifecycle {
   private readonly log = createLogger("engine-lifecycle");
   private readonly version: string;
+  private readonly environment: RuntimeEnvironment;
+  private readonly legacySourceMode: boolean;
   private readonly startedAt: string;
   private readonly startedAtMs: number;
   private readonly runtimePath: string;
@@ -87,6 +89,14 @@ export class EngineLifecycleService implements EngineLifecycle {
 
   constructor(options: EngineLifecycleServiceOptions) {
     this.version = options.version;
+    this.env = options.env ?? process.env;
+    const environment = runtimeEnvironmentForVersion(options.version);
+    if (!environment) throw new Error(`Unsupported runtime version: ${options.version}`);
+    this.legacySourceMode = environment === "production"
+      && (this.env["NIUBOT_LEGACY_SOURCE_MIGRATION"] === "1" || this.env["NIUBOT_ENV"] === "dev")
+      && Boolean(options.restartConfig?.sourceDirectory);
+    // 迁移期唯一例外：旧 DEV 使用稳定版本号。它在完成一次源码重启前仍必须禁用正式版更新。
+    this.environment = this.legacySourceMode ? "dev" : environment;
     this.startedAt = options.startedAt;
     const parsedStartedAt = Date.parse(options.startedAt);
     this.startedAtMs = Number.isFinite(parsedStartedAt) ? parsedStartedAt : Date.now();
@@ -95,7 +105,6 @@ export class EngineLifecycleService implements EngineLifecycle {
     this.restartConfig = options.restartConfig;
     this.configPath = options.configPath;
     this.autoUpdateConfig = options.initialAutoUpdateConfig;
-    this.env = options.env ?? process.env;
     this.onAutoUpdateConfigChanged = options.onAutoUpdateConfigChanged;
     this.dependencies = {
       runCommand,
@@ -108,7 +117,7 @@ export class EngineLifecycleService implements EngineLifecycle {
   getStatus(): EngineStatus {
     return {
       version: this.version,
-      environment: this.env["NIUBOT_ENV"] || "production",
+      environment: this.environment,
       startedAt: this.startedAt,
       uptimeMs: Math.max(0, this.dependencies.now().getTime() - this.startedAtMs),
       runtimePath: this.runtimePath,
@@ -116,6 +125,7 @@ export class EngineLifecycleService implements EngineLifecycle {
   }
 
   async checkForUpdate(): Promise<EngineUpdateStatus> {
+    this.assertProductionUpdate("检查正式版更新");
     const npmCommand = resolveNpmExecutableForNode(process.execPath) ?? "npm";
     const { stdout } = await this.dependencies.runCommand(
       npmCommand,
@@ -127,7 +137,7 @@ export class EngineLifecycleService implements EngineLifecycle {
       },
     );
     const latestVersion = stdout.trim();
-    if (!/^\d+\.\d+\.\d+(-[\w.]+)?$/.test(latestVersion)) {
+    if (!isProductionVersion(latestVersion)) {
       throw new Error(`版本号格式异常：${latestVersion.slice(0, 50)}`);
     }
     return {
@@ -138,6 +148,8 @@ export class EngineLifecycleService implements EngineLifecycle {
   }
 
   async predownloadUpdate(version: string): Promise<boolean> {
+    this.assertProductionUpdate("下载正式版更新");
+    if (!isProductionVersion(version)) throw new Error(`不是正式版本：${version}`);
     const store = new SharedReleaseStore(resolveSharedRuntimeRoot({ env: this.env }));
     store.ensureDirectories();
     const expected = `yuanzhangjing-niubot-${version}.tgz`;
@@ -202,9 +214,8 @@ export class EngineLifecycleService implements EngineLifecycle {
   }
 
   restart(request: EngineRestartRequest): EngineRestartResult {
-    const environment = this.env["NIUBOT_ENV"]
-      || (this.env["NIUBOT_RUNTIME_MODE"] === "npm-release" ? "production" : undefined);
-    const sourceDirectory = request.updateVersion || environment === "production"
+    if (request.updateVersion) this.assertProductionUpdate("执行正式版更新");
+    const sourceDirectory = request.updateVersion || (this.environment === "production" && !this.legacySourceMode)
       ? this.runtimePath
       : (this.restartConfig?.sourceDirectory ?? this.runtimePath);
     const launch = this.dependencies.launchRestartWorker({
@@ -212,7 +223,8 @@ export class EngineLifecycleService implements EngineLifecycle {
       botName: request.botName,
       runtimeRoot: this.runtimePath,
       sourceDirectory,
-      environment: this.env["NIUBOT_ENV"] || "",
+      environment: this.environment,
+      restartMode: this.legacySourceMode && !request.updateVersion ? "source" : undefined,
       autoUpdate: request.autoUpdate,
       notifyChatId: request.chatId,
       updateVersion: request.updateVersion,
@@ -227,5 +239,10 @@ export class EngineLifecycleService implements EngineLifecycle {
       logFile: launch.logFile,
     });
     return { ...launch, sourceDirectory };
+  }
+
+  private assertProductionUpdate(action: string): void {
+    if (this.environment === "production") return;
+    throw new Error(`DEV 运行环境不能${action}；请在源码目录构建后重启。`);
   }
 }

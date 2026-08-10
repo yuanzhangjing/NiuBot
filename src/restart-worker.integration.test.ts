@@ -57,6 +57,29 @@ describe("restart worker integration", () => {
     expect(fixture.homeStore.readState().rejectedRecommendation).toBeUndefined();
   }, 30_000);
 
+  it("safely activates an exact Launcher candidate for an empty home", async () => {
+    const fixture = createRecommendedFixture(true);
+    fixture.homeStore.writeState({ schemaVersion: 2 });
+    fixture.homeStore.writeSharedRef({ state: fixture.homeStore.readStateStrict() });
+    fs.rmSync(path.join(fixture.sharedStore.rootDirectory, "recommended.json"), { force: true });
+
+    await runTestRestartWorker({
+      ...process.env,
+      NIUBOT_SHARED_STORE: fixture.sharedStore.rootDirectory,
+      NIUBOT_HOME: fixture.home,
+      NIUBOT_BOT_NAME: "TestBot",
+      NIUBOT_SOURCE_DIR: fixture.currentRuntime,
+      NIUBOT_ENV: "production",
+      NIUBOT_RESTART_MODE: "candidate",
+      NIUBOT_CANDIDATE_ARTIFACT_ID: fixture.candidate.artifactId,
+    });
+
+    const running = await inspectRunningEngine(fixture.home);
+    expect(running?.identity.version).toBe("2.0.0");
+    expect(fixture.homeStore.readState().current).toEqual(fixture.candidate);
+    expect(new RecommendedReleaseStore(fixture.sharedStore).read()).toBeUndefined();
+  }, 30_000);
+
   it("restores current and remembers a rejected recommendation", async () => {
     const fixture = createRecommendedFixture(false);
     vi.stubEnv("NIUBOT_RESTART_HEALTH_TIMEOUT", "1");
@@ -403,6 +426,7 @@ describe("restart worker integration", () => {
       NIUBOT_HOME: home,
       NIUBOT_BOT_NAME: "TestBot",
       NIUBOT_SOURCE_DIR: source,
+      NIUBOT_RESTART_MODE: "source",
       NIUBOT_AGENT_SESSION: undefined,
     });
 
@@ -418,8 +442,8 @@ describe("restart worker integration", () => {
       const serviceLog = serviceLogName ? fs.readFileSync(path.join(home, "logs", serviceLogName), "utf-8") : "";
       throw new Error(`candidate is not running\nprocess=${JSON.stringify(processState)}\nidentity=${JSON.stringify(identity)}\n${state}\n${serviceLog}\n${debug}`);
     }
-    expect(running?.identity.version).toBe("1.0.0");
-    expect(running?.state.runtimePath).toContain(path.join("releases", ""));
+    expect(running?.identity.version).toBe("1.0.0-dev.1");
+    expect(running?.state.runtimePath).toContain(path.join("shared-store", "releases", ""));
     const releaseState = new HomeReleaseStore(home, new SharedReleaseStore(path.join(root, "shared-store"))).readState();
     expect(releaseState.current).toBeTruthy();
     expect(releaseState).not.toHaveProperty("lastKnownGood");
@@ -453,10 +477,7 @@ describe("restart worker integration", () => {
       version: "1.0.0",
       type: "module",
       files: ["dist", "src", "npm-shrinkwrap.json"],
-      scripts: {
-        build: "node -e \"require('node:fs').copyFileSync('dist/bad.js','dist/index.js')\"",
-        "pack:check": "node -e \"process.exit(0)\"",
-      },
+      scripts: { build: "node -e \"process.exit(0)\"", "pack:check": "node -e \"process.exit(0)\"" },
     }, null, 2)}\n`);
     fs.writeFileSync(path.join(home, "config.yaml"), [
       "bots:",
@@ -481,6 +502,20 @@ describe("restart worker integration", () => {
       NIUBOT_HOME: home,
       NIUBOT_BOT_NAME: "TestBot",
       NIUBOT_SOURCE_DIR: source,
+      NIUBOT_RESTART_MODE: "source",
+      NIUBOT_AGENT_SESSION: undefined,
+    });
+    const packageJson = JSON.parse(fs.readFileSync(path.join(source, "package.json"), "utf-8"));
+    packageJson.scripts.build = "node -e \"require('node:fs').copyFileSync('dist/bad.js','dist/index.js')\"";
+    fs.writeFileSync(path.join(source, "package.json"), `${JSON.stringify(packageJson, null, 2)}\n`);
+
+    await runTestRestartWorker({
+      ...process.env,
+      NIUBOT_SHARED_STORE: path.join(root, "shared-store"),
+      NIUBOT_HOME: home,
+      NIUBOT_BOT_NAME: "TestBot",
+      NIUBOT_SOURCE_DIR: source,
+      NIUBOT_RESTART_MODE: "source",
       NIUBOT_AGENT_SESSION: undefined,
     });
 
@@ -568,6 +603,7 @@ describe("restart worker integration", () => {
       NIUBOT_HOME: home,
       NIUBOT_BOT_NAME: "TestBot",
       NIUBOT_SOURCE_DIR: source,
+      NIUBOT_RESTART_MODE: "source",
       NIUBOT_AGENT_SESSION: undefined,
     })).rejects.toThrow(/exited with code 42/);
 
@@ -648,6 +684,7 @@ describe("restart worker integration", () => {
       NIUBOT_HOME: home,
       NIUBOT_BOT_NAME: "TestBot",
       NIUBOT_SOURCE_DIR: source,
+      NIUBOT_RESTART_MODE: "source",
       NIUBOT_AGENT_SESSION: undefined,
     })).rejects.toThrow();
     const running = await inspectRunningEngine(home);
@@ -822,6 +859,8 @@ ${mutateDatabase ? `if (process.env.NIUBOT_TEST_DATABASE_PATH) {
 }` : ""}
 const home = process.env.NIUBOT_HOME;
 const runtimePath = process.cwd();
+let runtimeVersion = "${version}";
+try { runtimeVersion = JSON.parse(fs.readFileSync(path.join(runtimePath, "package.json"), "utf-8")).version || runtimeVersion; } catch {}
 const named = (role) => {
   const hash = crypto.createHash("sha256").update(path.win32.resolve(home).toLowerCase()).digest("hex").slice(0, 16);
   return "\\\\\\\\.\\\\pipe\\\\niubot-" + hash + "-" + role;
@@ -857,7 +896,7 @@ engine = http.createServer((req, res) => {
       pid: process.pid,
       instanceId: process.env.NIUBOT_INSTANCE_ID,
       home,
-      version: "${version}",
+      version: runtimeVersion,
       runtimePath,
       startedAt: process.env.NIUBOT_STARTED_AT,
     }));

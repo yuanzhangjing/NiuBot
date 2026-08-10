@@ -5,6 +5,7 @@ import { RecommendedReleaseStore } from "./recommended-release.js";
 import { readProcessState } from "./process-state.js";
 import type { ReleaseRef } from "./release-ref.js";
 import { SharedReleaseStore } from "./shared-release-store.js";
+import { isDevVersion, isProductionVersion } from "./version.js";
 
 export interface CleanupCandidate {
   kind: "shared-release" | "shared-trash" | "staging" | "package-cache" | "legacy-release" | "legacy-trash";
@@ -38,7 +39,10 @@ export function cleanupSharedReleases(
     const releases = readDirectories(store.releasesDirectory)
       .map((entry) => ({ ...entry, mtimeMs: fs.statSync(entry.fullPath).mtimeMs }))
       .sort((left, right) => right.mtimeMs - left.mtimeMs);
-    const recentUnprotected = releases.filter((entry) => !protectedIds.has(entry.name)).slice(0, keepRecent);
+    const recentUnprotected = ["production", "dev", "legacy"]
+      .flatMap((channel) => releases
+        .filter((entry) => !protectedIds.has(entry.name) && artifactChannel(store, entry.name) === channel)
+        .slice(0, keepRecent));
     const recentIds = new Set(recentUnprotected.map((entry) => entry.name));
     const candidates: CleanupCandidate[] = [];
     for (const release of releases) {
@@ -82,6 +86,13 @@ export function cleanupSharedReleases(
   } finally {
     releaseLock();
   }
+}
+
+function artifactChannel(store: SharedReleaseStore, artifactId: string): "production" | "dev" | "legacy" {
+  const version = store.readManifest(artifactId)?.version;
+  if (version && isProductionVersion(version)) return "production";
+  if (version && isDevVersion(version)) return "dev";
+  return "legacy";
 }
 
 export interface LegacyCleanupOptions {

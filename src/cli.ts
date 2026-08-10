@@ -268,6 +268,7 @@ Usage: nbt restart [--update <version>] [--wake [<提示>]]
       runtimeRoot,
       sourceDirectory,
       environment: process.env["NIUBOT_ENV"] ?? "",
+      restartMode: process.env["NIUBOT_LEGACY_SOURCE_MIGRATION"] === "1" ? "source" : undefined,
       notifyChatId: CHAT_ID,
       updateVersion,
       wakePrompt,

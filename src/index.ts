@@ -47,6 +47,7 @@ import { EngineLifecycleService } from "./engine-lifecycle.js";
 import {
   completeRuntimeHomeMigrationAfterStartup,
 } from "./runtime-home-migration.js";
+import { isProductionVersion, runtimeEnvironmentForVersion } from "./version.js";
 
 const log = createLogger("main");
 
@@ -455,7 +456,7 @@ async function main(): Promise<void> {
       endpointKind: engineEndpoint.kind,
       controlToken,
       version,
-      runtimeMode: process.env["NIUBOT_ENV"] || process.env["NIUBOT_RUNTIME_MODE"] || "",
+      runtimeMode: runtimeEnvironmentForVersion(version) ?? "",
       runtimePath,
       nodePath: process.execPath,
       logFile: process.env["NIUBOT_LOG_FILE"],
@@ -486,7 +487,7 @@ async function main(): Promise<void> {
           });
           launcherRuntimePath = homeStore.resolveRuntime(sharedRef, true);
         }
-        if (process.env["NIUBOT_ENV"] !== "dev") {
+        if (isProductionVersion(version)) {
           const homeStore = migration?.homeStore ?? new HomeReleaseStore(NIUBOT_HOME, sharedStore);
           const runningRef = migration?.sharedRef
             ?? homeStore.releaseRefForRuntimePath(runtimePath, currentNodeRuntimeRef());

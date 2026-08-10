@@ -60,4 +60,17 @@ describe("restart launcher", () => {
     expect(env["NIUBOT_RECOMMENDED_ARTIFACT_ID"]).toBe("release-a");
     expect(env["NIUBOT_RECOMMENDED_GENERATION"]).toBe("7");
   });
+
+  it("passes an exact launcher recovery candidate without recommendation state", () => {
+    const env = buildRestartWorkerEnvironment({
+      niubotHome: "/tmp/home",
+      botName: "NiuBot",
+      runtimeRoot: "/tmp/runtime",
+      sourceDirectory: "/tmp/source",
+      candidateArtifactId: "candidate-a",
+    });
+    expect(env["NIUBOT_RESTART_MODE"]).toBe("candidate");
+    expect(env["NIUBOT_CANDIDATE_ARTIFACT_ID"]).toBe("candidate-a");
+    expect(env["NIUBOT_RECOMMENDED_ARTIFACT_ID"]).toBeUndefined();
+  });
 });

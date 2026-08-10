@@ -3,10 +3,11 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { HomeReleaseStore } from "./home-release-store.js";
-import { parseLauncherHome, bootstrapFromInstalledSeed, runRuntimeLauncher } from "./runtime-launcher.js";
+import { importInstalledProductionPackage, parseLauncherHome, runRuntimeLauncher } from "./runtime-launcher.js";
 import { SharedReleaseStore } from "./shared-release-store.js";
 import { currentNodeRuntimeRef, type ReleaseRef } from "./release-ref.js";
 import { RecommendedReleaseStore } from "./recommended-release.js";
+import { SharedReleaseInstaller } from "./shared-release-installer.js";
 
 const tempDirectories: string[] = [];
 
@@ -28,11 +29,46 @@ function createSeed(root: string, version = "1.0.0", name = "seed", label?: stri
   for (const entry of ["user-cli.js", "cli.js"]) {
     fs.writeFileSync(path.join(seed, "dist", entry), [
       "import fs from 'node:fs';",
-      `fs.writeFileSync(process.env.NIUBOT_TEST_LAUNCH_MARKER, JSON.stringify({ args: process.argv.slice(2), home: process.env.NIUBOT_HOME${label ? `, label: ${JSON.stringify(label)}, runtimeEnvironment: process.env.NIUBOT_ENV` : ""} }));`,
+      `fs.writeFileSync(process.env.NIUBOT_TEST_LAUNCH_MARKER, JSON.stringify({ args: process.argv.slice(2), home: process.env.NIUBOT_HOME${label ? `, label: ${JSON.stringify(label)}, runtimeEnvironment: process.env.NIUBOT_ENV, sourceFirstStart: process.env.NIUBOT_SOURCE_FIRST_START` : ""} }));`,
       "",
     ].join("\n"));
   }
   return seed;
+}
+
+async function bootstrapFixture(options: {
+  homeStore: HomeReleaseStore;
+  installedPackageRoot: string;
+  env: NodeJS.ProcessEnv;
+  verify?: (packageDirectory: string, version: string) => void | Promise<void>;
+}) {
+  const ref = await importInstalledProductionPackage({
+    homeStore: options.homeStore,
+    packageRoot: options.installedPackageRoot,
+    env: options.env,
+    verify: options.verify,
+  });
+  const state = options.homeStore.commitInitialHealthy(ref);
+  options.homeStore.writeSharedRef({ state });
+  new RecommendedReleaseStore(options.homeStore.sharedStore).promote(ref);
+  return state;
+}
+
+async function installDevFixture(homeStore: HomeReleaseStore, packageRoot: string) {
+  const installed = await new SharedReleaseInstaller(homeStore.sharedStore).importInstalledTree({
+    sourceDirectory: packageRoot,
+    sourceKind: "legacy",
+    nodePath: process.execPath,
+    nodeVersion: process.version,
+    nodeAbi: process.versions.modules,
+    cwd: packageRoot,
+    env: { NIUBOT_ALLOW_ROOT_STORE: "1" },
+    verify: () => undefined,
+  });
+  const ref = { storage: "shared" as const, artifactId: installed.artifactId, node: currentNodeRuntimeRef() };
+  const state = homeStore.commitInitialHealthy(ref);
+  homeStore.writeSharedRef({ state });
+  return ref;
 }
 
 afterEach(() => {
@@ -46,40 +82,38 @@ describe("runtime launcher", () => {
     expect(parsed.forwardedArgs).toEqual(["task", "list"]);
   });
 
-  it("bootstraps an installed seed into the shared store", async () => {
+  it("imports an installed production package without binding the home", async () => {
     const root = temporaryRoot();
     const home = path.join(root, "home");
     fs.mkdirSync(home);
     const shared = new SharedReleaseStore(path.join(root, "shared"));
     const store = new HomeReleaseStore(home, shared);
-    const state = await bootstrapFromInstalledSeed({
+    const ref = await importInstalledProductionPackage({
       homeStore: store,
-      seedRoot: createSeed(root),
+      packageRoot: createSeed(root),
       env: { NIUBOT_ALLOW_ROOT_STORE: "1" },
       verify: () => undefined,
     });
-    expect(state.current).toMatchObject({ storage: "shared" });
-    expect(state.lastKnownGood).toBeUndefined();
-    expect(shared.readAllHomeRefs()[0]?.pending?.protected).toEqual([state.current]);
-    expect(shared.readAllHomeRefs()).toHaveLength(1);
+    expect(ref).toMatchObject({ storage: "shared" });
+    expect(store.readState().current).toBeUndefined();
+    expect(shared.readAllHomeRefs()).toHaveLength(0);
   });
 
-  it("protects the seed in pending refs before writing home state", async () => {
+  it("does not write home state while importing an installed package", async () => {
     const root = temporaryRoot();
     const home = path.join(root, "home");
     fs.mkdirSync(home);
     const shared = new SharedReleaseStore(path.join(root, "shared"));
     const store = new HomeReleaseStore(home, shared);
-    vi.spyOn(store, "writeState").mockImplementation(() => { throw new Error("simulated crash"); });
-    await expect(bootstrapFromInstalledSeed({
+    const writeState = vi.spyOn(store, "writeState");
+    await expect(importInstalledProductionPackage({
       homeStore: store,
-      seedRoot: createSeed(root),
+      packageRoot: createSeed(root),
       env: { NIUBOT_ALLOW_ROOT_STORE: "1" },
       verify: () => undefined,
-    })).rejects.toThrow(/simulated crash/);
-    const ref = shared.readHomeRef(store.homeId);
-    expect(ref?.active).toEqual({});
-    expect(ref?.pending?.protected[0]).toMatchObject({ storage: "shared" });
+    })).resolves.toMatchObject({ storage: "shared" });
+    expect(writeState).not.toHaveBeenCalled();
+    expect(shared.readHomeRef(store.homeId)).toBeUndefined();
   });
 
   it("launches the shared CLI selected by the home state", async () => {
@@ -90,7 +124,7 @@ describe("runtime launcher", () => {
     const code = await runRuntimeLauncher({
       command: "nbt",
       argv: ["task", "list", "--home", home],
-      seedRoot: createSeed(root),
+      installedPackageRoot: createSeed(root),
       bootstrapVerify: () => undefined,
       env: {
         NIUBOT_SHARED_STORE: path.join(root, "shared"),
@@ -105,6 +139,29 @@ describe("runtime launcher", () => {
     });
   });
 
+  it("routes an empty source home through the source-first-start path", async () => {
+    const root = temporaryRoot();
+    const home = path.join(root, "home");
+    const marker = path.join(root, "source-start.json");
+    fs.mkdirSync(home);
+    const source = createSeed(root, "1.0.0", "source-entry", "source");
+    fs.mkdirSync(path.join(source, "src"));
+
+    const code = await runRuntimeLauncher({
+      command: "niubot",
+      argv: ["start", "--home", home],
+      installedPackageRoot: source,
+      env: { NIUBOT_TEST_LAUNCH_MARKER: marker },
+    });
+
+    expect(code).toBe(0);
+    expect(JSON.parse(fs.readFileSync(marker, "utf-8"))).toMatchObject({
+      runtimeEnvironment: "dev",
+      sourceFirstStart: "1",
+    });
+    expect(new HomeReleaseStore(home, new SharedReleaseStore(path.join(root, "shared"))).readState().current).toBeUndefined();
+  });
+
   it("reuses one seed artifact across two homes", async () => {
     const root = temporaryRoot();
     const seed = createSeed(root);
@@ -112,9 +169,9 @@ describe("runtime launcher", () => {
     for (const name of ["home-a", "home-b"]) {
       const home = path.join(root, name);
       fs.mkdirSync(home);
-      await bootstrapFromInstalledSeed({
+      await bootstrapFixture({
         homeStore: new HomeReleaseStore(home, shared),
-        seedRoot: seed,
+        installedPackageRoot: seed,
         env: { NIUBOT_ALLOW_ROOT_STORE: "1" },
         verify: () => undefined,
       });
@@ -131,15 +188,15 @@ describe("runtime launcher", () => {
     fs.mkdirSync(oldHome);
     fs.mkdirSync(newHome);
     const oldStore = new HomeReleaseStore(oldHome, shared);
-    const oldState = await bootstrapFromInstalledSeed({
+    const oldState = await bootstrapFixture({
       homeStore: oldStore,
-      seedRoot: createSeed(root, "1.0.0", "old-seed", "old"),
+      installedPackageRoot: createSeed(root, "1.0.0", "old-seed", "old"),
       env: { NIUBOT_ALLOW_ROOT_STORE: "1" },
       verify: () => undefined,
     });
-    await bootstrapFromInstalledSeed({
+    await bootstrapFixture({
       homeStore: new HomeReleaseStore(newHome, shared),
-      seedRoot: createSeed(root, "2.0.0", "new-seed", "recommended"),
+      installedPackageRoot: createSeed(root, "2.0.0", "new-seed", "recommended"),
       env: { NIUBOT_ALLOW_ROOT_STORE: "1" },
       verify: () => undefined,
     });
@@ -165,14 +222,14 @@ describe("runtime launcher", () => {
     const newHome = path.join(root, "new-home");
     fs.mkdirSync(oldHome);
     fs.mkdirSync(newHome);
-    await bootstrapFromInstalledSeed({
+    await bootstrapFixture({
       homeStore: new HomeReleaseStore(oldHome, shared),
-      seedRoot: createSeed(root, "1.0.0", "old-restart-seed", "old"),
+      installedPackageRoot: createSeed(root, "1.0.0", "old-restart-seed", "old"),
       env: { NIUBOT_ALLOW_ROOT_STORE: "1" }, verify: () => undefined,
     });
-    await bootstrapFromInstalledSeed({
+    await bootstrapFixture({
       homeStore: new HomeReleaseStore(newHome, shared),
-      seedRoot: createSeed(root, "2.0.0", "new-restart-seed", "recommended"),
+      installedPackageRoot: createSeed(root, "2.0.0", "new-restart-seed", "recommended"),
       env: { NIUBOT_ALLOW_ROOT_STORE: "1" }, verify: () => undefined,
     });
     const marker = path.join(root, "recommended-restart.json");
@@ -188,7 +245,7 @@ describe("runtime launcher", () => {
     expect(JSON.parse(fs.readFileSync(marker, "utf-8"))).toMatchObject({ label: "recommended" });
   });
 
-  it("recovers from unusable slots by importing the installed seed", async () => {
+  it("uses an imported production package for recovery without overwriting current before health", async () => {
     const root = temporaryRoot();
     const home = path.join(root, "home");
     const marker = path.join(root, "recovered.json");
@@ -200,7 +257,7 @@ describe("runtime launcher", () => {
     const code = await runRuntimeLauncher({
       command: "nbt",
       argv: ["status", "--home", home],
-      seedRoot: createSeed(root),
+      installedPackageRoot: createSeed(root),
       bootstrapVerify: () => undefined,
       env: {
         NIUBOT_SHARED_STORE: path.join(root, "shared"),
@@ -211,7 +268,7 @@ describe("runtime launcher", () => {
     expect(code).toBe(0);
     const state = new HomeReleaseStore(home, new SharedReleaseStore(path.join(root, "shared"))).readState();
     expect(state.current).toMatchObject({ storage: "shared" });
-    expect((state.current as { artifactId: string }).artifactId).not.toBe("missing");
+    expect((state.current as { artifactId: string }).artifactId).toBe("missing");
   });
 
   it("keeps a usable legacy v1 current instead of replacing it with the installed seed", async () => {
@@ -242,7 +299,7 @@ describe("runtime launcher", () => {
     const code = await runRuntimeLauncher({
       command: "nbt",
       argv: ["status", "--home", home],
-      seedRoot: createSeed(root),
+      installedPackageRoot: createSeed(root),
       bootstrapVerify: () => undefined,
       env: {
         NIUBOT_SHARED_STORE: sharedRoot,
@@ -285,7 +342,7 @@ describe("runtime launcher", () => {
     const code = await runRuntimeLauncher({
       command: "nbt",
       argv: ["status", "--home", home],
-      seedRoot: createSeed(root, "0.2.4"),
+      installedPackageRoot: createSeed(root, "0.2.4"),
       bootstrapVerify: () => undefined,
       env: {
         NIUBOT_SHARED_STORE: sharedRoot,
@@ -330,7 +387,7 @@ describe("runtime launcher", () => {
     const code = await runRuntimeLauncher({
       command: "nbt",
       argv: ["status", "--home", home],
-      seedRoot: seed,
+      installedPackageRoot: seed,
       bootstrapVerify: () => undefined,
       env: {
         NIUBOT_SHARED_STORE: sharedRoot,
@@ -349,9 +406,9 @@ describe("runtime launcher", () => {
     const emptyHome = path.join(root, "empty-home");
     fs.mkdirSync(sourceHome);
     fs.mkdirSync(emptyHome);
-    await bootstrapFromInstalledSeed({
+    await bootstrapFixture({
       homeStore: new HomeReleaseStore(sourceHome, shared),
-      seedRoot: createSeed(root, "2.0.0", "recommended-empty-seed", "recommended"),
+      installedPackageRoot: createSeed(root, "2.0.0", "recommended-empty-seed", "recommended"),
       env: { NIUBOT_ALLOW_ROOT_STORE: "1" },
       verify: () => undefined,
     });
@@ -359,7 +416,7 @@ describe("runtime launcher", () => {
     const code = await runRuntimeLauncher({
       command: "nbt",
       argv: ["status", "--home", emptyHome],
-      seedRoot: createSeed(root, "1.0.0", "older-empty-seed", "old"),
+      installedPackageRoot: createSeed(root, "1.0.0", "older-empty-seed", "old"),
       env: {
         NIUBOT_SHARED_STORE: shared.rootDirectory,
         NIUBOT_TEST_LAUNCH_MARKER: marker,
@@ -368,8 +425,8 @@ describe("runtime launcher", () => {
     });
     expect(code).toBe(0);
     expect(JSON.parse(fs.readFileSync(marker, "utf-8"))).toMatchObject({ label: "recommended" });
-    const state = new HomeReleaseStore(emptyHome, shared).readStateStrict();
-    expect(state.current).toEqual(new RecommendedReleaseStore(shared).readStrict().release);
+    const state = new HomeReleaseStore(emptyHome, shared).readState();
+    expect(state.current).toBeUndefined();
   });
 
   it("keeps a source home on dev during restart even when production has a newer recommendation", async () => {
@@ -379,17 +436,16 @@ describe("runtime launcher", () => {
     const productionHome = path.join(root, "production-home");
     fs.mkdirSync(devHome);
     fs.mkdirSync(productionHome);
-    const devState = await bootstrapFromInstalledSeed({
-      homeStore: new HomeReleaseStore(devHome, shared),
-      seedRoot: createSeed(root, "1.0.0-dev.1", "dev-seed", "dev"),
-      env: { NIUBOT_ALLOW_ROOT_STORE: "1", NIUBOT_ENV: "dev" }, verify: () => undefined,
-    });
-    const devArtifactId = (devState.current as { artifactId: string }).artifactId;
+    const devRef = await installDevFixture(
+      new HomeReleaseStore(devHome, shared),
+      createSeed(root, "1.0.0-dev.1", "dev-seed", "dev"),
+    );
+    const devArtifactId = devRef.artifactId;
     const devManifest = shared.readManifest(devArtifactId)!;
     fs.writeFileSync(shared.manifestFile(devArtifactId), `${JSON.stringify({ ...devManifest, sourceKind: "source" }, null, 2)}\n`);
-    await bootstrapFromInstalledSeed({
+    await bootstrapFixture({
       homeStore: new HomeReleaseStore(productionHome, shared),
-      seedRoot: createSeed(root, "2.0.0", "production-seed", "production"),
+      installedPackageRoot: createSeed(root, "2.0.0", "production-seed", "production"),
       env: { NIUBOT_ALLOW_ROOT_STORE: "1" }, verify: () => undefined,
     });
     const marker = path.join(root, "dev-restart.json");
@@ -413,19 +469,17 @@ describe("runtime launcher", () => {
     const shared = new SharedReleaseStore(path.join(root, "shared"));
     const home = path.join(root, "home");
     fs.mkdirSync(home);
-    const state = await bootstrapFromInstalledSeed({
+    const state = await bootstrapFixture({
       homeStore: new HomeReleaseStore(home, shared),
-      seedRoot: createSeed(root, "1.0.0", "stable-seed", "stable"),
+      installedPackageRoot: createSeed(root, "1.0.0", "stable-seed", "stable"),
       env: { NIUBOT_ALLOW_ROOT_STORE: "1" }, verify: () => undefined,
     });
     const sourceHome = path.join(root, "source-home");
     fs.mkdirSync(sourceHome);
-    const sourceState = await bootstrapFromInstalledSeed({
-      homeStore: new HomeReleaseStore(sourceHome, shared),
-      seedRoot: createSeed(root, "2.0.0-dev.1", "source-seed", "source"),
-      env: { NIUBOT_ALLOW_ROOT_STORE: "1", NIUBOT_ENV: "dev" }, verify: () => undefined,
-    });
-    const sourceRef = sourceState.current as ReleaseRef & { storage: "shared" };
+    const sourceRef = await installDevFixture(
+      new HomeReleaseStore(sourceHome, shared),
+      createSeed(root, "2.0.0-dev.1", "source-seed", "source"),
+    ) as ReleaseRef & { storage: "shared" };
     const sourceManifest = shared.readManifest(sourceRef.artifactId)!;
     fs.writeFileSync(shared.manifestFile(sourceRef.artifactId), `${JSON.stringify({ ...sourceManifest, sourceKind: "source" }, null, 2)}\n`);
     fs.writeFileSync(path.join(shared.rootDirectory, "recommended.json"), `${JSON.stringify({

@@ -21,6 +21,8 @@ export interface InstallArchiveOptions {
   sourceKind: "npm" | "source";
   sourceDigest?: string;
   expectedVersion?: string;
+  /** Rewrite a locally packed stable source archive into its allocated DEV version. */
+  versionOverride?: string;
   nodePath: string;
   nodeVersion: string;
   nodeAbi: string;
@@ -35,7 +37,7 @@ export interface InstallArchiveOptions {
 
 export interface ImportInstalledTreeOptions {
   sourceDirectory: string;
-  sourceKind: "seed" | "legacy";
+  sourceKind: "npm" | "seed" | "legacy";
   nodePath: string;
   nodeVersion: string;
   nodeAbi: string;
@@ -62,7 +64,11 @@ export class SharedReleaseInstaller {
       const packageDirectory = path.join(staging, "package");
       fs.mkdirSync(packageDirectory);
       await extractTar({ file: options.archivePath, cwd: packageDirectory, strip: 1 });
-      const pkg = readPackage(packageDirectory);
+      let pkg = readPackage(packageDirectory);
+      if (options.versionOverride) {
+        rewritePackageVersion(packageDirectory, pkg.version, options.versionOverride);
+        pkg = readPackage(packageDirectory);
+      }
       if (options.expectedVersion && pkg.version !== options.expectedVersion) {
         throw new Error(`Candidate version mismatch: ${pkg.version}; expected ${options.expectedVersion}`);
       }
@@ -187,6 +193,26 @@ export class SharedReleaseInstaller {
       if (staging) fs.rmSync(staging, { recursive: true, force: true });
     }
   }
+}
+
+function rewritePackageVersion(packageDirectory: string, originalVersion: string, version: string): void {
+  const packageFile = path.join(packageDirectory, "package.json");
+  const packageJson = JSON.parse(fs.readFileSync(packageFile, "utf-8")) as Record<string, unknown>;
+  if (packageJson["version"] !== originalVersion) throw new Error("Package version changed during DEV rewrite");
+  packageJson["version"] = version;
+  fs.writeFileSync(packageFile, `${JSON.stringify(packageJson, null, 2)}\n`);
+
+  const shrinkwrapFile = path.join(packageDirectory, "npm-shrinkwrap.json");
+  const shrinkwrap = JSON.parse(fs.readFileSync(shrinkwrapFile, "utf-8")) as Record<string, unknown>;
+  shrinkwrap["version"] = version;
+  const packages = shrinkwrap["packages"];
+  if (packages && typeof packages === "object" && !Array.isArray(packages)) {
+    const root = (packages as Record<string, unknown>)[""];
+    if (root && typeof root === "object" && !Array.isArray(root)) {
+      (root as Record<string, unknown>)["version"] = version;
+    }
+  }
+  fs.writeFileSync(shrinkwrapFile, `${JSON.stringify(shrinkwrap, null, 2)}\n`);
 }
 
 async function verifyCandidate(

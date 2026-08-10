@@ -7,7 +7,7 @@ import { currentNodeRuntimeRef, type ReleaseRef } from "./release-ref.js";
 import {
   completeRuntimeHomeMigrationAfterStartup,
 } from "./runtime-home-migration.js";
-import { SharedReleaseStore } from "./shared-release-store.js";
+import { computeTreeDigest, createSharedReleaseManifest, SharedReleaseStore } from "./shared-release-store.js";
 import { acquireProcessLock } from "./process-lock.js";
 import { ReleaseStore } from "./release-store.js";
 
@@ -20,6 +20,25 @@ afterEach(() => {
 });
 
 describe("runtime home migration", () => {
+  it("commits an empty home's shared runtime only after Engine startup", async () => {
+    const fixture = createFixture();
+    const runtime = publishSharedPackage(fixture.sharedStore, "initial", "1.2.3");
+    expect(fixture.homeStore.readState().current).toBeUndefined();
+
+    const completed = await completeRuntimeHomeMigrationAfterStartup({
+      niubotHome: fixture.home,
+      runtimePath: runtime,
+      node: currentNodeRuntimeRef(),
+      sharedStore: fixture.sharedStore,
+      env: { NIUBOT_ALLOW_ROOT_STORE: "1" },
+      settleMs: 0,
+    });
+
+    expect(completed?.state.current).toEqual(completed?.sharedRef);
+    expect(completed?.state.sharedSuccessfulStarts).toBe(1);
+    expect(fixture.sharedStore.readHomeRef(fixture.homeStore.homeId)?.active.current).toEqual(completed?.sharedRef);
+  });
+
   it("copies the running legacy tree and swaps only equivalent refs", async () => {
     const fixture = createFixture();
     const previous = createLegacyPackage(fixture.home, "previous", "0.2.4");
@@ -289,4 +308,27 @@ function createPackage(runtime: string, version: string): void {
     type: "module",
   }));
   fs.writeFileSync(path.join(runtime, "dist", "user-cli.js"), "");
+}
+
+function publishSharedPackage(store: SharedReleaseStore, artifactId: string, version: string): string {
+  const staging = store.createStagingDirectory(artifactId);
+  const runtime = path.join(staging, "package");
+  createPackage(runtime, version);
+  store.publishStagedArtifact({
+    stagingDirectory: staging,
+    manifest: createSharedReleaseManifest({
+      artifactId,
+      version,
+      sourceKind: "npm",
+      sourceDigest: artifactId,
+      treeDigest: computeTreeDigest(runtime),
+      installedAt: new Date().toISOString(),
+      installerNodePath: process.execPath,
+      nodeVersion: process.version,
+      nodeAbi: process.versions.modules,
+      platform: process.platform,
+      arch: process.arch,
+    }),
+  });
+  return store.packageDirectory(artifactId);
 }

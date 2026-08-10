@@ -38,7 +38,7 @@ describe("EngineLifecycleService", () => {
   test("reports Engine-owned version, environment, runtime and uptime", () => {
     const directory = createDirectory();
     const lifecycle = new EngineLifecycleService({
-      version: "1.2.3",
+      version: "1.2.3-dev.1",
       startedAt: "2026-08-10T00:00:00.000Z",
       runtimePath: path.join(directory, "runtime"),
       niubotHome: directory,
@@ -47,7 +47,7 @@ describe("EngineLifecycleService", () => {
     });
 
     expect(lifecycle.getStatus()).toEqual({
-      version: "1.2.3",
+      version: "1.2.3-dev.1",
       environment: "dev",
       startedAt: "2026-08-10T00:00:00.000Z",
       uptimeMs: 123_000,
@@ -93,12 +93,50 @@ describe("EngineLifecycleService", () => {
     await expect(lifecycle.checkForUpdate()).rejects.toThrow("版本号格式异常");
   });
 
+  test("rejects production update operations for a DEV runtime", async () => {
+    const directory = createDirectory();
+    const lifecycle = new EngineLifecycleService({
+      version: "1.2.3-dev.4",
+      startedAt: new Date().toISOString(),
+      runtimePath: directory,
+      niubotHome: directory,
+    });
+
+    await expect(lifecycle.checkForUpdate()).rejects.toThrow("DEV 运行环境");
+    await expect(lifecycle.predownloadUpdate("1.3.0")).rejects.toThrow("DEV 运行环境");
+    expect(() => lifecycle.restart({ botName: "NiuBot", updateVersion: "1.3.0" })).toThrow("DEV 运行环境");
+  });
+
+  test("treats a legacy stable-version source runtime as DEV until its one-time migration", async () => {
+    const directory = createDirectory();
+    const sourceDirectory = path.join(directory, "source");
+    const launchRestartWorker = vi.fn(() => ({ pid: 321, logFile: path.join(directory, "restart.log") }));
+    const lifecycle = new EngineLifecycleService({
+      version: "1.2.3",
+      startedAt: new Date().toISOString(),
+      runtimePath: path.join(directory, "runtime"),
+      niubotHome: directory,
+      restartConfig: { sourceDirectory },
+      env: { NIUBOT_LEGACY_SOURCE_MIGRATION: "1" },
+      dependencies: { launchRestartWorker },
+    });
+
+    expect(lifecycle.getStatus().environment).toBe("dev");
+    await expect(lifecycle.checkForUpdate()).rejects.toThrow("DEV 运行环境");
+    lifecycle.restart({ botName: "NiuBot" });
+    expect(launchRestartWorker).toHaveBeenCalledWith(expect.objectContaining({
+      sourceDirectory,
+      restartMode: "source",
+      environment: "dev",
+    }));
+  });
+
   test("owns the shared auto-update config and notifies observers after persistence", () => {
     const directory = createDirectory();
     const configPath = writeConfig(directory, false);
     const changed = vi.fn();
     const lifecycle = new EngineLifecycleService({
-      version: "1.2.3",
+      version: "1.2.3-dev.1",
       startedAt: new Date().toISOString(),
       runtimePath: directory,
       niubotHome: directory,
@@ -135,7 +173,7 @@ describe("EngineLifecycleService", () => {
     const sourceDirectory = path.join(directory, "source");
     const launchRestartWorker = vi.fn(() => ({ pid: 321, logFile: path.join(directory, "restart.log") }));
     const lifecycle = new EngineLifecycleService({
-      version: "1.2.3",
+      version: "1.2.3-dev.1",
       startedAt: new Date().toISOString(),
       runtimePath,
       niubotHome: directory,
@@ -145,16 +183,12 @@ describe("EngineLifecycleService", () => {
     });
 
     expect(lifecycle.restart({ botName: "ConanBot", chatId: "c1" }).sourceDirectory).toBe(sourceDirectory);
-    expect(lifecycle.restart({ botName: "ConanBot", updateVersion: "1.3.0" }).sourceDirectory).toBe(runtimePath);
+    expect(() => lifecycle.restart({ botName: "ConanBot", updateVersion: "1.3.0" })).toThrow("DEV 运行环境");
     expect(launchRestartWorker.mock.calls[0]?.[0]).toMatchObject({
       botName: "ConanBot",
       notifyChatId: "c1",
       sourceDirectory,
     });
-    expect(launchRestartWorker.mock.calls[1]?.[0]).toMatchObject({
-      botName: "ConanBot",
-      updateVersion: "1.3.0",
-      sourceDirectory: runtimePath,
-    });
+    expect(launchRestartWorker).toHaveBeenCalledOnce();
   });
 });

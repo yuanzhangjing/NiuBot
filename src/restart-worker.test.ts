@@ -64,10 +64,23 @@ describe("restart worker helpers", () => {
     // 手动 npm install -g + start：运行路径在 node_modules 下，无 npm-release 标记，无 src/
     expect(resolveRuntimeEnvironment({}, source, "/opt/homebrew/lib/node_modules/@yuanzhangjing/niubot"))
       .toBe("production");
-    // 显式 NIUBOT_ENV 仍优先
+    // 旧 npm 安装路径是迁移提示，不能被环境变量伪装成 DEV。
     expect(resolveRuntimeEnvironment(
       { NIUBOT_ENV: "dev" }, source, "/opt/homebrew/lib/node_modules/@yuanzhangjing/niubot",
-    )).toBe("dev");
+    )).toBe("production");
+  });
+
+  it("uses the artifact version before every legacy environment hint", () => {
+    const source = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-env-source-"));
+    const productionRuntime = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-env-production-"));
+    const devRuntime = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-env-dev-"));
+    tempDirs.push(source, productionRuntime, devRuntime);
+    fs.mkdirSync(path.join(source, "src"));
+    fs.writeFileSync(path.join(productionRuntime, "package.json"), JSON.stringify({ name: "@yuanzhangjing/niubot", version: "1.2.3" }));
+    fs.writeFileSync(path.join(devRuntime, "package.json"), JSON.stringify({ name: "@yuanzhangjing/niubot", version: "1.2.3-dev.7" }));
+
+    expect(resolveRuntimeEnvironment({ NIUBOT_ENV: "dev" }, source, productionRuntime)).toBe("production");
+    expect(resolveRuntimeEnvironment({ NIUBOT_ENV: "production" }, source, devRuntime)).toBe("dev");
   });
 
   it("resolves runtime environment: npm-release source means production", () => {

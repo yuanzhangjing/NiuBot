@@ -3,7 +3,7 @@ import path from "node:path";
 import { recoverFileReplacementSync, replaceFileSync } from "./platform/files.js";
 import { isReleaseRef, probeNodeRuntimeRef, sameReleaseRef, type ReleaseRef } from "./release-ref.js";
 import { type SharedReleaseManifest, SharedReleaseStore } from "./shared-release-store.js";
-import { comparePackageVersions, isPrereleaseOrUnrecognizedVersion } from "./version.js";
+import { comparePackageVersions, isProductionVersion } from "./version.js";
 
 export const RECOMMENDED_RELEASE_SCHEMA_VERSION = 1;
 
@@ -56,7 +56,7 @@ export class RecommendedReleaseStore {
       recoverFileReplacementSync(this.stateFile);
       const value = JSON.parse(fs.readFileSync(this.stateFile, "utf-8")) as unknown;
       if (!isRecommendedReleaseState(value)) throw new Error("invalid shape");
-      this.assertEligible(value.release);
+      this.assertEligible(value.release, false, false, true);
       return value;
     } catch (err) {
       throw new Error(`Invalid recommended release state: ${this.stateFile}`, { cause: err });
@@ -83,7 +83,7 @@ export class RecommendedReleaseStore {
       }
       if (current && sameReleaseRef(current.release, release)) return current;
       if (current) {
-        const existing = this.assertEligible(current.release);
+        const existing = this.assertEligible(current.release, false, false, true);
         const compared = comparePackageVersions(candidate.version, existing.version);
         if (compared === undefined) throw new Error("Recommended releases must use valid semantic versions");
         if (compared < 0) {
@@ -112,12 +112,14 @@ export class RecommendedReleaseStore {
     release: ReleaseRef & { storage: "shared" },
     verifyNode = false,
     verifyTree = false,
+    allowLegacySeed = false,
   ): SharedReleaseManifest {
     const manifest = this.sharedStore.assertUsableArtifact(release.artifactId, undefined, verifyTree);
-    if (manifest.sourceKind !== "npm" && manifest.sourceKind !== "seed" && manifest.sourceKind !== "legacy") {
+    if (manifest.sourceKind !== "npm" && manifest.sourceKind !== "legacy"
+      && !(allowLegacySeed && manifest.sourceKind === "seed")) {
       throw new Error(`Artifact '${release.artifactId}' is not an eligible production release`);
     }
-    if (isPrereleaseOrUnrecognizedVersion(manifest.version)) {
+    if (!isProductionVersion(manifest.version)) {
       throw new Error(`Artifact '${release.artifactId}' is not a stable production version`);
     }
     if (manifest.nodeAbi !== release.node.nodeAbi) {

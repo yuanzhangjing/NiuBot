@@ -49,7 +49,7 @@ import {
   queryProcessFileDescriptorPath,
   queryProcessWorkingDirectory,
 } from "./platform/process.js";
-import { isNewerPackageVersion } from "./version.js";
+import { isNewerPackageVersion, isProductionVersion, runtimeEnvironmentForVersion } from "./version.js";
 import {
   isSupportedNodeMajor,
   MINIMUM_NODE_MAJOR,
@@ -980,6 +980,8 @@ async function cmdStart(niubotHome: string, flags: CliFlags): Promise<void> {
     process.exit(1);
   }
 
+  if (await activateSourceFirstStartIfNeeded(niubotHome, config)) return;
+  if (await activateLauncherCandidateIfNeeded(niubotHome, config)) return;
   if (await activateRecommendedReleaseIfNeeded(niubotHome, config)) return;
 
   // Ensure working directories exist
@@ -1077,7 +1079,7 @@ async function cmdStart(niubotHome: string, flags: CliFlags): Promise<void> {
   }
 
   // Check for updates (non-blocking, best-effort)
-  const latest = checkForUpdate();
+  const latest = isProductionVersion(getPkgVersion()) ? checkForUpdate() : null;
   if (latest) {
     console.log();
     console.log(`  Update available: ${getPkgVersion()} → ${latest}`);
@@ -1087,7 +1089,7 @@ async function cmdStart(niubotHome: string, flags: CliFlags): Promise<void> {
 }
 
 async function activateRecommendedReleaseIfNeeded(niubotHome: string, config: NiuBotConfig): Promise<boolean> {
-  if (process.env["NIUBOT_ENV"] === "dev" || fs.existsSync(path.join(PROJECT_ROOT, "src"))) return false;
+  if (!isProductionVersion(getPkgVersion())) return false;
   const sharedStore = new SharedReleaseStore(resolveSharedRuntimeRoot());
   const homeStore = new HomeReleaseStore(niubotHome, sharedStore);
   if (!homeStore.stateExistsRecovering()) return false;
@@ -1158,6 +1160,85 @@ async function activateRecommendedReleaseIfNeeded(niubotHome: string, config: Ni
   }
 }
 
+async function activateLauncherCandidateIfNeeded(niubotHome: string, config: NiuBotConfig): Promise<boolean> {
+  const artifactId = process.env["NIUBOT_LAUNCH_CANDIDATE_ARTIFACT_ID"];
+  if (!artifactId) return false;
+  const sharedStore = new SharedReleaseStore(resolveSharedRuntimeRoot());
+  const manifest = sharedStore.assertUsableArtifact(artifactId, undefined, true);
+  const environment = runtimeEnvironmentForVersion(manifest.version);
+  if (!environment) throw new Error(`Unsupported launcher candidate version: ${manifest.version}`);
+  info(`Safely activating version ${manifest.version}...`);
+  const worker = launchRestartWorker({
+    niubotHome,
+    botName: config.bots[0]?.id ?? "NiuBot",
+    runtimeRoot: PROJECT_ROOT,
+    sourceDirectory: PROJECT_ROOT,
+    environment,
+    candidateArtifactId: artifactId,
+  });
+  try {
+    const result = await waitForRestartCompletion({
+      stateFile: worker.stateFile,
+      restartId: worker.restartId,
+      workerPid: worker.pid,
+      onPhase: (restartState) => {
+        if (!restartCompletion(restartState)) info(restartPhaseLabel(restartState.phase, manifest.version));
+      },
+    });
+    if (result.completion === "success") {
+      ok(`NiuBot is running on version ${manifest.version}.`);
+      return true;
+    }
+    if (result.completion === "rolled-back") {
+      fail(`Version ${manifest.version} failed; the last healthy version is running.`);
+      if (result.state.error) hint(result.state.error);
+    } else {
+      fail(`Could not start version ${manifest.version}${result.state.error ? `: ${result.state.error}` : "."}`);
+    }
+  } catch (err) {
+    fail(err instanceof Error ? err.message : String(err));
+    hint(`Check ${worker.logFile}`);
+  }
+  process.exitCode = 1;
+  return true;
+}
+
+async function activateSourceFirstStartIfNeeded(niubotHome: string, config: NiuBotConfig): Promise<boolean> {
+  if (process.env["NIUBOT_SOURCE_FIRST_START"] !== "1") return false;
+  const sourceDirectory = process.env["NIUBOT_SOURCE_DIR"] ?? PROJECT_ROOT;
+  info("Building and safely activating the first DEV artifact...");
+  const worker = launchRestartWorker({
+    niubotHome,
+    botName: config.bots[0]?.id ?? "NiuBot",
+    runtimeRoot: PROJECT_ROOT,
+    sourceDirectory,
+    environment: "dev",
+    restartMode: "source",
+  });
+  try {
+    const result = await waitForRestartCompletion({
+      stateFile: worker.stateFile,
+      restartId: worker.restartId,
+      workerPid: worker.pid,
+      onPhase: (restartState) => {
+        if (!restartCompletion(restartState)) info(restartPhaseLabel(restartState.phase, "DEV"));
+      },
+    });
+    if (result.completion === "success") {
+      ok("NiuBot is running on the new DEV artifact.");
+      return true;
+    }
+    fail(result.completion === "rolled-back"
+      ? "DEV startup failed; the previous version was restored."
+      : `DEV startup failed${result.state.error ? `: ${result.state.error}` : "."}`);
+  } catch (err) {
+    fail(err instanceof Error ? err.message : String(err));
+    hint(`Check ${worker.logFile}`);
+  }
+  process.exitCode = 1;
+  return true;
+}
+
 // ── Stop ───────────────────────────────────────────────────
 
 async function cmdStop(niubotHome: string): Promise<void> {
@@ -1176,6 +1257,7 @@ async function cmdRestart(niubotHome: string): Promise<void> {
     return;
   }
   const config = loadConfig(path.join(niubotHome, "config.yaml"));
+  if (await activateLauncherCandidateIfNeeded(niubotHome, config)) return;
   if (await activateRecommendedReleaseIfNeeded(niubotHome, config)) return;
   const worker = launchRestartWorker({
     niubotHome,
@@ -1183,6 +1265,7 @@ async function cmdRestart(niubotHome: string): Promise<void> {
     runtimeRoot: PROJECT_ROOT,
     sourceDirectory: running.identity.runtimePath,
     environment: running.state.runtimeMode ?? process.env["NIUBOT_ENV"] ?? "",
+    restartMode: process.env["NIUBOT_LEGACY_SOURCE_MIGRATION"] === "1" ? "source" : undefined,
   });
   console.log(`Restart started (worker PID ${worker.pid})`);
   console.log(`  Log: ${worker.logFile}`);
@@ -1378,7 +1461,7 @@ function fetchLatestVersion(): string {
     cwd: safeCurrentWorkingDirectory(),
     env: npmEnvironmentForCurrentNode(),
   }).stdout.trim();
-  if (!latest || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(latest)) {
+  if (!latest || !isProductionVersion(latest)) {
     throw new Error(`npm returned an invalid latest version: ${latest || "(empty)"}`);
   }
   return latest;
@@ -1411,6 +1494,12 @@ async function cmdUpdate(niubotHome: string, flags: CliFlags): Promise<void> {
   }
 
   const current = running?.identity.version ?? getPkgVersion();
+  if (!isProductionVersion(current)) {
+    fail(`DEV 版本 ${current} 不支持正式版更新。`);
+    hint("请在源码目录完成构建，然后执行 restart 使用最新 DEV 产物。");
+    process.exitCode = 1;
+    return;
+  }
   const npmCommand = resolveNpmCommandForCurrentNode();
   console.log();
   console.log(`Current version: ${current}`);
@@ -1678,11 +1767,12 @@ async function cmdBot(rawArgs: string[], envHome: string | undefined): Promise<v
 }
 
 function currentTransferRuntime() {
+  const version = getPkgVersion();
   return {
     runtimePath: PROJECT_ROOT,
     nodePath: process.execPath,
-    version: getPkgVersion(),
-    runtimeMode: process.env["NIUBOT_ENV"],
+    version,
+    runtimeMode: runtimeEnvironmentForVersion(version),
     sourceDirectory: process.env["NIUBOT_SOURCE_DIR"] ?? PROJECT_ROOT,
     logLevel: process.env["NIUBOT_LOG_LEVEL"],
     debugAgentStdout: process.env["NIUBOT_DEBUG_AGENT_STDOUT"],

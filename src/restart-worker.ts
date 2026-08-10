@@ -38,16 +38,15 @@ import {
 import { assertNoPendingBotTransfer } from "./bot-transfer.js";
 import { recoverStaleBotTransferLifecycles } from "./bot-transfer-worker.js";
 import { ensureRuntimeCliShims } from "./platform/cli-runtime.js";
+import { reserveDevelopmentVersion, selectLatestDevelopmentRelease } from "./development-release.js";
+import { comparePackageVersions, isProductionVersion, runtimeEnvironmentForVersion, type RuntimeEnvironment } from "./version.js";
 
 const PACKAGE_NAME = "@yuanzhangjing/niubot";
 const DEFAULT_INSTALL_TIMEOUT_MS = 120_000;
 const UPDATE_INSTALL_TIMEOUT_MS = 600_000;
 export const DEFAULT_PREFLIGHT_TIMEOUT_MS = 120_000;
 
-type RestartMode = "source" | "npm-update" | "recommended" | "production";
-
-/** 运行环境标识：dev（本地开发）vs production（正式服务）。显式声明优先，否则推导，兜底保守取 production。 */
-export type RuntimeEnvironment = "dev" | "production";
+type RestartMode = "source" | "dev" | "npm-update" | "recommended" | "candidate" | "production";
 
 interface RestartContext {
   id: string;
@@ -57,11 +56,12 @@ interface RestartContext {
   botDirectory: string;
   sourceDirectory: string;
   workerRuntimePath: string;
-  /** dev/production 运行环境（NIUBOT_ENV 显式声明或推导） */
+  /** 兼容旧版本迁移；新产物的运行环境始终由版本号决定。 */
   environment: RuntimeEnvironment;
   updateVersion?: string;
   recommendedArtifactId?: string;
   recommendedGeneration?: number;
+  candidateArtifactId?: string;
   notifyChatId?: string;
   legacyNotifyEndpoint?: string;
   /** 重启完成后注入主会话的任务提示（nbt restart --wake 传入） */
@@ -80,7 +80,7 @@ interface RestartContext {
 interface RuntimeTarget {
   runtimePath: string;
   version: string;
-  runtimeMode: string;
+  runtimeMode: RuntimeEnvironment;
   nodePath: string;
   releaseRef?: ReleaseRef;
 }
@@ -122,6 +122,7 @@ export async function runRestartWorker(
     updateVersion: env["NIUBOT_UPDATE_VERSION"],
     recommendedArtifactId: env["NIUBOT_RECOMMENDED_ARTIFACT_ID"],
     recommendedGeneration: parsePositiveInteger(env["NIUBOT_RECOMMENDED_GENERATION"]),
+    candidateArtifactId: env["NIUBOT_CANDIDATE_ARTIFACT_ID"],
     notifyChatId: env["NIUBOT_RESTART_NOTIFY_CHAT_ID"] || env["NIUBOT_CHAT_ID"],
     legacyNotifyEndpoint: env["NIUBOT_API_SOCKET"],
     wakePrompt: env["NIUBOT_RESTART_WAKE_PROMPT"] || undefined,
@@ -171,10 +172,14 @@ export async function runRestartWorker(
     try {
       if (mode === "source") {
         await runSourceRestart(context);
+      } else if (mode === "dev") {
+        await runDevelopmentRestart(context);
       } else if (mode === "npm-update") {
         await runNpmUpdate(context);
       } else if (mode === "recommended") {
         await runRecommendedActivation(context);
+      } else if (mode === "candidate") {
+        await runLauncherCandidateActivation(context);
       } else {
         await runProductionRestart(context);
       }
@@ -227,27 +232,56 @@ async function recoverInterruptedHomeTransaction(context: RestartContext): Promi
 }
 
 async function runSourceRestart(context: RestartContext): Promise<void> {
-  await ensureBootstrapRelease(context);
   context.state.write("build_candidate");
   const npmCommand = resolveNpmCommandForCurrentNode();
   const npmEnv = npmEnvironmentForCurrentNode();
   await runLogged(context, npmCommand, ["run", "build"], context.sourceDirectory, 180_000, npmEnv);
   await runLogged(context, npmCommand, ["run", "pack:check"], context.sourceDirectory, 180_000, npmEnv);
   const pkg = readPackage(path.join(context.sourceDirectory, "package.json"));
-  const sha = await readGitSha(context);
-  const releaseId = `${compactTimestamp(new Date())}-${pkg.version}-${sha}`;
-  const candidate = await packRelease(context, {
-    releaseId,
-    cwd: context.sourceDirectory,
-    installTimeoutMs: installTimeout(context, false),
-  });
-  await switchToCandidate(context, candidate, "重启成功。");
+  if (!isProductionVersion(pkg.version)) {
+    throw new Error(`Source package base version must be stable SemVer: ${pkg.version}`);
+  }
+  const reservation = reserveDevelopmentVersion(context.sharedStore, pkg.version);
+  try {
+    const sha = await readGitSha(context);
+    const releaseId = `${compactTimestamp(new Date())}-${reservation.version}-${sha}`;
+    await packRelease(context, {
+      releaseId,
+      cwd: context.sourceDirectory,
+      expectedVersion: reservation.version,
+      versionOverride: reservation.version,
+      installTimeoutMs: installTimeout(context, false),
+    });
+    const latest = selectLatestDevelopmentRelease(context.sharedStore);
+    if (!latest) throw new Error("No compatible DEV artifact is available after source build");
+    await switchToCandidate(context, {
+      runtimePath: latest.runtimePath,
+      version: latest.version,
+      runtimeMode: "dev",
+      nodePath: latest.ref.node.nodePath,
+      releaseRef: latest.ref,
+    }, "重启成功。");
+  } finally {
+    reservation.release();
+  }
+}
+
+async function runDevelopmentRestart(context: RestartContext): Promise<void> {
+  const latest = selectLatestDevelopmentRelease(context.sharedStore);
+  if (!latest) throw new Error("No compatible DEV artifact is available; build one from the source directory first");
+  await switchToCandidate(context, {
+    runtimePath: latest.runtimePath,
+    version: latest.version,
+    runtimeMode: "dev",
+    nodePath: latest.ref.node.nodePath,
+    releaseRef: latest.ref,
+  }, "重启成功。");
 }
 
 async function runNpmUpdate(context: RestartContext): Promise<void> {
   const version = context.updateVersion;
   if (!version || !/^[0-9A-Za-z._-]+$/.test(version)) throw new Error(`invalid npm update version: ${version ?? ""}`);
-  await ensureBootstrapRelease(context);
+  if (!isProductionVersion(version)) throw new Error(`npm update target is not a production version: ${version}`);
   const expectedRecommendationGeneration = context.recommendedStore.read()?.generation ?? 0;
   context.state.write("build_npm_candidate");
   const releaseId = `${compactTimestamp(new Date())}-${version}-npm`;
@@ -300,6 +334,60 @@ async function runRecommendedActivation(context: RestartContext): Promise<void> 
   });
 }
 
+async function runLauncherCandidateActivation(context: RestartContext): Promise<void> {
+  const artifactId = context.candidateArtifactId;
+  if (!artifactId) throw new Error("Launcher candidate artifact is missing");
+  const manifest = context.sharedStore.assertUsableArtifact(artifactId, undefined, true);
+  const environment = runtimeEnvironmentForVersion(manifest.version);
+  if (!environment) throw new Error(`Unsupported launcher candidate version: ${manifest.version}`);
+  const releaseRef: ReleaseRef & { storage: "shared" } = {
+    storage: "shared",
+    artifactId,
+    node: currentNodeRuntimeRef(),
+  };
+  const runtimePath = context.homeStore.resolveRuntime(releaseRef, true);
+  const state = context.homeStore.readState();
+  if (state.current) {
+    const recordedEnvironment = releaseRefEnvironment(context, state.current);
+    if (recordedEnvironment && recordedEnvironment !== environment) {
+      throw new Error(`Refusing implicit ${recordedEnvironment} to ${environment} runtime conversion`);
+    }
+    try {
+      const currentPath = context.homeStore.resolveRuntime(state.current, true);
+      const currentEnvironment = environmentForRuntimePath(currentPath);
+      if (currentEnvironment !== environment) {
+        throw new Error(`Refusing implicit ${currentEnvironment} to ${environment} runtime conversion`);
+      }
+      const currentVersion = readPackage(path.join(currentPath, "package.json")).version;
+      if (comparePackageVersions(manifest.version, currentVersion) === -1) {
+        throw new Error(`Refusing implicit downgrade from ${currentVersion} to ${manifest.version}`);
+      }
+    } catch (err) {
+      if (err instanceof Error && err.message.startsWith("Refusing implicit")) throw err;
+      // An unusable current may be recovered by a compatible launcher candidate.
+    }
+  }
+  await switchToCandidate(context, {
+    runtimePath,
+    version: manifest.version,
+    runtimeMode: environment,
+    nodePath: releaseRef.node.nodePath,
+    releaseRef,
+  }, `已启动版本 ${manifest.version}。`);
+}
+
+function releaseRefEnvironment(context: RestartContext, ref: ReleaseRef): RuntimeEnvironment | undefined {
+  if (ref.storage === "shared") {
+    const version = context.sharedStore.readManifest(ref.artifactId)?.version;
+    return version ? runtimeEnvironmentForVersion(version) : undefined;
+  }
+  try {
+    return environmentForRuntimePath(ref.runtimePath);
+  } catch {
+    return undefined;
+  }
+}
+
 async function runProductionRestart(context: RestartContext): Promise<void> {
   const runtimePath = context.sourceDirectory;
   const selected = resolveSelectedRelease(context);
@@ -325,7 +413,7 @@ async function runProductionRestart(context: RestartContext): Promise<void> {
       await switchToCandidate(context, {
         runtimePath: selectedRuntime,
         version: readPackage(path.join(selectedRuntime, "package.json")).version,
-        runtimeMode: context.environment,
+        runtimeMode: environmentForRuntimePath(selectedRuntime),
         nodePath: selected.ref.node.nodePath,
         releaseRef: selected.ref,
       }, "重启成功。");
@@ -361,10 +449,11 @@ async function runProductionRestart(context: RestartContext): Promise<void> {
   try {
     context.state.write("production_start_service", { oldPid: old?.state.pid });
     sanitizeOneShotEnvironment();
+    const productionVersion = readPackage(path.join(runtimePath, "package.json")).version;
     const launched = launchRuntime(context, {
       runtimePath,
-      version: readPackage(path.join(runtimePath, "package.json")).version,
-      runtimeMode: context.environment,
+      version: productionVersion,
+      runtimeMode: requireRuntimeEnvironment(productionVersion),
       nodePath: selected?.ref.node.nodePath ?? old?.state.nodePath ?? process.execPath,
     });
     context.state.write("production_health_check", { candidatePid: launched.state.pid });
@@ -430,7 +519,7 @@ async function switchToCandidate(
   try {
     preflightSnapshot = await createDatabaseSnapshot(context, "preflight");
     context.state.write("preflight_candidate", { candidateRelease: releaseId });
-    await runPreflight(context, packageDirectory, preflightSnapshot.manifestPath, candidate.nodePath);
+    await runPreflight(context, packageDirectory, preflightSnapshot.manifestPath, candidate.nodePath, candidate.runtimeMode);
   } catch (err) {
     if (preflightSnapshot) cleanupSnapshot(context, preflightSnapshot);
     context.homeStore.writeSharedRef({
@@ -560,7 +649,7 @@ function launchRuntime(context: RestartContext, target: RuntimeTarget) {
     nodePath: target.nodePath,
     runtimeMode: target.runtimeMode,
     beforeLaunch: () => assertNoPendingBotTransfer(context.niubotHome),
-    env: runtimeEnvironment(context),
+    env: runtimeEnvironment(context, target.runtimeMode),
   });
 }
 
@@ -568,7 +657,7 @@ function runtimeTargetFromRunning(running: NonNullable<Awaited<ReturnType<typeof
   return {
     runtimePath: running.state.runtimePath,
     version: running.identity.version,
-    runtimeMode: running.state.runtimeMode ?? "",
+    runtimeMode: requireRuntimeEnvironment(running.identity.version),
     nodePath: running.state.nodePath,
   };
 }
@@ -584,7 +673,7 @@ function resolveRollbackTarget(
       return {
         runtimePath,
         version: readPackage(path.join(runtimePath, "package.json")).version,
-        runtimeMode: old?.state.runtimeMode ?? context.environment,
+        runtimeMode: environmentForRuntimePath(runtimePath),
         nodePath: rollbackRef.node.nodePath,
         releaseRef: rollbackRef,
       };
@@ -679,58 +768,12 @@ async function resumeRuntimeAfterSnapshotFailure(
   }
 }
 
-async function ensureBootstrapRelease(context: RestartContext): Promise<void> {
-  context.state.write("bootstrap_last_known_good");
-  const state = context.homeStore.stateExistsRecovering()
-    ? context.homeStore.readStateStrict()
-    : context.homeStore.readOrMigrateLegacy(currentNodeRuntimeRef());
-  if (state.current) return;
-
-  const running = await inspectRunningEngine(context.niubotHome);
-  const node = running
-    ? probeNodeRuntimeRef(running.state.nodePath)
-    : currentNodeRuntimeRef();
-  const existingRef = running
-    ? context.homeStore.releaseRefForRuntimePath(running.state.runtimePath, node)
-    : undefined;
-  if (existingRef) {
-    const next: HomeReleaseState = {
-      schemaVersion: 2,
-      current: existingRef,
-      unresolvedLegacy: [],
-    };
-    context.homeStore.writeState(next);
-    context.homeStore.writeSharedRef({ state: next, runtimePath: running?.state.runtimePath });
-    return;
-  }
-  const packageJson = path.join(context.sourceDirectory, "package.json");
-  const dist = path.join(context.sourceDirectory, "dist");
-  if (!fs.existsSync(packageJson) || !fs.existsSync(dist)) {
-    log(context, "bootstrap skipped: current dist is unavailable");
-    return;
-  }
-  const pkg = readPackage(packageJson);
-  const bootstrap = await packRelease(context, {
-    releaseId: `bootstrap-${compactTimestamp(new Date())}-${pkg.version}`,
-    cwd: context.sourceDirectory,
-    expectedVersion: pkg.version,
-    installTimeoutMs: installTimeout(context, false),
-  });
-  if (!bootstrap.releaseRef) throw new Error("bootstrap release reference is unavailable");
-  const next: HomeReleaseState = {
-    schemaVersion: 2,
-    current: bootstrap.releaseRef,
-    unresolvedLegacy: [],
-  };
-  context.homeStore.writeState(next);
-  context.homeStore.writeSharedRef({ state: next });
-}
-
 interface PackReleaseOptions {
   releaseId: string;
   cwd: string;
   packageSpec?: string;
   expectedVersion?: string;
+  versionOverride?: string;
   installTimeoutMs: number;
 }
 
@@ -801,6 +844,7 @@ async function packRelease(context: RestartContext, options: PackReleaseOptions)
     archivePath: archive,
     sourceKind: options.packageSpec ? "npm" : "source",
     expectedVersion: options.expectedVersion,
+    versionOverride: options.versionOverride,
     nodePath: process.execPath,
     nodeVersion: process.version,
     nodeAbi: process.versions.modules,
@@ -827,7 +871,7 @@ async function packRelease(context: RestartContext, options: PackReleaseOptions)
   return {
     runtimePath: installed.packageDirectory,
     version: installed.manifest.version,
-    runtimeMode: context.environment,
+    runtimeMode: requireRuntimeEnvironment(installed.manifest.version),
     nodePath: process.execPath,
     releaseRef,
   };
@@ -838,6 +882,7 @@ async function runPreflight(
   runtimePath: string,
   databaseManifestPath: string,
   nodePath: string,
+  runtimeMode = context.environment,
 ): Promise<void> {
   const timeoutMs = resolvePreflightTimeoutMs();
   const startedAt = Date.now();
@@ -850,7 +895,7 @@ async function runPreflight(
       runtimePath,
       timeoutMs,
       {
-        ...withNodeRuntimeOnPath(nodePath, runtimeEnvironment(context)),
+        ...withNodeRuntimeOnPath(nodePath, runtimeEnvironment(context, runtimeMode)),
         [PREFLIGHT_DATABASE_MANIFEST_ENV]: databaseManifestPath,
         [PREFLIGHT_FULL_VALIDATION_ENV]: "1",
       },
@@ -1031,7 +1076,8 @@ export function resolveRestartSourceDirectory(options: {
 }): string {
   const mode = options.env["NIUBOT_RESTART_MODE"];
   const environment = options.env["NIUBOT_ENV"];
-  if (mode === "npm-update" || environment === "production" || options.env["NIUBOT_RUNTIME_MODE"] === "npm-release") {
+  if (mode !== "source"
+    && (mode === "npm-update" || environment === "production" || options.env["NIUBOT_RUNTIME_MODE"] === "npm-release")) {
     return path.resolve(options.env["NIUBOT_SOURCE_DIR"] || options.workerRuntimePath);
   }
   try {
@@ -1053,7 +1099,12 @@ export function resolveRestartSourceDirectory(options: {
 function resolveRestartMode(context: RestartContext, env: NodeJS.ProcessEnv): RestartMode {
   if (env["NIUBOT_RESTART_MODE"] === "npm-update") return "npm-update";
   if (env["NIUBOT_RESTART_MODE"] === "recommended") return "recommended";
-  if (fs.existsSync(path.join(context.sourceDirectory, "src"))) return "source";
+  if (env["NIUBOT_RESTART_MODE"] === "candidate") return "candidate";
+  if (env["NIUBOT_RESTART_MODE"] === "source") return "source";
+  if (context.environment === "dev") {
+    if (fs.existsSync(path.join(context.sourceDirectory, "src"))) return "source";
+    return "dev";
+  }
   return "production";
 }
 
@@ -1064,15 +1115,23 @@ function parsePositiveInteger(value: string | undefined): number | undefined {
 }
 
 /**
- * 解析运行环境标识（dev/production）。
- * 优先级：NIUBOT_ENV 显式声明 > 运行时路径在 npm 全局 node_modules（npm 包）> npm-release 旧标记
- *         > 源码目录有 src/（开发）> 兜底保守 production。
+ * 新产物按版本号判定。后面的环境变量和源码目录判断只用于把旧版
+ * stable-source home 迁成首个 x.y.z-dev.N，迁完后不再参与选择。
  */
 export function resolveRuntimeEnvironment(
   env: NodeJS.ProcessEnv,
   sourceDirectory: string,
   runtimePath = "",
 ): RuntimeEnvironment {
+  if (runtimePath) {
+    try {
+      const version = readPackage(path.join(runtimePath, "package.json")).version;
+      const environment = runtimeEnvironmentForVersion(version);
+      if (environment) return environment;
+    } catch {
+      // Continue with the one-cycle legacy migration hints below.
+    }
+  }
   const declared = env["NIUBOT_ENV"];
   if (declared === "dev" || declared === "production") return declared;
   // npm 全局安装的包：运行路径必然在 node_modules 下（手动 npm install + start 也命中）
@@ -1083,6 +1142,16 @@ export function resolveRuntimeEnvironment(
   return "production";
 }
 
+function environmentForRuntimePath(runtimePath: string): RuntimeEnvironment {
+  return requireRuntimeEnvironment(readPackage(path.join(runtimePath, "package.json")).version);
+}
+
+function requireRuntimeEnvironment(version: string): RuntimeEnvironment {
+  const environment = runtimeEnvironmentForVersion(version);
+  if (!environment) throw new Error(`Unsupported runtime version: ${version}`);
+  return environment;
+}
+
 /** npm 全局包路径必然包含 node_modules 段（如 /opt/homebrew/lib/node_modules/@xxx/pkg） */
 export function isNpmInstalledPath(runtimePath: string): boolean {
   if (!runtimePath) return false;
@@ -1090,10 +1159,10 @@ export function isNpmInstalledPath(runtimePath: string): boolean {
   return segments.includes("node_modules");
 }
 
-function runtimeEnvironment(context: RestartContext): NodeJS.ProcessEnv {
+function runtimeEnvironment(context: RestartContext, environment: string = context.environment): NodeJS.ProcessEnv {
   return {
     NIUBOT_SOURCE_DIR: context.sourceDirectory,
-    NIUBOT_ENV: context.environment,
+    NIUBOT_ENV: environment,
     NIUBOT_LOG_LEVEL: process.env["NIUBOT_LOG_LEVEL"] || "info",
   };
 }
@@ -1106,6 +1175,7 @@ function sanitizeOneShotEnvironment(): void {
     "NIUBOT_UPDATE_VERSION",
     "NIUBOT_RECOMMENDED_ARTIFACT_ID",
     "NIUBOT_RECOMMENDED_GENERATION",
+    "NIUBOT_CANDIDATE_ARTIFACT_ID",
     "NIUBOT_RESTART_STOP_AFTER_COMPLETION",
     "NIUBOT_RESTART_NOTIFY_CHAT_ID",
     "NIUBOT_CHAT_ID",

@@ -121,6 +121,8 @@ describe("EngineAutoUpdateCoordinator", () => {
   });
 
   test("sends proactive version notifications only through the configured first Bot", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-10T02:00:00Z")); // Monday 10:00 Asia/Shanghai
     const { coordinator, cards } = createFixture(false);
     (coordinator as any).fetchLatestVersion = async () => "1.1.0";
     coordinator.start();
@@ -131,6 +133,42 @@ describe("EngineAutoUpdateCoordinator", () => {
     expect(cards).toHaveLength(1);
     expect(cards[0]).toMatchObject({ chatId: "chat-open-id", header: "Update" });
     expect(cards[0]?.content).toContain("1.0.0 → 1.1.0");
+    coordinator.stop();
+  });
+
+  test("does not check or notify while a legacy stable-version source runtime is marked DEV", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-10T02:00:00Z"));
+    const { coordinator, lifecycle, cards } = createFixture(false);
+    const status = lifecycle.getStatus();
+    vi.spyOn(lifecycle, "getStatus").mockReturnValue({ ...status, environment: "dev" });
+    const fetchLatest = vi.fn(async () => "1.1.0");
+    (coordinator as any).fetchLatestVersion = fetchLatest;
+    coordinator.start();
+
+    await coordinator.runDailyCheck();
+
+    expect(fetchLatest).not.toHaveBeenCalled();
+    expect(cards).toHaveLength(0);
+    coordinator.stop();
+  });
+
+  test("checks for manual update reminders only on Monday at the daytime timer", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-11T02:00:00Z")); // Tuesday 10:00 Asia/Shanghai
+    const { coordinator, cards } = createFixture(false);
+    let fetches = 0;
+    (coordinator as any).fetchLatestVersion = async () => { fetches++; return "1.1.0"; };
+    coordinator.start();
+
+    await coordinator.runDailyCheck();
+    expect(fetches).toBe(0);
+    expect(cards).toHaveLength(0);
+
+    vi.setSystemTime(new Date("2026-08-17T02:00:00Z")); // Monday 10:00 Asia/Shanghai
+    await coordinator.runDailyCheck();
+    expect(fetches).toBe(1);
+    expect(cards).toHaveLength(1);
     coordinator.stop();
   });
 
@@ -175,7 +213,8 @@ describe("EngineAutoUpdateCoordinator", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-07T10:00:00Z"));
     const { coordinator, lifecycle } = createFixture(true);
-    (coordinator as any).fetchLatestVersion = async () => "1.1.0";
+    let fetches = 0;
+    (coordinator as any).fetchLatestVersion = async () => { fetches++; return "1.1.0"; };
     let downloads = 0;
     let restarts = 0;
     lifecycle.predownloadUpdate = async () => { downloads++; return true; };
@@ -184,17 +223,127 @@ describe("EngineAutoUpdateCoordinator", () => {
     coordinator.start();
     await (coordinator as any).requestAutoUpgradeCheck();
 
+    expect(fetches).toBe(0);
     expect(downloads).toBe(0);
     expect(restarts).toBe(0);
     coordinator.stop();
   });
 
-  test("fetches npm latest only once per day for automatic checks", async () => {
+  test("queries npm only once per successful upgrade window", async () => {
     vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-08-07T10:00:00Z"));
+    vi.setSystemTime(new Date("2026-08-07T18:00:00Z"));
     const { coordinator, lifecycle } = createFixture(true);
     let fetches = 0;
+    let latest = "1.0.0";
+    (coordinator as any).fetchLatestVersion = async () => { fetches++; return latest; };
+    lifecycle.predownloadUpdate = async () => true;
+    const restart = vi.fn(() => ({ pid: 123, logFile: "restart.log", sourceDirectory: "runtime" }));
+    lifecycle.restart = restart;
+
+    coordinator.start();
+    await (coordinator as any).requestAutoUpgradeCheck();
+    expect(fetches).toBe(1);
+    expect(restart).not.toHaveBeenCalled();
+
+    latest = "1.1.0";
+    vi.setSystemTime(new Date("2026-08-07T18:30:00Z"));
+    await (coordinator as any).requestAutoUpgradeCheck();
+
+    expect(fetches).toBe(1);
+    expect(restart).not.toHaveBeenCalled();
+
+    vi.setSystemTime(new Date("2026-08-08T18:00:00Z"));
+    await (coordinator as any).requestAutoUpgradeCheck();
+
+    expect(fetches).toBe(2);
+    expect(restart).toHaveBeenCalledOnce();
+    coordinator.stop();
+  });
+
+  test("aligns the first automatic query to 02:00 in the configured timezone", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-07T17:59:59Z"));
+    const { coordinator } = createFixture(true);
+    let fetches = 0;
     (coordinator as any).fetchLatestVersion = async () => { fetches++; return "1.0.0"; };
+
+    coordinator.start();
+    await vi.advanceTimersByTimeAsync(999);
+    expect(fetches).toBe(0);
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fetches).toBe(1);
+    coordinator.stop();
+  });
+
+  test("does not backfill when the Engine starts inside the window", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-07T19:00:00Z"));
+    const { coordinator } = createFixture(true);
+    let fetches = 0;
+    (coordinator as any).fetchLatestVersion = async () => { fetches++; return "1.0.0"; };
+
+    coordinator.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetches).toBe(0);
+
+    await vi.advanceTimersByTimeAsync(23 * 60 * 60_000 - 1);
+    expect(fetches).toBe(0);
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fetches).toBe(1);
+    coordinator.stop();
+  });
+
+  test("retries a failed npm query inside the same window", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-07T17:59:59Z"));
+    const { coordinator } = createFixture(true);
+    let fetches = 0;
+    (coordinator as any).fetchLatestVersion = async () => {
+      fetches++;
+      if (fetches === 1) throw new Error("temporary network failure");
+      return "1.0.0";
+    };
+
+    coordinator.start();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(fetches).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(30 * 60_000);
+    expect(fetches).toBe(2);
+    coordinator.stop();
+  });
+
+  test("does not retry when the running version cannot be auto-upgraded", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-07T17:59:59Z"));
+    const { coordinator, lifecycle } = createFixture(true);
+    const status = lifecycle.getStatus();
+    vi.spyOn(lifecycle, "getStatus").mockReturnValue({ ...status, version: "1.0.0-dev" });
+    const checks = vi.spyOn(coordinator, "runAutoUpgradeCheck");
+    let fetches = 0;
+    (coordinator as any).fetchLatestVersion = async () => { fetches++; return "1.1.0"; };
+
+    coordinator.start();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(checks).toHaveBeenCalledOnce();
+    expect(fetches).toBe(0);
+
+    await vi.advanceTimersByTimeAsync(30 * 60_000);
+    expect(checks).toHaveBeenCalledOnce();
+    expect(fetches).toBe(0);
+    coordinator.stop();
+  });
+
+  test("caches a discovered update while waiting for the Engine to become idle", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-07T18:00:00Z"));
+    const source = busySource();
+    const { coordinator, lifecycle } = createFixture(true, [[source]]);
+    let fetches = 0;
+    (coordinator as any).fetchLatestVersion = async () => { fetches++; return "1.1.0"; };
+    lifecycle.predownloadUpdate = async () => true;
 
     coordinator.start();
     await (coordinator as any).requestAutoUpgradeCheck();
@@ -204,11 +353,111 @@ describe("EngineAutoUpdateCoordinator", () => {
     coordinator.stop();
   });
 
+  test("retries only safeness while busy without querying npm again", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-07T17:59:59Z"));
+    let busy = true;
+    const source: UpgradeSafenessSource = {
+      name: "mutable",
+      isIdle: () => !busy,
+      describeBlockers: () => (busy ? "任务进行中" : ""),
+    };
+    const { coordinator, lifecycle } = createFixture(true, [[source]]);
+    let fetches = 0;
+    (coordinator as any).fetchLatestVersion = async () => { fetches++; return "1.1.0"; };
+    lifecycle.predownloadUpdate = async () => true;
+    const restart = vi.fn(() => ({ pid: 123, logFile: "restart.log", sourceDirectory: "runtime" }));
+    lifecycle.restart = restart;
+
+    coordinator.start();
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(30 * 60_000);
+    expect(fetches).toBe(1);
+    expect(restart).not.toHaveBeenCalled();
+
+    busy = false;
+    await vi.advanceTimersByTimeAsync(30 * 60_000);
+    expect(fetches).toBe(1);
+    expect(restart).toHaveBeenCalledOnce();
+    coordinator.stop();
+  });
+
+  test("stops retrying when another path has already activated the cached version", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-07T17:59:59Z"));
+    const { coordinator, lifecycle } = createFixture(true, [[busySource()]]);
+    const initialStatus = lifecycle.getStatus();
+    const getStatus = vi.spyOn(lifecycle, "getStatus");
+    getStatus.mockReturnValue(initialStatus);
+    (coordinator as any).fetchLatestVersion = async () => "1.1.0";
+    lifecycle.predownloadUpdate = async () => true;
+    const checks = vi.spyOn(coordinator, "runAutoUpgradeCheck");
+
+    coordinator.start();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(checks).toHaveBeenCalledOnce();
+
+    getStatus.mockReturnValue({ ...initialStatus, version: "1.1.0" });
+    await vi.advanceTimersByTimeAsync(30 * 60_000);
+    expect(checks).toHaveBeenCalledTimes(2);
+
+    await vi.advanceTimersByTimeAsync(30 * 60_000);
+    expect(checks).toHaveBeenCalledTimes(2);
+    coordinator.stop();
+  });
+
+  test("stops busy retries when the remaining window reaches the margin", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-07T17:59:59Z"));
+    const { coordinator, lifecycle } = createFixture(true, [[busySource()]]);
+    (coordinator as any).fetchLatestVersion = async () => "1.1.0";
+    let downloads = 0;
+    lifecycle.predownloadUpdate = async () => { downloads++; return true; };
+
+    coordinator.start();
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(2.5 * 60 * 60_000);
+    expect(downloads).toBe(6);
+
+    await vi.advanceTimersByTimeAsync(11 * 60_000);
+    expect(downloads).toBe(6);
+    coordinator.stop();
+  });
+
+  test("treats both sides of a cross-midnight window as one query window", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-07T15:00:00Z"));
+    const { coordinator, lifecycle } = createFixture(true, [[busySource()]]);
+    lifecycle.getAutoUpdateConfig = () => ({
+      enabled: true,
+      windowStartHour: 22,
+      windowEndHour: 2,
+      timezone: "Asia/Shanghai",
+      marginMinutes: 10,
+      notifyOnResult: true,
+    });
+    let fetches = 0;
+    (coordinator as any).fetchLatestVersion = async () => { fetches++; return "1.1.0"; };
+    lifecycle.predownloadUpdate = async () => true;
+
+    coordinator.start();
+    await (coordinator as any).requestAutoUpgradeCheck();
+    vi.setSystemTime(new Date("2026-08-07T17:00:00Z"));
+    await (coordinator as any).requestAutoUpgradeCheck();
+    expect(fetches).toBe(1);
+
+    vi.setSystemTime(new Date("2026-08-08T14:00:00Z"));
+    await (coordinator as any).requestAutoUpgradeCheck();
+    expect(fetches).toBe(2);
+    coordinator.stop();
+  });
+
   test("does not automatically upgrade to a prerelease target", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-07T19:00:00Z"));
     const { coordinator, lifecycle } = createFixture(true);
-    (coordinator as any).fetchLatestVersion = async () => "1.1.0-beta.1";
+    let fetches = 0;
+    (coordinator as any).fetchLatestVersion = async () => { fetches++; return "1.1.0-beta.1"; };
     let downloads = 0;
     let restarts = 0;
     lifecycle.predownloadUpdate = async () => { downloads++; return true; };
@@ -216,13 +465,15 @@ describe("EngineAutoUpdateCoordinator", () => {
 
     coordinator.start();
     await (coordinator as any).requestAutoUpgradeCheck();
+    await (coordinator as any).requestAutoUpgradeCheck();
 
+    expect(fetches).toBe(1);
     expect(downloads).toBe(0);
     expect(restarts).toBe(0);
     coordinator.stop();
   });
 
-  test("reacts immediately when any Bot enables the shared setting", async () => {
+  test("waits for the next window when enabled inside the current window", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-07T19:00:00Z"));
     const { coordinator, configPath } = createFixture(false);
@@ -233,15 +484,40 @@ describe("EngineAutoUpdateCoordinator", () => {
 
     writeAutoUpdateEnabledToConfig(configPath, true);
     coordinator.configChanged();
-    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(checks).toBe(0);
 
+    await vi.advanceTimersByTimeAsync(23 * 60 * 60_000);
     expect(checks).toBe(1);
+    coordinator.stop();
+  });
+
+  test("cancels and rebuilds the window timer when the shared setting changes", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-07T17:59:00Z"));
+    const { coordinator, configPath } = createFixture(true);
+    let fetches = 0;
+    (coordinator as any).fetchLatestVersion = async () => { fetches++; return "1.0.0"; };
+    coordinator.start();
+
+    writeAutoUpdateEnabledToConfig(configPath, false);
+    coordinator.configChanged();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(fetches).toBe(0);
+
+    writeAutoUpdateEnabledToConfig(configPath, true);
+    coordinator.configChanged();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetches).toBe(0);
+
+    await vi.advanceTimersByTimeAsync(24 * 60 * 60_000);
+    expect(fetches).toBe(1);
     coordinator.stop();
   });
 
   test("does not restart if auto-update is disabled during an in-flight download", async () => {
     vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-08-07T19:00:00Z"));
+    vi.setSystemTime(new Date("2026-08-07T17:59:59Z"));
     const { coordinator, lifecycle, configPath } = createFixture(true);
     (coordinator as any).fetchLatestVersion = async () => "1.1.0";
     let finishDownload!: () => void;
@@ -251,6 +527,7 @@ describe("EngineAutoUpdateCoordinator", () => {
     let restarted = false;
     (coordinator as any).triggerRestart = () => { restarted = true; };
     coordinator.start();
+    await vi.advanceTimersByTimeAsync(1_000);
     await vi.waitFor(() => expect(finishDownload).toBeTypeOf("function"));
 
     writeAutoUpdateEnabledToConfig(configPath, false);
@@ -260,6 +537,32 @@ describe("EngineAutoUpdateCoordinator", () => {
     await Promise.resolve();
 
     expect(restarted).toBe(false);
+    coordinator.stop();
+  });
+
+  test("does not let a check from an earlier start generation trigger restart", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-07T18:00:00Z"));
+    const { coordinator, lifecycle } = createFixture(true);
+    let finishFetch!: () => void;
+    (coordinator as any).fetchLatestVersion = () => new Promise<string>((resolve) => {
+      finishFetch = () => resolve("1.1.0");
+    });
+    let downloads = 0;
+    let restarts = 0;
+    lifecycle.predownloadUpdate = async () => { downloads++; return true; };
+    (coordinator as any).triggerRestart = () => { restarts++; };
+
+    coordinator.start();
+    const staleCheck = (coordinator as any).requestAutoUpgradeCheck();
+    await vi.waitFor(() => expect(finishFetch).toBeTypeOf("function"));
+    coordinator.stop();
+    coordinator.start();
+    finishFetch();
+    await staleCheck;
+
+    expect(downloads).toBe(0);
+    expect(restarts).toBe(0);
     coordinator.stop();
   });
 
@@ -308,6 +611,18 @@ describe("EngineAutoUpdateCoordinator", () => {
     await coordinator.runDailyCheck();
 
     expect(cards.filter((card) => card.content.includes("已自动升级"))).toHaveLength(1);
+    coordinator.stop();
+  });
+
+  test("does not query npm during the daytime check when automatic upgrade is enabled", async () => {
+    const { coordinator } = createFixture(true);
+    let fetches = 0;
+    (coordinator as any).fetchLatestVersion = async () => { fetches++; return "1.1.0"; };
+    coordinator.start();
+
+    await coordinator.runDailyCheck();
+
+    expect(fetches).toBe(0);
     coordinator.stop();
   });
 

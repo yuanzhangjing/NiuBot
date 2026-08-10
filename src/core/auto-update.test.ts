@@ -75,6 +75,12 @@ describe("window check", () => {
     expect(isInUpgradeWindow(new Date("2026-08-08T05:00:00+08:00"), config)).toBe(false);
   });
 
+  it("handles a window that starts at local midnight", () => {
+    const midnight: AutoUpdateConfig = { ...config, windowStartHour: 0, windowEndHour: 3 };
+    expect(isInUpgradeWindow(new Date("2026-08-08T00:30:00+08:00"), midnight)).toBe(true);
+    expect(isInUpgradeWindow(new Date("2026-08-08T03:00:00+08:00"), midnight)).toBe(false);
+  });
+
   it("cross-midnight window", () => {
     const cross: AutoUpdateConfig = { ...config, windowStartHour: 22, windowEndHour: 2 };
     expect(isInUpgradeWindow(new Date("2026-08-08T23:00:00+08:00"), cross)).toBe(true);
@@ -86,6 +92,7 @@ describe("window check", () => {
     expect(minutesUntilUpgradeWindowEnd(new Date("2026-08-08T03:30:00+08:00"), config)).toBe(90);
     expect(minutesUntilUpgradeWindowEnd(new Date("2026-08-08T04:55:00+08:00"), config)).toBe(5);
     expect(minutesUntilUpgradeWindowEnd(new Date("2026-08-08T10:00:00+08:00"), config)).toBe(0);
+    expect(minutesUntilUpgradeWindowEnd(new Date("2026-08-08T04:50:59+08:00"), config)).toBeLessThan(10);
     // 跨天窗口：23:00 在 22:00-02:00 内，距结束 02:00 = 3 小时 = 180 分钟
     const cross: AutoUpdateConfig = { ...config, windowStartHour: 22, windowEndHour: 2 };
     expect(minutesUntilUpgradeWindowEnd(new Date("2026-08-08T23:00:00+08:00"), cross)).toBe(180);
