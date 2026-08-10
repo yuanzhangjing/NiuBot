@@ -1132,10 +1132,10 @@ export function resolveRuntimeEnvironment(
       // Continue with the one-cycle legacy migration hints below.
     }
   }
-  const declared = env["NIUBOT_ENV"];
-  if (declared === "dev" || declared === "production") return declared;
   // npm 全局安装的包：运行路径必然在 node_modules 下（手动 npm install + start 也命中）
   if (isNpmInstalledPath(runtimePath)) return "production";
+  const declared = env["NIUBOT_ENV"];
+  if (declared === "dev" || declared === "production") return declared;
   // 旧标记：升级路径写入的 npm-release
   if (env["NIUBOT_RUNTIME_MODE"] === "npm-release") return "production";
   if (fs.existsSync(path.join(sourceDirectory, "src"))) return "dev";

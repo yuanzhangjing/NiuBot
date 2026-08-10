@@ -61,12 +61,13 @@ describe("restart worker helpers", () => {
   it("resolves runtime environment: npm-installed path means production (manual npm install + start)", () => {
     const source = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-env-"));
     tempDirs.push(source);
+    const npmRuntime = path.join(source, "global", "node_modules", "@yuanzhangjing", "niubot");
     // 手动 npm install -g + start：运行路径在 node_modules 下，无 npm-release 标记，无 src/
-    expect(resolveRuntimeEnvironment({}, source, "/opt/homebrew/lib/node_modules/@yuanzhangjing/niubot"))
+    expect(resolveRuntimeEnvironment({}, source, npmRuntime))
       .toBe("production");
     // 旧 npm 安装路径是迁移提示，不能被环境变量伪装成 DEV。
     expect(resolveRuntimeEnvironment(
-      { NIUBOT_ENV: "dev" }, source, "/opt/homebrew/lib/node_modules/@yuanzhangjing/niubot",
+      { NIUBOT_ENV: "dev" }, source, npmRuntime,
     )).toBe("production");
   });
 
