@@ -29,9 +29,7 @@ describe("restart progress", () => {
       other.write("success");
       const writer = new RestartStateWriter(botDirectory, "restart-a", "2026-07-30T00:00:00.000Z");
       const phases: string[] = [];
-      // 间隔放大（50ms/150ms）避免轮询竞态：windows node 20 上过短间隔可能跳过中间阶段
-      setTimeout(() => writer.write("build_npm_candidate"), 50);
-      setTimeout(() => writer.write("success"), 150);
+      setTimeout(() => writer.write("build_npm_candidate"), 10);
 
       const result = await waitForRestartCompletion({
         stateFile: writer.stateFile,
@@ -40,7 +38,11 @@ describe("restart progress", () => {
         pollIntervalMs: 2,
         timeoutMs: 1000,
         processAlive: () => true,
-        onPhase: (state) => phases.push(state.phase),
+        onPhase: (state) => {
+          phases.push(state.phase);
+          // 只在观察到中间阶段后写入终态，避免测试依赖系统定时器精度。
+          if (state.phase === "build_npm_candidate") writer.write("success");
+        },
       });
 
       expect(result.completion).toBe("success");
