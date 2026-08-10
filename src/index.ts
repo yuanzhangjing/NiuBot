@@ -48,6 +48,7 @@ import {
   completeRuntimeHomeMigrationAfterStartup,
 } from "./runtime-home-migration.js";
 import { isProductionVersion, runtimeEnvironmentForVersion } from "./version.js";
+import { writeLegacyRuntimeVersion } from "./legacy-runtime-metadata.js";
 
 const log = createLogger("main");
 
@@ -519,6 +520,14 @@ async function main(): Promise<void> {
     log.info("PID file written", { pidFile, pid: process.pid });
   } catch (e) {
     log.warn("failed to write PID file", { pidFile, error: String(e) });
+  }
+  try {
+    writeLegacyRuntimeVersion(NIUBOT_HOME, version);
+    log.info("legacy version snapshot written", { version });
+  } catch (e) {
+    // Canonical process state and Engine identity remain authoritative. This
+    // file only serves old CLIs and must not make a healthy Engine fail.
+    log.warn("failed to write legacy version snapshot", { error: String(e) });
   }
 
   for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {

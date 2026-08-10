@@ -51,9 +51,32 @@ describe("process manager", () => {
       logFile,
       version: "1.0.0",
     };
+    fs.writeFileSync(path.join(home, "niubot.version"), "0.1.90");
 
     const launched = launchDetachedEngine(options);
+    expect(fs.readFileSync(path.join(home, "niubot.version"), "utf8")).toBe("1.0.0");
     expect(() => launchDetachedEngine(options)).toThrow(/already running or starting/);
+    await expect(stopEngine(home)).resolves.toEqual({ stopped: true, pid: launched.state.pid });
+  });
+
+  it("does not fail Engine launch when the legacy version snapshot is unwritable", async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-process-manager-version-"));
+    tempDirs.push(home);
+    const runtime = path.join(home, "runtime");
+    const entry = path.join(runtime, "dist", "index.js");
+    fs.mkdirSync(path.dirname(entry), { recursive: true });
+    fs.writeFileSync(entry, "setInterval(() => {}, 1000);\n");
+    fs.mkdirSync(path.join(home, "niubot.version"));
+
+    const launched = launchDetachedEngine({
+      niubotHome: home,
+      engineEntry: entry,
+      runtimePath: runtime,
+      logFile: path.join(home, "engine.log"),
+      version: "2.0.0",
+    });
+
+    expect(readProcessState(home)?.processes.engine.version).toBe("2.0.0");
     await expect(stopEngine(home)).resolves.toEqual({ stopped: true, pid: launched.state.pid });
   });
 

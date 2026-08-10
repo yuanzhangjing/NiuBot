@@ -18,6 +18,7 @@ import {
   waitForProcessExit,
 } from "./platform/process.js";
 import { acquireProcessLock } from "./process-lock.js";
+import { writeLegacyRuntimeVersion } from "./legacy-runtime-metadata.js";
 import {
   DEFAULT_ENGINE_CONTROL_REQUEST_TIMEOUT_MS,
   resolveEngineShutdownTimeoutMs,
@@ -136,8 +137,15 @@ function launchDetachedEngineLocked(options: LaunchEngineOptions): LaunchedEngin
   };
   try {
     writeProcessState(options.niubotHome, state);
-    // Legacy compatibility for releases that only understand niubot.pid.
+    // Legacy compatibility for releases that only understand flat files.
     fs.writeFileSync(path.join(options.niubotHome, "niubot.pid"), String(child.pid));
+    // Canonical process state already contains the version. A damaged
+    // compatibility file must never prevent the Engine from starting.
+    try {
+      writeLegacyRuntimeVersion(options.niubotHome, options.version);
+    } catch {
+      // Best effort.
+    }
     child.unref();
     return { state, endpoint };
   } catch (err) {

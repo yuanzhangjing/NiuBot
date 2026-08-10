@@ -40,6 +40,9 @@ afterEach(async () => {
 describe("restart worker integration", () => {
   it("activates the production recommendation for a stopped home", async () => {
     const fixture = createRecommendedFixture(true);
+    // Older CLIs fall back to this flat file when they cannot query the new
+    // Engine identity API. It must change in the same activation transaction.
+    fs.writeFileSync(path.join(fixture.home, "niubot.version"), "0.1.90");
     await runTestRestartWorker({
       ...process.env,
       NIUBOT_SHARED_STORE: fixture.sharedStore.rootDirectory,
@@ -53,6 +56,7 @@ describe("restart worker integration", () => {
     });
     const running = await inspectRunningEngine(fixture.home);
     expect(running?.identity.version).toBe("2.0.0");
+    expect(fs.readFileSync(path.join(fixture.home, "niubot.version"), "utf8")).toBe("2.0.0");
     expect(fixture.homeStore.readState().current).toEqual(fixture.candidate);
     expect(fixture.homeStore.readState().rejectedRecommendation).toBeUndefined();
   }, 30_000);

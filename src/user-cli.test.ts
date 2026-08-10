@@ -274,9 +274,192 @@ describe("user-cli init model configuration", () => {
     );
 
     expect(output).toContain(`Agent install guide: run \`${expectedCommand}\` and follow it.`);
-    expect(output).toContain("niubot bot export <bot-id>");
-    expect(output).toContain("niubot bot import <file>");
-    expect(output).toContain("niubot bot move <bot-id>");
+    expect(output).toContain("bot list");
+    expect(output).toContain("bot add");
+    expect(output).toContain("bot export");
+    expect(output).toContain("niubot bot --help");
+    expect(output).not.toContain("  add-bot");
+    expect(output).not.toContain("--include-secrets");
+  });
+
+  it("shows command-specific help without running the command", () => {
+    const srcDir = path.dirname(fileURLToPath(import.meta.url));
+    const tsxCliPath = path.join(srcDir, "..", "node_modules", "tsx", "dist", "cli.mjs");
+    const statusHelp = execFileSync(
+      process.execPath,
+      [tsxCliPath, path.join(srcDir, "user-cli.ts"), "status", "--help", "--home", "/missing-home"],
+      { encoding: "utf8" },
+    );
+    const exportHelp = execFileSync(
+      process.execPath,
+      [tsxCliPath, path.join(srcDir, "user-cli.ts"), "bot", "export", "--help"],
+      { encoding: "utf8" },
+    );
+    const nestedExportHelp = execFileSync(
+      process.execPath,
+      [tsxCliPath, path.join(srcDir, "user-cli.ts"), "help", "bot", "export"],
+      { encoding: "utf8" },
+    );
+    const addHelp = execFileSync(
+      process.execPath,
+      [tsxCliPath, path.join(srcDir, "user-cli.ts"), "bot", "add", "--help"],
+      { encoding: "utf8" },
+    );
+
+    expect(statusHelp).toContain("Usage: niubot status");
+    expect(statusHelp).toContain("niubot bot list");
+    expect(statusHelp).not.toContain("Home: /missing-home");
+    expect(exportHelp).toContain("Usage: niubot bot export <bot-id>");
+    expect(exportHelp).toContain("default output is <bot-id>.nbot");
+    expect(nestedExportHelp).toBe(exportHelp);
+    expect(addHelp).toContain("Usage: niubot bot add [--home <path>]");
+  });
+
+  it("rejects unknown help topics instead of showing unrelated help", () => {
+    const srcDir = path.dirname(fileURLToPath(import.meta.url));
+    const tsxCliPath = path.join(srcDir, "..", "node_modules", "tsx", "dist", "cli.mjs");
+    const topLevel = spawnSync(
+      process.execPath,
+      [tsxCliPath, path.join(srcDir, "user-cli.ts"), "help", "statsu"],
+      { encoding: "utf8" },
+    );
+    const bot = spawnSync(
+      process.execPath,
+      [tsxCliPath, path.join(srcDir, "user-cli.ts"), "bot", "help", "remove"],
+      { encoding: "utf8" },
+    );
+
+    expect(topLevel.status).toBe(1);
+    expect(`${topLevel.stdout}${topLevel.stderr}`).toContain("Unknown command: statsu");
+    expect(bot.status).toBe(1);
+    expect(`${bot.stdout}${bot.stderr}`).toContain("Unknown Bot command: remove");
+  });
+
+  it("lists Bot IDs without the verbose service status output", () => {
+    const tempDir = makeTempDir("niubot-bot-list-");
+    fs.writeFileSync(path.join(tempDir, "config.yaml"), [
+      "bots:",
+      "  - id: FirstBot",
+      "    backend: codex",
+      "    appId: app-a",
+      "    appSecret: secret-a",
+      "  - id: SecondBot",
+      "    backend: codex",
+      "    appId: app-b",
+      "    appSecret: secret-b",
+      "",
+    ].join("\n"));
+    const srcDir = path.dirname(fileURLToPath(import.meta.url));
+    const tsxCliPath = path.join(srcDir, "..", "node_modules", "tsx", "dist", "cli.mjs");
+    const output = execFileSync(
+      process.execPath,
+      [tsxCliPath, path.join(srcDir, "user-cli.ts"), "--home", tempDir, "bot", "list"],
+      { encoding: "utf8" },
+    );
+
+    expect(output).toContain(`Home: ${tempDir}`);
+    expect(output).toContain("Bot IDs:\n  FirstBot\n  SecondBot");
+    expect(output).not.toContain("Engine:");
+    expect(output).not.toContain("API:");
+  });
+
+  it("rejects unknown commands instead of silently succeeding", () => {
+    const srcDir = path.dirname(fileURLToPath(import.meta.url));
+    const tsxCliPath = path.join(srcDir, "..", "node_modules", "tsx", "dist", "cli.mjs");
+    const result = spawnSync(
+      process.execPath,
+      [tsxCliPath, path.join(srcDir, "user-cli.ts"), "statsu"],
+      { encoding: "utf8" },
+    );
+
+    expect(result.status).toBe(1);
+    expect(`${result.stdout}${result.stderr}`).toContain("Unknown command: statsu");
+  });
+
+  it("rejects options that belong to another command", () => {
+    const srcDir = path.dirname(fileURLToPath(import.meta.url));
+    const tsxCliPath = path.join(srcDir, "..", "node_modules", "tsx", "dist", "cli.mjs");
+    const result = spawnSync(
+      process.execPath,
+      [tsxCliPath, path.join(srcDir, "user-cli.ts"), "status", "--apply"],
+      { encoding: "utf8" },
+    );
+
+    expect(result.status).toBe(1);
+    expect(`${result.stdout}${result.stderr}`).toContain("Option --apply is not valid for 'status'");
+    expect(`${result.stdout}${result.stderr}`).toContain("Usage: niubot status");
+  });
+
+  it("rejects extra positional arguments for top-level commands", () => {
+    const srcDir = path.dirname(fileURLToPath(import.meta.url));
+    const tsxCliPath = path.join(srcDir, "..", "node_modules", "tsx", "dist", "cli.mjs");
+    const result = spawnSync(
+      process.execPath,
+      [tsxCliPath, path.join(srcDir, "user-cli.ts"), "version", "unexpected"],
+      { encoding: "utf8" },
+    );
+
+    expect(result.status).toBe(1);
+    expect(`${result.stdout}${result.stderr}`).toContain("Unexpected argument for 'version': unexpected");
+  });
+
+  it("validates options before showing help and handles version aliases", () => {
+    const srcDir = path.dirname(fileURLToPath(import.meta.url));
+    const tsxCliPath = path.join(srcDir, "..", "node_modules", "tsx", "dist", "cli.mjs");
+    const invalid = spawnSync(
+      process.execPath,
+      [tsxCliPath, path.join(srcDir, "user-cli.ts"), "status", "--help", "--apply"],
+      { encoding: "utf8" },
+    );
+    const invalidWithoutCommand = spawnSync(
+      process.execPath,
+      [tsxCliPath, path.join(srcDir, "user-cli.ts"), "--apply", "--help"],
+      { encoding: "utf8" },
+    );
+    const versionHelp = execFileSync(
+      process.execPath,
+      [tsxCliPath, path.join(srcDir, "user-cli.ts"), "--version", "--help"],
+      { encoding: "utf8" },
+    );
+    const helpAlias = execFileSync(
+      process.execPath,
+      [tsxCliPath, path.join(srcDir, "user-cli.ts"), "help", "--version"],
+      { encoding: "utf8" },
+    );
+
+    expect(invalid.status).toBe(1);
+    expect(`${invalid.stdout}${invalid.stderr}`).toContain("Option --apply is not valid for 'status'");
+    expect(invalidWithoutCommand.status).toBe(1);
+    expect(`${invalidWithoutCommand.stdout}${invalidWithoutCommand.stderr}`).toContain("Option --apply is not valid without a command");
+    expect(versionHelp).toContain("Usage: niubot version [--verbose]");
+    expect(helpAlias).toBe(versionHelp);
+  });
+
+  it("fails Bot listing for an explicitly invalid home", () => {
+    const srcDir = path.dirname(fileURLToPath(import.meta.url));
+    const tsxCliPath = path.join(srcDir, "..", "node_modules", "tsx", "dist", "cli.mjs");
+    const missingHome = path.join(makeTempDir("niubot-missing-home-parent-"), "missing");
+    const result = spawnSync(
+      process.execPath,
+      [tsxCliPath, path.join(srcDir, "user-cli.ts"), "--home", missingHome, "bot", "list"],
+      { encoding: "utf8" },
+    );
+
+    expect(result.status).toBe(1);
+    expect(`${result.stdout}${result.stderr}`).toContain(`Cannot list Bots in ${missingHome}`);
+  });
+
+  it("rejects the global --home option for bot move", () => {
+    const srcDir = path.dirname(fileURLToPath(import.meta.url));
+    const tsxCliPath = path.join(srcDir, "..", "node_modules", "tsx", "dist", "cli.mjs");
+    const result = spawnSync(
+      process.execPath,
+      [tsxCliPath, path.join(srcDir, "user-cli.ts"), "--home", "/ignored", "bot", "move", "--help"],
+      { encoding: "utf8" },
+    );
+
+    expect(result.status).toBe(1);
+    expect(`${result.stdout}${result.stderr}`).toContain("Option --home is not valid for 'bot move'");
   });
 
   it("rejects Bot transfer commands from a non-admin agent session", () => {
@@ -293,6 +476,22 @@ describe("user-cli init model configuration", () => {
 
     expect(result.status).toBe(1);
     expect(`${result.stdout}${result.stderr}`).toContain("require an admin session");
+  });
+
+  it("applies the same admin check to the legacy add-bot alias", () => {
+    const srcDir = path.dirname(fileURLToPath(import.meta.url));
+    const tsxCliPath = path.join(srcDir, "..", "node_modules", "tsx", "dist", "cli.mjs");
+    const result = spawnSync(
+      process.execPath,
+      [tsxCliPath, path.join(srcDir, "user-cli.ts"), "add-bot"],
+      {
+        encoding: "utf8",
+        env: { ...process.env, NIUBOT_AGENT_SESSION: "1", NIUBOT_IS_ADMIN: "false" },
+      },
+    );
+
+    expect(result.status).toBe(1);
+    expect(`${result.stdout}${result.stderr}`).toContain("Bot commands require an admin session");
   });
 
   it("prints the packaged installation guide without relying on cat", () => {

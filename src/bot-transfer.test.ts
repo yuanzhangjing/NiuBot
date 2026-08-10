@@ -72,9 +72,10 @@ describe("Bot transfer bundle", () => {
     const cli = path.join(sourceDirectory, "user-cli.ts");
     const env = { ...process.env, NIUBOT_LOG_LEVEL: "error" };
 
-    const exported = execFileSync(process.execPath, [tsx, cli, "bot", "export", "Mover", "--home", source, "--output", bundle], {
+    const exported = execFileSync(process.execPath, [tsx, cli, "bot", "export", "Mover", "--home", source], {
       encoding: "utf-8",
       env,
+      cwd: root,
     });
     expect(exported).toContain("exported");
     const secondTarget = createEmptyTarget(path.join(root, "second-target"), "SecondExisting");

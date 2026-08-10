@@ -143,23 +143,33 @@ interface CliFlags {
   check?: boolean;
   detach?: boolean;
   force?: boolean;
+  help?: boolean;
   restart?: boolean;
   verbose?: boolean;
   all?: boolean;
   apply?: boolean;
   home?: string;
+  unknown?: string[];
 }
 
-function parseCliArgs(args: string[]): { command: string | undefined; commandIndex: number; flags: CliFlags } {
+function parseCliArgs(args: string[]): {
+  command: string | undefined;
+  commandIndex: number;
+  flags: CliFlags;
+  extraPositionals: string[];
+} {
   const flags: CliFlags = {};
+  const extraPositionals: string[] = [];
   let command: string | undefined;
   let commandIndex = -1;
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
+    if (command && i > commandIndex && (command === "bot" || command === "help")) continue;
     if (arg === "--check") flags.check = true;
     else if (arg === "--detach") flags.detach = true;
     else if (arg === "--force") flags.force = true;
+    else if (arg === "--help" || arg === "-h") flags.help = true;
     else if (arg === "--restart") flags.restart = true;
     else if (arg === "--verbose") flags.verbose = true;
     else if (arg === "--all") flags.all = true;
@@ -168,15 +178,27 @@ function parseCliArgs(args: string[]): { command: string | undefined; commandInd
       command = arg;
       commandIndex = i;
     }
-    else if (arg === "--home" && i + 1 < args.length) {
+    else if (arg.startsWith("--home=")) {
+      const value = arg.slice("--home=".length);
+      if (!value) throw new Error("--home requires a path");
+      flags.home = value;
+    }
+    else if (arg === "--home") {
+      if (i + 1 >= args.length || args[i + 1]!.startsWith("-")) {
+        throw new Error("--home requires a path");
+      }
       flags.home = args[++i];
     } else if (!arg.startsWith("-") && !command) {
       command = arg;
       commandIndex = i;
+    } else if (!arg.startsWith("-") && command !== "bot" && command !== "help") {
+      extraPositionals.push(arg);
+    } else if (arg.startsWith("-") && command !== "bot") {
+      (flags.unknown ??= []).push(arg);
     }
   }
 
-  return { command, commandIndex, flags };
+  return { command, commandIndex, flags, extraPositionals };
 }
 
 // ── Output helpers ─────────────────────────────────────────
@@ -1014,8 +1036,8 @@ async function cmdStart(niubotHome: string, flags: CliFlags): Promise<void> {
       NIUBOT_DEBUG_AGENT_STDOUT: process.env["NIUBOT_DEBUG_AGENT_STDOUT"] ?? "",
     },
   });
-  // Snapshot the version at startup so status shows the actual running version
-  fs.writeFileSync(path.join(niubotHome, "niubot.version"), getPkgVersion());
+  // launchDetachedEngine keeps the legacy version snapshot synchronized for
+  // every launch path, including update, restart, and rollback.
   fs.writeFileSync(path.join(niubotHome, "niubot.node"), getNodeRuntimeLabel());
   try {
     const registryStore = new SharedReleaseStore(resolveSharedRuntimeRoot());
@@ -1622,82 +1644,290 @@ function getUsageText(): string {
 
 Usage: niubot <command> [options]
 
-Commands:
-  init       Initialize NiuBot (environment check + config templates)
-  add-bot    Add a new bot to an existing installation
-  start      Start the NiuBot service
-  restart    Safely rebuild or restart the running service
-  stop       Stop the NiuBot service
-  status     Show service status
-  update     Check for updates and install latest version
-  cleanup    List safely removable releases (use --apply to move/delete)
-  bot        Export, import, or move one Bot
-  version    Show version
-  install-guide  Print the agent installation guide
+Service:
+  start          Start an Engine
+  restart        Safely rebuild or restart an Engine
+  stop           Stop an Engine
+  status         Show Engine and Bot health details
 
-Init options:
-  --check    Only run preflight checks, don't create files
-  --force    Overwrite existing config files
-  --home <path>  Custom NIUBOT_HOME (default: ~/.niubot)
+Bots:
+  bot list       List Bot IDs
+  bot add        Add a Bot to an existing home
+  bot export     Back up one Bot to a .nbot file
+  bot import     Restore one Bot from a .nbot file
+  bot move       Move one Bot between homes
 
-Start options:
-  --restart  Stop existing process first if running
+Setup and maintenance:
+  init           Check the environment and create config templates
+  update         Check for and install a production update
+  cleanup        Show safely removable releases (dry-run by default)
+  version        Show the installed version
 
-Status options:
-  --all      List all registered NiuBot homes (default without --home)
+Help:
+  -h, --help     Show help without running the command
 
-Update options:
-  --detach   Start the update worker and return immediately (running Engine only)
+Home selection:
+  --home <path>  Use one NIUBOT_HOME where the command usage lists this option
 
-Cleanup options:
-  --apply    Apply cleanup; default is dry-run
-
-Bot transfer:
-  niubot bot export <bot-id> --output <file> [--home <path>] [--include-secrets]
-  niubot bot import <file> [--home <path>] [--app-id <id> --app-secret-file <path>]
-  niubot bot move <bot-id> --from-home <path> --to-home <path> [--apply]
-
-Export is an online backup. Import and applied move automatically stop and restore affected Engines. Move is dry-run by default.
+Run \`niubot <command> --help\` or \`niubot bot --help\` for command details.
 
 Agent install guide: run \`${INSTALL_GUIDE_COMMAND}\` and follow it.`;
 }
 
-function printUsage(): void {
-  console.log(getUsageText());
+function getCommandUsageText(command: string | undefined): string {
+  switch (command) {
+    case "init":
+      return `Usage: niubot init [--check] [--force] [--home <path>]
+
+Check the environment and create NiuBot configuration files.
+  --check  Run checks only; do not create files
+  --force  Overwrite existing generated config files`;
+    case "start":
+      return `Usage: niubot start [--restart] [--home <path>]
+
+Start one Engine. Use --restart to replace an existing process.`;
+    case "restart":
+      return `Usage: niubot restart [--home <path>]
+
+Safely restart one Engine with health checks and automatic rollback.`;
+    case "stop":
+      return `Usage: niubot stop [--home <path>]
+
+Stop one Engine.`;
+    case "status":
+      return `Usage: niubot status [--home <path>] [--all]
+
+Show detailed Engine and Bot health.
+Without --home, all registered homes are shown.
+For a short list of Bot IDs, use \`niubot bot list\`.`;
+    case "update":
+      return `Usage: niubot update [--home <path>] [--detach]
+
+Check for a production update and install it safely.
+  --detach  Start the worker and return immediately (running Engine only)`;
+    case "cleanup":
+      return `Usage: niubot cleanup [--home <path>] [--apply]
+
+Show safely removable releases. Nothing is removed without --apply.`;
+    case "add-bot":
+      return `Usage: niubot add-bot [--home <path>]
+
+Legacy alias for \`niubot bot add\`.`;
+    case "version":
+    case "--version":
+    case "-v":
+      return `Usage: niubot version [--verbose]
+
+Show the installed NiuBot version and optional runtime details.`;
+    case "install-guide":
+      return `Usage: niubot install-guide
+
+Print the packaged installation guide.`;
+    case "bot":
+      return getBotUsageText();
+    default:
+      return getUsageText();
+  }
 }
 
-async function cmdBot(rawArgs: string[], envHome: string | undefined): Promise<void> {
-  if (process.env["NIUBOT_AGENT_SESSION"] === "1" && process.env["NIUBOT_IS_ADMIN"] !== "true") {
-    throw new Error("Bot export, import, and move require an admin session");
+function getBotUsageText(subcommand?: string): string {
+  switch (subcommand) {
+    case "list":
+      return `Usage: niubot bot list [--home <path>] [--all]
+
+List Bot IDs. Without --home, Bots from all registered homes are shown.`;
+    case "add":
+      return `Usage: niubot bot add [--home <path>]
+
+Interactively add a Bot to an existing home.`;
+    case "export":
+      return `Usage: niubot bot export <bot-id> [--output <file>] [--home <path>] [--include-secrets]
+
+Create an online backup without stopping the Engine.
+The default output is <bot-id>.nbot in the current directory.
+Credentials are omitted unless --include-secrets is specified.`;
+    case "import":
+      return `Usage: niubot bot import <file> [--home <path>] [--app-id <id> --app-secret-file <path>] [--working-directory <path>]
+
+Restore a Bot. The target Engine is stopped and restarted automatically.`;
+    case "move":
+      return `Usage: niubot bot move <bot-id> --from-home <path> --to-home <path> [--apply]
+
+Validate a same-device move. Nothing changes without --apply.
+With --apply, affected Engines are stopped and restored automatically.`;
+    default:
+      return `Usage: niubot bot <command> [options]
+
+Commands:
+  list    List Bot IDs
+  add     Add a Bot to an existing home
+  export  Back up one Bot to a .nbot file
+  import  Restore one Bot from a .nbot file
+  move    Move one Bot between homes
+
+Run \`niubot bot <command> --help\` for details.`;
   }
+}
+
+const TOP_LEVEL_COMMAND_FLAGS: Record<string, ReadonlySet<keyof CliFlags>> = {
+  init: new Set(["check", "force", "help", "home"]),
+  "add-bot": new Set(["help", "home"]),
+  start: new Set(["help", "home", "restart"]),
+  restart: new Set(["help", "home"]),
+  stop: new Set(["help", "home"]),
+  status: new Set(["all", "help", "home"]),
+  update: new Set(["detach", "help", "home"]),
+  cleanup: new Set(["apply", "help", "home"]),
+  bot: new Set(["help", "home"]),
+  version: new Set(["help", "verbose"]),
+  "--version": new Set(["help", "verbose"]),
+  "-v": new Set(["help", "verbose"]),
+  "install-guide": new Set(["help"]),
+  help: new Set(),
+};
+
+const TOP_LEVEL_COMMANDS = new Set(Object.keys(TOP_LEVEL_COMMAND_FLAGS));
+
+const BOT_COMMAND_FLAGS: Record<string, readonly string[]> = {
+  list: ["home", "all", "help", "h"],
+  add: ["home", "help", "h"],
+  export: ["home", "output", "include-secrets", "help", "h"],
+  import: ["home", "app-id", "app-secret-file", "working-directory", "help", "h"],
+  move: ["from-home", "to-home", "apply", "help", "h"],
+};
+
+const BOT_COMMANDS = new Set(Object.keys(BOT_COMMAND_FLAGS));
+
+function assertKnownHelpTopic(command: string, subcommand?: string): void {
+  if (!TOP_LEVEL_COMMANDS.has(command)) {
+    throw new Error(`Unknown command: ${command}\n\n${getUsageText()}`);
+  }
+  if (command === "bot" && subcommand && !BOT_COMMANDS.has(subcommand)) {
+    throw new Error(`Unknown Bot command: ${subcommand}\n\n${getBotUsageText()}`);
+  }
+}
+
+function printUsage(command?: string): void {
+  console.log(getCommandUsageText(command));
+}
+
+function assertTopLevelCommandFlags(command: string | undefined, flags: CliFlags): void {
+  const unknown = flags.unknown?.[0];
+  const context = command ? `for '${command}'` : "without a command";
+  if (unknown) throw new Error(`Unknown option ${context}: ${unknown}`);
+  const allowed = command ? TOP_LEVEL_COMMAND_FLAGS[command] : new Set<keyof CliFlags>(["help"]);
+  if (!allowed) return;
+  for (const [name, value] of Object.entries(flags) as Array<[keyof CliFlags, CliFlags[keyof CliFlags]]>) {
+    if (name === "unknown" || value === undefined || value === false || allowed.has(name)) continue;
+    throw new Error(`Option --${name} is not valid ${context}\n\n${getCommandUsageText(command)}`);
+  }
+}
+
+function assertBotCommandAdmin(): void {
+  if (process.env["NIUBOT_AGENT_SESSION"] === "1" && process.env["NIUBOT_IS_ADMIN"] !== "true") {
+    throw new Error("Bot commands require an admin session");
+  }
+}
+
+function assertBotInvocationFlags(
+  subcommand: string,
+  flags: Record<string, string>,
+  globalHome: string | undefined,
+): void {
+  assertBotCommandFlags(flags, BOT_COMMAND_FLAGS[subcommand] ?? []);
+  if (subcommand === "move" && globalHome !== undefined) {
+    throw new Error("Option --home is not valid for 'bot move'; use --from-home and --to-home");
+  }
+}
+
+async function cmdBot(
+  rawArgs: string[],
+  envHome: string | undefined,
+  globalHome: string | undefined,
+): Promise<void> {
   const parsed = parseArgs(rawArgs);
   const [subcommand, ...positional] = parsed.positional;
+  if (subcommand === "help") {
+    const topic = positional[0];
+    if (positional.length > 1) {
+      throw new Error(`Unexpected help topic: ${positional[1]}\n\n${getBotUsageText(topic)}`);
+    }
+    if (topic && !BOT_COMMANDS.has(topic)) {
+      throw new Error(`Unknown Bot command: ${topic}\n\n${getBotUsageText()}`);
+    }
+    if (topic) assertBotInvocationFlags(topic, parsed.flags, globalHome);
+    else assertBotCommandFlags(parsed.flags, ["help", "h"]);
+    console.log(getBotUsageText(topic));
+    return;
+  }
+  if (!subcommand) {
+    assertBotCommandFlags(parsed.flags, ["help", "h"]);
+    console.log(getBotUsageText());
+    return;
+  }
+  if (!BOT_COMMANDS.has(subcommand)) {
+    throw new Error(`Unknown Bot command: ${subcommand}\n\n${getBotUsageText()}`);
+  }
+  assertBotInvocationFlags(subcommand, parsed.flags, globalHome);
+  if (parsed.flags["help"] === "true" || parsed.flags["h"] === "true") {
+    console.log(getBotUsageText(subcommand));
+    return;
+  }
+  assertBotCommandAdmin();
   switch (subcommand) {
-    case "export": {
-      assertBotCommandFlags(parsed.flags, ["home", "output", "include-secrets"]);
-      if (positional.length !== 1 || !parsed.flags["output"]) {
-        throw new Error("Usage: niubot bot export <bot-id> --output <file> [--home <path>] [--include-secrets]");
+    case "add": {
+      if (positional.length !== 0) throw new Error(getBotUsageText("add"));
+      const home = resolveNiubotHome(parsed.flags["home"] ?? globalHome, envHome);
+      await cmdAddBot(home);
+      break;
+    }
+    case "list": {
+      if (positional.length !== 0) throw new Error(getBotUsageText("list"));
+      const requestedHome = parsed.flags["home"] ?? globalHome;
+      const hasExplicitHome = requestedHome !== undefined || envHome !== undefined;
+      const home = resolveNiubotHome(requestedHome, envHome);
+      const listAll = booleanBotFlag(parsed.flags, "all") || !hasExplicitHome;
+      const homes = listAll
+        ? collectStatusHomes(home, readRegisteredHomes(getHomeRegistryPath()))
+        : [home];
+      for (const [index, item] of homes.entries()) {
+        if (index > 0) console.log();
+        console.log(`Home: ${item}`);
+        try {
+          const bots = loadConfig(path.join(item, "config.yaml")).bots;
+          console.log("Bot IDs:");
+          if (bots.length === 0) console.log("  (none)");
+          for (const bot of bots) console.log(`  ${bot.id}`);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          if (!listAll) throw new Error(`Cannot list Bots in ${item}: ${message}`);
+          console.log(`Bot IDs: unavailable (${message})`);
+        }
       }
-      const home = resolveNiubotHome(parsed.flags["home"], envHome);
+      break;
+    }
+    case "export": {
+      if (positional.length !== 1) throw new Error(getBotUsageText("export"));
+      const home = resolveNiubotHome(parsed.flags["home"] ?? globalHome, envHome);
+      const output = parsed.flags["output"] ?? `${positional[0]!}.nbot`;
       await exportBotBundle({
         home,
         botId: positional[0]!,
-        outputPath: parsed.flags["output"],
+        outputPath: output,
         includeSecrets: booleanBotFlag(parsed.flags, "include-secrets"),
         sourceVersion: getPkgVersion(),
       });
-      ok(`Bot '${positional[0]}' exported to ${path.resolve(parsed.flags["output"])}`);
+      ok(`Bot '${positional[0]}' exported to ${path.resolve(output)}`);
       if (!booleanBotFlag(parsed.flags, "include-secrets")) {
         hint("Credentials were omitted; import requires --app-id and --app-secret-file.");
       }
       break;
     }
     case "import": {
-      assertBotCommandFlags(parsed.flags, ["home", "app-id", "app-secret-file", "working-directory"]);
       if (positional.length !== 1) {
         throw new Error("Usage: niubot bot import <file> [--home <path>] [--app-id <id> --app-secret-file <path>] [--working-directory <path>]");
       }
-      const home = resolveNiubotHome(parsed.flags["home"], envHome);
+      const home = resolveNiubotHome(parsed.flags["home"] ?? globalHome, envHome);
       const launch = launchBotTransferWorker({
         runtimeRoot: PROJECT_ROOT,
         request: {
@@ -1719,7 +1949,6 @@ async function cmdBot(rawArgs: string[], envHome: string | undefined): Promise<v
       break;
     }
     case "move": {
-      assertBotCommandFlags(parsed.flags, ["from-home", "to-home", "apply"]);
       if (positional.length !== 1 || !parsed.flags["from-home"] || !parsed.flags["to-home"]) {
         throw new Error("Usage: niubot bot move <bot-id> --from-home <path> --to-home <path> [--apply]");
       }
@@ -1762,7 +1991,7 @@ async function cmdBot(rawArgs: string[], envHome: string | undefined): Promise<v
       break;
     }
     default:
-      throw new Error("Usage: niubot bot <export|import|move> ...");
+      throw new Error(`Unknown Bot command: ${subcommand}\n\n${getBotUsageText()}`);
   }
 }
 
@@ -1791,7 +2020,7 @@ function readSecretFile(filePath: string): string {
   return value;
 }
 
-function assertBotCommandFlags(flags: Record<string, string>, allowed: string[]): void {
+function assertBotCommandFlags(flags: Record<string, string>, allowed: readonly string[]): void {
   const allowedSet = new Set(allowed);
   const unknown = Object.keys(flags).filter((flag) => !allowedSet.has(flag));
   if (unknown.length > 0) throw new Error(`Unknown option: --${unknown[0]}`);
@@ -1808,16 +2037,38 @@ function booleanBotFlag(flags: Record<string, string>, name: string): boolean {
 
 async function main(): Promise<void> {
   const rawArgs = process.argv.slice(2);
-  const { command, commandIndex, flags } = parseCliArgs(rawArgs);
+  const { command, commandIndex, flags, extraPositionals } = parseCliArgs(rawArgs);
   const envHome = process.env["NIUBOT_HOME"];
   const hasExplicitHome = flags.home !== undefined || envHome !== undefined;
   const niubotHome = resolveNiubotHome(flags.home, envHome);
+
+  assertTopLevelCommandFlags(command, flags);
+  if (command && TOP_LEVEL_COMMANDS.has(command) && command !== "bot" && command !== "help" && extraPositionals.length > 0) {
+    throw new Error(`Unexpected argument for '${command}': ${extraPositionals[0]}\n\n${getCommandUsageText(command)}`);
+  }
+  if (flags.help) {
+    if (command) assertKnownHelpTopic(command);
+    if (command === "bot") {
+      const subcommand = rawArgs[commandIndex + 1];
+      if (subcommand && !BOT_COMMANDS.has(subcommand)) {
+        throw new Error(`Unknown Bot command: ${subcommand}\n\n${getBotUsageText()}`);
+      }
+      if (subcommand === "move" && flags.home !== undefined) {
+        throw new Error("Option --home is not valid for 'bot move'; use --from-home and --to-home");
+      }
+      console.log(getBotUsageText(subcommand));
+    } else {
+      printUsage(command);
+    }
+    return;
+  }
 
   switch (command) {
     case "init":
       await cmdInit(niubotHome, flags);
       break;
     case "add-bot":
+      assertBotCommandAdmin();
       await cmdAddBot(niubotHome);
       break;
     case "start":
@@ -1839,7 +2090,26 @@ async function main(): Promise<void> {
       cmdCleanup(niubotHome, flags);
       break;
     case "bot":
-      await cmdBot(rawArgs.slice(commandIndex + 1), envHome);
+      await cmdBot(rawArgs.slice(commandIndex + 1), envHome, flags.home);
+      break;
+    case "help":
+      {
+        const topic = rawArgs[commandIndex + 1];
+        const subtopic = rawArgs[commandIndex + 2];
+        const extraTopic = rawArgs[commandIndex + 3];
+        if (!topic) {
+          printUsage();
+          break;
+        }
+        assertKnownHelpTopic(topic, subtopic);
+        if (extraTopic) {
+          throw new Error(`Unexpected help topic: ${extraTopic}\n\n${topic === "bot" ? getBotUsageText(subtopic) : getCommandUsageText(topic)}`);
+        }
+        if (subtopic && topic !== "bot") {
+          throw new Error(`Unexpected help topic: ${subtopic}\n\n${getCommandUsageText(topic)}`);
+        }
+        console.log(topic === "bot" ? getBotUsageText(subtopic) : getCommandUsageText(topic));
+      }
       break;
     case "version":
     case "--version":
@@ -1850,6 +2120,7 @@ async function main(): Promise<void> {
       cmdInstallGuide();
       break;
     default:
+      if (command) throw new Error(`Unknown command: ${command}\n\n${getUsageText()}`);
       printUsage();
       break;
   }
