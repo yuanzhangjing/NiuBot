@@ -5101,6 +5101,34 @@ describe("Pipeline runtime", () => {
     });
   });
 
+  test("controls the Engine-level keep-awake service through /awake", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const { im, sentTexts } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db, im, new RecordingAgent(), createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex",
+    );
+    (pipeline as any).adminRoles.set("u2", "owner");
+    const enabled = { supported: true, enabled: true, platform: "win32" as const, method: "pwsh" };
+    const setKeepAwakeEnabled = vi.fn(async () => enabled);
+    (pipeline as any).engineLifecycle = createTestLifecycle(dir, undefined, {
+      getKeepAwakeStatus: () => ({ supported: true, enabled: false, platform: "win32" }),
+      setKeepAwakeEnabled,
+    });
+
+    expect((pipeline as any).handleBuiltinCommand(
+      "/awake", "u2", "c1", "chat-open-id", "p2p", "m1",
+    )).toBe(true);
+    expect(sentTexts.at(-1)).toContain("已关闭");
+
+    expect((pipeline as any).handleBuiltinCommand(
+      "/awake on", "u2", "c1", "chat-open-id", "p2p", "m2",
+    )).toBe(true);
+    await vi.waitFor(() => expect(sentTexts.at(-1)).toContain("已开启（pwsh）"));
+    expect(setKeepAwakeEnabled).toHaveBeenCalledWith(true);
+  });
+
   test("stores silent group messages but only runs the agent when the bot is mentioned", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);

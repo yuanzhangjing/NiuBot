@@ -12,6 +12,7 @@ import { launchRestartWorker, type RestartWorkerLaunch } from "./restart-launche
 import { SharedReleaseStore } from "./shared-release-store.js";
 import { resolveUpdateCommandCwd } from "./update-command.js";
 import { isNewerPackageVersion, isProductionVersion, runtimeEnvironmentForVersion, type RuntimeEnvironment } from "./version.js";
+import { KeepAwakeController, type KeepAwakeStatus } from "./platform/keep-awake.js";
 
 const UPDATE_PACKAGE_NAME = "@yuanzhangjing/niubot";
 
@@ -48,6 +49,8 @@ export interface EngineLifecycle {
   getAutoUpdateConfig(): AutoUpdateConfig | undefined;
   canPersistAutoUpdate(): boolean;
   setAutoUpdateEnabled(enabled: boolean): void;
+  getKeepAwakeStatus(): KeepAwakeStatus;
+  setKeepAwakeEnabled(enabled: boolean): Promise<KeepAwakeStatus>;
   restart(request: EngineRestartRequest): EngineRestartResult;
 }
 
@@ -86,6 +89,7 @@ export class EngineLifecycleService implements EngineLifecycle {
   private readonly env: NodeJS.ProcessEnv;
   private readonly onAutoUpdateConfigChanged?: () => void;
   private readonly dependencies: EngineLifecycleDependencies;
+  private readonly keepAwake: KeepAwakeController;
 
   constructor(options: EngineLifecycleServiceOptions) {
     this.version = options.version;
@@ -112,6 +116,7 @@ export class EngineLifecycleService implements EngineLifecycle {
       now: () => new Date(),
       ...options.dependencies,
     };
+    this.keepAwake = new KeepAwakeController({ env: this.env });
   }
 
   getStatus(): EngineStatus {
@@ -211,6 +216,14 @@ export class EngineLifecycleService implements EngineLifecycle {
     } catch (err) {
       this.log.warn("auto-update config observer failed", { error: String(err) });
     }
+  }
+
+  getKeepAwakeStatus(): KeepAwakeStatus {
+    return this.keepAwake.status();
+  }
+
+  setKeepAwakeEnabled(enabled: boolean): Promise<KeepAwakeStatus> {
+    return this.keepAwake.setEnabled(enabled);
   }
 
   restart(request: EngineRestartRequest): EngineRestartResult {

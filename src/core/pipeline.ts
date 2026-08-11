@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { exec } from "node:child_process";
+import { exec, execFile } from "node:child_process";
 import { existsSync, mkdirSync, realpathSync, rmSync } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -98,6 +98,10 @@ import {
   GOAL_DEFAULTS,
 } from "./goal.js";
 import { resolveExecutable } from "../platform/executable.js";
+import {
+  buildWindowsAdminShellInvocation,
+  shouldHandleAdminShellCommand,
+} from "../platform/admin-shell.js";
 import type { BackendCapability } from "../agent/backend-capability.js";
 import { buildResponseFooter } from "./footer.js";
 import { ResponseSender } from "./response-sender.js";
@@ -111,6 +115,7 @@ import type { EngineLifecycle } from "../engine-lifecycle.js";
 export { resolveUpdateCommandCwd } from "../update-command.js";
 
 const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 const PROCESSING_EMOJI = "Get";
 const MERGED_EMOJI = "Pin";
@@ -134,7 +139,7 @@ const INTERRUPT_WORDS = new Set([
 
 const BUILTIN_COMMANDS = new Set([
   "/restart", "/update", "/service", "/new", "/agent", "/model", "/effort", "/autoupdate",
-  "/admin", "/help", "/stop", "/clear", "/flush", "/task", "/status", "/history",
+  "/admin", "/help", "/stop", "/clear", "/flush", "/task", "/status", "/history", "/awake",
   "/worker",
 ]);
 const HYBRID_SCHEDULE_COMMANDS = new Set(["/loop", "/cron"]);
@@ -1626,6 +1631,14 @@ export class Pipeline {
         this.sendStatus(chatId, platformChatId, msgId);
         return true;
       }
+      case "/awake": {
+        if (!isAdmin) {
+          this.replyText(chatId, platformChatId, msgId, "/awake 仅管理员可用。");
+          return true;
+        }
+        this.handleAwakeCommand(parts.slice(1), chatId, platformChatId, msgId);
+        return true;
+      }
       case "/new": {
         this.log.info("builtin command: reset-session", { userId, cmd, chatId });
         this.startSessionTransition(chatId, () => this.resetSession(chatId, platformChatId, msgId));
@@ -1813,14 +1826,11 @@ export class Pipeline {
       }
     }
 
-    // 2. 管理员 shell 命令：检查首个 token 是否在 PATH 中，是则执行，否则转发 agent
-    if (isAdmin) {
-      const shellCmd = text.slice(1); // 去掉 / 前缀
-      const firstToken = shellCmd.split(/\s+/)[0];
-      if (firstToken && commandExistsSync(firstToken)) {
-        this.tryShellCommand(shellCmd, userId, chatId, chatType, platformChatId, msgId);
-        return true;
-      }
+    // 2. 管理员 shell 命令。Windows PowerShell cmdlet/alias 不是 PATH 中的独立文件，
+    // 因此 Windows 上直接交给 PowerShell；//xxx 仍强制透传给 Agent。
+    if (shouldHandleAdminShellCommand(text, isAdmin, { commandExists: commandExistsSync })) {
+      this.tryShellCommand(text.slice(1), userId, chatId, chatType, platformChatId, msgId);
+      return true;
     }
 
     // 3. 未识别的 / 命令，交给 agent 处理
@@ -1845,9 +1855,9 @@ export class Pipeline {
       return subcommand === undefined || WORKER_BUILTIN_SUBCOMMANDS.has(subcommand);
     }
     if (firstToken && BUILTIN_COMMANDS.has(firstToken)) return true;
-    if (!this.adminRoles.has(userId)) return false;
-    const executable = text.slice(1).split(/\s+/, 1)[0];
-    return !!executable && commandExistsSync(executable);
+    return shouldHandleAdminShellCommand(text, this.adminRoles.has(userId), {
+      commandExists: commandExistsSync,
+    });
   }
 
   private handleScheduleBuiltinCommand(
@@ -4083,6 +4093,7 @@ ${jobParts.join("\n\n")}
         "`/agent`　　查看/切换 Agent backend",
         "`/restart`　重启引擎",
         "`/update`　　检查更新",
+        "`/awake`　　查看/切换防休眠",
         "`/<cmd>`　　执行 shell 命令",
       );
     }
@@ -4093,7 +4104,30 @@ ${jobParts.join("\n\n")}
       .catch(() => {});
   }
 
-  /** 管理员命令通过 Node 的平台默认 shell 执行，调用前先检查首个命令是否存在。 */
+  private handleAwakeCommand(args: string[], chatId: string, platformChatId: string, msgId?: string): void {
+    const lifecycle = this.engineLifecycle;
+    if (!lifecycle) {
+      this.replyText(chatId, platformChatId, msgId, "Engine 生命周期服务不可用。");
+      return;
+    }
+    const action = args[0]?.toLowerCase();
+    if (!action || action === "status") {
+      this.replyText(chatId, platformChatId, msgId, formatKeepAwakeStatus(lifecycle.getKeepAwakeStatus()));
+      return;
+    }
+    if (action !== "on" && action !== "off") {
+      this.replyText(chatId, platformChatId, msgId, "用法：/awake [on|off|status]");
+      return;
+    }
+    void lifecycle.setKeepAwakeEnabled(action === "on").then((status) => {
+      this.replyText(chatId, platformChatId, msgId, formatKeepAwakeStatus(status));
+    }).catch((err) => {
+      this.log.error("keep-awake command failed", { action, error: String(err) });
+      this.replyText(chatId, platformChatId, msgId, `防休眠切换失败：${err instanceof Error ? err.message : String(err)}`);
+    });
+  }
+
+  /** 管理员命令：Windows 优先 pwsh、回退 powershell.exe，Unix 保持平台默认 shell。 */
   private tryShellCommand(cmd: string, userId: string, chatId: string, chatType: string, platformChatId: string, msgId?: string): void {
     this.log.info("shell command", { cmd });
 
@@ -4117,11 +4151,19 @@ ${jobParts.join("\n\n")}
       botProfilePath: this.stableContextOptions.botProfilePath,
     });
 
-    execAsync(cmd, {
+    const execOptions = {
       timeout: SHELL_COMMAND_TIMEOUT_MS,
       cwd: this.workingDirectory,
       env: { ...process.env, ...env },
-    }).then(({ stdout, stderr }) => {
+    };
+    const execution = process.platform === "win32"
+      ? (() => {
+        const invocation = buildWindowsAdminShellInvocation(cmd, { env: execOptions.env });
+        return execFileAsync(invocation.command, invocation.args, execOptions);
+      })()
+      : execAsync(cmd, execOptions);
+
+    execution.then(({ stdout, stderr }) => {
       const output = (stdout + stderr).trim();
       this.recordShellHistory(cmd, output, 0);
       sendResult(formatShellOutput(this.workingDirectory, cmd, output, 0));
@@ -5449,6 +5491,12 @@ function extractPlatformErrorDetail(err: unknown): string {
 /** 检查命令是否在 PATH 中（对齐 Go exec.LookPath） */
 function commandExistsSync(cmd: string): boolean {
   return resolveExecutable(cmd) !== undefined;
+}
+
+function formatKeepAwakeStatus(status: ReturnType<EngineLifecycle["getKeepAwakeStatus"]>): string {
+  if (!status.supported) return "防休眠：当前系统不支持（仅支持 macOS 和 Windows）。";
+  if (!status.enabled) return "防休眠：已关闭。\n用 `/awake on` 开启。";
+  return `防休眠：已开启（${status.method ?? "系统 API"}）。\nEngine 停止或执行 \`/awake off\` 后自动恢复。`;
 }
 
 /** Shell 输出最大字符数（超出截断） */

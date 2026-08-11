@@ -343,6 +343,9 @@ async function main(): Promise<void> {
 
     log.info("shutting down...");
     engineAutoUpdateCoordinator?.stop();
+    try { await engineLifecycle.setKeepAwakeEnabled(false); } catch (e) {
+      log.warn("failed to disable keep-awake during shutdown", { error: String(e) });
+    }
 
     const schedulerStopPromises: Array<Promise<void>> = [];
     for (const bot of bots) {
