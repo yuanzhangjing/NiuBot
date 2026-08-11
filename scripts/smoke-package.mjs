@@ -12,10 +12,12 @@ const packageJson = JSON.parse(fs.readFileSync(new URL("../package.json", import
 const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-package-smoke-"));
 const packageDirectory = path.join(temporaryRoot, "package");
 const installPrefix = path.join(temporaryRoot, "install");
+const smokeUserHome = path.join(temporaryRoot, "user-home");
 const smokeEnv = {
   ...process.env,
-  HOME: path.join(temporaryRoot, "user-home"),
-  USERPROFILE: path.join(temporaryRoot, "user-home"),
+  HOME: smokeUserHome,
+  USERPROFILE: smokeUserHome,
+  LOCALAPPDATA: path.join(smokeUserHome, "AppData", "Local"),
   NIUBOT_HOME: path.join(temporaryRoot, "niubot-home"),
   NIUBOT_SHARED_STORE: path.join(temporaryRoot, "shared-store"),
   NIUBOT_ALLOW_ROOT_STORE: "1",
@@ -108,7 +110,7 @@ try {
     ? path.join(installPrefix, "node_modules", "@yuanzhangjing", "niubot")
     : path.join(installPrefix, "lib", "node_modules", "@yuanzhangjing", "niubot");
   const managedLauncher = process.platform === "win32"
-    ? path.join(smokeEnv.USERPROFILE, "AppData", "Local", "NiuBot", "bin", "niubot.cmd")
+    ? path.join(smokeEnv.LOCALAPPDATA, "NiuBot", "bin", "niubot.cmd")
     : path.join(smokeEnv.HOME, ".local", "bin", "niubot");
   if (!fs.existsSync(managedLauncher)
     || !fs.readFileSync(managedLauncher, "utf8").includes(path.join(installedPackageRoot, "dist", "niubot-launcher.js"))) {
