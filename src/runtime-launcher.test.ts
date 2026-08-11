@@ -29,7 +29,7 @@ function createSeed(root: string, version = "1.0.0", name = "seed", label?: stri
   for (const entry of ["user-cli.js", "cli.js"]) {
     fs.writeFileSync(path.join(seed, "dist", entry), [
       "import fs from 'node:fs';",
-      `fs.writeFileSync(process.env.NIUBOT_TEST_LAUNCH_MARKER, JSON.stringify({ args: process.argv.slice(2), home: process.env.NIUBOT_HOME${label ? `, label: ${JSON.stringify(label)}, runtimeEnvironment: process.env.NIUBOT_ENV, sourceFirstStart: process.env.NIUBOT_SOURCE_FIRST_START` : ""} }));`,
+      `fs.writeFileSync(process.env.NIUBOT_TEST_LAUNCH_MARKER, JSON.stringify({ args: process.argv.slice(2), home: process.env.NIUBOT_HOME${label ? `, label: ${JSON.stringify(label)}, runtimeEnvironment: process.env.NIUBOT_ENV, sourceFirstStart: process.env.NIUBOT_SOURCE_FIRST_START, candidateArtifactId: process.env.NIUBOT_LAUNCH_CANDIDATE_ARTIFACT_ID` : ""} }));`,
       "",
     ].join("\n"));
   }
@@ -114,6 +114,70 @@ describe("runtime launcher", () => {
     })).resolves.toMatchObject({ storage: "shared" });
     expect(writeState).not.toHaveBeenCalled();
     expect(shared.readHomeRef(store.homeId)).toBeUndefined();
+  });
+
+  it("routes update through a newer globally installed package without committing before health", async () => {
+    const root = temporaryRoot();
+    const home = path.join(root, "home");
+    const marker = path.join(root, "takeover.json");
+    fs.mkdirSync(home);
+    const shared = new SharedReleaseStore(path.join(root, "shared"));
+    const store = new HomeReleaseStore(home, shared);
+    const oldCurrent: ReleaseRef = {
+      storage: "legacy",
+      runtimePath: createSeed(home, "0.1.121", path.join("LegacyBot", "releases", "old", "package"), "old"),
+      node: currentNodeRuntimeRef(),
+    };
+    store.writeState({ schemaVersion: 2, current: oldCurrent });
+
+    const code = await runRuntimeLauncher({
+      command: "niubot",
+      argv: ["update", "--home", home],
+      installedPackageRoot: createSeed(root, "0.2.17", "global-latest", "new"),
+      bootstrapVerify: () => undefined,
+      env: {
+        NIUBOT_SHARED_STORE: shared.rootDirectory,
+        NIUBOT_TEST_LAUNCH_MARKER: marker,
+        NIUBOT_ALLOW_ROOT_STORE: "1",
+      },
+    });
+
+    expect(code).toBe(0);
+    expect(JSON.parse(fs.readFileSync(marker, "utf-8"))).toMatchObject({
+      label: "new",
+      args: ["update", "--home", home],
+      runtimeEnvironment: "production",
+    });
+    expect(JSON.parse(fs.readFileSync(marker, "utf-8")).candidateArtifactId).toEqual(expect.any(String));
+    expect(store.readState().current).toEqual(oldCurrent);
+  });
+
+  it("does not use an older globally installed package to downgrade update", async () => {
+    const root = temporaryRoot();
+    const home = path.join(root, "home");
+    const marker = path.join(root, "no-downgrade.json");
+    fs.mkdirSync(home);
+    const shared = new SharedReleaseStore(path.join(root, "shared"));
+    await bootstrapFixture({
+      homeStore: new HomeReleaseStore(home, shared),
+      installedPackageRoot: createSeed(root, "0.2.17", "current-newer", "current"),
+      env: { NIUBOT_ALLOW_ROOT_STORE: "1" },
+      verify: () => undefined,
+    });
+
+    const code = await runRuntimeLauncher({
+      command: "niubot",
+      argv: ["update", "--home", home],
+      installedPackageRoot: createSeed(root, "0.2.16", "global-older", "older"),
+      env: {
+        NIUBOT_SHARED_STORE: shared.rootDirectory,
+        NIUBOT_TEST_LAUNCH_MARKER: marker,
+        NIUBOT_ALLOW_ROOT_STORE: "1",
+      },
+    });
+
+    expect(code).toBe(0);
+    expect(JSON.parse(fs.readFileSync(marker, "utf-8"))).toMatchObject({ label: "current" });
   });
 
   it("launches the shared CLI selected by the home state", async () => {

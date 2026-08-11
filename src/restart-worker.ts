@@ -46,6 +46,25 @@ const DEFAULT_INSTALL_TIMEOUT_MS = 120_000;
 const UPDATE_INSTALL_TIMEOUT_MS = 600_000;
 export const DEFAULT_PREFLIGHT_TIMEOUT_MS = 120_000;
 
+const ONE_SHOT_ENVIRONMENT_NAMES = [
+  "NIUBOT_RESTART_MODE",
+  "NIUBOT_RESTART_ID",
+  "NIUBOT_RESTART_STARTED_AT",
+  "NIUBOT_UPDATE_VERSION",
+  "NIUBOT_RECOMMENDED_ARTIFACT_ID",
+  "NIUBOT_RECOMMENDED_GENERATION",
+  "NIUBOT_CANDIDATE_ARTIFACT_ID",
+  "NIUBOT_LAUNCH_CANDIDATE_ARTIFACT_ID",
+  "NIUBOT_RESTART_STOP_AFTER_COMPLETION",
+  "NIUBOT_RESTART_NOTIFY_CHAT_ID",
+  "NIUBOT_CHAT_ID",
+  "NIUBOT_API_SOCKET",
+  "NIUBOT_INSTANCE_ID",
+  "NIUBOT_CONTROL_TOKEN",
+  "NIUBOT_STARTED_AT",
+  PREFLIGHT_DATABASE_MANIFEST_ENV,
+] as const;
+
 type RestartMode = "source" | "dev" | "npm-update" | "recommended" | "candidate" | "production";
 
 interface RestartContext {
@@ -56,6 +75,7 @@ interface RestartContext {
   botDirectory: string;
   sourceDirectory: string;
   workerRuntimePath: string;
+  inheritedEnvironment: NodeJS.ProcessEnv;
   /** 兼容旧版本迁移；新产物的运行环境始终由版本号决定。 */
   environment: RuntimeEnvironment;
   updateVersion?: string;
@@ -118,6 +138,7 @@ export async function runRestartWorker(
     botDirectory,
     sourceDirectory,
     workerRuntimePath,
+    inheritedEnvironment: { ...env },
     environment: resolveRuntimeEnvironment(env, sourceDirectory, workerRuntimePath),
     updateVersion: env["NIUBOT_UPDATE_VERSION"],
     recommendedArtifactId: env["NIUBOT_RECOMMENDED_ARTIFACT_ID"],
@@ -1159,29 +1180,34 @@ export function isNpmInstalledPath(runtimePath: string): boolean {
   return segments.includes("node_modules");
 }
 
-function runtimeEnvironment(context: RestartContext, environment: string = context.environment): NodeJS.ProcessEnv {
-  return {
-    NIUBOT_SOURCE_DIR: context.sourceDirectory,
+function runtimeEnvironment(
+  context: RestartContext,
+  environment: RuntimeEnvironment = context.environment,
+): NodeJS.ProcessEnv {
+  return buildRestartRuntimeEnvironment(
+    context.sourceDirectory,
+    environment,
+    context.inheritedEnvironment,
+  );
+}
+
+export function buildRestartRuntimeEnvironment(
+  sourceDirectory: string,
+  environment: RuntimeEnvironment,
+  inheritedEnvironment: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const output: NodeJS.ProcessEnv = {
+    ...inheritedEnvironment,
+    NIUBOT_SOURCE_DIR: sourceDirectory,
     NIUBOT_ENV: environment,
-    NIUBOT_LOG_LEVEL: process.env["NIUBOT_LOG_LEVEL"] || "info",
+    NIUBOT_LOG_LEVEL: inheritedEnvironment["NIUBOT_LOG_LEVEL"] || "info",
   };
+  for (const name of ONE_SHOT_ENVIRONMENT_NAMES) delete output[name];
+  return output;
 }
 
 function sanitizeOneShotEnvironment(): void {
-  for (const name of [
-    "NIUBOT_RESTART_MODE",
-    "NIUBOT_RESTART_ID",
-    "NIUBOT_RESTART_STARTED_AT",
-    "NIUBOT_UPDATE_VERSION",
-    "NIUBOT_RECOMMENDED_ARTIFACT_ID",
-    "NIUBOT_RECOMMENDED_GENERATION",
-    "NIUBOT_CANDIDATE_ARTIFACT_ID",
-    "NIUBOT_RESTART_STOP_AFTER_COMPLETION",
-    "NIUBOT_RESTART_NOTIFY_CHAT_ID",
-    "NIUBOT_CHAT_ID",
-    "NIUBOT_API_SOCKET",
-    PREFLIGHT_DATABASE_MANIFEST_ENV,
-  ]) delete process.env[name];
+  for (const name of ONE_SHOT_ENVIRONMENT_NAMES) delete process.env[name];
 }
 
 async function readGitSha(context: RestartContext): Promise<string> {

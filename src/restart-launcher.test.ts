@@ -19,6 +19,7 @@ describe("restart launcher", () => {
       NIUBOT_AGENT_SESSION: "session-a",
       NIUBOT_RECOMMENDED_ARTIFACT_ID: "stale",
       NIUBOT_RECOMMENDED_GENERATION: "9",
+      NIUBOT_LAUNCH_CANDIDATE_ARTIFACT_ID: "launcher-only",
       KEEP_ME: "yes",
     });
 
@@ -28,6 +29,7 @@ describe("restart launcher", () => {
     expect(env["NIUBOT_RESTART_MODE"]).toBe("npm-update");
     expect(env["NIUBOT_UPDATE_VERSION"]).toBe("1.2.3");
     expect(env["NIUBOT_RECOMMENDED_ARTIFACT_ID"]).toBeUndefined();
+    expect(env["NIUBOT_LAUNCH_CANDIDATE_ARTIFACT_ID"]).toBeUndefined();
     expect(env["NIUBOT_RESTART_ID"]).toBe("restart-a");
     expect(env["NIUBOT_RESTART_STARTED_AT"]).toBe("2026-07-30T00:00:00.000Z");
     expect(env["NIUBOT_ENV"]).toBe("production");

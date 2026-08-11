@@ -93,7 +93,7 @@ try {
     "--prefix",
     installPrefix,
     tarballPath,
-  ], { stdio: "inherit" });
+  ], { env: smokeEnv, stdio: "inherit" });
 
   const cliPath = process.platform === "win32"
     ? path.join(installPrefix, "niubot.cmd")
@@ -107,6 +107,13 @@ try {
   const installedPackageRoot = process.platform === "win32"
     ? path.join(installPrefix, "node_modules", "@yuanzhangjing", "niubot")
     : path.join(installPrefix, "lib", "node_modules", "@yuanzhangjing", "niubot");
+  const managedLauncher = process.platform === "win32"
+    ? path.join(smokeEnv.USERPROFILE, "AppData", "Local", "NiuBot", "bin", "niubot.cmd")
+    : path.join(smokeEnv.HOME, ".local", "bin", "niubot");
+  if (!fs.existsSync(managedLauncher)
+    || !fs.readFileSync(managedLauncher, "utf8").includes(path.join(installedPackageRoot, "dist", "niubot-launcher.js"))) {
+    throw new Error("Global package install did not refresh the marker-owned user launcher");
+  }
   execFileSync(process.execPath, [
     "-e",
     "const Database=require(process.argv[1]);const db=new Database(':memory:');db.close();",

@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_PREFLIGHT_TIMEOUT_MS,
+  buildRestartRuntimeEnvironment,
   buildInstallArgs,
   isNpmInstalledPath,
   npmPackFilenameForPackage,
@@ -12,6 +13,7 @@ import {
   resolveRestartSourceDirectory,
   resolveRuntimeEnvironment,
 } from "./restart-worker.js";
+import { withNodeRuntimeOnPath } from "./platform/executable.js";
 
 const tempDirs: string[] = [];
 
@@ -27,6 +29,52 @@ describe("restart worker helpers", () => {
     expect(resolvePreflightTimeoutMs({ NIUBOT_RESTART_PREFLIGHT_TIMEOUT: "90" })).toBe(90_000);
     expect(resolvePreflightTimeoutMs({ NIUBOT_RESTART_PREFLIGHT_TIMEOUT: "invalid" })).toBe(120_000);
     expect(resolvePreflightTimeoutMs({ NIUBOT_RESTART_PREFLIGHT_TIMEOUT: "0" })).toBe(120_000);
+  });
+
+  it("preserves the inherited Windows PATH when selecting the candidate Node runtime", () => {
+    const inherited = {
+      Path: "C:\\Users\\Admin\\AppData\\Roaming\\npm;C:\\Windows\\System32",
+      PATHEXT: ".COM;.EXE;.BAT;.CMD",
+      NIUBOT_UPDATE_VERSION: "0.2.16",
+      NIUBOT_CONTROL_TOKEN: "old-engine-secret",
+    };
+    const runtimeEnv = buildRestartRuntimeEnvironment("C:\\src\\niubot", "production", inherited);
+    const preflightEnv = withNodeRuntimeOnPath(
+      "C:\\Users\\Admin\\AppData\\Local\\Programs\\node-v24\\node.exe",
+      runtimeEnv,
+      "win32",
+    );
+
+    expect(preflightEnv["Path"]).toBe([
+      "C:\\Users\\Admin\\AppData\\Local\\Programs\\node-v24",
+      "C:\\Users\\Admin\\AppData\\Roaming\\npm",
+      "C:\\Windows\\System32",
+    ].join(";"));
+    expect(preflightEnv["PATHEXT"]).toBe(inherited.PATHEXT);
+    expect(preflightEnv["NIUBOT_SOURCE_DIR"]).toBe("C:\\src\\niubot");
+    expect(preflightEnv["NIUBOT_ENV"]).toBe("production");
+    expect(preflightEnv["NIUBOT_UPDATE_VERSION"]).toBeUndefined();
+    expect(preflightEnv["NIUBOT_CONTROL_TOKEN"]).toBeUndefined();
+  });
+
+  it("preserves custom POSIX tool directories when selecting the candidate Node runtime", () => {
+    const runtimeEnv = buildRestartRuntimeEnvironment("/srv/niubot", "production", {
+      PATH: "/opt/homebrew/bin:/home/test/.asdf/shims:/usr/bin",
+      CODEX_HOME: "/home/test/.codex",
+    });
+    const preflightEnv = withNodeRuntimeOnPath(
+      "/home/test/.local/niubot/node/bin/node",
+      runtimeEnv,
+      "linux",
+    );
+
+    expect(preflightEnv["PATH"]).toBe([
+      "/home/test/.local/niubot/node/bin",
+      "/opt/homebrew/bin",
+      "/home/test/.asdf/shims",
+      "/usr/bin",
+    ].join(":"));
+    expect(preflightEnv["CODEX_HOME"]).toBe("/home/test/.codex");
   });
 
   it("parses npm pack JSON without trusting paths", () => {

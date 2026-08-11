@@ -84,6 +84,7 @@ export function buildRestartWorkerEnvironment(
     delete env["NIUBOT_RECOMMENDED_GENERATION"];
     delete env["NIUBOT_CANDIDATE_ARTIFACT_ID"];
   }
+  delete env["NIUBOT_LAUNCH_CANDIDATE_ARTIFACT_ID"];
   return env;
 }
 

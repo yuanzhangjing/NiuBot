@@ -13,7 +13,7 @@ import { SharedReleaseStore } from "./shared-release-store.js";
 import { RecommendedReleaseStore, shouldAdoptRecommendedRelease } from "./recommended-release.js";
 import { inspectRunningEngine, stopEngine } from "./process-manager.js";
 import { cleanupRestartDatabaseSnapshot, restoreRestartDatabaseSnapshot } from "./database/restart-snapshot.js";
-import { isDevVersion, isProductionVersion, runtimeEnvironmentForVersion } from "./version.js";
+import { comparePackageVersions, isDevVersion, isProductionVersion, runtimeEnvironmentForVersion } from "./version.js";
 import { selectLatestDevelopmentRelease, selectLatestProductionRelease } from "./development-release.js";
 
 export type LauncherCommand = "niubot" | "nbt";
@@ -102,10 +102,30 @@ export async function runRuntimeLauncher(options: RuntimeLauncherOptions): Promi
     }
   }
 
+  let installedUpdateCandidate: ReleaseRef | undefined;
+  if (options.command === "niubot" && argv[0] === "update" && state.current) {
+    const currentVersion = releaseVersion(homeStore, sharedStore, state.current);
+    const installedVersion = readPackageVersion(installedPackageRoot);
+    if (currentVersion
+      && installedVersion
+      && isProductionVersion(currentVersion)
+      && isProductionVersion(installedVersion)
+      && comparePackageVersions(installedVersion, currentVersion) === 1) {
+      installedUpdateCandidate = await importInstalledProductionPackage({
+        homeStore,
+        packageRoot: installedPackageRoot,
+        env,
+        verify: options.bootstrapVerify,
+      });
+    }
+  }
+
   const recommendation = state.current
     ? recommendedStartRef(options.command, argv, state, homeStore, sharedStore)
     : undefined;
-  const launchRefs = options.command === "nbt" && runningRef
+  const launchRefs = installedUpdateCandidate
+    ? [installedUpdateCandidate]
+    : options.command === "nbt" && runningRef
     ? uniqueReleaseRefs([runningRef, ...orderedFallbacks(state)])
     : recommendation
       ? uniqueReleaseRefs([recommendation, ...orderedFallbacks(state)])
@@ -118,6 +138,9 @@ export async function runRuntimeLauncher(options: RuntimeLauncherOptions): Promi
       if (!fs.existsSync(entry)) throw new Error(`CLI entry is missing: ${entry}`);
       const args = options.command === "nbt" ? parsed.forwardedArgs : argv;
       const selectedEnvironment = releaseEnvironment(sharedStore, ref);
+      const isInstalledUpdateCandidate = installedUpdateCandidate
+        ? sameReleaseRef(ref, installedUpdateCandidate)
+        : false;
       const result = spawnSync(ref.node.nodePath, [entry, ...args], {
         cwd: safeWorkingDirectory(runtimePath),
         env: {
@@ -125,7 +148,9 @@ export async function runRuntimeLauncher(options: RuntimeLauncherOptions): Promi
           NIUBOT_HOME: parsed.home,
           NIUBOT_ENV: selectedEnvironment,
           NIUBOT_LEGACY_SOURCE_MIGRATION: isLegacyDevRuntime(sharedStore, ref, env, runningRef, running?.state.runtimeMode) ? "1" : "",
-          NIUBOT_LAUNCH_CANDIDATE_ARTIFACT_ID: !state.current && ref.storage === "shared" ? ref.artifactId : "",
+          NIUBOT_LAUNCH_CANDIDATE_ARTIFACT_ID: (isInstalledUpdateCandidate || !state.current) && ref.storage === "shared"
+            ? ref.artifactId
+            : "",
         },
         stdio: "inherit",
         windowsHide: true,

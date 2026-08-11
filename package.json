@@ -33,6 +33,7 @@
   "scripts": {
     "dev": "tsx src/index.ts",
     "build": "node scripts/build.mjs",
+    "postinstall": "node scripts/postinstall.mjs",
     "start": "node dist/index.js",
     "test": "vitest run --testTimeout=30000",
     "test:public-upgrades": "node scripts/check-public-upgrades.mjs",

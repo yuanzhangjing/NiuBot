@@ -1182,7 +1182,11 @@ async function activateRecommendedReleaseIfNeeded(niubotHome: string, config: Ni
   }
 }
 
-async function activateLauncherCandidateIfNeeded(niubotHome: string, config: NiuBotConfig): Promise<boolean> {
+async function activateLauncherCandidateIfNeeded(
+  niubotHome: string,
+  config: NiuBotConfig,
+  options: { stopAfterCompletion?: boolean } = {},
+): Promise<boolean> {
   const artifactId = process.env["NIUBOT_LAUNCH_CANDIDATE_ARTIFACT_ID"];
   if (!artifactId) return false;
   const sharedStore = new SharedReleaseStore(resolveSharedRuntimeRoot());
@@ -1197,6 +1201,7 @@ async function activateLauncherCandidateIfNeeded(niubotHome: string, config: Niu
     sourceDirectory: PROJECT_ROOT,
     environment,
     candidateArtifactId: artifactId,
+    stopAfterCompletion: options.stopAfterCompletion,
   });
   try {
     const result = await waitForRestartCompletion({
@@ -1208,7 +1213,9 @@ async function activateLauncherCandidateIfNeeded(niubotHome: string, config: Niu
       },
     });
     if (result.completion === "success") {
-      ok(`NiuBot is running on version ${manifest.version}.`);
+      ok(options.stopAfterCompletion
+        ? `NiuBot updated to version ${manifest.version}; Engine remains stopped.`
+        : `NiuBot is running on version ${manifest.version}.`);
       return true;
     }
     if (result.completion === "rolled-back") {
@@ -1512,6 +1519,13 @@ async function cmdUpdate(niubotHome: string, flags: CliFlags): Promise<void> {
     fail("--detach requires a running Engine.");
     hint("Run 'niubot update' without --detach while the Engine is stopped.");
     process.exitCode = 1;
+    return;
+  }
+
+  const launcherCandidate = process.env["NIUBOT_LAUNCH_CANDIDATE_ARTIFACT_ID"];
+  if (launcherCandidate) {
+    const config = loadConfig(path.join(niubotHome, "config.yaml"));
+    await activateLauncherCandidateIfNeeded(niubotHome, config, { stopAfterCompletion: !running });
     return;
   }
 
