@@ -44,7 +44,7 @@ describe("npm postinstall", () => {
     });
     expect(first.status).toBe("completed");
     const shimPath = path.join(homeDir, ".local", "bin", "niubot");
-    expect(fs.readFileSync(shimPath, "utf8")).toContain(path.join(projectRoot, "dist", "niubot-launcher.js"));
+    expect(fs.readFileSync(shimPath, "utf8")).toContain(path.posix.join(projectRoot, "dist", "niubot-launcher.js"));
 
     const newerRoot = path.join(root, "new-package");
     fs.mkdirSync(path.join(newerRoot, "dist"), { recursive: true });
@@ -61,7 +61,7 @@ describe("npm postinstall", () => {
       status: "completed",
       shims: { niubot: { status: "updated" }, nbt: { status: "updated" } },
     });
-    expect(fs.readFileSync(shimPath, "utf8")).toContain(path.join(newerRoot, "dist", "niubot-launcher.js"));
+    expect(fs.readFileSync(shimPath, "utf8")).toContain(path.posix.join(newerRoot, "dist", "niubot-launcher.js"));
   });
 
   it("does not overwrite a user-owned command", () => {
