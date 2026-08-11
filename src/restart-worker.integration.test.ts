@@ -436,7 +436,11 @@ describe("restart worker integration", () => {
 
     const running = await inspectRunningEngine(home);
     if (!running) {
-      const debug = fs.readFileSync(path.join(home, "logs", "restart-debug.log"), "utf-8");
+      const restartLogDirectory = path.join(home, "logs", "restarts");
+      const restartLogName = fs.readdirSync(restartLogDirectory).find((name) => name.endsWith(".log"));
+      const debug = restartLogName
+        ? fs.readFileSync(path.join(restartLogDirectory, restartLogName), "utf-8")
+        : "restart debug log missing";
       const state = fs.readFileSync(path.join(home, "TestBot", "restart", "state.json"), "utf-8");
       const processState = readProcessState(home);
       const identity = processState

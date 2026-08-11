@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { waitForEngineIdentity } from "./local-api/engine-client.js";
 import { inspectRunningEngine, launchDetachedEngine, stopEngine } from "./process-manager.js";
 import { waitForProcessExit } from "./platform/process.js";
@@ -10,6 +10,7 @@ const homes: string[] = [];
 const runtimes: string[] = [];
 
 afterEach(async () => {
+  vi.unstubAllEnvs();
   for (const home of homes.splice(0)) {
     try { await stopEngine(home); } catch { /* already stopped */ }
     fs.rmSync(home, { recursive: true, force: true });
@@ -55,6 +56,7 @@ describe("process manager integration", () => {
   }, 60_000);
 
   it("does not orphan an engine that closes IPC before its process exits", async () => {
+    vi.stubEnv("NIUBOT_ENGINE_SHUTDOWN_TIMEOUT", "1");
     const runtime = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-engine-fixture-"));
     runtimes.push(runtime);
     const entry = path.join(runtime, "engine.mjs");

@@ -5,6 +5,7 @@ import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 import {
   buildWindowsProcessStartMarkerScript,
+  buildWindowsTaskkillArguments,
   defaultProcessMarkerTimeoutMs,
   isProcessAlive,
   processStartMarkersMatch,
@@ -29,6 +30,10 @@ afterEach(async () => {
 });
 
 describe("process platform helpers", () => {
+  test("keeps single-process Windows termination separate from process-tree termination", () => {
+    expect(buildWindowsTaskkillArguments(123, { tree: false, force: true })).toEqual(["/PID", "123", "/F"]);
+    expect(buildWindowsTaskkillArguments(123, { tree: true, force: true })).toEqual(["/PID", "123", "/T", "/F"]);
+  });
   test("gives slow Windows hosts more time without using a CIM query", () => {
     expect(defaultProcessMarkerTimeoutMs("win32")).toBe(30_000);
     expect(defaultProcessMarkerTimeoutMs("linux")).toBe(5_000);

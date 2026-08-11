@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { resolveRestartDebugLog } from "./restart-log.js";
 
 export interface RestartWorkerLaunchOptions {
   niubotHome: string;
@@ -94,17 +95,16 @@ export function launchRestartWorker(options: RestartWorkerLaunchOptions): Restar
   const workerEntry = path.join(runtimeRoot, "dist", "restart-worker.js");
   if (!fs.existsSync(workerEntry)) throw new Error(`Restart worker not found: ${workerEntry}`);
 
-  const logDirectory = path.join(path.resolve(options.niubotHome), "logs");
-  const logFile = path.join(logDirectory, "restart-debug.log");
-  const restartId = options.restartId ?? randomUUID();
-  const restartStartedAt = options.restartStartedAt ?? new Date().toISOString();
+  const restartId = options.restartId || randomUUID();
+  const restartStartedAt = options.restartStartedAt || new Date().toISOString();
+  const logFile = resolveRestartDebugLog(options.niubotHome, restartId);
   const stateFile = path.join(
     path.resolve(options.niubotHome),
     options.botName,
     "restart",
     "state.json",
   );
-  fs.mkdirSync(logDirectory, { recursive: true });
+  fs.mkdirSync(path.dirname(logFile), { recursive: true });
   const logFd = fs.openSync(logFile, "a");
   let child;
   try {

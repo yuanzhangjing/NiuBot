@@ -40,6 +40,7 @@ import { recoverStaleBotTransferLifecycles } from "./bot-transfer-worker.js";
 import { ensureRuntimeCliShims } from "./platform/cli-runtime.js";
 import { reserveDevelopmentVersion, selectLatestDevelopmentRelease } from "./development-release.js";
 import { comparePackageVersions, isProductionVersion, runtimeEnvironmentForVersion, type RuntimeEnvironment } from "./version.js";
+import { beginRestartDebugLog, resolveRestartDebugLog } from "./restart-log.js";
 
 const PACKAGE_NAME = "@yuanzhangjing/niubot";
 const DEFAULT_INSTALL_TIMEOUT_MS = 120_000;
@@ -148,7 +149,7 @@ export async function runRestartWorker(
     legacyNotifyEndpoint: env["NIUBOT_API_SOCKET"],
     wakePrompt: env["NIUBOT_RESTART_WAKE_PROMPT"] || undefined,
     logFile: path.join(logDirectory, `niubot-${localDate()}.log`),
-    debugLog: path.join(logDirectory, "restart-debug.log"),
+    debugLog: resolveRestartDebugLog(niubotHome, id),
     store: new ReleaseStore(botDirectory),
     sharedStore,
     recommendedStore: new RecommendedReleaseStore(sharedStore),
@@ -180,7 +181,7 @@ export async function runRestartWorker(
     throw err;
   }
   try {
-    fs.writeFileSync(context.debugLog, "");
+    beginRestartDebugLog(context.debugLog, context.id);
     log(context, `restart worker started pid=${process.pid} bot=${botName} source=${sourceDirectory}`);
     await recoverInterruptedHomeTransaction(context);
     context.state.write("started", { oldPid: readProcessState(niubotHome)?.processes.engine.pid });
@@ -242,7 +243,7 @@ async function recoverInterruptedHomeTransaction(context: RestartContext): Promi
     throw new Error(`NiuBot runtime transaction '${transaction.transactionId}' is still active`);
   }
   log(context, `recovering interrupted runtime transaction id=${transaction.transactionId}`);
-  await stopEngine(context.niubotHome);
+  await stopEngine(context.niubotHome, { preserveDescendants: true });
   if (transaction.databaseSnapshot) {
     context.homeStore.assertTransactionSnapshotContained(transaction.databaseSnapshot);
     restoreRestartDatabaseSnapshot(transaction.databaseSnapshot);
@@ -454,7 +455,7 @@ async function runProductionRestart(context: RestartContext): Promise<void> {
   context.state.write("production_stop_service");
   const old = await inspectRunningEngine(context.niubotHome);
   const recoveryTarget = old ? runtimeTargetFromRunning(old) : undefined;
-  await stopEngine(context.niubotHome);
+  await stopEngine(context.niubotHome, { preserveDescendants: true });
   let snapshot: RestartDatabaseSnapshot;
   try {
     context.state.write("production_rollback_snapshot");
@@ -561,12 +562,26 @@ async function switchToCandidate(
   const previous = previousReleaseState.current;
   const rollbackTarget = resolveRollbackTarget(context, old, previous);
   if (!candidate.releaseRef) throw new Error("candidate release reference is unavailable");
+  const activatingState: HomeReleaseState = {
+    ...previousReleaseState,
+    transaction: {
+      transactionId: context.id,
+      phase: "activating",
+      candidate: candidate.releaseRef,
+      rollbackCurrent: previousReleaseState.current,
+      ownerPid: process.pid,
+      ownerStartMarker: waitForProcessStartMarker(process.pid),
+    },
+  };
+  // Persist recovery intent before the old Engine is touched. If the worker is
+  // interrupted during shutdown, the Launcher can still select rollbackCurrent.
+  context.homeStore.writeState(activatingState);
   context.state.write("stop_old_service", {
     oldPid: old?.state.pid,
     candidateRelease: releaseId,
     previousRelease: previous ? describeReleaseRef(previous) : undefined,
   });
-  await stopEngine(context.niubotHome);
+  await stopEngine(context.niubotHome, { preserveDescendants: true });
   let snapshot: RestartDatabaseSnapshot;
   try {
     context.state.write("rollback_snapshot", { candidateRelease: releaseId });
@@ -581,19 +596,10 @@ async function switchToCandidate(
     }
     throw err;
   }
-  const activatingState: HomeReleaseState = {
-    ...previousReleaseState,
-    transaction: {
-      transactionId: context.id,
-      phase: "activating",
-      candidate: candidate.releaseRef,
-      rollbackCurrent: previousReleaseState.current,
-      ownerPid: process.pid,
-      ownerStartMarker: waitForProcessStartMarker(process.pid),
-      databaseSnapshot: snapshot,
-    },
-  };
-  context.homeStore.writeState(activatingState);
+  context.homeStore.writeState({
+    ...activatingState,
+    transaction: { ...activatingState.transaction!, databaseSnapshot: snapshot },
+  });
   try {
     sanitizeOneShotEnvironment();
     context.state.write("start_candidate");

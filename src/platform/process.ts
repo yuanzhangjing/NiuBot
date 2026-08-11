@@ -4,6 +4,16 @@ import fs from "node:fs";
 export const DEFAULT_PROCESS_MARKER_TIMEOUT_MS = 5_000;
 export const DEFAULT_WINDOWS_PROCESS_MARKER_TIMEOUT_MS = 30_000;
 
+export function buildWindowsTaskkillArguments(
+  pid: number,
+  options: { tree: boolean; force: boolean },
+): string[] {
+  const args = ["/PID", String(pid)];
+  if (options.tree) args.push("/T");
+  if (options.force) args.push("/F");
+  return args;
+}
+
 export function defaultProcessMarkerTimeoutMs(platform: NodeJS.Platform = process.platform): number {
   return platform === "win32"
     ? DEFAULT_WINDOWS_PROCESS_MARKER_TIMEOUT_MS
@@ -235,7 +245,7 @@ export function forceTerminateProcessTree(
 ): void {
   if (platform === "win32") {
     try {
-      execFileSync("taskkill.exe", ["/PID", String(pid), "/T", "/F"], {
+      execFileSync("taskkill.exe", buildWindowsTaskkillArguments(pid, { tree: true, force: true }), {
         timeout: 10_000,
         stdio: "ignore",
       });
@@ -252,14 +262,37 @@ export function forceTerminateProcessTree(
   }
 }
 
+/**
+ * Force-stops only the selected process on Windows. This is intentionally
+ * separate from forceTerminateProcessTree: a detached lifecycle worker can
+ * still be recorded by Windows as a descendant of the Engine that launched
+ * it, so taskkill /T would destroy the worker responsible for recovery.
+ */
+export function forceTerminateSingleProcess(
+  pid: number,
+  platform: NodeJS.Platform = process.platform,
+): void {
+  if (platform === "win32") {
+    try {
+      execFileSync("taskkill.exe", buildWindowsTaskkillArguments(pid, { tree: false, force: true }), {
+        timeout: 10_000,
+        stdio: "ignore",
+      });
+    } catch {
+      // The process may already be gone. Callers verify termination.
+    }
+    return;
+  }
+  try { process.kill(pid, "SIGKILL"); } catch { /* already stopped */ }
+}
+
 export function terminateSpawnedProcessTree(
   pid: number,
   force: boolean,
   platform: NodeJS.Platform = process.platform,
 ): void {
   if (platform === "win32") {
-    const args = ["/PID", String(pid), "/T"];
-    if (force) args.push("/F");
+    const args = buildWindowsTaskkillArguments(pid, { tree: true, force });
     try { execFileSync("taskkill.exe", args, { timeout: 10_000, stdio: "ignore" }); } catch { /* already stopped */ }
     return;
   }

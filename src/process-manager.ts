@@ -7,6 +7,7 @@ import type { EngineIdentity } from "./local-api/engine-server.js";
 import { endpointFromAddress, resolveEngineEndpoint, type LocalIpcEndpoint } from "./platform/ipc.js";
 import { samePlatformPath } from "./platform/files.js";
 import {
+  forceTerminateSingleProcess,
   forceTerminateProcessTree,
   isProcessAlive,
   processStartMarkersMatch,
@@ -50,6 +51,11 @@ export interface LaunchEngineOptions {
 export interface LaunchedEngine {
   state: EngineProcessState;
   endpoint: LocalIpcEndpoint;
+}
+
+export interface StopEngineOptions {
+  /** Keep the caller alive when it is a Windows descendant of the Engine. */
+  preserveDescendants?: boolean;
 }
 
 export async function inspectRunningEngine(niubotHome: string): Promise<RunningEngine | undefined> {
@@ -173,12 +179,16 @@ function rejectConcurrentEngineStart(niubotHome: string): void {
   removeLegacyPidFile(niubotHome);
 }
 
-export async function stopEngine(niubotHome: string): Promise<{ stopped: boolean; pid?: number }> {
+export async function stopEngine(
+  niubotHome: string,
+  options: StopEngineOptions = {},
+): Promise<{ stopped: boolean; pid?: number }> {
   const recordedState = readProcessState(niubotHome);
   const running = await inspectRunningEngine(niubotHome);
   if (running) {
     const endpoint = endpointFromAddress(running.state.endpoint);
     let accepted = false;
+    let shutdownDeadline: number | undefined;
     try {
       accepted = await requestEngineShutdown(
         endpoint,
@@ -190,11 +200,11 @@ export async function stopEngine(niubotHome: string): Promise<{ stopped: boolean
     }
 
     if (accepted) {
-      const deadline = Date.now() + resolveEngineShutdownTimeoutMs();
-      while (Date.now() < deadline) {
+      shutdownDeadline = Date.now() + resolveEngineShutdownTimeoutMs();
+      while (Date.now() < shutdownDeadline) {
         const identity = await readEngineIdentity(
           endpoint,
-          Math.min(DEFAULT_ENGINE_CONTROL_REQUEST_TIMEOUT_MS, Math.max(1, deadline - Date.now())),
+          Math.min(DEFAULT_ENGINE_CONTROL_REQUEST_TIMEOUT_MS, Math.max(1, shutdownDeadline - Date.now())),
         );
         if (!identity || identity.instanceId !== running.state.instanceId) break;
         await delay(250);
@@ -203,13 +213,16 @@ export async function stopEngine(niubotHome: string): Promise<{ stopped: boolean
 
     const remaining = await readEngineIdentity(endpoint, DEFAULT_ENGINE_CONTROL_REQUEST_TIMEOUT_MS);
     if (remaining?.instanceId === running.state.instanceId) {
-      await forceStopVerifiedProcess(running.state);
+      await forceStopVerifiedProcess(running.state, options);
     } else if (running.state.pid !== process.pid && isProcessAlive(running.state.pid)) {
       // The endpoint may disappear before the process actually exits. Do not
       // clear its state and leave an orphan behind; verify the OS creation
-      // marker before using the precise process-tree fallback.
-      const exited = accepted && await waitForProcessExit(running.state.pid, 2_000);
-      if (!exited) await forceStopVerifiedProcess(running.state);
+      // marker before using the precise forced-stop fallback.
+      const exited = accepted && await waitForProcessExit(
+        running.state.pid,
+        Math.max(1, (shutdownDeadline ?? Date.now()) - Date.now()),
+      );
+      if (!exited) await forceStopVerifiedProcess(running.state, options);
     }
     clearProcessState(niubotHome, running.state.instanceId);
     removeLegacyPidFile(niubotHome);
@@ -226,28 +239,32 @@ export async function stopEngine(niubotHome: string): Promise<{ stopped: boolean
     if (state.pid === process.pid) {
       throw new Error("Refusing to force-stop the current process without Engine IPC confirmation");
     }
-    await forceStopVerifiedProcess(state);
+    await forceStopVerifiedProcess(state, options);
     clearProcessState(niubotHome, state.instanceId);
     removeLegacyPidFile(niubotHome);
     return { stopped: true, pid: state.pid };
   }
 
-  return stopLegacyEngine(niubotHome);
+  return stopLegacyEngine(niubotHome, options);
 }
 
-async function forceStopVerifiedProcess(state: EngineProcessState): Promise<void> {
+async function forceStopVerifiedProcess(state: EngineProcessState, options: StopEngineOptions): Promise<void> {
   if (!isProcessAlive(state.pid)) return;
   const currentMarker = waitForProcessStartMarker(state.pid);
   if (!processStartMarkersMatch(state.platformStartMarker, currentMarker)) {
     throw new Error("Engine process state exists, but its identity could not be verified");
   }
-  forceTerminateProcessTree(state.pid);
+  // On Windows the restart worker remains in the old Engine's process tree
+  // even though it is detached. taskkill /T would kill the recovery worker
+  // together with the Engine and leave the service stopped indefinitely.
+  if (process.platform === "win32" && options.preserveDescendants) forceTerminateSingleProcess(state.pid);
+  else forceTerminateProcessTree(state.pid);
   if (!await waitForProcessExit(state.pid, 5_000)) {
     throw new Error(`Engine process ${state.pid} did not exit after forced termination`);
   }
 }
 
-function asyncLegacyStop(pid: number, expectedMarker: string): Promise<void> {
+function asyncLegacyStop(pid: number, expectedMarker: string, options: StopEngineOptions): Promise<void> {
   if (!processStartMarkersMatch(expectedMarker, queryProcessStartMarker(pid))) {
     return Promise.reject(new Error("Legacy Engine PID was reused before termination"));
   }
@@ -257,7 +274,8 @@ function asyncLegacyStop(pid: number, expectedMarker: string): Promise<void> {
       if (!processStartMarkersMatch(expectedMarker, queryProcessStartMarker(pid))) {
         throw new Error("Legacy Engine PID was reused before forced termination");
       }
-      forceTerminateProcessTree(pid);
+      if (process.platform === "win32" && options.preserveDescendants) forceTerminateSingleProcess(pid);
+      else forceTerminateProcessTree(pid);
       return waitForProcessExit(pid, 5_000).then((forcedExit) => {
         if (!forcedExit) throw new Error(`Legacy Engine process ${pid} did not exit after forced termination`);
       });
@@ -265,7 +283,10 @@ function asyncLegacyStop(pid: number, expectedMarker: string): Promise<void> {
   });
 }
 
-async function stopLegacyEngine(niubotHome: string): Promise<{ stopped: boolean; pid?: number }> {
+async function stopLegacyEngine(
+  niubotHome: string,
+  options: StopEngineOptions,
+): Promise<{ stopped: boolean; pid?: number }> {
   const pidFile = path.join(niubotHome, "niubot.pid");
   const pid = readLegacyPid(pidFile);
   if (!pid || !isProcessAlive(pid)) {
@@ -273,7 +294,7 @@ async function stopLegacyEngine(niubotHome: string): Promise<{ stopped: boolean;
     return { stopped: false };
   }
   const marker = verifyLegacyEngineProcess(pid, niubotHome);
-  await asyncLegacyStop(pid, marker);
+  await asyncLegacyStop(pid, marker, options);
   removeLegacyPidFile(niubotHome);
   return { stopped: true, pid };
 }

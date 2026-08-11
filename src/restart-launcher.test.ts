@@ -1,8 +1,24 @@
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { buildRestartWorkerEnvironment } from "./restart-launcher.js";
+import { beginRestartDebugLog, resolveRestartDebugLog } from "./restart-log.js";
 
 describe("restart launcher", () => {
+  it("uses a separate portable debug log for every restart", () => {
+    expect(resolveRestartDebugLog("/tmp/home", "first/run")).toBe(path.join("/tmp/home", "logs", "restarts", "first_run.log"));
+    expect(resolveRestartDebugLog("/tmp/home", "second")).not.toBe(resolveRestartDebugLog("/tmp/home", "first"));
+  });
+  it("appends to an existing restart log instead of erasing evidence", () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-restart-log-"));
+    const logFile = resolveRestartDebugLog(home, "restart-a");
+    fs.mkdirSync(path.dirname(logFile), { recursive: true });
+    fs.writeFileSync(logFile, "original failure\n");
+    beginRestartDebugLog(logFile, "restart-a", new Date("2026-08-11T10:00:00.000Z"));
+    expect(fs.readFileSync(logFile, "utf-8")).toContain("original failure");
+    fs.rmSync(home, { recursive: true, force: true });
+  });
   it("passes update inputs without leaking an agent-session guard", () => {
     const env = buildRestartWorkerEnvironment({
       niubotHome: "/tmp/home",

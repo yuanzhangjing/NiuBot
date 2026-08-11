@@ -168,6 +168,62 @@ describe("process manager", () => {
     expect(await waitForProcessExit(child.pid, 1_000)).toBe(true);
   });
 
+  it.skipIf(process.platform !== "win32")("does not kill the detached recovery worker when force-stopping its parent Engine", async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-process-manager-worker-"));
+    tempDirs.push(home);
+    const childPidFile = path.join(home, "worker.pid");
+    const engineScript = [
+      "const { spawn } = require('node:child_process');",
+      "const fs = require('node:fs');",
+      "const worker = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' });",
+      `fs.writeFileSync(${JSON.stringify(childPidFile)}, String(worker.pid));`,
+      "worker.unref();",
+      "setInterval(() => {}, 1000);",
+    ].join("\n");
+    const engine = spawn(process.execPath, ["-e", engineScript], {
+      detached: true,
+      windowsHide: true,
+      stdio: "ignore",
+    });
+    if (!engine.pid) throw new Error("test Engine did not start");
+    engine.unref();
+    let workerPid: number | undefined;
+    try {
+      const deadline = Date.now() + 5_000;
+      while (!workerPid && Date.now() < deadline) {
+        try { workerPid = Number(fs.readFileSync(childPidFile, "utf-8")); } catch { /* wait for child */ }
+        if (!workerPid) await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      if (!workerPid) throw new Error("test recovery worker did not start");
+      const marker = queryProcessStartMarker(engine.pid);
+      if (!marker) throw new Error("test Engine creation marker is unavailable");
+      const endpoint = resolveEngineEndpoint(home);
+      writeProcessState(home, {
+        pid: engine.pid,
+        instanceId: "disconnected-engine-with-worker",
+        startedAt: new Date().toISOString(),
+        platformStartMarker: marker,
+        endpoint: endpoint.address,
+        endpointKind: endpoint.kind,
+        controlToken: "token",
+        version: "1.0.0",
+        runtimePath: home,
+        nodePath: process.execPath,
+      });
+
+      await expect(stopEngine(home, { preserveDescendants: true })).resolves.toEqual({ stopped: true, pid: engine.pid });
+      expect(await waitForProcessExit(engine.pid, 1_000)).toBe(true);
+      expect(queryProcessStartMarker(workerPid)).toBeTruthy();
+    } finally {
+      if (workerPid) {
+        terminateSpawnedProcessTree(workerPid, true);
+        await waitForProcessExit(workerPid, 1_000);
+      }
+      terminateSpawnedProcessTree(engine.pid, true);
+      await waitForProcessExit(engine.pid, 1_000);
+    }
+  });
+
   it.skipIf(process.platform === "win32")("verifies the home and command before stopping a legacy PID", async () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "niubot legacy home "));
     tempDirs.push(home);
