@@ -171,8 +171,9 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
     try {
       await runCommand(this.command(), ["--version"], { timeoutMs: resolveBackendProbeTimeoutMs() });
       this.log.info(`${this.command()} CLI found`);
-    } catch {
-      throw new Error(`${this.command()} CLI not found in PATH`);
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      throw new Error(`${this.command()} CLI is not usable: ${detail}`, { cause: err });
     }
   }
 

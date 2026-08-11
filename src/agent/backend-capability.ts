@@ -4,12 +4,9 @@ import { buildExecutableInvocation, resolveExecutable } from "../platform/execut
 import { runCommand } from "../platform/command.js";
 import { resolveBackendProbeTimeoutMs } from "../lifecycle-timeouts.js";
 
-export type BackendPlatformSupport = "native" | "dependency-required" | "wsl-only" | "unknown";
-
 export interface BackendCapability {
   backend: BuiltinBackendType;
   platform: NodeJS.Platform;
-  support: BackendPlatformSupport;
   installed: boolean;
   version?: string;
   selectable: boolean;
@@ -39,42 +36,15 @@ export function probeBackendCapability(
   const definition = AGENT_REGISTRY[backend];
   const platform = options.platform ?? process.platform;
   const env = options.env ?? process.env;
-  const support: BackendPlatformSupport = platform === "win32"
-    ? definition.windowsSupport
-    : "native";
   const executable = (options.resolveCommand ?? resolveExecutable)(definition.command, { platform, env });
 
   if (!executable) {
     return {
       backend,
       platform,
-      support,
       installed: false,
       selectable: false,
       reason: `${definition.command} CLI not found`,
-    };
-  }
-
-  if (support === "wsl-only") {
-    return {
-      backend,
-      platform,
-      support,
-      installed: true,
-      selectable: false,
-      executable,
-      reason: "upstream CLI currently requires WSL on Windows",
-    };
-  }
-  if (support === "unknown") {
-    return {
-      backend,
-      platform,
-      support,
-      installed: true,
-      selectable: false,
-      executable,
-      reason: "native Windows support has not been verified",
     };
   }
 
@@ -82,11 +52,9 @@ export function probeBackendCapability(
     return {
       backend,
       platform,
-      support,
       installed: true,
       selectable: true,
       executable,
-      reason: supportReason(support),
     };
   }
 
@@ -100,30 +68,21 @@ export function probeBackendCapability(
     return {
       backend,
       platform,
-      support,
       installed: true,
       selectable: true,
       executable,
       version: parseVersion(output),
-      reason: supportReason(support),
     };
   } catch (err) {
     return {
       backend,
       platform,
-      support,
       installed: true,
       selectable: false,
       executable,
       reason: versionProbeError(err),
     };
   }
-}
-
-function supportReason(support: BackendPlatformSupport): string | undefined {
-  return support === "dependency-required"
-    ? "requires the upstream Windows runtime dependency"
-    : undefined;
 }
 
 export function probeAllBackendCapabilities(options: ProbeBackendOptions = {}): BackendCapability[] {

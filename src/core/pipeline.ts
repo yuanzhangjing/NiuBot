@@ -480,7 +480,6 @@ export class Pipeline {
     this.getBackendCapabilities = getBackendCapabilities ?? (() => this.getAvailableBackends().map((backend) => ({
       backend: backend as BackendCapability["backend"],
       platform: process.platform,
-      support: "native",
       installed: true,
       selectable: true,
     })));

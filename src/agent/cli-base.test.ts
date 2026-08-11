@@ -89,12 +89,26 @@ class ThrowingHookBackend extends ParsedOutputBackend {
   }
 }
 
+class MissingCliBackend extends ParsedOutputBackend {
+  command(): string {
+    return "__niubot_missing_backend_cli__";
+  }
+}
+
 describe("CliAgentBackend diagnostic logging", () => {
   const tempHome = join(tmpdir(), `niubot-cli-base-stdout-${process.pid}`);
 
   afterEach(() => {
     vi.unstubAllEnvs();
     rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  test("preserves the real availability-check error", async () => {
+    const backend = new MissingCliBackend({ text: "", turnCompleted: true });
+
+    await expect(backend.start()).rejects.toThrow(
+      "__niubot_missing_backend_cli__ CLI is not usable: Command not found: __niubot_missing_backend_cli__",
+    );
   });
 
   test("dumps full stdout when NIUBOT_DEBUG_AGENT_STDOUT is enabled", async () => {

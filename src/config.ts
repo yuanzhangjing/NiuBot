@@ -38,37 +38,31 @@ export const AGENT_REGISTRY = {
     aliases: ["claude", "claude-code"],
     command: "claude",
     versionArgs: ["--version"],
-    windowsSupport: "native",
   },
   codex: {
     aliases: ["codex"],
     command: "codex",
     versionArgs: ["--version"],
-    windowsSupport: "native",
   },
   traecli: {
     aliases: ["traecli", "trae-cli"],
     command: "traecli",
     versionArgs: ["--version"],
-    windowsSupport: "unknown",
   },
   opencode: {
     aliases: ["opencode"],
     command: "opencode",
     versionArgs: ["--version"],
-    windowsSupport: "native",
   },
   cursor: {
     aliases: ["cursor", "cursor-agent"],
     command: "cursor-agent",
     versionArgs: ["--version"],
-    windowsSupport: "wsl-only",
   },
   pi: {
     aliases: ["pi", "pi-agent", "pi-coding-agent"],
     command: "pi",
     versionArgs: ["--version"],
-    windowsSupport: "unknown",
   },
 } as const;
 

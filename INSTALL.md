@@ -16,12 +16,10 @@ Human users: run `niubot init` and follow the prompts. You don't need to read th
 
 NiuBot itself runs natively in PowerShell or Windows Terminal. It does not require WSL or Git Bash for installation or service management.
 
-- Codex, OpenCode, and Grok are treated as native Windows backends when their CLI version probe succeeds.
+- Installed backends are available on Windows when their CLI command can be resolved. NiuBot does not maintain a separate platform allowlist.
 - Claude Code supports native Windows and falls back to PowerShell when Git Bash is absent. Git for Windows is still useful for Bash-based tools; portable installations may need `CLAUDE_CODE_GIT_BASH_PATH`.
-- Cursor Agent is marked WSL-only on Windows.
-- Pi and TraeCLI remain unavailable on native Windows until their upstream behavior is verified.
 
-NiuBot probes the selected backend at startup. An unavailable backend does not prevent other installed backends from running.
+NiuBot runs the selected backend's version command when it starts. If the CLI or one of its runtime dependencies fails, NiuBot reports that command's actual error; an unavailable backend does not prevent other installed backends from running.
 
 ## Step 1: Install NiuBot
 

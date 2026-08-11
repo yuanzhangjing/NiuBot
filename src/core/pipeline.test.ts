@@ -2682,17 +2682,17 @@ describe("Pipeline runtime", () => {
       createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex",
     );
     (pipeline as any).getBackendCapabilities = () => [
-      { backend: "codex", platform: "win32", support: "native", installed: true, selectable: true, version: "1.2.3" },
-      { backend: "cursor", platform: "win32", support: "wsl-only", installed: true, selectable: false, reason: "requires WSL" },
+      { backend: "codex", platform: "win32", installed: true, selectable: true, version: "1.2.3" },
+      { backend: "cursor", platform: "win32", installed: true, selectable: false, reason: "CLI version probe failed" },
     ];
 
     await (pipeline as any).handleAgentCommand([], "c1", "chat-open-id");
 
     expect(sentCards[0]?.content).toContain("codex — 可用 · 1.2.3");
-    expect(sentCards[0]?.content).toContain("cursor — 不可用 · requires WSL");
+    expect(sentCards[0]?.content).toContain("cursor — 不可用 · CLI version probe failed");
 
     await (pipeline as any).handleAgentCommand(["2"], "c1", "chat-open-id");
-    expect(sentCards[1]?.content).toContain("cursor** 当前不可用：requires WSL");
+    expect(sentCards[1]?.content).toContain("cursor** 当前不可用：CLI version probe failed");
   });
 
   test("/agent refreshes backend installation state on every invocation", async () => {
@@ -2705,11 +2705,10 @@ describe("Pipeline runtime", () => {
     );
     let claudeInstalled = false;
     const getCapabilities = vi.fn(async () => [
-      { backend: "codex", platform: "darwin", support: "native", installed: true, selectable: true },
+      { backend: "codex", platform: "darwin", installed: true, selectable: true },
       {
         backend: "claude",
         platform: "darwin",
-        support: "native",
         installed: claudeInstalled,
         selectable: claudeInstalled,
         version: claudeInstalled ? "2.1.0" : undefined,

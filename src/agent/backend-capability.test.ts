@@ -3,6 +3,7 @@ import {
   probeAllBackendCapabilities,
   probeAllBackendCapabilitiesAsync,
   probeBackendCapability,
+  probeBackendCapabilityAsync,
 } from "./backend-capability.js";
 
 describe("backend capability", () => {
@@ -51,7 +52,6 @@ describe("backend capability", () => {
     });
     expect(capability).toMatchObject({
       backend: "codex",
-      support: "native",
       installed: true,
       selectable: true,
       version: "1.2.3",
@@ -63,14 +63,50 @@ describe("backend capability", () => {
       platform: "win32",
       resolveCommand: () => "C:\\bin\\claude.exe",
       runVersion: () => "2.1.0",
-    })).toMatchObject({ support: "native", installed: true, selectable: true });
+    })).toMatchObject({ installed: true, selectable: true });
   });
 
-  it("does not expose WSL-only or unverified backends as native Windows choices", () => {
+  it("allows every installed backend on native Windows when its version command works", () => {
     const resolveCommand = vi.fn((command: string) => `C:\\bin\\${command}.cmd`);
-    expect(probeBackendCapability("cursor", { platform: "win32", resolveCommand })?.selectable).toBe(false);
-    expect(probeBackendCapability("pi", { platform: "win32", resolveCommand })?.selectable).toBe(false);
-    expect(probeBackendCapability("traecli", { platform: "win32", resolveCommand })?.selectable).toBe(false);
+    const runVersion = vi.fn(() => "1.2.3");
+    for (const backend of ["cursor", "pi", "traecli"]) {
+      expect(probeBackendCapability(backend, {
+        platform: "win32",
+        resolveCommand,
+        runVersion,
+      })).toMatchObject({ installed: true, selectable: true, version: "1.2.3" });
+    }
+    expect(runVersion).toHaveBeenCalledTimes(3);
+  });
+
+  it("allows every discovered backend on native Windows without a version probe", async () => {
+    const runVersionAsync = vi.fn(async () => "1.2.3");
+    const capabilities = await probeAllBackendCapabilitiesAsync({
+      platform: "win32",
+      resolveCommand: (command) => `C:\\bin\\${command}.cmd`,
+      runVersionAsync,
+      verifyVersion: false,
+    });
+
+    expect(capabilities).toHaveLength(6);
+    expect(capabilities.every((capability) => capability.installed && capability.selectable)).toBe(true);
+    expect(runVersionAsync).not.toHaveBeenCalled();
+  });
+
+  it("reports the real Windows version-probe error when verification is requested", async () => {
+    const capability = await probeBackendCapabilityAsync("traecli", {
+      platform: "win32",
+      resolveCommand: () => "C:\\bin\\traecli.cmd",
+      runVersionAsync: async () => {
+        throw new Error("runtime initialization failed");
+      },
+    });
+
+    expect(capability).toMatchObject({
+      installed: true,
+      selectable: false,
+      reason: "CLI version probe failed: runtime initialization failed",
+    });
   });
 
   it("keeps all installed backends selectable on macOS and Linux", () => {

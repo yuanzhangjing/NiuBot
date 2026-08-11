@@ -6,7 +6,6 @@ function capability(selectable: boolean, version?: string): BackendCapability {
   return {
     backend: "codex",
     platform: "darwin",
-    support: "native",
     installed: selectable,
     selectable,
     version,
