@@ -7,7 +7,9 @@ import { beginRestartDebugLog, resolveRestartDebugLog } from "./restart-log.js";
 
 describe("restart launcher", () => {
   it("uses a separate portable debug log for every restart", () => {
-    expect(resolveRestartDebugLog("/tmp/home", "first/run")).toBe(path.join("/tmp/home", "logs", "restarts", "first_run.log"));
+    expect(resolveRestartDebugLog("/tmp/home", "first/run")).toBe(
+      path.join(path.resolve("/tmp/home"), "logs", "restarts", "first_run.log"),
+    );
     expect(resolveRestartDebugLog("/tmp/home", "second")).not.toBe(resolveRestartDebugLog("/tmp/home", "first"));
   });
   it("appends to an existing restart log instead of erasing evidence", () => {
