@@ -1110,7 +1110,11 @@ async function cmdStart(niubotHome: string, flags: CliFlags): Promise<void> {
   console.log();
 }
 
-async function activateRecommendedReleaseIfNeeded(niubotHome: string, config: NiuBotConfig): Promise<boolean> {
+async function activateRecommendedReleaseIfNeeded(
+  niubotHome: string,
+  config: NiuBotConfig,
+  options: { stopAfterCompletion?: boolean; expectedVersion?: string } = {},
+): Promise<boolean> {
   if (!isProductionVersion(getPkgVersion())) return false;
   const sharedStore = new SharedReleaseStore(resolveSharedRuntimeRoot());
   const homeStore = new HomeReleaseStore(niubotHome, sharedStore);
@@ -1132,6 +1136,7 @@ async function activateRecommendedReleaseIfNeeded(niubotHome: string, config: Ni
   }
 
   const manifest = sharedStore.assertUsableArtifact(recommended.release.artifactId, undefined, true);
+  if (options.expectedVersion && manifest.version !== options.expectedVersion) return false;
   let currentVersion: string | undefined;
   if (state.current) {
     try {
@@ -1151,6 +1156,7 @@ async function activateRecommendedReleaseIfNeeded(niubotHome: string, config: Ni
     environment: "production",
     recommendedArtifactId: recommended.release.artifactId,
     recommendedGeneration: recommended.generation,
+    stopAfterCompletion: options.stopAfterCompletion,
   });
   try {
     const result = await waitForRestartCompletion({
@@ -1162,7 +1168,9 @@ async function activateRecommendedReleaseIfNeeded(niubotHome: string, config: Ni
       },
     });
     if (result.completion === "success") {
-      ok(`NiuBot is running on recommended version ${manifest.version}.`);
+      ok(options.stopAfterCompletion
+        ? `NiuBot updated to recommended version ${manifest.version}; Engine remains stopped.`
+        : `NiuBot is running on recommended version ${manifest.version}.`);
       return true;
     }
     if (result.completion === "rolled-back") {
@@ -1507,6 +1515,152 @@ function checkForUpdate(): string | null {
 }
 
 async function cmdUpdate(niubotHome: string, flags: CliFlags): Promise<void> {
+  const singleHome = flags.home !== undefined;
+  if (!singleHome && flags.detach) {
+    fail("--detach requires --home for a single Home update.");
+    hint("Run 'niubot update' without --detach to update all registered production Homes.");
+    process.exitCode = 1;
+    return;
+  }
+  if (singleHome && flags.detach) {
+    const running = await inspectRunningEngine(niubotHome);
+    if (!running) {
+      fail("--detach requires a running Engine.");
+      hint("Run 'niubot update' without --detach while the Engine is stopped.");
+      process.exitCode = 1;
+      return;
+    }
+  }
+
+  const launcherCandidate = process.env["NIUBOT_LAUNCH_CANDIDATE_ARTIFACT_ID"];
+  let targetVersion: string;
+  if (launcherCandidate) {
+    try {
+      const manifest = new SharedReleaseStore(resolveSharedRuntimeRoot())
+        .assertUsableArtifact(launcherCandidate, undefined, true);
+      if (!isProductionVersion(manifest.version) || manifest.sourceKind === "source") {
+        throw new Error(`candidate ${manifest.version} is not a packaged production release`);
+      }
+      targetVersion = manifest.version;
+    } catch (err) {
+      fail(`Installed update candidate is unavailable: ${err instanceof Error ? err.message : String(err)}`);
+      process.exitCode = 1;
+      return;
+    }
+  } else {
+    info("Checking npm registry...");
+    try {
+      targetVersion = fetchLatestVersion();
+    } catch (err) {
+      fail(`Update check failed: ${err instanceof Error ? err.message : String(err)}`);
+      console.log();
+      process.exitCode = 1;
+      return;
+    }
+  }
+
+  const homes = singleHome
+    ? [niubotHome]
+    : collectStatusHomes(niubotHome, readRegisteredHomes(getHomeRegistryPath()));
+  if (!singleHome) {
+    console.log();
+    console.log(`Updating registered production Homes to ${targetVersion}:`);
+  }
+  await runSequentialHomeUpdates(homes, async (home) => {
+    if (!singleHome) {
+      console.log();
+      console.log(`Home: ${home}`);
+    }
+    await updateHomeToTarget(home, flags, {
+      version: targetVersion,
+      launcherCandidate,
+      batch: !singleHome,
+    });
+  }, (home, err) => {
+    fail(`${home}: ${err instanceof Error ? err.message : String(err)}`);
+    process.exitCode = 1;
+  });
+}
+
+export async function runSequentialHomeUpdates(
+  homes: string[],
+  updateHome: (home: string) => Promise<void>,
+  onError: (home: string, error: unknown) => void,
+): Promise<void> {
+  for (const home of homes) {
+    try {
+      await updateHome(home);
+    } catch (err) {
+      onError(home, err);
+    }
+  }
+}
+
+export type ProductionUpdateDecision = "update" | "up-to-date" | "dev" | "unsupported";
+
+export function decideProductionUpdate(
+  currentVersion: string | undefined,
+  targetVersion: string,
+  currentEnvironment?: "dev" | "production",
+): ProductionUpdateDecision {
+  if (currentEnvironment === "dev" || (currentVersion && runtimeEnvironmentForVersion(currentVersion) === "dev")) return "dev";
+  if (currentVersion && !isProductionVersion(currentVersion)) return "unsupported";
+  if (currentVersion && !isNewerPackageVersion(targetVersion, currentVersion)) return "up-to-date";
+  return "update";
+}
+
+function readStoppedHomeRuntime(niubotHome: string): {
+  version?: string;
+  environment?: "dev" | "production";
+} {
+  const sharedStore = new SharedReleaseStore(resolveSharedRuntimeRoot());
+  const homeStore = new HomeReleaseStore(niubotHome, sharedStore);
+  const state = homeStore.stateExistsRecovering()
+    ? homeStore.readStateStrict()
+    : homeStore.readState();
+  const current = state.current;
+  if (!current) return {};
+  if (current.storage === "shared") {
+    const manifest = sharedStore.assertUsableArtifact(current.artifactId, undefined, true);
+    return {
+      version: manifest.version,
+      environment: manifest.sourceKind === "source"
+        ? "dev"
+        : runtimeEnvironmentForVersion(manifest.version),
+    };
+  }
+  const version = readNiuBotPackage(homeStore.resolveRuntime(current))?.version;
+  if (!version) throw new Error("Current Home runtime version is unavailable");
+  return { version, environment: runtimeEnvironmentForVersion(version) };
+}
+
+function matchingRecommendation(version: string): ReturnType<RecommendedReleaseStore["read"]> {
+  try {
+    const sharedStore = new SharedReleaseStore(resolveSharedRuntimeRoot());
+    const recommendation = new RecommendedReleaseStore(sharedStore).readStrict();
+    const manifest = sharedStore.assertUsableArtifact(recommendation.release.artifactId, undefined, true);
+    return manifest.version === version ? recommendation : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function updateHomeToTarget(
+  niubotHome: string,
+  flags: CliFlags,
+  target: { version: string; launcherCandidate?: string; batch: boolean },
+): Promise<void> {
+  const configPath = path.join(niubotHome, "config.yaml");
+  if (!isRegularFile(configPath)) {
+    if (target.batch) {
+      info("Skipped: Home is not initialized or its config is missing.");
+      return;
+    }
+    fail(`Config not found: ${configPath}`);
+    process.exitCode = 1;
+    return;
+  }
+
   const running = await inspectRunningEngine(niubotHome);
   const recordedState = readProcessState(niubotHome);
   if (!running && recordedState && isProcessAlive(recordedState.processes.engine.pid)) {
@@ -1522,53 +1676,54 @@ async function cmdUpdate(niubotHome: string, flags: CliFlags): Promise<void> {
     return;
   }
 
-  const launcherCandidate = process.env["NIUBOT_LAUNCH_CANDIDATE_ARTIFACT_ID"];
-  if (launcherCandidate) {
-    const config = loadConfig(path.join(niubotHome, "config.yaml"));
-    await activateLauncherCandidateIfNeeded(niubotHome, config, { stopAfterCompletion: !running });
-    return;
-  }
-
-  const current = running?.identity.version ?? getPkgVersion();
-  if (!isProductionVersion(current)) {
+  const stoppedRuntime = running ? undefined : readStoppedHomeRuntime(niubotHome);
+  const current = running?.identity.version ?? stoppedRuntime?.version;
+  const currentEnvironment = running?.state.runtimeMode === "dev"
+    ? "dev"
+    : stoppedRuntime?.environment;
+  const decision = decideProductionUpdate(current, target.version, currentEnvironment);
+  if (decision === "dev") {
+    if (target.batch) {
+      info(`Skipped: DEV Home is isolated at ${current}.`);
+      return;
+    }
     fail(`DEV 版本 ${current} 不支持正式版更新。`);
     hint("请在源码目录完成构建，然后执行 restart 使用最新 DEV 产物。");
     process.exitCode = 1;
     return;
   }
-  const npmCommand = resolveNpmCommandForCurrentNode();
-  console.log();
-  console.log(`Current version: ${current}`);
-
-  // Check for latest
-  info("Checking npm registry...");
-  let latest: string;
-  try {
-    latest = fetchLatestVersion();
-  } catch (err) {
-    fail(`Update check failed: ${err instanceof Error ? err.message : String(err)}`);
-    console.log();
+  if (decision === "unsupported") {
+    fail(`Unsupported current Home version: ${current ?? "unknown"}.`);
     process.exitCode = 1;
     return;
   }
-  if (!isNewerPackageVersion(latest, current)) {
-    ok("Already up to date.");
-    console.log();
+  if (decision === "up-to-date") {
+    ok(`Already up to date (${current}).`);
     return;
   }
 
-  console.log(`  New version available: ${latest}`);
-  console.log();
+  const config = loadConfig(configPath);
+  if (target.launcherCandidate) {
+    await activateLauncherCandidateIfNeeded(niubotHome, config, { stopAfterCompletion: !running });
+    return;
+  }
+
+  if (matchingRecommendation(target.version)) {
+    const handled = await activateRecommendedReleaseIfNeeded(niubotHome, config, {
+      stopAfterCompletion: !running,
+      expectedVersion: target.version,
+    });
+    if (handled) return;
+  }
 
   {
-    const config = loadConfig(path.join(niubotHome, "config.yaml"));
     const worker = launchRestartWorker({
       niubotHome,
       botName: config.bots[0]?.id ?? "NiuBot",
       runtimeRoot: PROJECT_ROOT,
       sourceDirectory: running?.identity.runtimePath ?? PROJECT_ROOT,
       environment: running?.state.runtimeMode ?? process.env["NIUBOT_ENV"] ?? "production",
-      updateVersion: latest,
+      updateVersion: target.version,
       stopAfterCompletion: !running,
     });
     info(`Update started (worker PID ${worker.pid})`);
@@ -1585,11 +1740,11 @@ async function cmdUpdate(niubotHome: string, flags: CliFlags): Promise<void> {
         restartId: worker.restartId,
         workerPid: worker.pid,
         onPhase: (state) => {
-          if (!restartCompletion(state)) info(restartPhaseLabel(state.phase, latest));
+          if (!restartCompletion(state)) info(restartPhaseLabel(state.phase, target.version));
         },
       });
       if (result.completion === "success") {
-        ok(`Updated to ${latest}.`);
+        ok(`Updated to ${target.version}.`);
       } else if (result.completion === "rolled-back") {
         fail("Update failed; the previous version was restored.");
         if (result.state.error) hint(result.state.error);
@@ -1606,7 +1761,6 @@ async function cmdUpdate(niubotHome: string, flags: CliFlags): Promise<void> {
     console.log();
     return;
   }
-
 }
 
 // ── Utilities ──────────────────────────────────────────────
@@ -1717,8 +1871,9 @@ For a short list of Bot IDs, use \`niubot bot list\`.`;
     case "update":
       return `Usage: niubot update [--home <path>] [--detach]
 
-Check for a production update and install it safely.
-  --detach  Start the worker and return immediately (running Engine only)`;
+Without --home, update every registered production Home sequentially; DEV Homes are skipped.
+Use --home to update one Home.
+  --detach  Start one Home worker and return immediately (requires --home and a running Engine)`;
     case "cleanup":
       return `Usage: niubot cleanup [--home <path>] [--apply]
 

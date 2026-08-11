@@ -136,6 +136,7 @@ describe("runtime launcher", () => {
       installedPackageRoot: createSeed(root, "0.2.17", "global-latest", "new"),
       bootstrapVerify: () => undefined,
       env: {
+        NIUBOT_HOME: home,
         NIUBOT_SHARED_STORE: shared.rootDirectory,
         NIUBOT_TEST_LAUNCH_MARKER: marker,
         NIUBOT_ALLOW_ROOT_STORE: "1",
@@ -150,6 +151,40 @@ describe("runtime launcher", () => {
     });
     expect(JSON.parse(fs.readFileSync(marker, "utf-8")).candidateArtifactId).toEqual(expect.any(String));
     expect(store.readState().current).toEqual(oldCurrent);
+  });
+
+  it("uses the packaged production CLI as the all-Home update control plane when entered through DEV", async () => {
+    const root = temporaryRoot();
+    const home = path.join(root, "dev-home");
+    const marker = path.join(root, "dev-control-plane.json");
+    fs.mkdirSync(home);
+    const shared = new SharedReleaseStore(path.join(root, "shared"));
+    const store = new HomeReleaseStore(home, shared);
+    const devRef = await installDevFixture(store, createSeed(root, "0.2.20", "dev-runtime", "dev"));
+    const devManifest = shared.readManifest(devRef.artifactId)!;
+    fs.writeFileSync(shared.manifestFile(devRef.artifactId), `${JSON.stringify({ ...devManifest, sourceKind: "source" }, null, 2)}\n`);
+
+    const code = await runRuntimeLauncher({
+      command: "niubot",
+      argv: ["update"],
+      installedPackageRoot: createSeed(root, "0.2.19", "global-production", "production-control"),
+      bootstrapVerify: () => undefined,
+      env: {
+        NIUBOT_HOME: home,
+        NIUBOT_SHARED_STORE: shared.rootDirectory,
+        NIUBOT_TEST_LAUNCH_MARKER: marker,
+        NIUBOT_ALLOW_ROOT_STORE: "1",
+      },
+    });
+
+    expect(code).toBe(0);
+    expect(JSON.parse(fs.readFileSync(marker, "utf-8"))).toMatchObject({
+      label: "production-control",
+      args: ["update"],
+      runtimeEnvironment: "production",
+      candidateArtifactId: "",
+    });
+    expect(store.readState().current).toEqual(devRef);
   });
 
   it("does not use an older globally installed package to downgrade update", async () => {

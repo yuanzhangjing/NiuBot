@@ -16,8 +16,10 @@ import {
   parseNiubotVersionOutput,
   resolveNiubotHome,
   collectStatusHomes,
+  decideProductionUpdate,
   readRegisteredHomes,
   registerHomePath,
+  runSequentialHomeUpdates,
 } from "./user-cli.js";
 import { writeAutoUpdateEnabledToConfig } from "./config.js";
 
@@ -89,6 +91,38 @@ describe("user-cli init model configuration", () => {
     const secondHome = path.join(root, "b");
     expect(collectStatusHomes(defaultHome, [firstHome, defaultHome, secondHome]))
       .toEqual([defaultHome, firstHome, secondHome]);
+  });
+
+  it("keeps DEV Homes isolated and never downgrades production Homes", () => {
+    expect(decideProductionUpdate("0.2.20-dev.3", "0.2.21")).toBe("dev");
+    expect(decideProductionUpdate("0.2.20", "0.2.21", "dev")).toBe("dev");
+    expect(decideProductionUpdate("0.2.20-beta.1", "0.2.21")).toBe("unsupported");
+    expect(decideProductionUpdate("0.2.21", "0.2.21")).toBe("up-to-date");
+    expect(decideProductionUpdate("0.2.22", "0.2.21")).toBe("up-to-date");
+    expect(decideProductionUpdate("0.2.20", "0.2.21")).toBe("update");
+    expect(decideProductionUpdate(undefined, "0.2.21")).toBe("update");
+  });
+
+  it("updates registered Homes sequentially and continues after one Home fails", async () => {
+    const events: string[] = [];
+    await runSequentialHomeUpdates(
+      ["home-a", "home-b", "home-c"],
+      async (home) => {
+        events.push(`start:${home}`);
+        if (home === "home-b") throw new Error("broken config");
+        events.push(`done:${home}`);
+      },
+      (home, error) => events.push(`error:${home}:${error instanceof Error ? error.message : String(error)}`),
+    );
+
+    expect(events).toEqual([
+      "start:home-a",
+      "done:home-a",
+      "start:home-b",
+      "error:home-b:broken config",
+      "start:home-c",
+      "done:home-c",
+    ]);
   });
 
   it("writes the chosen model into config.yaml", () => {
@@ -222,6 +256,21 @@ describe("user-cli init model configuration", () => {
 
     expect(result.status).toBe(1);
     expect(result.stdout).toContain("--detach requires a running Engine");
+    expect(result.stdout).not.toContain("Checking npm registry");
+  });
+
+  it("requires --home when detaching an update instead of silently detaching a batch", () => {
+    const tempDir = makeTempDir("niubot-update-detach-batch-");
+    const srcDir = path.dirname(fileURLToPath(import.meta.url));
+    const tsxCliPath = path.join(srcDir, "..", "node_modules", "tsx", "dist", "cli.mjs");
+    const result = spawnSync(
+      process.execPath,
+      [tsxCliPath, path.join(srcDir, "user-cli.ts"), "update", "--detach"],
+      { encoding: "utf8", env: { ...process.env, NIUBOT_HOME: tempDir } },
+    );
+
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain("--detach requires --home");
     expect(result.stdout).not.toContain("Checking npm registry");
   });
 

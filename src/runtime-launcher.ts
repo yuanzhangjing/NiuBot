@@ -102,29 +102,52 @@ export async function runRuntimeLauncher(options: RuntimeLauncherOptions): Promi
     }
   }
 
-  let installedUpdateCandidate: ReleaseRef | undefined;
+  let installedUpdateEntrypoint: ReleaseRef | undefined;
+  let installedUpdateMode: "candidate" | "control-plane" | undefined;
   if (options.command === "niubot" && argv[0] === "update" && state.current) {
     const currentVersion = releaseVersion(homeStore, sharedStore, state.current);
     const installedVersion = readPackageVersion(installedPackageRoot);
-    if (currentVersion
-      && installedVersion
-      && isProductionVersion(currentVersion)
+    const currentIsDevelopment = Boolean(currentVersion
+      && (runtimeEnvironmentForVersion(currentVersion) === "dev"
+        || isLegacyDevRuntime(sharedStore, state.current, env, runningRef, running?.state.runtimeMode)));
+    const installedIsPackagedProduction = Boolean(installedVersion
       && isProductionVersion(installedVersion)
-      && comparePackageVersions(installedVersion, currentVersion) === 1) {
-      installedUpdateCandidate = await importInstalledProductionPackage({
+      && !fs.existsSync(path.join(installedPackageRoot, "src")));
+    if (currentVersion
+      && currentIsDevelopment
+      && installedIsPackagedProduction
+      && !hasExplicitLauncherHome(argv)) {
+      // A no--home update is a user-wide production operation. A DEV Home may
+      // be the command's entry point, but its runtime must not own or block the
+      // production update control plane. Do not mark this package as the update
+      // target: the production CLI still checks npm for the actual latest.
+      installedUpdateEntrypoint = await importInstalledProductionPackage({
         homeStore,
         packageRoot: installedPackageRoot,
         env,
         verify: options.bootstrapVerify,
       });
+      installedUpdateMode = "control-plane";
+    } else if (currentVersion
+      && installedVersion
+      && isProductionVersion(currentVersion)
+      && installedIsPackagedProduction
+      && comparePackageVersions(installedVersion, currentVersion) === 1) {
+      installedUpdateEntrypoint = await importInstalledProductionPackage({
+        homeStore,
+        packageRoot: installedPackageRoot,
+        env,
+        verify: options.bootstrapVerify,
+      });
+      installedUpdateMode = "candidate";
     }
   }
 
   const recommendation = state.current
     ? recommendedStartRef(options.command, argv, state, homeStore, sharedStore)
     : undefined;
-  const launchRefs = installedUpdateCandidate
-    ? [installedUpdateCandidate]
+  const launchRefs = installedUpdateEntrypoint
+    ? [installedUpdateEntrypoint]
     : options.command === "nbt" && runningRef
     ? uniqueReleaseRefs([runningRef, ...orderedFallbacks(state)])
     : recommendation
@@ -138,8 +161,8 @@ export async function runRuntimeLauncher(options: RuntimeLauncherOptions): Promi
       if (!fs.existsSync(entry)) throw new Error(`CLI entry is missing: ${entry}`);
       const args = options.command === "nbt" ? parsed.forwardedArgs : argv;
       const selectedEnvironment = releaseEnvironment(sharedStore, ref);
-      const isInstalledUpdateCandidate = installedUpdateCandidate
-        ? sameReleaseRef(ref, installedUpdateCandidate)
+      const isInstalledUpdateEntrypoint = installedUpdateEntrypoint
+        ? sameReleaseRef(ref, installedUpdateEntrypoint)
         : false;
       const result = spawnSync(ref.node.nodePath, [entry, ...args], {
         cwd: safeWorkingDirectory(runtimePath),
@@ -148,7 +171,8 @@ export async function runRuntimeLauncher(options: RuntimeLauncherOptions): Promi
           NIUBOT_HOME: parsed.home,
           NIUBOT_ENV: selectedEnvironment,
           NIUBOT_LEGACY_SOURCE_MIGRATION: isLegacyDevRuntime(sharedStore, ref, env, runningRef, running?.state.runtimeMode) ? "1" : "",
-          NIUBOT_LAUNCH_CANDIDATE_ARTIFACT_ID: (isInstalledUpdateCandidate || !state.current) && ref.storage === "shared"
+          NIUBOT_LAUNCH_CANDIDATE_ARTIFACT_ID: ((isInstalledUpdateEntrypoint && installedUpdateMode === "candidate")
+            || (!state.current && installedUpdateMode !== "control-plane")) && ref.storage === "shared"
             ? ref.artifactId
             : "",
         },
@@ -198,6 +222,10 @@ export async function runRuntimeLauncher(options: RuntimeLauncherOptions): Promi
     failures.push(err instanceof Error ? err.message : String(err));
     throw new Error(`No usable NiuBot runtime for ${parsed.home}: ${failures.join("; ")}`);
   }
+}
+
+function hasExplicitLauncherHome(argv: string[]): boolean {
+  return argv.some((arg) => arg === "--home" || arg.startsWith("--home="));
 }
 
 function runSourceEntrypoint(
