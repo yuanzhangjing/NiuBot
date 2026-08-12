@@ -131,7 +131,7 @@ describe("EngineAutoUpdateCoordinator", () => {
     await coordinator.runDailyCheck();
 
     expect(cards).toHaveLength(1);
-    expect(cards[0]).toMatchObject({ chatId: "chat-open-id", header: "Update" });
+    expect(cards[0]).toMatchObject({ chatId: "chat-open-id", header: "更新|orange" });
     expect(cards[0]?.content).toContain("1.0.0 → 1.1.0");
     coordinator.stop();
   });

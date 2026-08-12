@@ -334,11 +334,11 @@ export class EngineAutoUpdateCoordinator {
     const target = this.notificationTarget;
     if (hasUpdateNotification(target.db, target.id, latest)) return;
     const version = this.lifecycle.getStatus().version;
-    const text = `发现新版本：${version} → ${latest}\n发送 \`${UPDATE_CONFIRM_COMMAND}\` 升级并重启。`;
+    const text = `🚀 发现新版本：${version} → ${latest}\n发送 \`${UPDATE_CONFIRM_COMMAND}\` 升级并重启。`;
     let delivered = false;
     for (const platformChatId of this.getAdminPrivatePlatformChatIds()) {
       try {
-        await target.transport.sendCard(platformChatId, "Update", text);
+        await target.transport.sendCard(platformChatId, "更新|orange", text);
         delivered = true;
       } catch (err) {
         this.log.warn("failed to send update notification", { platformChatId, error: String(err) });
@@ -355,10 +355,10 @@ export class EngineAutoUpdateCoordinator {
 
     let delivered = false;
     const version = this.lifecycle.getStatus().version;
-    const text = `已自动升级到 **${version}**。`;
+    const text = `✅ 已自动升级到 **${version}**。`;
     for (const platformChatId of this.getAdminPrivatePlatformChatIds()) {
       try {
-        await this.notificationTarget.transport.sendCard(platformChatId, "Update", text);
+        await this.notificationTarget.transport.sendCard(platformChatId, "更新|green", text);
         delivered = true;
       } catch (err) {
         this.log.warn("failed to send auto-upgrade result", { platformChatId, error: String(err) });

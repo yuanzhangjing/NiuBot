@@ -98,6 +98,7 @@ import {
   GOAL_DEFAULTS,
 } from "./goal.js";
 import { resolveExecutable } from "../platform/executable.js";
+import { collectDisplayStatus, formatDisplayStatus } from "../platform/display-status.js";
 import {
   buildWindowsAdminShellInvocation,
   shouldHandleAdminShellCommand,
@@ -1676,7 +1677,7 @@ export class Pipeline {
         }
         void this.handleAgentCommand(parts.slice(1), chatId, platformChatId, msgId).catch((err) => {
           this.log.error("agent command failed", { error: String(err) });
-          this.sendAgentCard(chatId, platformChatId, msgId, "Agent", `处理 /agent 失败: ${String(err)}`);
+          this.sendAgentCard(chatId, platformChatId, msgId, "Agent|red", `处理 /agent 失败: ${String(err)}`);
         });
         return true;
       }
@@ -1951,7 +1952,7 @@ export class Pipeline {
     if (lines.length === 0) lines.push(`当前没有 ${mode === "loop" ? "Loop" : "Cron"} 任务。`);
     lines.push("", `创建：/${mode} <任务与时间>`, `删除：/${mode} del <id>`);
     const content = lines.join("\n");
-    this.transport.sendCard(platformChatId, mode === "loop" ? "Loop" : "Cron", content, undefined, msgId)
+    this.transport.sendCard(platformChatId, mode === "loop" ? "循环任务|turquoise" : "定时任务|turquoise", content, undefined, msgId)
       .then((pmid) => { this.storeBotResponse(chatId, content, pmid); })
       .catch((err) => this.log.error("schedule list send failed", { mode, chatId, error: String(err) }));
   }
@@ -2107,7 +2108,7 @@ export class Pipeline {
       `**最新数据:** ${latestDataAge}`,
       ...sections,
     ].join("\n\n");
-    const header = count > 0 ? `Running · ${count} 个任务` : "Status";
+    const header = count > 0 ? `运行中 · ${count} 个任务|orange` : "Status|blue";
     this.transport.sendCard(platformChatId, header, content, undefined, msgId)
       .then((pmid) => { this.storeBotResponse(chatId, content, pmid); })
       .catch((err) => this.log.error("running list card send failed", { chatId, error: String(err) }));
@@ -2274,7 +2275,7 @@ export class Pipeline {
       `**Working directory:** \`${this.workingDirectory}\``,
     ].join("\n");
 
-    const send = this.transport.sendCard(platformChatId, "service", content, undefined, msgId);
+    const send = this.transport.sendCard(platformChatId, "服务|blue", content, undefined, msgId);
     send
       .then((pmid) => {
         this.storeBotResponse(chatId, content, pmid);
@@ -2748,7 +2749,7 @@ export class Pipeline {
           "",
           "配置调整直接说需求，我来改 · `/worker on|off` 开关",
         ].join("\n");
-        this.sendWorkerCard(chatId, platformChatId, msgId, "Worker · 状态", content);
+        this.sendWorkerCard(chatId, platformChatId, msgId, "Worker · 状态|blue", content);
       }
     }
   }
@@ -2798,7 +2799,7 @@ export class Pipeline {
       : `定时任务执行失败，后续会按计划重试。\n\n${detail || "未知错误"}`;
     const platformMsgId = await this.transport.sendCard(
       platformChatId,
-      `⏰ ${description || "Cron 任务"}`,
+      `⏰ ${description || "定时任务"}|${paused ? "red" : "orange"}`,
       content,
     );
     this.storeBotResponse(chatId, content, platformMsgId);
@@ -3616,7 +3617,7 @@ ${jobParts.join("\n\n")}
       capabilities = await this.getBackendCapabilities();
     } catch (err) {
       this.log.error("failed to refresh backend capabilities", { error: String(err) });
-      this.sendAgentCard(chatId, platformChatId, msgId, "Agent", `读取 backend 状态失败: ${String(err)}`);
+      this.sendAgentCard(chatId, platformChatId, msgId, "Agent|red", `读取 backend 状态失败: ${String(err)}`);
       return;
     }
     if (args.length === 0) {
@@ -3637,7 +3638,7 @@ ${jobParts.join("\n\n")}
         lines.push(`  ${i + 1}. ${capability.backend} — ${status}${current}`);
       }
       lines.push("", "`/agent <名字或编号>` 切换");
-      this.sendAgentCard(chatId, platformChatId, msgId, "Agent", lines.join("\n"));
+      this.sendAgentCard(chatId, platformChatId, msgId, "Agent|blue", lines.join("\n"));
       return;
     }
 
@@ -3658,17 +3659,17 @@ ${jobParts.join("\n\n")}
       const content = capability
         ? `backend **${capability.backend}** 当前不可用：${capability.reason ?? "当前平台或安装状态不支持"}\n\n可选: ${availableLabels}`
         : `无效的 backend: \`${args[0]}\`\n\n可选: ${availableLabels}`;
-      this.sendAgentCard(chatId, platformChatId, msgId, "Agent", content);
+      this.sendAgentCard(chatId, platformChatId, msgId, "Agent|orange", content);
       return;
     }
 
     if (target === this.backendType) {
-      this.sendAgentCard(chatId, platformChatId, msgId, "Agent", `已经是 **${displayBackendType(target)}**，无需切换。`);
+      this.sendAgentCard(chatId, platformChatId, msgId, "Agent|green", `已经是 **${displayBackendType(target)}**，无需切换。`);
       return;
     }
 
     if (!this.backendResolver) {
-      this.sendAgentCard(chatId, platformChatId, msgId, "Agent", "backend resolver 未配置，无法切换。");
+      this.sendAgentCard(chatId, platformChatId, msgId, "Agent|orange", "backend resolver 未配置，无法切换。");
       return;
     }
 
@@ -3714,7 +3715,7 @@ ${jobParts.join("\n\n")}
       try {
         await doSwitch();
         const model = this.botIdentity.model ?? "default";
-        this.sendAgentCard(chatId, platformChatId, msgId, "Agent",
+        this.sendAgentCard(chatId, platformChatId, msgId, "Agent|green",
           `已切换到 **${displayBackendType(target)}** (Model: ${model})\n上下文已重置，重启后仍保持当前选择。`);
         this.log.info("agent backend switched (runtime only)", {
           backend: target,
@@ -3722,7 +3723,7 @@ ${jobParts.join("\n\n")}
         });
       } catch (err) {
         this.log.error("failed to switch agent backend", { error: String(err) });
-        this.sendAgentCard(chatId, platformChatId, msgId, "Agent", `切换失败: ${String(err)}`);
+        this.sendAgentCard(chatId, platformChatId, msgId, "Agent|red", `切换失败: ${String(err)}`);
       }
     });
   }
@@ -3748,13 +3749,13 @@ ${jobParts.join("\n\n")}
         model: undefined,
       });
       this.clearRuntimeModels();
-      this.sendAgentCard(chatId, platformChatId, msgId, "Model", "已恢复为默认模型。\n当前会话立即生效。");
+      this.sendAgentCard(chatId, platformChatId, msgId, "Model|green", "已恢复为默认模型。\n当前会话立即生效。");
       this.log.info("model reset to backend defaults", { backend: this.backendType });
       return;
     }
 
     if (args[0] === "lite") {
-      this.sendAgentCard(chatId, platformChatId, msgId, "Model", "Lite 模型已移除。使用 `/model <名字或编号>` 切换当前模型。");
+      this.sendAgentCard(chatId, platformChatId, msgId, "Model|blue", "Lite 模型已移除。使用 `/model <名字或编号>` 切换当前模型。");
       return;
     }
 
@@ -3775,7 +3776,7 @@ ${jobParts.join("\n\n")}
       const progress = `正在探测模型 **${resolvedModel}**，可能需要几十秒，请稍等…`;
       try {
         // 进度提示不入库，避免污染会话历史；发送失败不阻断探测
-        await this.transport.sendCard(platformChatId, "Model", progress, undefined, msgId);
+        await this.transport.sendCard(platformChatId, "Model|orange", progress, undefined, msgId);
       } catch (err) {
         this.log.warn("model probe progress send failed", { model: resolvedModel, error: String(err) });
       }
@@ -3792,7 +3793,7 @@ ${jobParts.join("\n\n")}
             lines.push("");
             lines.push("`/model <名字或编号>` 切换");
           }
-          this.sendAgentCard(chatId, platformChatId, msgId, "Model", lines.join("\n"));
+          this.sendAgentCard(chatId, platformChatId, msgId, "Model|red", lines.join("\n"));
           return;
         }
       } catch (err) {
@@ -3804,7 +3805,7 @@ ${jobParts.join("\n\n")}
     this.updateActiveChatSessionModels(chatId, { model: resolvedModel });
     this.recordModelHistory(this.backendType, resolvedModel);
     this.persistRuntimeState();
-    this.sendAgentCard(chatId, platformChatId, msgId, "Model", `模型已切换为 **${resolvedModel}**\n当前会话立即生效，重启后仍保持当前选择。`);
+    this.sendAgentCard(chatId, platformChatId, msgId, "Model|green", `模型已切换为 **${resolvedModel}**\n当前会话立即生效，重启后仍保持当前选择。`);
     this.log.info("model switched (runtime)", { model: resolvedModel, backend: this.backendType });
   }
 
@@ -3829,7 +3830,7 @@ ${jobParts.join("\n\n")}
         "`/effort <级别|编号>` 切换",
         "`/effort reset` 恢复默认",
       ];
-      this.sendAgentCard(chatId, platformChatId, msgId, "Effort", lines.join("\n"));
+      this.sendAgentCard(chatId, platformChatId, msgId, "Effort|violet", lines.join("\n"));
       return;
     }
 
@@ -3837,7 +3838,7 @@ ${jobParts.join("\n\n")}
       this.botIdentity.effort = undefined;
       this.updateActiveChatSessionModels(chatId, { effort: undefined });
       this.persistRuntimeState();
-      this.sendAgentCard(chatId, platformChatId, msgId, "Effort", "已恢复为默认强度。\n当前会话立即生效。");
+      this.sendAgentCard(chatId, platformChatId, msgId, "Effort|green", "已恢复为默认强度。\n当前会话立即生效。");
       this.log.info("effort reset", { backend: this.backendType });
       return;
     }
@@ -3850,7 +3851,7 @@ ${jobParts.join("\n\n")}
       : raw) as (typeof EFFORT_LEVELS)[number];
     if (!EFFORT_LEVELS.includes(level)) {
       this.sendAgentCard(
-        chatId, platformChatId, msgId, "Effort",
+        chatId, platformChatId, msgId, "Effort|orange",
         `无效级别 **${args[0]}**。\n可选：${EFFORT_LEVELS.map((item, i) => `${i + 1}. ${item}`).join("  ")}`,
       );
       return;
@@ -3862,7 +3863,7 @@ ${jobParts.join("\n\n")}
     const note = supported
       ? "当前会话立即生效，重启后仍保持当前选择。"
       : `当前 backend（${this.backendType}）不支持 effort 参数，值已保存；切换到支持的 backend 后自动生效。`;
-    this.sendAgentCard(chatId, platformChatId, msgId, "Effort", `推理强度已切换为 **${level}**\n${note}`);
+    this.sendAgentCard(chatId, platformChatId, msgId, "Effort|green", `推理强度已切换为 **${level}**\n${note}`);
     this.log.info("effort switched (runtime)", { effort: level, backend: this.backendType });
   }
 
@@ -3874,7 +3875,7 @@ ${jobParts.join("\n\n")}
     if (action === "on" || action === "enable" || action === "1") {
       if (!this.persistAutoUpdateSetting(true, chatId, platformChatId, msgId)) return;
       this.sendAgentCard(
-        chatId, platformChatId, msgId, "AutoUpdate",
+        chatId, platformChatId, msgId, "AutoUpdate|green",
         `自动升级已**开启**。\n窗口：${config.windowStartHour}:00-${config.windowEndHour}:00（${config.timezone}），引擎空闲时自动升级。`,
       );
       this.log.info("auto-update enabled (runtime)", { userId: chatId });
@@ -3882,7 +3883,7 @@ ${jobParts.join("\n\n")}
     }
     if (action === "off" || action === "disable" || action === "0") {
       if (!this.persistAutoUpdateSetting(false, chatId, platformChatId, msgId)) return;
-      this.sendAgentCard(chatId, platformChatId, msgId, "AutoUpdate", "自动升级已**关闭**。");
+      this.sendAgentCard(chatId, platformChatId, msgId, "AutoUpdate|grey", "自动升级已**关闭**。");
       this.log.info("auto-update disabled (runtime)", { userId: chatId });
       return;
     }
@@ -3900,7 +3901,7 @@ ${jobParts.join("\n\n")}
       "`/update auto off` 关闭",
       "（`/autoupdate` 为兼容别名）",
     ];
-    this.sendAgentCard(chatId, platformChatId, msgId, "AutoUpdate", lines.join("\n"));
+    this.sendAgentCard(chatId, platformChatId, msgId, "AutoUpdate|blue", lines.join("\n"));
   }
 
   private persistAutoUpdateSetting(
@@ -3921,7 +3922,7 @@ ${jobParts.join("\n\n")}
         chatId,
         platformChatId,
         msgId,
-        "AutoUpdate",
+        "AutoUpdate|red",
         `自动升级设置保存失败：${err instanceof Error ? err.message : String(err)}`,
       );
       return false;
@@ -4050,7 +4051,7 @@ ${jobParts.join("\n\n")}
     }
 
     const content = lines.join("\n");
-    const send = this.transport.sendCard(platformChatId, "Model", content, undefined, msgId);
+    const send = this.transport.sendCard(platformChatId, "Model|blue", content, undefined, msgId);
     send
       .then((pmid) => { this.storeBotResponse(chatId, content, pmid); })
       .catch(() => {});
@@ -4071,6 +4072,7 @@ ${jobParts.join("\n\n")}
   /** 发送 /help 卡片 */
   private sendHelpCard(chatId: string, platformChatId: string, msgId: string | undefined, isAdmin: boolean): void {
     const lines = [
+      "⚡ **常用命令**",
       "`/new`　　新会话（清空当前上下文）",
       "`/stop`　　停止当前任务并清空队列（全停）",
       "`/flush`　　中断当前回复，合并处理排队消息",
@@ -4086,7 +4088,7 @@ ${jobParts.join("\n\n")}
     if (isAdmin) {
       lines.push(
         "",
-        "**管理员**",
+        "🛠 **管理员**",
         "`/admin`　　管理员列表/添加/移除",
         "`/model`　　查看/切换模型",
         "`/effort`　 查看/切换推理强度",
@@ -4098,7 +4100,7 @@ ${jobParts.join("\n\n")}
       );
     }
     const content = lines.join("\n");
-    const send = this.transport.sendCard(platformChatId, "Help", content, undefined, msgId);
+    const send = this.transport.sendCard(platformChatId, "帮助|blue", content, undefined, msgId);
     send
       .then((pmid) => { this.storeBotResponse(chatId, content, pmid); })
       .catch(() => {});
@@ -4112,7 +4114,18 @@ ${jobParts.join("\n\n")}
     }
     const action = args[0]?.toLowerCase();
     if (!action || action === "status") {
-      this.replyText(chatId, platformChatId, msgId, formatKeepAwakeStatus(lifecycle.getKeepAwakeStatus()));
+      const status = lifecycle.getKeepAwakeStatus();
+      const baseText = formatKeepAwakeStatus(status);
+      const sendStatus = (content: string, header: string) => {
+        const send = this.transport.sendCard(platformChatId, header, content, undefined, msgId);
+        send.then((pmid) => this.storeBotResponse(chatId, content, pmid)).catch(() => {});
+      };
+      void collectDisplayStatus().then((display) => {
+        sendStatus(baseText + formatDisplayStatus(display), formatKeepAwakeHeader(status));
+      }).catch((err) => {
+        this.log.warn("failed to collect display status", { error: String(err) });
+        sendStatus(baseText, formatKeepAwakeHeader(status));
+      });
       return;
     }
     if (action !== "on" && action !== "off") {
@@ -4120,7 +4133,9 @@ ${jobParts.join("\n\n")}
       return;
     }
     void lifecycle.setKeepAwakeEnabled(action === "on").then((status) => {
-      this.replyText(chatId, platformChatId, msgId, formatKeepAwakeStatus(status));
+      const content = formatKeepAwakeStatus(status);
+      const send = this.transport.sendCard(platformChatId, formatKeepAwakeHeader(status), content, undefined, msgId);
+      send.then((pmid) => this.storeBotResponse(chatId, content, pmid)).catch(() => {});
     }).catch((err) => {
       this.log.error("keep-awake command failed", { action, error: String(err) });
       this.replyText(chatId, platformChatId, msgId, `防休眠切换失败：${err instanceof Error ? err.message : String(err)}`);
@@ -4131,8 +4146,8 @@ ${jobParts.join("\n\n")}
   private tryShellCommand(cmd: string, userId: string, chatId: string, chatType: string, platformChatId: string, msgId?: string): void {
     this.log.info("shell command", { cmd });
 
-    const sendResult = (content: string) => {
-      const sendPromise = this.transport.sendCard(platformChatId, "Shell", content, undefined, msgId);
+    const sendResult = (content: string, header = "Shell|blue") => {
+      const sendPromise = this.transport.sendCard(platformChatId, header, content, undefined, msgId);
       sendPromise.then((pmid) => {
         this.storeBotResponse(chatId, content, pmid);
       }).catch(() => {});
@@ -4166,11 +4181,11 @@ ${jobParts.join("\n\n")}
     execution.then(({ stdout, stderr }) => {
       const output = (stdout + stderr).trim();
       this.recordShellHistory(cmd, output, 0);
-      sendResult(formatShellOutput(this.workingDirectory, cmd, output, 0));
+      sendResult(formatShellOutput(this.workingDirectory, cmd, output, 0), "Shell|blue");
     }).catch((err: unknown) => {
       const { output, exitCode, formatted } = formatShellExecErrorDetails(this.workingDirectory, cmd, err);
       this.recordShellHistory(cmd, output, exitCode);
-      sendResult(formatted);
+      sendResult(formatted, "Shell|red");
     });
   }
 
@@ -4200,7 +4215,7 @@ ${jobParts.join("\n\n")}
       if (entry.exitCode !== 0) line += ` (exit ${entry.exitCode})`;
       return line;
     });
-    this.transport.sendCard(platformChatId, "Shell History", lines.join("\n"), undefined, msgId)
+    this.transport.sendCard(platformChatId, "Shell 历史|blue", lines.join("\n"), undefined, msgId)
       .then((pmid) => { this.storeBotResponse(chatId, lines.join("\n"), pmid); })
       .catch(() => {});
   }
@@ -4216,23 +4231,23 @@ ${jobParts.join("\n\n")}
       const env = this.engineLifecycle.getStatus().environment;
       if (!updateAvailable) {
         const text = [
-          `已是最新版本 (${currentVersion})。`,
+          `✅ 已是最新版本 (${currentVersion})。`,
           `Env: ${env}`,
           ...(autoInfo ? ["", ...autoInfo] : []),
         ].join("\n");
-        const send = this.transport.sendCard(platformChatId, "Update", text, undefined, msgId);
+        const send = this.transport.sendCard(platformChatId, "更新|green", text, undefined, msgId);
         send.then((pmid) => { this.storeBotResponse(chatId, text, pmid); }).catch((err) => this.log.warn("update card send failed", { error: String(err) }));
         return;
       }
 
       if (!confirmed) {
         const text = [
-          `发现新版本：${currentVersion} → ${latestVersion}`,
+          `🚀 发现新版本：${currentVersion} → ${latestVersion}`,
           `Env: ${env}`,
           `发送 \`${UPDATE_CONFIRM_COMMAND}\` 升级并重启。`,
           ...(autoInfo ? ["", ...autoInfo] : []),
         ].join("\n");
-        const send = this.transport.sendCard(platformChatId, "Update", text, undefined, msgId);
+        const send = this.transport.sendCard(platformChatId, "更新|orange", text, undefined, msgId);
         send.then((pmid) => { this.storeBotResponse(chatId, text, pmid); }).catch((err) => this.log.warn("update card send failed", { error: String(err) }));
         return;
       }
@@ -5494,9 +5509,15 @@ function commandExistsSync(cmd: string): boolean {
 }
 
 function formatKeepAwakeStatus(status: ReturnType<EngineLifecycle["getKeepAwakeStatus"]>): string {
-  if (!status.supported) return "防休眠：当前系统不支持（仅支持 macOS 和 Windows）。";
-  if (!status.enabled) return "防休眠：已关闭。\n用 `/awake on` 开启。";
-  return `防休眠：已开启（${status.method ?? "系统 API"}）。\nEngine 停止或执行 \`/awake off\` 后自动恢复。`;
+  if (!status.supported) return "💤 防休眠：当前系统不支持（仅支持 macOS 和 Windows）。";
+  if (!status.enabled) return "💤 防休眠：**已关闭**\n用 `/awake on` 开启";
+  return `✅ 防休眠：**已开启**（${status.method ?? "系统 API"}）\nEngine 停止或执行 \`/awake off\` 后自动恢复`;
+}
+
+/** /awake 状态卡片的 header（带颜色） */
+function formatKeepAwakeHeader(status: ReturnType<EngineLifecycle["getKeepAwakeStatus"]>): string {
+  if (!status.supported) return "防休眠|grey";
+  return status.enabled ? "防休眠|green" : "防休眠|grey";
 }
 
 /** Shell 输出最大字符数（超出截断） */

@@ -138,3 +138,69 @@ describe("FeishuAdapter", () => {
     });
   });
 });
+
+describe("sendCard header color", () => {
+  test("parses header|color syntax into card template", async () => {
+    const adapter = new FeishuAdapter("app-id", "app-secret");
+    let sentContent = "";
+    (adapter as any).client = {
+      im: {
+        message: {
+          create: async ({ data }: any) => {
+            sentContent = data.content;
+            return { data: { message_id: "card-id" } };
+          },
+        },
+      },
+    };
+
+    await adapter.sendCard("chat-id", "防休眠|green", "✅ 防休眠：**已开启**");
+
+    const card = JSON.parse(sentContent);
+    expect(card.header.template).toBe("green");
+    expect(card.header.title.content).toBe("防休眠");
+    expect(card.body.elements[0].content).toBe("✅ 防休眠：**已开启**");
+  });
+
+  test("keeps default blue template for plain headers", async () => {
+    const adapter = new FeishuAdapter("app-id", "app-secret");
+    let sentContent = "";
+    (adapter as any).client = {
+      im: {
+        message: {
+          create: async ({ data }: any) => {
+            sentContent = data.content;
+            return { data: { message_id: "card-id" } };
+          },
+        },
+      },
+    };
+
+    await adapter.sendCard("chat-id", "Help", "content");
+
+    const card = JSON.parse(sentContent);
+    expect(card.header.template).toBe("blue");
+    expect(card.header.title.content).toBe("Help");
+  });
+
+  test("ignores unknown color suffix and keeps the full title", async () => {
+    const adapter = new FeishuAdapter("app-id", "app-secret");
+    let sentContent = "";
+    (adapter as any).client = {
+      im: {
+        message: {
+          create: async ({ data }: any) => {
+            sentContent = data.content;
+            return { data: { message_id: "card-id" } };
+          },
+        },
+      },
+    };
+
+    await adapter.sendCard("chat-id", "Shell | 输出", "content");
+
+    const card = JSON.parse(sentContent);
+    expect(card.header.template).toBe("blue");
+    expect(card.header.title.content).toBe("Shell | 输出");
+  });
+});

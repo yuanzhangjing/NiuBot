@@ -953,7 +953,12 @@ export class FeishuAdapter implements PlatformAdapter {
   }
 }
 
-/** 构建飞书卡片 JSON */
+/** 飞书卡片 header 模板颜色（与飞书 schema 2.0 一致） */
+const CARD_HEADER_TEMPLATES = new Set([
+  "blue", "wathet", "turquoise", "indigo", "violet", "red", "orange", "green", "grey",
+]);
+
+/** 构建飞书卡片 JSON。header 支持 "标题|颜色" 语法选择 header 模板颜色。 */
 function buildCardJSON(header: string, content: string, footer?: string): string {
   let mdContent = content;
   if (footer) {
@@ -964,9 +969,10 @@ function buildCardJSON(header: string, content: string, footer?: string): string
     config: { wide_screen_mode: true },
   };
   if (header) {
+    const { title, template } = parseCardHeader(header);
     card.header = {
-      template: "blue",
-      title: { tag: "plain_text", content: header },
+      template,
+      title: { tag: "plain_text", content: title },
     };
   }
   if (mdContent) {
@@ -976,6 +982,17 @@ function buildCardJSON(header: string, content: string, footer?: string): string
     };
   }
   return JSON.stringify(card);
+}
+
+function parseCardHeader(header: string): { title: string; template: string } {
+  const sep = header.lastIndexOf("|");
+  if (sep > 0) {
+    const color = header.slice(sep + 1).trim();
+    if (CARD_HEADER_TEMPLATES.has(color)) {
+      return { title: header.slice(0, sep).trim(), template: color };
+    }
+  }
+  return { title: header, template: "blue" };
 }
 
 function parsePlatformTs(val?: string): number | undefined {

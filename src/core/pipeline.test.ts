@@ -1495,7 +1495,7 @@ describe("Pipeline runtime", () => {
 
     expect(handled).toBe(true);
     expect(sentCards).toHaveLength(1);
-    expect(sentCards[0]?.header).toBe("service");
+    expect(sentCards[0]?.header).toBe("服务|blue");
     expect(sentCards[0]?.content).toContain("**Version:** 1.2.3");
     expect(sentCards[0]?.content).toContain("**Uptime:** 1m 5s");
     expect(sentCards[0]?.content).toContain("/shared/releases/1.2.3/package");
@@ -4204,7 +4204,7 @@ describe("Pipeline runtime", () => {
 
     expect(handled).toBe(true);
     const card = sentCards.at(-1)!;
-    expect(card.header).toBe("Running · 2 个任务");
+    expect(card.header).toBe("运行中 · 2 个任务|orange");
     expect(card.content).toContain("**最新数据:** 刚刚");
     expect(card.content).toContain("**⚙️ Worker**");
     expect(card.content).toContain("运行中: **1** · 排队: **1** · 取消中: **1** · 等待验收: **1** · 验收中: **2**");
@@ -4244,7 +4244,7 @@ describe("Pipeline runtime", () => {
     (pipeline as any).handleBuiltinCommand("/status", "u2", "c1", "chat-open-id", "p2p", "status-msg");
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(sentCards.at(-1)?.header).toBe("Status");
+    expect(sentCards.at(-1)?.header).toBe("Status|blue");
     expect(sentCards.at(-1)?.content).toContain("运行中: **0** · 排队: **1** · 取消中: **0** · 等待验收: **1** · 验收中: **0**");
   });
 
@@ -4919,10 +4919,10 @@ describe("Pipeline runtime", () => {
     expect((pipeline as any).handleBuiltinCommand("/loop", "u2", "c1", "chat-open-id", "p2p", "m-loop")).toBe(true);
     expect((pipeline as any).handleBuiltinCommand("/cron list", "u2", "c1", "chat-open-id", "p2p", "m-cron")).toBe(true);
     await vi.waitFor(() => expect(sentCards).toHaveLength(2));
-    expect(sentCards[0]).toMatchObject({ header: "Loop" });
+    expect(sentCards[0]).toMatchObject({ header: "循环任务|turquoise" });
     expect(sentCards[0]!.content).toContain("loop:1");
     expect(sentCards[0]!.content).toContain("创建：/loop <任务与时间>");
-    expect(sentCards[1]).toMatchObject({ header: "Cron" });
+    expect(sentCards[1]).toMatchObject({ header: "定时任务|turquoise" });
     expect(sentCards[1]!.content).toContain("cron:1");
     expect(sentCards[1]!.content).toContain("创建：/cron <任务与时间>");
   });
@@ -5090,14 +5090,14 @@ describe("Pipeline runtime", () => {
       "/pwd", "u2", "c1", "chat-open-id", "p2p", "m1",
     )).toBe(true);
     await vi.waitFor(() => {
-      expect(sentCards.some((card) => card.header === "Shell" && card.content.includes(dir))).toBe(true);
+      expect(sentCards.some((card) => card.header === "Shell|blue" && card.content.includes(dir))).toBe(true);
     });
 
     expect((pipeline as any).handleBuiltinCommand(
       "/history", "u2", "c1", "chat-open-id", "p2p", "m2",
     )).toBe(true);
     await vi.waitFor(() => {
-      expect(sentCards.some((card) => card.header === "Shell History" && card.content.includes("pwd"))).toBe(true);
+      expect(sentCards.some((card) => card.header === "Shell 历史|blue" && card.content.includes("pwd"))).toBe(true);
     });
   });
 
@@ -5105,7 +5105,7 @@ describe("Pipeline runtime", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
     const db = initDatabase(path.join(dir, "niubot.db"));
-    const { im, sentTexts } = createRecordingImStub();
+    const { im, sentCards } = createRecordingImStub();
     const pipeline = new Pipeline(
       db, im, new RecordingAgent(), createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex",
     );
@@ -5120,12 +5120,18 @@ describe("Pipeline runtime", () => {
     expect((pipeline as any).handleBuiltinCommand(
       "/awake", "u2", "c1", "chat-open-id", "p2p", "m1",
     )).toBe(true);
-    expect(sentTexts.at(-1)).toContain("已关闭");
+    await vi.waitFor(() => {
+      expect(sentCards.at(-1)?.content).toContain("已关闭");
+      expect(sentCards.at(-1)?.header).toContain("grey");
+    });
 
     expect((pipeline as any).handleBuiltinCommand(
       "/awake on", "u2", "c1", "chat-open-id", "p2p", "m2",
     )).toBe(true);
-    await vi.waitFor(() => expect(sentTexts.at(-1)).toContain("已开启（pwsh）"));
+    await vi.waitFor(() => {
+      expect(sentCards.at(-1)?.content).toContain("**已开启**（pwsh）");
+      expect(sentCards.at(-1)?.header).toContain("green");
+    });
     expect(setKeepAwakeEnabled).toHaveBeenCalledWith(true);
   });
 
