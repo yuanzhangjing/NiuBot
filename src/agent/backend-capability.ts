@@ -1,7 +1,6 @@
-import { spawnSync } from "node:child_process";
 import { AGENT_REGISTRY, BUILTIN_BACKENDS, normalizeBackend, type BuiltinBackendType } from "../config.js";
 import { buildExecutableInvocation, resolveExecutable } from "../platform/executable.js";
-import { runCommand } from "../platform/command.js";
+import { runCommand, runCommandSync } from "../platform/command.js";
 import { resolveBackendProbeTimeoutMs } from "../lifecycle-timeouts.js";
 
 export interface BackendCapability {
@@ -126,16 +125,11 @@ async function defaultRunVersionAsync(command: string, args: string[]): Promise<
   })).stdout;
 }
 
-function defaultRunVersion(command: string, args: string[], windowsVerbatimArguments = false): string {
-  const result = spawnSync(command, args, {
-    timeout: resolveBackendProbeTimeoutMs(),
-    encoding: "utf-8",
-    stdio: ["ignore", "pipe", "pipe"],
-    windowsVerbatimArguments,
-  });
-  if (result.error) throw result.error;
-  if (result.status !== 0) throw new Error((result.stderr || `exit ${result.status}`).trim());
-  return result.stdout;
+function defaultRunVersion(command: string, args: string[], _windowsVerbatimArguments = false): string {
+  // 统一走 runCommandSync：固定 windowsHide + 超时 + 非零退出码抛错（调用方转为探测失败）
+  return runCommandSync(command, args, {
+    timeoutMs: resolveBackendProbeTimeoutMs(),
+  }).stdout;
 }
 
 function parseVersion(output: string): string | undefined {

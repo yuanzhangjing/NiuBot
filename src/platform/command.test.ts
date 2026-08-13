@@ -16,6 +16,30 @@ describe("runCommand", () => {
       .rejects.toThrow(/Command exited with code 2[\s\S]*bad/);
   });
 
+  it("returns non-zero exit codes without throwing when throwOnNonZero is false", async () => {
+    const result = await runCommand(process.execPath, ["-e", "process.stderr.write('bad');process.exit(2)"], {
+      throwOnNonZero: false,
+    });
+    expect(result.exitCode).toBe(2);
+    expect(result.stderr).toContain("bad");
+  });
+
+  it("executes command strings through the platform shell", async () => {
+    const script = process.platform === "win32"
+      ? `node -e "process.stdout.write('shell-ok')"`
+      : "printf shell-ok";
+    const result = await runCommand(script, [], { shell: true, throwOnNonZero: false });
+    expect(result.stdout).toContain("shell-ok");
+  });
+
+  it("reports shell failures through the unified error shape", async () => {
+    const script = process.platform === "win32"
+      ? "node -e \"process.exit(7)\""
+      : "exit 7";
+    await expect(runCommand(script, [], { shell: true }))
+      .rejects.toThrow(/Command exited with code 7/);
+  });
+
   it("supports the same executable resolution synchronously", () => {
     const result = runCommandSync(process.execPath, ["-e", "process.stdout.write('sync')"]);
     expect(result.stdout).toBe("sync");

@@ -17,11 +17,11 @@
  */
 
 import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readlinkSync, renameSync, rmSync, statSync, symlinkSync, type Dirent } from "node:fs";
-import { execFile } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { createLogger } from "../logger.js";
+import { runCommand } from "./command.js";
 
 const log = createLogger("skills");
 
@@ -220,13 +220,15 @@ function findInstallerArtifacts(dir: string): string[] {
 function runSkillInstaller(skillDir: string): void {
   const installer = path.join(skillDir, "install.mjs");
   if (!existsSync(installer)) return;
-  execFile(process.execPath, [installer], { cwd: skillDir, timeout: 30_000, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
-    if (err) {
-      log.warn("skill installer failed", { skillDir, error: String(err) });
-      return;
-    }
+  runCommand(process.execPath, [installer], {
+    cwd: skillDir,
+    timeoutMs: 30_000,
+    maxOutputBytes: 16 * 1024 * 1024,
+  }).then(({ stdout, stderr }) => {
     const output = `${stdout}${stderr}`.trim();
     if (output) log.info(`skill installer: ${path.basename(skillDir)}`, { output });
+  }).catch((err) => {
+    log.warn("skill installer failed", { skillDir, error: String(err) });
   });
 }
 

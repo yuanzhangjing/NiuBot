@@ -248,6 +248,7 @@ export function forceTerminateProcessTree(
       execFileSync("taskkill.exe", buildWindowsTaskkillArguments(pid, { tree: true, force: true }), {
         timeout: 10_000,
         stdio: "ignore",
+        windowsHide: true,
       });
     } catch {
       // The process may have exited between identity verification and taskkill.
@@ -277,6 +278,7 @@ export function forceTerminateSingleProcess(
       execFileSync("taskkill.exe", buildWindowsTaskkillArguments(pid, { tree: false, force: true }), {
         timeout: 10_000,
         stdio: "ignore",
+        windowsHide: true,
       });
     } catch {
       // The process may already be gone. Callers verify termination.
@@ -293,7 +295,7 @@ export function terminateSpawnedProcessTree(
 ): void {
   if (platform === "win32") {
     const args = buildWindowsTaskkillArguments(pid, { tree: true, force });
-    try { execFileSync("taskkill.exe", args, { timeout: 10_000, stdio: "ignore" }); } catch { /* already stopped */ }
+    try { execFileSync("taskkill.exe", args, { timeout: 10_000, stdio: "ignore", windowsHide: true }); } catch { /* already stopped */ }
     return;
   }
   const signal = force ? "SIGKILL" : "SIGTERM";

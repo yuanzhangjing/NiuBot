@@ -20,6 +20,7 @@ const required = [
   "dist/cli.js",
   "dist/npm-postinstall.js",
   "scripts/postinstall.mjs",
+  "bin/nbt.cmd",
 ];
 const packagedPaths = new Set(files.map((file) => file.path));
 const missing = required.filter((path) => !packagedPaths.has(path));

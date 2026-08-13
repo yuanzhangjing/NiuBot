@@ -1,8 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { exec, execFile } from "node:child_process";
 import { existsSync, mkdirSync, realpathSync, rmSync } from "node:fs";
 import path from "node:path";
-import { promisify } from "node:util";
 import type Database from "better-sqlite3";
 import { escapeYamlContent, renderMessageNodes } from "../im/render.js";
 import { findLatestUserPlatformMsgId } from "../messages/store.js";
@@ -98,6 +96,7 @@ import {
   GOAL_DEFAULTS,
 } from "./goal.js";
 import { resolveExecutable } from "../platform/executable.js";
+import { runCommand } from "../platform/command.js";
 import { collectDisplayStatus, formatDisplayStatus } from "../platform/display-status.js";
 import {
   buildWindowsAdminShellInvocation,
@@ -114,9 +113,6 @@ import { wrapInjectedUserMessage } from "../session-archive/native-transcript.js
 import type { EngineLifecycle } from "../engine-lifecycle.js";
 
 export { resolveUpdateCommandCwd } from "../update-command.js";
-
-const execAsync = promisify(exec);
-const execFileAsync = promisify(execFile);
 
 const PROCESSING_EMOJI = "Get";
 const MERGED_EMOJI = "Pin";
@@ -4167,21 +4163,30 @@ ${jobParts.join("\n\n")}
     });
 
     const execOptions = {
-      timeout: SHELL_COMMAND_TIMEOUT_MS,
+      timeoutMs: SHELL_COMMAND_TIMEOUT_MS,
       cwd: this.workingDirectory,
       env: { ...process.env, ...env },
+      // 对齐原 exec 默认 maxBuffer（1MB）；4KB 的 SHELL_MAX_OUTPUT_LEN 只控制展示截断
+      maxOutputBytes: 1024 * 1024,
     };
     const execution = process.platform === "win32"
       ? (() => {
         const invocation = buildWindowsAdminShellInvocation(cmd, { env: execOptions.env });
-        return execFileAsync(invocation.command, invocation.args, execOptions);
+        return runCommand(invocation.command, invocation.args, {
+          ...execOptions,
+          throwOnNonZero: false,
+        });
       })()
-      : execAsync(cmd, execOptions);
+      : runCommand(cmd, [], {
+        ...execOptions,
+        shell: true,
+        throwOnNonZero: false,
+      });
 
-    execution.then(({ stdout, stderr }) => {
+    execution.then(({ stdout, stderr, exitCode }) => {
       const output = (stdout + stderr).trim();
-      this.recordShellHistory(cmd, output, 0);
-      sendResult(formatShellOutput(this.workingDirectory, cmd, output, 0), "Shell|blue");
+      this.recordShellHistory(cmd, output, exitCode);
+      sendResult(formatShellOutput(this.workingDirectory, cmd, output, exitCode), exitCode === 0 ? "Shell|blue" : "Shell|red");
     }).catch((err: unknown) => {
       const { output, exitCode, formatted } = formatShellExecErrorDetails(this.workingDirectory, cmd, err);
       this.recordShellHistory(cmd, output, exitCode);
@@ -5533,13 +5538,16 @@ type ShellExecError = {
 
 function formatShellExecErrorDetails(cwd: string, cmd: string, err: unknown): { output: string; exitCode: number; formatted: string } {
   const execErr = err as ShellExecError;
+  const result = (err as { result?: { stdout?: string; stderr?: string; exitCode?: number } }).result;
   const lines: string[] = [];
-  const output = ((execErr.stdout ?? "") + (execErr.stderr ?? "")).trim();
+  const output = ((execErr.stdout ?? "") + (execErr.stderr ?? "")).trim()
+    || ((result?.stdout ?? "") + (result?.stderr ?? "")).trim();
   if (output) lines.push(output);
-  if (execErr.killed) lines.push(`command timed out after ${SHELL_COMMAND_TIMEOUT_MS}ms`);
+  const message = err instanceof Error ? err.message : String(err);
+  if (execErr.killed || /timed out/i.test(message)) lines.push(`command timed out after ${SHELL_COMMAND_TIMEOUT_MS}ms`);
   if (execErr.signal) lines.push(`signal: ${execErr.signal}`);
 
-  const exitCode = execErr.code ?? 1;
+  const exitCode = execErr.code ?? result?.exitCode ?? 1;
   const formattedOutput = lines.join("\n");
   return {
     output: formattedOutput,

@@ -168,7 +168,9 @@ export function prependNiubotBinToPath(
   const delimiter = platform === "win32" ? ";" : ":";
 
   return uniquePathEntries([
-    getBundledNiubotBinDir(projectRoot, platform),
+    // Windows 上 bundled bin/ 是无扩展名的 bash 脚本，放进 PATH 会被 PowerShell
+    // 按文件关联尝试执行而挂起；Windows 入口是 .cmd shim（npm 全局 + 用户级）。
+    ...(platform === "win32" ? [] : [getBundledNiubotBinDir(projectRoot, platform)]),
     ...(homeDir ? [getNbtShimDirectory(homeDir, platform, env["LOCALAPPDATA"])] : []),
     ...getNpmGlobalBinCandidates({ projectRoot, env, homeDir, execPath, platform }),
     ...currentPath.split(delimiter),

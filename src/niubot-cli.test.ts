@@ -88,7 +88,7 @@ describe("niubot CLI path helpers", () => {
     expect(env["PATH"]).toContain(getBundledNiubotBinDir());
   });
 
-  it("uses Windows PATH separators and the managed cmd shim directory", () => {
+  it("uses Windows PATH separators, the managed cmd shim directory, and excludes the bash bin directory", () => {
     const value = prependNiubotBinToPath("C:\\Windows;C:\\Tools", {
       projectRoot: "C:\\pkg",
       env: { LOCALAPPDATA: "C:\\Local" },
@@ -96,8 +96,17 @@ describe("niubot CLI path helpers", () => {
       execPath: "C:\\Node\\node.exe",
       platform: "win32",
     });
-    expect(value.split(";")).toContain(path.win32.join("C:\\Local", "NiuBot", "bin"));
+    const entries = value.split(";");
+    expect(entries).toContain(path.win32.join("C:\\Local", "NiuBot", "bin"));
+    // Windows 上 bundled bin/ 是无扩展名 bash 脚本，必须排除，否则 PowerShell 会挂起
+    expect(entries).not.toContain("C:\\pkg\\bin");
     expect(value).toContain("C:\\Windows;C:\\Tools");
+  });
+
+  it("ships a Windows cmd entry next to the bash bin script", () => {
+    expect(fs.existsSync(path.join(import.meta.dirname, "..", "bin", "nbt.cmd"))).toBe(true);
+    const content = fs.readFileSync(path.join(import.meta.dirname, "..", "bin", "nbt.cmd"), "utf-8");
+    expect(content).toContain("dist\\cli.js");
   });
 
   it("passes bot profile path only for admin sessions", () => {
