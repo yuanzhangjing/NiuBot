@@ -74,20 +74,55 @@ async function collectMacOsDisplayStatus(): Promise<DisplayStatus> {
   return status;
 }
 
+const WINDOWS_STATUS_SCRIPT = String.raw`
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$locked = $null -ne (Get-Process LogonUI -ErrorAction SilentlyContinue)
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class NiuBotIdle {
+  [StructLayout(LayoutKind.Sequential)]
+  public struct LASTINPUTINFO { public uint cbSize; public uint dwTime; }
+  [DllImport("user32.dll")]
+  private static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
+  public static long IdleSeconds() {
+    var lii = new LASTINPUTINFO { cbSize = (uint)Marshal.SizeOf(typeof(LASTINPUTINFO)) };
+    if (!GetLastInputInfo(ref lii)) return -1;
+    uint now = (uint)Environment.TickCount;
+    return (long)(now - lii.dwTime) / 1000;
+  }
+}
+'@
+$idle = [NiuBotIdle]::IdleSeconds()
+Write-Output "LOCKED=$locked"
+Write-Output "IDLE=$idle"
+`.trim();
+
 async function collectWindowsDisplayStatus(): Promise<DisplayStatus> {
   const status: DisplayStatus = { platform: "win32" };
-  const [video, standby] = await Promise.all([
+  const [video, standby, session] = await Promise.all([
     safeCommand("powercfg", ["/q", "SCHEME_CURRENT", "SUB_VIDEO", "VIDEOIDLE"]),
     safeCommand("powercfg", ["/q", "SCHEME_CURRENT", "SUB_SLEEP", "STANDBYIDLE"]),
+    // Add-Type 首次编译较慢，超时放宽到 10s
+    safeCommand("powershell.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", WINDOWS_STATUS_SCRIPT], 10_000),
   ]);
   if (video) status.displaySleepMinutes = parsePowerCfgMinutes(video);
   if (standby) status.systemSleepMinutes = parsePowerCfgMinutes(standby);
+  if (session) {
+    // PowerShell 输出行尾是 \r\n，用 \s* 兼容
+    const locked = session.match(/^LOCKED=(True|False)\s*$/m)?.[1];
+    if (locked) status.screenLocked = locked === "True";
+    const idle = session.match(/^IDLE=(\d+)\s*$/m)?.[1];
+    if (idle !== undefined && Number.isFinite(Number(idle))) {
+      status.idleSeconds = Math.max(0, Number(idle));
+    }
+  }
   return status;
 }
 
-async function safeCommand(command: string, args: string[]): Promise<string | undefined> {
+async function safeCommand(command: string, args: string[], timeoutMs = 3_000): Promise<string | undefined> {
   try {
-    const result = await runCommand(command, args, { timeoutMs: 3_000, maxOutputBytes: 1024 * 1024 });
+    const result = await runCommand(command, args, { timeoutMs, maxOutputBytes: 1024 * 1024 });
     return result.stdout;
   } catch {
     return undefined;

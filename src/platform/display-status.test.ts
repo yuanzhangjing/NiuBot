@@ -54,6 +54,8 @@ const WIN_STANDBY = `
   当前交流电源设置索引: 0x00000000
   当前直流电源设置索引: 0x00000000
 `;
+const WIN_SESSION_LOCKED = "LOCKED=True\r\nIDLE=3600\r\n";
+const WIN_SESSION_UNLOCKED = "LOCKED=False\r\nIDLE=42\r\n";
 
 beforeEach(() => {
   mockRunCommand.mockReset();
@@ -94,24 +96,28 @@ describe("collectDisplayStatus (macOS)", () => {
 });
 
 describe("collectDisplayStatus (Windows)", () => {
-  test("parses powercfg AC/DC settings", async () => {
+  test("parses powercfg AC/DC settings, lock state and idle time", async () => {
     mockOutput("powercfg", ["/q", "SCHEME_CURRENT", "SUB_VIDEO", "VIDEOIDLE"], WIN_VIDEO);
     mockOutput("powercfg", ["/q", "SCHEME_CURRENT", "SUB_SLEEP", "STANDBYIDLE"], WIN_STANDBY);
+    mockOutput("powershell.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", expect.any(String)], WIN_SESSION_LOCKED);
 
     const status = await collectDisplayStatus("win32");
     expect(status).toMatchObject({
       platform: "win32",
       displaySleepMinutes: 10,
       systemSleepMinutes: 0,
+      screenLocked: true,
+      idleSeconds: 3600,
     });
   });
 
   test("parses powercfg on English systems", async () => {
     mockOutput("powercfg", ["/q", "SCHEME_CURRENT", "SUB_VIDEO", "VIDEOIDLE"], WIN_VIDEO_EN);
     mockOutput("powercfg", ["/q", "SCHEME_CURRENT", "SUB_SLEEP", "STANDBYIDLE"], WIN_STANDBY);
+    mockOutput("powershell.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", expect.any(String)], WIN_SESSION_UNLOCKED);
 
     const status = await collectDisplayStatus("win32");
-    expect(status).toMatchObject({ displaySleepMinutes: 10 });
+    expect(status).toMatchObject({ displaySleepMinutes: 10, screenLocked: false, idleSeconds: 42 });
   });
 });
 
