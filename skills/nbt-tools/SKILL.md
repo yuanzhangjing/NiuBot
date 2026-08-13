@@ -1,7 +1,7 @@
 ---
 name: nbt-tools
-description: NiuBot 工具手册（nbt CLI）。命令速查：任务、记忆、身份/规则/消息恢复、发送、定时/循环、Goal 多轮、Worker 派工、引擎重启。
-when_to_use: "用户提到任务/进度、记忆、身份/场景、消息或上下文丢失、系统规则，要求定时/循环/提醒/稍后、多轮/分步/持续跟进、拆活派活、重启/更新，或需要发送文件时加载。"
+description: NiuBot 工具手册（nbt CLI）。命令速查：任务、记忆、身份/规则/消息恢复、发送、Loop 定时/循环任务（cron）、Goal 多轮、Worker 派工、引擎重启。
+when_to_use: "用户提到任务/进度、记忆、身份/场景、消息或上下文丢失、系统规则，要求定时/循环/提醒/稍后，或英文 loop/goal/cron/定时检查/定期跟进、多轮/分步/持续跟进、拆活派活、重启/更新，或需要发送文件时加载。"
 ---
 
 # NBT Tools — nbt CLI 速查
@@ -22,9 +22,9 @@ when_to_use: "用户提到任务/进度、记忆、身份/场景、消息或上�
 
 - **nbt send**：`<text>` / `--card <header> <content>` / `--file <path>`。
 
-## 定时/循环任务（nbt schedule create）
+## Loop 定时/循环任务（nbt schedule create）
 
-用户要定时、循环、提醒、稍后 → 创建；只是讨论时不创建。
+用户说 **loop / 定时 / 循环 / 提醒 / 稍后 / 定期检查 / 持续跟进** → 创建；只是讨论时不创建。创建后任务 ID 形如 `loop:<N>`（内部就叫 Loop）。
 
 - `--mode current_session|new_session`；触发：`--every 5m` / `--at "08-06 09:00"` / `--after 30m` / `--cron "0 9 * * 1"`
 - 可选 `--times` `--until` `--duration` `--description`；`list` / `cancel <id>`
