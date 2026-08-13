@@ -337,13 +337,17 @@ async function main(): Promise<void> {
   let shuttingDown = false;
   const pidFile = resolve(NIUBOT_HOME, "niubot.pid");
 
+  // 重启后恢复持久化的防休眠状态（失败不阻断启动）
+  void engineLifecycle.restoreKeepAwakeFromConfig();
+
   const shutdown = async () => {
     if (shuttingDown) return;
     shuttingDown = true;
 
     log.info("shutting down...");
     engineAutoUpdateCoordinator?.stop();
-    try { await engineLifecycle.setKeepAwakeEnabled(false); } catch (e) {
+    // 只停止 keep-awake 子进程，不写配置：持久化的开关状态在下次启动时恢复
+    try { await engineLifecycle.setKeepAwakeEnabled(false, { persist: false }); } catch (e) {
       log.warn("failed to disable keep-awake during shutdown", { error: String(e) });
     }
 

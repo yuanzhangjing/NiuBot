@@ -1,7 +1,7 @@
 import { existsSync, rmSync } from "node:fs";
 import path from "node:path";
 import type { RestartConfig } from "./config.js";
-import { loadConfig, writeAutoUpdateEnabledToConfig } from "./config.js";
+import { loadConfig, writeAutoUpdateEnabledToConfig, writeKeepAwakeEnabledToConfig } from "./config.js";
 import type { AutoUpdateConfig } from "./core/auto-update.js";
 import { createLogger } from "./logger.js";
 import { assertInstallablePackageArchive } from "./package-archive.js";
@@ -50,7 +50,9 @@ export interface EngineLifecycle {
   canPersistAutoUpdate(): boolean;
   setAutoUpdateEnabled(enabled: boolean): void;
   getKeepAwakeStatus(): KeepAwakeStatus;
-  setKeepAwakeEnabled(enabled: boolean): Promise<KeepAwakeStatus>;
+  setKeepAwakeEnabled(enabled: boolean, options?: { persist?: boolean }): Promise<KeepAwakeStatus>;
+  /** 重启后恢复持久化的防休眠状态；无配置或已关闭时保持现状。 */
+  restoreKeepAwakeFromConfig(): Promise<void>;
   restart(request: EngineRestartRequest): EngineRestartResult;
 }
 
@@ -222,8 +224,38 @@ export class EngineLifecycleService implements EngineLifecycle {
     return this.keepAwake.status();
   }
 
-  setKeepAwakeEnabled(enabled: boolean): Promise<KeepAwakeStatus> {
-    return this.keepAwake.setEnabled(enabled);
+  setKeepAwakeEnabled(enabled: boolean, options?: { persist?: boolean }): Promise<KeepAwakeStatus> {
+    const persist = options?.persist !== false;
+    const operation = this.keepAwake.setEnabled(enabled);
+    return operation.then((status) => {
+      if (persist && status.supported) {
+        try {
+          if (this.configPath) writeKeepAwakeEnabledToConfig(this.configPath, enabled);
+        } catch (err) {
+          this.log.warn("failed to persist keep-awake state", { enabled, error: String(err) });
+        }
+      }
+      return status;
+    });
+  }
+
+  /** Engine 启动时调用：读取持久化的 keepAwake 开关，开启则自动恢复。失败不阻断启动。 */
+  async restoreKeepAwakeFromConfig(): Promise<void> {
+    if (!this.configPath) return;
+    let enabled: boolean | undefined;
+    try {
+      enabled = loadConfig(this.configPath).keepAwake;
+    } catch (err) {
+      this.log.warn("failed to read keep-awake config", { error: String(err) });
+      return;
+    }
+    if (!enabled) return;
+    try {
+      const status = await this.keepAwake.setEnabled(true);
+      this.log.info("keep-awake restored from config", { method: status.method });
+    } catch (err) {
+      this.log.warn("failed to restore keep-awake from config", { error: String(err) });
+    }
   }
 
   restart(request: EngineRestartRequest): EngineRestartResult {

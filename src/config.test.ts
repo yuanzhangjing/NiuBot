@@ -9,6 +9,7 @@ import {
   normalizeBackend,
   resolveHomePath,
   writeAutoUpdateEnabledToConfig,
+  writeKeepAwakeEnabledToConfig,
 } from "./config.js";
 import { acquireProcessLock } from "./process-lock.js";
 
@@ -244,6 +245,25 @@ bots:
     workingDirectory: ${dir}/workspace
 `, "utf-8");
     expect(loadConfig(configPath).autoUpdate).toBeUndefined();
+  });
+
+  it("parses the keepAwake boolean switch and persists it back", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-config-"));
+    tempDirs.push(dir);
+    const configPath = path.join(dir, "config.yaml");
+    fs.writeFileSync(configPath, `
+bots:
+  - id: NiuBot
+    appId: app-id
+    appSecret: app-secret
+    workingDirectory: ${dir}/workspace
+keepAwake: true
+`, "utf-8");
+    expect(loadConfig(configPath).keepAwake).toBe(true);
+
+    writeKeepAwakeEnabledToConfig(configPath, false);
+    expect(loadConfig(configPath).keepAwake).toBe(false);
+    expect(fs.readFileSync(configPath, "utf-8")).toContain("keepAwake: false");
   });
 
   it("skips autoUpdate config when disabled", () => {

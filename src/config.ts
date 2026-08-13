@@ -107,6 +107,8 @@ export interface NiuBotConfig {
   restart?: RestartConfig;
   /** 可选：自动升级配置。未配置或 enabled=false 时不启用。 */
   autoUpdate?: AutoUpdateConfig;
+  /** 可选：防休眠持久化开关。true 时 Engine 启动自动执行 /awake on。 */
+  keepAwake?: boolean;
   queue: {
     /** 消息缓冲合并窗口（ms），默认 1500 */
     bufferMs: number;
@@ -233,6 +235,7 @@ export function loadConfig(configPath?: string): NiuBotConfig {
     bots,
     restart: parseRestartConfig(fileConfig["restart"]),
     autoUpdate: parseAutoUpdateConfig(fileConfig["autoUpdate"]),
+    keepAwake: typeof fileConfig["keepAwake"] === "boolean" ? fileConfig["keepAwake"] : undefined,
     queue: queueConfig,
   };
 }
@@ -268,6 +271,27 @@ export function writeAutoUpdateEnabledToConfig(configPath: string, enabled: bool
       throw new Error("配置文件根节点必须是对象");
     }
     document.set("autoUpdate", enabled);
+    return document.toString({ lineWidth: 0 });
+  });
+}
+
+/** 原子修改配置文件中的 keepAwake 布尔值，并保留 YAML 注释。 */
+export function writeKeepAwakeEnabledToConfig(configPath: string, enabled: boolean): void {
+  updateConfigFileAtomically(configPath, (raw, format) => {
+    if (format === "json") {
+      const parsed = JSON.parse(raw) as unknown;
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error("配置文件根节点必须是对象");
+      }
+      (parsed as Record<string, unknown>)["keepAwake"] = enabled;
+      return `${JSON.stringify(parsed, null, 2)}\n`;
+    }
+    const document = yaml.parseDocument(raw);
+    if (document.errors.length > 0) throw document.errors[0];
+    if (document.contents !== null && !yaml.isMap(document.contents)) {
+      throw new Error("配置文件根节点必须是对象");
+    }
+    document.set("keepAwake", enabled);
     return document.toString({ lineWidth: 0 });
   });
 }

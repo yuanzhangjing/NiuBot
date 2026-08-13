@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { loadConfig } from "./config.js";
 import { EngineLifecycleService } from "./engine-lifecycle.js";
+import { KeepAwakeController } from "./platform/keep-awake.js";
 
 const directories: string[] = [];
 
@@ -165,6 +166,93 @@ describe("EngineLifecycleService", () => {
 
     expect(lifecycle.canPersistAutoUpdate()).toBe(false);
     expect(() => lifecycle.setAutoUpdateEnabled(true)).toThrow("当前服务没有配置文件");
+  });
+
+  test("persists keep-awake on/off to the service config", async () => {
+    const directory = createDirectory();
+    const configPath = writeConfig(directory, false);
+    const lifecycle = new EngineLifecycleService({
+      version: "1.2.3",
+      startedAt: new Date().toISOString(),
+      runtimePath: directory,
+      niubotHome: directory,
+      configPath,
+    });
+    const setEnabled = vi.spyOn(KeepAwakeController.prototype, "setEnabled").mockResolvedValue({
+      supported: true,
+      enabled: true,
+      platform: process.platform as NodeJS.Platform,
+      method: "caffeinate",
+    });
+
+    await lifecycle.setKeepAwakeEnabled(true);
+    expect(loadConfig(configPath).keepAwake).toBe(true);
+
+    setEnabled.mockResolvedValue({
+      supported: true,
+      enabled: false,
+      platform: process.platform as NodeJS.Platform,
+      method: "caffeinate",
+    });
+    await lifecycle.setKeepAwakeEnabled(false);
+    expect(loadConfig(configPath).keepAwake).toBe(false);
+  });
+
+  test("does not persist keep-awake when persist is disabled (shutdown path)", async () => {
+    const directory = createDirectory();
+    const configPath = writeConfig(directory, false);
+    const lifecycle = new EngineLifecycleService({
+      version: "1.2.3",
+      startedAt: new Date().toISOString(),
+      runtimePath: directory,
+      niubotHome: directory,
+      configPath,
+    });
+    vi.spyOn(KeepAwakeController.prototype, "setEnabled").mockResolvedValue({
+      supported: true,
+      enabled: false,
+      platform: process.platform as NodeJS.Platform,
+      method: "caffeinate",
+    });
+
+    await lifecycle.setKeepAwakeEnabled(false, { persist: false });
+    expect(loadConfig(configPath).keepAwake).toBeUndefined();
+  });
+
+  test("restores persisted keep-awake on Engine startup and skips when disabled", async () => {
+    const directory = createDirectory();
+    const configPath = writeConfig(directory, false);
+    writeFileSync(configPath, readFileSync(configPath, "utf-8") + "keepAwake: true\n");
+    const lifecycle = new EngineLifecycleService({
+      version: "1.2.3",
+      startedAt: new Date().toISOString(),
+      runtimePath: directory,
+      niubotHome: directory,
+      configPath,
+    });
+    const setEnabled = vi.spyOn(KeepAwakeController.prototype, "setEnabled").mockResolvedValue({
+      supported: true,
+      enabled: true,
+      platform: process.platform as NodeJS.Platform,
+      method: "caffeinate",
+    });
+
+    await lifecycle.restoreKeepAwakeFromConfig();
+    expect(setEnabled).toHaveBeenCalledWith(true);
+
+    // keepAwake: false → 不恢复
+    setEnabled.mockClear();
+    writeFileSync(configPath, [
+      "bots:",
+      "  - id: NiuBot",
+      "    appId: app-id",
+      "    appSecret: app-secret",
+      `    workingDirectory: ${JSON.stringify(directory)}`,
+      "keepAwake: false",
+      "",
+    ].join("\n"));
+    await lifecycle.restoreKeepAwakeFromConfig();
+    expect(setEnabled).not.toHaveBeenCalled();
   });
 
   test("selects the restart source at Engine level and forwards the notifying Bot", () => {
