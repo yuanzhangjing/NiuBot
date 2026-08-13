@@ -210,6 +210,30 @@ describe("CliAgentBackend diagnostic logging", () => {
     }));
   });
 
+  test("cancelSession resets watchdog notification state immediately", async () => {
+    const backend = new ParsedOutputBackend({ text: "ok", turnCompleted: true });
+    const session = await backend.createSession({ workingDirectory: process.cwd() });
+    (backend as any).activityMap.set(session.id, {
+      status: "running",
+      startedAt: 1,
+      lastActiveAt: 2,
+      completionDetected: false,
+      compacting: false,
+      recentLines: [],
+      notifyCount: 1,
+      lastNotifiedAt: 1000,
+    });
+
+    await backend.cancelSession(session as AgentSession);
+
+    const activity = backend.getActivity(session.id)!;
+    // /stop 后立即变 cancelled，watchdog 不再把后续输出误判为“恢复活动”
+    expect(activity.status).toBe("cancelled");
+    expect(activity.notifyCount).toBe(0);
+    expect(activity.lastNotifiedAt).toBeUndefined();
+    expect(activity.completionDetected).toBe(false);
+  });
+
   test("does not let stdout hook errors escape readline callbacks", async () => {
     const backend = new ThrowingHookBackend({ text: "ok", turnCompleted: true });
     const entries: Array<{ level: string; msg: string; data?: Record<string, unknown> }> = [];

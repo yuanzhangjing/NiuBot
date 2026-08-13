@@ -311,6 +311,16 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
   }
 
   async cancelSession(session: AgentSession): Promise<void> {
+    // 同步重置 activity：进程被 kill 后 exec 链返回前还有窗口期，
+    // watchdog 会把 stop 引发的最后输出/文件 mtime 更新误判为“恢复活动”，
+    // 导致 /stop 后误发“又有动静了，继续跑着”。立即标记 cancelled + 清空通知状态。
+    const activity = this.activityMap.get(session.id);
+    if (activity) {
+      activity.status = "cancelled";
+      activity.notifyCount = 0;
+      activity.lastNotifiedAt = undefined;
+      activity.completionDetected = false;
+    }
     const child = this.activeProcesses.get(session.id);
     if (child) {
       this.cancelledSessions.add(session.id);
