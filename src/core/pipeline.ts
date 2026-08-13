@@ -121,7 +121,7 @@ const UPDATE_CONFIRM_COMMAND = "/update 1";
 /** /effort 可选级别（与 claude --effort 值域一致） */
 const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
 /** 支持 effort 透传的内置 backend（CLI 能力静态声明；不支持的 backend 保存但不生效） */
-const EFFORT_SUPPORTED_BACKENDS = new Set(["claude", "codex", "pi", "opencode", "traecli"]);
+const EFFORT_SUPPORTED_BACKENDS = new Set(["claude", "codex", "pi", "opencode", "traecli", "grok"]);
 export const SHELL_COMMAND_TIMEOUT_MS = 300_000;
 
 /** 过期消息阈值（ms）：超过 2 分钟的消息丢弃 */

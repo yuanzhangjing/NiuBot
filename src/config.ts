@@ -64,6 +64,11 @@ export const AGENT_REGISTRY = {
     command: "pi",
     versionArgs: ["--version"],
   },
+  grok: {
+    aliases: ["grok", "grok-build"],
+    command: "grok",
+    versionArgs: ["--version"],
+  },
 } as const;
 
 /** 内置 agent backend 类型 */

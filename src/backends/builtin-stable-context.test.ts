@@ -11,6 +11,7 @@ import CursorAgentBackend from "./cursor-agent.js";
 import OpencodeBackend from "./opencode.js";
 import TraeCliBackend from "./traecli.js";
 import PiBackend from "./pi.js";
+import GrokBackend from "./grok.js";
 
 const BUILTIN_BACKENDS = [
   { name: "claude", backend: new ClaudeBackend(), needsPrefix: false },
@@ -19,6 +20,7 @@ const BUILTIN_BACKENDS = [
   { name: "opencode", backend: new OpencodeBackend(), needsPrefix: true },
   { name: "cursor", backend: new CursorAgentBackend(), needsPrefix: false },
   { name: "pi", backend: new PiBackend(), needsPrefix: false },
+  { name: "grok", backend: new GrokBackend(), needsPrefix: false },
 ];
 
 describe("builtin backend stable context", () => {

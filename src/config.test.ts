@@ -99,6 +99,12 @@ bots:
     expect(normalizeBackend("pi-coding-agent")).toBe("pi");
   });
 
+  it("registers grok as a built-in backend with aliases", () => {
+    expect(BUILTIN_BACKEND_LIST).toContain("grok");
+    expect(normalizeBackend("grok")).toBe("grok");
+    expect(normalizeBackend("grok-build")).toBe("grok");
+  });
+
   it("does not assign a workspace project context path by default", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-config-"));
     tempDirs.push(dir);

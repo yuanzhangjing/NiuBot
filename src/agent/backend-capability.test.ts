@@ -88,7 +88,7 @@ describe("backend capability", () => {
       verifyVersion: false,
     });
 
-    expect(capabilities).toHaveLength(6);
+    expect(capabilities).toHaveLength(7);
     expect(capabilities.every((capability) => capability.installed && capability.selectable)).toBe(true);
     expect(runVersionAsync).not.toHaveBeenCalled();
   });

@@ -554,6 +554,7 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
             if (
               (parsed.type === "system" && parsed.subtype === "status" && parsed.status === "compacting")
               || parsed.type === "compaction_start"
+              || parsed.type === "auto_compact_start"
             ) {
               if (myActivity) myActivity.compacting = true;
               try {
@@ -564,10 +565,8 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
                   error: String(err),
                 });
               }
-            } else if (parsed.type === "compaction_end") {
+            } else if (parsed.type === "compaction_end" || parsed.type === "auto_compact_end") {
               if (myActivity) myActivity.compacting = false;
-            } else {
-              if (myActivity && myActivity.compacting) myActivity.compacting = false;
             }
           } catch {
             if (myActivity && myActivity.compacting) myActivity.compacting = false;
