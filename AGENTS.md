@@ -1,78 +1,182 @@
-# NiuBot Engine — 开发指南
+# NiuBot Engine — Agent 开发指南
 
-NiuBot 是一个 AI 人格运行时：有记忆、有性格、能自主管理上下文，通过 IM 和人沟通。
-核心差异化：**上下文自治** — 用户不需要管理 session，系统自主决策何时新建、压缩、切换、恢复。
+NiuBot 是 AI 人格运行时：有记忆、有性格、能自主管理上下文，通过 IM 和人沟通。  
+核心差异化：**上下文自治**——用户不需要管 session，系统自己决定新建、压缩、切换、恢复。
 
-`AGENTS.md` 是当前项目的源文件。`CLAUDE.md` 只是指向它的软链接，后续统一改这一个文件。
+`AGENTS.md` 是本仓库规则源文件。`CLAUDE.md` 是指向它的软链接；只改这一份。
 
-## 目录结构
+| 文档 | 用途 |
+|---|---|
+| 本文件 | 整体架构、开发/测试/发版、质量门槛 |
+| [`src/backends/AGENTS.md`](src/backends/AGENTS.md) | 新增/修改内置 Backend 的完整契约 |
+
+---
+
+## 仓库与目录
 
 ```
 src/
-├── core/        # 核心引擎（pipeline, queue, runtime state, cron）
-├── agent/       # Agent backend 抽象和公共类型
-├── backends/    # 内置 backend
-├── im/          # IM 平台适配（feishu）+ 消息渲染（render.ts）
-├── memory/      # 上下文注入与用户记忆
-├── database/    # SQLite schema + migrations
-├── cli/         # nbt CLI 工具（messages, contacts, task, cron, send）
-└── index.ts     # 入口
+├── core/           # Pipeline、队列、运行态、Goal/Loop/Cron、footer
+├── agent/          # Backend 抽象、cli-base、capability
+├── backends/       # 内置 CLI backend（claude/pi/cursor/grok/…）
+├── im/             # 飞书适配 + 消息渲染
+├── memory/         # 用户记忆与上下文注入
+├── database/       # SQLite schema + migrations
+├── session-archive/# 原生 transcript 解析与归档
+├── worker/         # 内部 Worker 运行时
+├── transport/      # 持久化 inbox/outbox
+├── platform/       # 跨平台进程/路径/IPC/防休眠等
+├── cli/            # nbt 子命令实现
+├── local-api/      # Engine 本地 API
+├── user-cli.ts     # niubot / nbt 用户入口
+└── index.ts        # Engine 入口
 ```
+
+运行数据默认在 `~/.niubot/<BotName>/`（DB、profile、session 归档、api.sock）。  
+CLI 侧工具：`nbt`（消息/记忆/任务/发送/重启/Goal…）。
+
+---
+
+## 关键怎么串起来
+
+1. **IM 入站** → transport 落库 → Pipeline 收消息  
+2. **缓冲合并**（默认约 1.5s）→ 按时间排序 → 渲染成 agent 输入  
+3. **Session**：有则 resume，无则新建；stable context 按 backend 能力注入  
+4. **Backend 子进程**跑一轮 → 解析终态 → 取**用户可见回复**  
+5. **出站**：卡片/文本发回 IM；footer 带 session 短 id、token、compact、模型  
+6. **旁路**：watchdog（idle/compact）、`/status`（activity + 最近日志）、归档、Worker/Goal/Loop  
+
+### 关键模块
+
+- **Pipeline**（`core/pipeline.ts`）：消息总控、内置命令、session、agent 调用、发送  
+- **CliAgentBackend**（`agent/cli-base.ts`）：起进程、stdout 行、activity、cancel  
+- **Backends**（`backends/*.ts`）：各 CLI 参数、解析、session 文件、token/compact  
+- **Render**（`im/render.ts`）：YAML 消息格式（独立 / 引用 / 转发 / 合并）  
+- **三层上下文**：Static（workspace AGENTS.md）→ Important（system：身份/规则/记忆）→ Normal（任务、最近消息、归档引用）  
+- **Session 生命周期**：new → active（每轮 resume）→ archive；Engine 重启后 DB recover + resume  
+
+### 内置命令分发
+
+1. Pipeline 内置 switch（`/agent` `/model` `/effort` `/status` `/restart`…）  
+2. admin shell  
+3. 其余转给 agent  
+
+---
 
 ## 开发约定
 
-### 构建和测试
+### 构建与测试
+
 ```bash
-npm run build        # tsc 编译
-npx tsc --noEmit     # 类型检查（不生成文件）
+npm test                 # 全量单测（发版门槛）
+npm run build            # 编译 dist/
+npx tsc --noEmit         # 只类型检查
+npm run release:check    # test + build + pack:check + pack:smoke
 ```
 
-### 发版规范
-```bash
-npm run release -- patch
-```
+改 backend / pipeline 至少要：
 
-- 以 npm 为准，不再创建 GitHub Release 包。
-- 发版统一走 `npm run release -- <patch|minor|major>`。
-- 不要手动执行零散的 `npm version`、`npm publish`、手工打 tag、单独 push tag，除非你就是在修发版脚本本身。
-- 发版脚本会负责：
-  - 检查 git worktree 必须干净
-  - 执行 `npm run release:check`
-  - 创建 npm 版本和对应的 `vX.Y.Z` git tag
-  - 发布到 npm
-  - 推送当前分支和 tags（`--follow-tags`）
-  - 发布后核验 npm 上的版本
-
-### 重启服务
-修改代码后需要重启才能生效。使用安全重启脚本：
-```bash
-NIUBOT_HOME=~/.niubot bash restart.sh
-```
-流程：build → backup dist → stop → start → health check → rollback on failure
-
-### 运行环境标识（NIUBOT_ENV）
-重启链路用 `NIUBOT_ENV` 区分 dev/production，决定 release 依赖安装是否走 `--prefer-offline`（本地缓存优先）：
-
-- **显式声明**：启动/部署时设置 `NIUBOT_ENV=dev` 或 `NIUBOT_ENV=production`，最高优先
-- **自动推导**（未声明时）：运行路径含 `node_modules`（npm 全局安装）→ production；`NIUBOT_RUNTIME_MODE=npm-release` 旧标记 → production（老实例兼容）；源码目录含 `src/` → dev；兜底 → production（保守，宁慢勿错）
-- **生效范围**：restart worker 算出环境后透传新引擎，dev 才给 `npm install` 加 `--prefer-offline`；生产更新（npm-update）始终拉取最新依赖，不受缓存影响
-- `NIUBOT_RUNTIME_MODE` 已废弃透传，仅保留读取兼容（`resolveRuntimeEnvironment` 等），等老实例升级完后可删除
+1. 相关单测绿  
+2. 真机：`/agent <name>` 多轮、`/status`、footer token、重启后 resume  
+3. 需要生效时 `nbt restart`（或源码目录安全重启流程）  
 
 ### 代码规范
-- TypeScript strict mode
-- 日志用 `createLogger`，不用 `console.log`
-- DB 操作用 prepared statements
-- 新增 DB 字段走 migration（`src/database/schema.ts`）
-- 保持 IM 卡片、footer、命令输出格式一致，避免同类功能各写一套样式
 
-### 关键架构
-- **Pipeline**（`src/core/pipeline.ts`）：消息入口 → 存 DB → 队列缓冲（1500ms，`config.ts` bufferMs 可配）→ flush（platformTs 排序 + YAML 合并）→ session 管理 → agent 调用 → IM 发送
-- **消息渲染**（`src/im/render.ts`）：统一 YAML 格式 — 独立消息纯文本，回复 `- msg: + quoted:`，转发 `- forward: + messages:`，多条合并为 YAML 列表
-- **三层上下文注入**：Static（AGENTS.md）→ Important（system prompt: 场景+记忆）→ Normal（user prompt 前缀: task + 最近消息 + session 归档目录）
-- **Session 生命周期**：new → active（每条消息 --resume）→ archive（完整 Markdown transcript）；进程重启 recover（DB 读 agent_session_id → --resume）
-- **Built-in backends**（`src/backends/*.ts`）：Claude、Codex、Trae CLI 的内置适配；公共抽象在 `src/agent/`
-- **内置命令**：三层分发 — builtin switch → shell exec（admin）→ forward to agent
+- TypeScript strict  
+- 日志用 `createLogger`，不要 `console.log`  
+- DB 用 prepared statements；改表走 migration（只追加，保持兼容）  
+- IM 卡片、footer、命令回执格式保持一致  
+- 用户数据经 `nbt` 访问，不要直接读 Bot DB 文件  
 
-## 任务管理
+### 改动范围
 
-项目进展优先记录在 issue、PR 或公开文档中。不要把个人工作空间路径、私有任务目录或未公开项目资料写进仓库文件。
+- 只改任务需要的代码；不顺手大重构  
+- 测试与实现一起交；不要只交「看起来能跑」的解析逻辑  
+- 注释只写非显而易见的约束，不写过程流水账  
+
+---
+
+## 发版
+
+```bash
+npm run release -- patch   # 或 minor / major
+```
+
+- **必须**走上述命令；不要手搓 `npm version` / `npm publish` / 单独打 tag  
+- worktree 必须干净  
+- 脚本会跑 `release:check`，再 version + tag，再 `git push --follow-tags`  
+- npm 发布由 GitHub Actions 承接  
+- 是否发版听用户/负责人明确指令；默认不擅自发版  
+
+发版后本机若要吃正式包：等 registry 出包再 `/update`。dev 源码重启用的是本地 build，与 npm 版本不是一回事。
+
+### 重启
+
+```bash
+nbt restart
+# 或源码侧安全重启（build → 快照 → 健康检查 → 失败回滚）
+```
+
+改 Engine / backend 代码后必须重启才进正在跑的进程。
+
+### 运行环境 `NIUBOT_ENV`
+
+- 显式：`dev` | `production`  
+- 未声明时：路径含 `node_modules` → production；源码含 `src/` → dev；兜底 production  
+- **仅 dev** 的 release 安装可走 `--prefer-offline`；生产更新始终拉最新依赖  
+- 旧 `NIUBOT_RUNTIME_MODE` 只保留读取兼容  
+
+---
+
+## 新增 / 修改 Backend
+
+**先读 [`src/backends/AGENTS.md`](src/backends/AGENTS.md)。**
+
+那里是完整契约，摘要：
+
+1. 注册：registry、index 动态加载、CLI 提示、effort 集合、归档解析、相关测试  
+2. 会话：尽早拿到 session id；`agentSessionId` 只在真正开场后写入；resume / 半开场目录  
+3. 回复：只发当前轮最后一条用户可见 assistant；history 优先于拼接 stdout  
+4. Token：上下文**占用**，不是 spend/cache 累计  
+5. Watchdog / `/status`：用原生 session 文件刷最近日志，盖住 stdout 碎片  
+6. 失败：`error` 后仍可能有 `end`/`result`，必须 `failed`  
+7. 真机验收：多轮、`/status`、footer、compact（若有）、重启 resume  
+
+`CliAgentBackend` 不够用时不要猜——按契约打勾，再对照 claude/pi/cursor/grok 的参考实现。
+
+---
+
+## 质量门槛（上线前）
+
+| 层级 | 要求 |
+|---|---|
+| 单测 | 相关文件 + 全量 `npm test` 绿 |
+| 构建 | `npm run build` / pack:check 绿 |
+| 契约 | Backend 变更过一遍 `src/backends/AGENTS.md` |
+| 真机 | 主路径 + `/status` + token 观感 + 失败路径至少各一次 |
+| 审查 | 正确性 / 失败路径 / 敏感信息脱敏；有明确阻塞项先修再发 |
+| 发版 | 仅在明确授权后 `npm run release -- <bump>` |
+
+已知可接受边界要写进 PR/结论（例如某 CLI 只能 `-p` 传消息、进程列表可见）。
+
+---
+
+## 任务与协作
+
+- 正式任务用 `nbt task`；进度写在任务 README（目标、状态、入口、决策、下一步），不写聊天流水  
+- 用户记忆用 `nbt user-memory`（人相关偏好）；项目进度不要塞记忆  
+- 发文件 / 卡片：`nbt send`  
+- 多轮交付用 Goal（`nbt goal start/progress/finish`）；长任务可拆 Worker  
+
+不要把个人本机绝对路径、私有未公开资料写进仓库文档。
+
+---
+
+## 反模式
+
+- 只解析 stdout 终态字段就当 backend 完成  
+- 用计费 `total_tokens` 当 footer 上下文占用  
+- 不跑真机、只靠 fixture 发版  
+- 发版手搓 version/tag/publish  
+- 改完代码不重启就断言「线上已生效」  
+- 大段无关重构混进功能提交  
