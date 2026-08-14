@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import GrokBackend, { encodeGrokSessionDir, extractLastGrokAssistantText } from "./grok.js";
+import GrokBackend, { countGrokCompactionSegments, encodeGrokSessionDir, extractLastGrokAssistant, extractLastGrokAssistantText } from "./grok.js";
 
 function setTestHome(home: string): void {
   vi.stubEnv("HOME", home);
@@ -211,6 +211,32 @@ describe("GrokBackend", () => {
     expect(extractLastGrokAssistantText(history)).toBe("只有旁白");
   });
 
+  it("extracts model_id from the last no-tool assistant in the current turn", () => {
+    const history = [
+      JSON.stringify({ type: "user", content: "hi" }),
+      JSON.stringify({ type: "assistant", content: "先搜一下。", model_id: "grok-4.5-build", tool_calls: [{ id: "c1", name: "web_search" }] }),
+      JSON.stringify({ type: "assistant", content: "额度比 Claude 紧。", model_id: "grok-4.6-build" }),
+    ].join("\n");
+
+    expect(extractLastGrokAssistant(history)).toEqual({
+      text: "额度比 Claude 紧。",
+      model: "grok-4.6-build",
+    });
+  });
+
+  it("falls back to last tool-call model_id when the final assistant has none", () => {
+    const history = [
+      JSON.stringify({ type: "user", content: "hi" }),
+      JSON.stringify({ type: "assistant", content: "先读文件。", model_id: "grok-4.6-build", tool_calls: [{ id: "c1", name: "read_file" }] }),
+      JSON.stringify({ type: "assistant", content: "读完了。" }),
+    ].join("\n");
+
+    expect(extractLastGrokAssistant(history)).toEqual({
+      text: "读完了。",
+      model: "grok-4.6-build",
+    });
+  });
+
   it("prefers last assistant text over concatenated stdout text", () => {
     const sessionId = "019ffb94-cccc-72f3-b3eb-42e766619372";
     const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "grok-home-"));
@@ -367,25 +393,24 @@ describe("GrokBackend", () => {
     fs.writeFileSync(path.join(sessionDir, "summary.json"), JSON.stringify({
       current_model_id: "grok-4.6",
     }));
-    fs.writeFileSync(
-      path.join(sessionDir, "events.jsonl"),
-      [
-        JSON.stringify({ type: "turn_started", session_id: sessionId }),
-        JSON.stringify({ type: "auto_compact_start" }),
-        JSON.stringify({ type: "auto_compact_end" }),
-      ].join("\n"),
-    );
+    fs.writeFileSync(path.join(sessionDir, "signals.json"), JSON.stringify({
+      compactionCount: 2,
+    }));
+    fs.mkdirSync(path.join(sessionDir, "compaction"), { recursive: true });
+    fs.writeFileSync(path.join(sessionDir, "compaction", "INDEX.md"), "# index\n");
+    fs.writeFileSync(path.join(sessionDir, "compaction", "segment_000.md"), "# segment\n");
     fs.writeFileSync(
       path.join(sessionDir, "chat_history.jsonl"),
-      JSON.stringify({ type: "assistant", content: "done" }),
+      JSON.stringify({ type: "assistant", content: "done", model_id: "grok-4.6-build" }),
     );
 
     const backend = new GrokBackend();
     const session = backend.buildSession({ workingDirectory, agentSessionId: sessionId });
     const parsed = backend.parseOutput(grokEnd({ sessionId }), session);
 
-    expect(parsed.model).toBe("grok-4.6");
+    expect(parsed.model).toBe("grok-4.6-build");
     expect(parsed.compactCount).toBe(1);
+    expect(countGrokCompactionSegments(sessionDir)).toBe(1);
     expect(parsed.contextTokens).toBe(15967);
     expect(parsed.contextWindow).toBeUndefined();
     expect((backend as any).probeSessionFileMtime(session)).toBeGreaterThan(0);
@@ -407,11 +432,15 @@ describe("GrokBackend", () => {
     );
     fs.mkdirSync(sessionDir, { recursive: true });
     fs.writeFileSync(path.join(sessionDir, "signals.json"), JSON.stringify({
-      primaryModelId: "grok-4.6",
+      primaryModelId: "grok-4.5",
       contextTokensUsed: 184851,
       contextWindowTokens: 500000,
       compactionCount: 0,
     }));
+    fs.writeFileSync(
+      path.join(sessionDir, "chat_history.jsonl"),
+      JSON.stringify({ type: "assistant", content: "pong", model_id: "grok-4.6-build" }),
+    );
 
     const backend = new GrokBackend();
     const session = backend.buildSession({ workingDirectory, agentSessionId: sessionId });
@@ -422,11 +451,11 @@ describe("GrokBackend", () => {
 
     expect(parsed.contextTokens).toBe(184851);
     expect(parsed.contextWindow).toBe(500000);
-    expect(parsed.model).toBe("grok-4.6");
+    expect(parsed.model).toBe("grok-4.6-build");
     expect(parsed.compactCount).toBeUndefined();
   });
 
-  it("resumes scanning compact events incrementally across turns", () => {
+  it("picks up a new compaction segment across turns", () => {
     const sessionId = "019ffb94-aaaa-72f3-b3eb-42e766619372";
     const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "grok-home-"));
     const workingDirectory = path.join(tempHome, "workspace");
@@ -443,13 +472,15 @@ describe("GrokBackend", () => {
     fs.mkdirSync(sessionDir, { recursive: true });
     const eventsPath = path.join(sessionDir, "events.jsonl");
     fs.writeFileSync(eventsPath, JSON.stringify({ type: "turn_started" }));
+    const compactionDir = path.join(sessionDir, "compaction");
 
     const backend = new GrokBackend();
     const session = backend.buildSession({ workingDirectory, agentSessionId: sessionId });
     const first = backend.parseOutput(grokEnd({ sessionId, text: "first" }), session);
     expect(first.compactCount).toBeUndefined();
 
-    fs.appendFileSync(eventsPath, "\n" + JSON.stringify({ type: "auto_compact_end" }));
+    fs.mkdirSync(compactionDir, { recursive: true });
+    fs.writeFileSync(path.join(compactionDir, "segment_000.md"), "# first compact\n");
     const second = backend.parseOutput(grokEnd({ sessionId, text: "second" }), session);
     expect(second.compactCount).toBe(1);
   });
@@ -559,6 +590,8 @@ describe("GrokBackend", () => {
       JSON.stringify({ ts: "2026-08-13T15:00:00.000Z", type: "auto_compact_start" }),
       JSON.stringify({ ts: "2026-08-13T15:00:01.000Z", type: "auto_compact_end" }),
     ].join("\n") + "\n");
+    fs.mkdirSync(path.join(sessionDir, "compaction"), { recursive: true });
+    fs.writeFileSync(path.join(sessionDir, "compaction", "segment_000.md"), "# compact\n");
 
     const backend = new GrokBackend();
     const session = backend.buildSession({ workingDirectory, agentSessionId: sessionId });

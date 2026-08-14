@@ -5,7 +5,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { existsSync, openSync, readFileSync, readSync, closeSync, statSync } from "node:fs";
+import { existsSync, openSync, readFileSync, readSync, closeSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { CliAgentBackend, buildNiubotEnv, type BaseCliSession, type ParsedOutput } from "../agent/cli-base.js";
@@ -158,28 +158,31 @@ export default class GrokBackend extends CliAgentBackend<GrokSession> {
     const stdoutModel = firstModelUsageId(stream.modelUsage);
     const stdoutContextTokens = estimateGrokContextTokens(stream.usage);
 
-    let model = stdoutModel ?? session.model;
-    let contextTokens = stdoutContextTokens;
-    let contextWindow: number | undefined;
-
     if (stream.completed && agentSessionId) {
       session.agentSessionId = agentSessionId;
       session.isNewSession = false;
     }
+
+    const lastAssistant = this.readLastAssistant(session);
+    const lastAssistantText = lastAssistant.text;
+    const stdoutText = stream.text.trim();
+    // history 正文不在本轮 stdout 里时，说明是上一轮残留，模型和正文一起丢掉。
+    const useHistory = !!(lastAssistantText && (!stdoutText || stdoutText.includes(lastAssistantText)));
+    const text = useHistory ? lastAssistantText : stdoutText;
+    const model = (useHistory ? lastAssistant.model : undefined) ?? stdoutModel ?? session.model;
+    let contextTokens = stdoutContextTokens;
+    let contextWindow: number | undefined;
+
     if (agentSessionId) {
-      const meta = this.scanSessionMeta(session);
-      if (meta.model) model = meta.model;
+      this.consumeNewEvents(session);
+      this.refreshCompactCount(session);
       const signals = this.readSignals(session);
       if (signals) {
-        if (signals.primaryModelId) model = signals.primaryModelId;
         if (signals.contextTokensUsed && signals.contextTokensUsed > 0) {
           contextTokens = signals.contextTokensUsed;
         }
         if (signals.contextWindowTokens && signals.contextWindowTokens > 0) {
           contextWindow = signals.contextWindowTokens;
-        }
-        if (signals.compactionCount !== undefined && signals.compactionCount >= 0) {
-          session.compactCount = Math.max(session.compactCount, signals.compactionCount);
         }
       }
       this.log.info("parseOutput: done", {
@@ -187,18 +190,10 @@ export default class GrokBackend extends CliAgentBackend<GrokSession> {
         model: model ?? null,
         contextTokens: contextTokens ?? null,
         contextWindow: contextWindow ?? null,
-        modelSource: signals?.primaryModelId ? "signals" : meta.model ? "summary" : stdoutModel ? "stdout" : "none",
+        modelSource: useHistory && lastAssistant.model ? "history" : stdoutModel ? "stdout" : session.model ? "session" : "none",
         tokensSource: signals?.contextTokensUsed ? "signals" : stdoutContextTokens !== undefined ? "stdout" : "none",
       });
     }
-
-    // streaming 的 text 事件仍可能把旁白拼在一起；
-    // 优先用当前轮最后一条无 tool_calls 的 assistant。
-    const lastAssistant = this.readLastAssistantText(session);
-    const stdoutText = stream.text.trim();
-    const text = lastAssistant && (!stdoutText || stdoutText.includes(lastAssistant))
-      ? lastAssistant
-      : stdoutText;
 
     const turnCompleted = stream.completed;
     const failed = !!errorMessage;
@@ -218,13 +213,13 @@ export default class GrokBackend extends CliAgentBackend<GrokSession> {
     };
   }
 
-  private readLastAssistantText(session: GrokSession): string | undefined {
+  private readLastAssistant(session: GrokSession): { text?: string; model?: string } {
     const file = this.getChatHistoryPath(session);
-    if (!file) return undefined;
+    if (!file) return {};
     try {
-      return extractLastGrokAssistantText(readFileSync(file, "utf-8"));
+      return extractLastGrokAssistant(readFileSync(file, "utf-8"));
     } catch {
-      return undefined;
+      return {};
     }
   }
 
@@ -243,6 +238,7 @@ export default class GrokBackend extends CliAgentBackend<GrokSession> {
     const session = this.sessions.get(sessionId);
     if (!session) return;
     this.consumeNewEvents(session, activity);
+    this.refreshCompactCount(session);
     activity.executingTool = session.activeToolCount > 0;
     const historyLines = this.readHistoryStatusLines(session);
     if (historyLines.length > 0) session.statusLines = historyLines;
@@ -274,24 +270,6 @@ export default class GrokBackend extends CliAgentBackend<GrokSession> {
     } catch {
       return null;
     }
-  }
-
-  private scanSessionMeta(session: GrokSession): { model?: string } {
-    const sessionDir = this.getSessionDir(session);
-    if (!sessionDir) return {};
-
-    let model: string | undefined;
-
-    const summaryPath = join(sessionDir, "summary.json");
-    try {
-      const summary = JSON.parse(readFileSync(summaryPath, "utf-8")) as {
-        current_model_id?: string;
-      };
-      if (summary.current_model_id) model = summary.current_model_id;
-    } catch { /* summary 尚未落盘 */ }
-
-    this.consumeNewEvents(session);
-    return { model };
   }
 
   private consumeNewEvents(session: GrokSession, activity?: AgentSessionActivity): void {
@@ -409,14 +387,27 @@ export default class GrokBackend extends CliAgentBackend<GrokSession> {
       return undefined;
     }
   }
+
+  private refreshCompactCount(session: GrokSession): void {
+    session.compactCount = countGrokCompactionSegments(this.getSessionDir(session));
+  }
 }
 
 type GrokSignals = {
-  primaryModelId?: string;
   contextTokensUsed?: number;
   contextWindowTokens?: number;
-  compactionCount?: number;
 };
+
+/** 数当前会话目录下 compaction/segment_*.md。 */
+export function countGrokCompactionSegments(sessionDir: string | null): number {
+  if (!sessionDir) return 0;
+  try {
+    return readdirSync(join(sessionDir, "compaction"))
+      .filter((name) => /^segment_\d+\.md$/i.test(name)).length;
+  } catch {
+    return 0;
+  }
+}
 
 /** 与 Grok CLI 的 session 目录命名一致：realpath(cwd) 再 encodeURIComponent。 */
 export function encodeGrokSessionDir(cwd: string): string {
@@ -425,28 +416,40 @@ export function encodeGrokSessionDir(cwd: string): string {
 
 /** 取当前轮最后一条应发给用户的 assistant 文本。遇 user 行即停，避免跨轮。 */
 export function extractLastGrokAssistantText(raw: string): string | undefined {
+  return extractLastGrokAssistant(raw).text;
+}
+
+/** 当前轮最后一条 assistant 的正文和 model_id。遇 user 行即停，避免跨轮。 */
+export function extractLastGrokAssistant(raw: string): { text?: string; model?: string } {
   const lines = raw.split("\n");
-  let lastAny: string | undefined;
+  let lastAnyText: string | undefined;
+  let lastNoToolText: string | undefined;
+  let lastModel: string | undefined;
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i]?.trim();
     if (!line) continue;
-    let entry: { type?: string; content?: unknown; tool_calls?: unknown };
+    let entry: { type?: string; content?: unknown; tool_calls?: unknown; model_id?: unknown };
     try {
-      entry = JSON.parse(line) as { type?: string; content?: unknown; tool_calls?: unknown };
+      entry = JSON.parse(line) as { type?: string; content?: unknown; tool_calls?: unknown; model_id?: unknown };
     } catch {
       continue;
     }
     if (entry.type === "user") break;
     if (entry.type !== "assistant") continue;
     const content = typeof entry.content === "string" ? entry.content.trim() : "";
+    const model = typeof entry.model_id === "string" && entry.model_id.trim() ? entry.model_id.trim() : undefined;
+    if (model) lastModel ??= model;
     if (!content) continue;
-    lastAny ??= content;
+    lastAnyText ??= content;
     const tools = entry.tool_calls;
     if (!Array.isArray(tools) || tools.length === 0) {
-      return content;
+      lastNoToolText ??= content;
+    }
+    if (lastNoToolText && lastModel) {
+      return { text: lastNoToolText, model: lastModel };
     }
   }
-  return lastAny;
+  return { text: lastNoToolText ?? lastAnyText, model: lastModel };
 }
 
 function getGrokHome(): string {
@@ -568,7 +571,6 @@ function applyGrokActivityEvent(
     return;
   }
   if (isGrokCompactEnd(type, event.phase)) {
-    session.compactCount++;
     if (activity) activity.compacting = false;
   }
 }
