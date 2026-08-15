@@ -293,7 +293,8 @@ describe("GrokBackend", () => {
     );
 
     const backend = new GrokBackend();
-    const session = backend.buildSession({ workingDirectory });
+    const session = backend.buildSession({ workingDirectory, agentSessionId: sessionId });
+    backend.buildInput(session, "当前是什么模型");
     const parsed = backend.parseOutput(grokEnd({
       sessionId,
       text: "先查一下。当前是 default。",
@@ -345,7 +346,49 @@ describe("GrokBackend", () => {
     expect(session.agentSessionId).toBeUndefined();
   });
 
-  it("completes a turn from events turn_ended without waiting for stdout end", () => {
+  it("ignores leftover turn_ended and previous assistant after a new prompt", () => {
+    const sessionId = "019ffb94-stale-72f3-b3eb-42e766619372";
+    const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "grok-home-"));
+    const workingDirectory = path.join(tempHome, "workspace");
+    fs.mkdirSync(workingDirectory, { recursive: true });
+    setTestHome(tempHome);
+
+    const sessionDir = path.join(
+      tempHome,
+      ".grok",
+      "sessions",
+      encodeGrokSessionDir(workingDirectory),
+      sessionId,
+    );
+    fs.mkdirSync(sessionDir, { recursive: true });
+    const oldTs = new Date(Date.now() - 3_600_000).toISOString();
+    fs.writeFileSync(
+      path.join(sessionDir, "events.jsonl"),
+      [
+        JSON.stringify({ type: "turn_started", ts: oldTs, turn_number: 74 }),
+        JSON.stringify({ type: "turn_ended", ts: oldTs, outcome: "completed" }),
+      ].join("\n") + "\n",
+    );
+    fs.writeFileSync(
+      path.join(sessionDir, "chat_history.jsonl"),
+      [
+        JSON.stringify({ type: "user", content: "重启了吗" }),
+        JSON.stringify({ type: "assistant", content: "还是 dev，版本 0.2.29-dev.1。", model_id: "grok-4.6-build" }),
+      ].join("\n"),
+    );
+
+    const backend = new GrokBackend();
+    const session = backend.buildSession({ workingDirectory, agentSessionId: sessionId });
+    backend.buildInput(session, "coding 怎么默认派给指定 agent");
+    const hooks = (backend as any).getExecHooks(session);
+
+    expect(hooks.pollComplete()).toBe(false);
+    const parsed = backend.parseOutput("", session);
+    expect(parsed.turnCompleted).toBe(false);
+    expect(parsed.text).toBe("");
+  });
+
+  it("completes a turn from this prompt's turn_ended without waiting for stdout end", () => {
     const sessionId = "019ffb94-eded-72f3-b3eb-42e766619372";
     const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "grok-home-"));
     const workingDirectory = path.join(tempHome, "workspace");
@@ -360,24 +403,98 @@ describe("GrokBackend", () => {
       sessionId,
     );
     fs.mkdirSync(sessionDir, { recursive: true });
+    const oldTs = new Date(Date.now() - 3_600_000).toISOString();
     fs.writeFileSync(
       path.join(sessionDir, "events.jsonl"),
-      JSON.stringify({ type: "turn_ended", outcome: "completed" }) + "\n",
+      JSON.stringify({ type: "turn_ended", ts: oldTs, outcome: "completed" }) + "\n",
     );
     fs.writeFileSync(
       path.join(sessionDir, "chat_history.jsonl"),
-      JSON.stringify({ type: "assistant", content: "已经写完了。", model_id: "grok-4.6-build" }),
+      [
+        JSON.stringify({ type: "user", content: "重启了吗" }),
+        JSON.stringify({ type: "assistant", content: "还是 dev，版本 0.2.29-dev.1。", model_id: "grok-4.6-build" }),
+      ].join("\n"),
     );
 
     const backend = new GrokBackend();
     const session = backend.buildSession({ workingDirectory, agentSessionId: sessionId });
+    backend.buildInput(session, "coding 怎么默认派给指定 agent");
+    const hooks = (backend as any).getExecHooks(session);
+    expect(hooks.pollComplete()).toBe(false);
+
+    const nowTs = new Date().toISOString();
+    fs.appendFileSync(
+      path.join(sessionDir, "events.jsonl"),
+      [
+        JSON.stringify({ type: "turn_started", ts: nowTs, turn_number: 75 }),
+        JSON.stringify({ type: "turn_ended", ts: nowTs, outcome: "completed" }),
+      ].join("\n") + "\n",
+    );
+    expect(hooks.pollComplete()).toBe(false);
+
+    fs.appendFileSync(
+      path.join(sessionDir, "chat_history.jsonl"),
+      "\n" + [
+        JSON.stringify({ type: "user", content: "coding 怎么默认派给指定 agent" }),
+        JSON.stringify({ type: "assistant", content: "主会话写不了业务代码，写代码只派给指定那个。", model_id: "grok-4.6-build" }),
+      ].join("\n"),
+    );
+
+    expect(hooks.pollComplete()).toBe(true);
+    const parsed = backend.parseOutput(JSON.stringify({ type: "text", data: "主会话" }), session);
+    expect(parsed.turnCompleted).toBe(true);
+    expect(parsed.text).toBe("主会话写不了业务代码，写代码只派给指定那个。");
+    expect(parsed.model).toBe("grok-4.6-build");
+  });
+
+  it("still completes when this turn's reply text matches the previous turn", () => {
+    const sessionId = "019ffb94-same-72f3-b3eb-42e766619372";
+    const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "grok-home-"));
+    const workingDirectory = path.join(tempHome, "workspace");
+    fs.mkdirSync(workingDirectory, { recursive: true });
+    setTestHome(tempHome);
+
+    const sessionDir = path.join(
+      tempHome,
+      ".grok",
+      "sessions",
+      encodeGrokSessionDir(workingDirectory),
+      sessionId,
+    );
+    fs.mkdirSync(sessionDir, { recursive: true });
+    fs.writeFileSync(path.join(sessionDir, "events.jsonl"), "");
+    fs.writeFileSync(
+      path.join(sessionDir, "chat_history.jsonl"),
+      [
+        JSON.stringify({ type: "user", content: "在吗" }),
+        JSON.stringify({ type: "assistant", content: "在。", model_id: "grok-4.6-build" }),
+      ].join("\n"),
+    );
+
+    const backend = new GrokBackend();
+    const session = backend.buildSession({ workingDirectory, agentSessionId: sessionId });
+    backend.buildInput(session, "还在吗");
+    const nowTs = new Date().toISOString();
+    fs.appendFileSync(
+      path.join(sessionDir, "events.jsonl"),
+      [
+        JSON.stringify({ type: "turn_started", ts: nowTs, turn_number: 2 }),
+        JSON.stringify({ type: "turn_ended", ts: nowTs, outcome: "completed" }),
+      ].join("\n") + "\n",
+    );
+    fs.appendFileSync(
+      path.join(sessionDir, "chat_history.jsonl"),
+      "\n" + [
+        JSON.stringify({ type: "user", content: "还在吗" }),
+        JSON.stringify({ type: "assistant", content: "在。", model_id: "grok-4.6-build" }),
+      ].join("\n"),
+    );
+
     const hooks = (backend as any).getExecHooks(session);
     expect(hooks.pollComplete()).toBe(true);
-
-    const parsed = backend.parseOutput(JSON.stringify({ type: "text", data: "已经写完了。" }), session);
+    const parsed = backend.parseOutput("", session);
     expect(parsed.turnCompleted).toBe(true);
-    expect(parsed.text).toBe("已经写完了。");
-    expect(parsed.model).toBe("grok-4.6-build");
+    expect(parsed.text).toBe("在。");
   });
 
   it("does not treat a cancelled turn_ended as sendable", () => {
@@ -394,17 +511,28 @@ describe("GrokBackend", () => {
       sessionId,
     );
     fs.mkdirSync(sessionDir, { recursive: true });
-    fs.writeFileSync(
-      path.join(sessionDir, "events.jsonl"),
-      JSON.stringify({ type: "turn_ended", outcome: "cancelled" }) + "\n",
-    );
-    fs.writeFileSync(
-      path.join(sessionDir, "chat_history.jsonl"),
-      JSON.stringify({ type: "assistant", content: "半截。" }),
-    );
+    fs.writeFileSync(path.join(sessionDir, "events.jsonl"), "");
+    fs.writeFileSync(path.join(sessionDir, "chat_history.jsonl"), "");
 
     const backend = new GrokBackend();
     const session = backend.buildSession({ workingDirectory, agentSessionId: sessionId });
+    backend.buildInput(session, "继续");
+    const nowTs = new Date().toISOString();
+    fs.appendFileSync(
+      path.join(sessionDir, "events.jsonl"),
+      [
+        JSON.stringify({ type: "turn_started", ts: nowTs, turn_number: 1 }),
+        JSON.stringify({ type: "turn_ended", ts: nowTs, outcome: "cancelled" }),
+      ].join("\n") + "\n",
+    );
+    fs.writeFileSync(
+      path.join(sessionDir, "chat_history.jsonl"),
+      [
+        JSON.stringify({ type: "user", content: "继续" }),
+        JSON.stringify({ type: "assistant", content: "半截。" }),
+      ].join("\n"),
+    );
+
     const hooks = (backend as any).getExecHooks(session);
     expect(hooks.pollComplete()).toBe(false);
     expect(backend.parseOutput(JSON.stringify({ type: "text", data: "半截。" }), session).turnCompleted).toBe(false);

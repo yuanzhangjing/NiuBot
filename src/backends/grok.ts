@@ -25,8 +25,14 @@ interface GrokSession extends BaseCliSession {
   activeToolCount: number;
   /** 从 events.jsonl 整理出的最近日志，覆盖 stdout 碎片。 */
   statusLines: string[];
-  /** 本轮 events 已出现 outcome=completed 的 turn_ended。 */
+  /** 本轮已看到 turn_started 之后的 outcome=completed turn_ended。 */
   turnEnded: boolean;
+  /** 本轮 prompt 发出后，events 里已经出现过新的 turn_started。 */
+  turnStartedThisPrompt: boolean;
+  /** buildInput 时刻。这一刻之前的 turn 事件一律不算本轮。 */
+  promptStartedAt: number;
+  /** 发 prompt 时 chat_history.jsonl 的大小；只认这之后新写的回答。 */
+  historyOffset: number;
 }
 
 interface GrokJsonResult {
@@ -81,11 +87,14 @@ export default class GrokBackend extends CliAgentBackend<GrokSession> {
       activeToolCount: 0,
       statusLines: [],
       turnEnded: false,
+      turnStartedThisPrompt: false,
+      promptStartedAt: 0,
+      historyOffset: 0,
     };
   }
 
   buildInput(session: GrokSession, message: string): { args: string[]; stdin?: string } {
-    session.turnEnded = false;
+    this.beginPromptTurn(session);
     // 首轮若已写出 session 目录（进程中途挂了），必须改 resume，不能重复 --session-id。
     if (session.isNewSession && this.sessionExists(session)) {
       session.isNewSession = false;
@@ -165,8 +174,9 @@ export default class GrokBackend extends CliAgentBackend<GrokSession> {
       this.consumeNewEvents(session);
     }
 
-    const lastAssistant = this.readLastAssistant(session);
-    const turnCompleted = stream.completed || (session.turnEnded && !!(lastAssistant.text || stream.text.trim()));
+    const lastAssistant = this.currentTurnAssistant(session);
+    const turnCompleted = stream.completed
+      || (session.turnStartedThisPrompt && session.turnEnded && !!(lastAssistant.text || stream.text.trim()));
     const agentSessionId = turnCompleted
       ? (stream.sessionId ?? session.agentSessionId ?? session.clientSessionId)
       : session.agentSessionId;
@@ -179,8 +189,12 @@ export default class GrokBackend extends CliAgentBackend<GrokSession> {
     }
     const lastAssistantText = lastAssistant.text;
     const stdoutText = stream.text.trim();
-    // history 正文不在本轮 stdout 里时，说明是上一轮残留，模型和正文一起丢掉。
-    const useHistory = !!(lastAssistantText && (!stdoutText || stdoutText.includes(lastAssistantText)));
+    // 发过 prompt 后，本轮 history 已滤掉上一句残留，优先用它，避免 poll 时半截 stdout 盖掉终稿。
+    const useHistory = !!lastAssistantText && (
+      session.promptStartedAt > 0
+      || !stdoutText
+      || stdoutText.includes(lastAssistantText)
+    );
     const text = useHistory ? lastAssistantText : stdoutText;
     const model = (useHistory ? lastAssistant.model : undefined) ?? stdoutModel ?? session.model;
     let contextTokens = stdoutContextTokens;
@@ -224,18 +238,55 @@ export default class GrokBackend extends CliAgentBackend<GrokSession> {
     };
   }
 
-  private isTurnReadyToSend(session: GrokSession): boolean {
-    this.consumeNewEvents(session);
-    return session.turnEnded && !!this.readLastAssistant(session).text;
+  private beginPromptTurn(session: GrokSession): void {
+    session.turnEnded = false;
+    session.turnStartedThisPrompt = false;
+    session.promptStartedAt = Date.now();
+    session.historyOffset = this.fileSize(this.getChatHistoryPath(session));
+    const eventsPath = this.getEventsPath(session);
+    if (eventsPath) {
+      session.eventsOffset = this.fileSize(eventsPath);
+    }
   }
 
-  private readLastAssistant(session: GrokSession): { text?: string; model?: string } {
+  private isTurnReadyToSend(session: GrokSession): boolean {
+    this.consumeNewEvents(session);
+    return session.turnStartedThisPrompt && session.turnEnded && !!this.currentTurnAssistant(session).text;
+  }
+
+  private currentTurnAssistant(session: GrokSession): { text?: string; model?: string } {
     const file = this.getChatHistoryPath(session);
     if (!file) return {};
     try {
-      return extractLastGrokAssistant(readFileSync(file, "utf-8"));
+      const raw = this.readFileSince(file, session.historyOffset);
+      if (!raw.trim()) return {};
+      return extractLastGrokAssistant(raw);
     } catch {
       return {};
+    }
+  }
+
+  private fileSize(file: string | null): number {
+    if (!file) return 0;
+    try {
+      return statSync(file).size;
+    } catch {
+      return 0;
+    }
+  }
+
+  private readFileSince(file: string, offset: number): string {
+    const size = statSync(file).size;
+    const start = size < offset ? 0 : offset;
+    if (size <= start) return "";
+    if (start === 0) return readFileSync(file, "utf-8");
+    const fd = openSync(file, "r");
+    try {
+      const buf = Buffer.alloc(size - start);
+      readSync(fd, buf, 0, buf.length, start);
+      return buf.toString("utf-8");
+    } finally {
+      closeSync(fd);
     }
   }
 
@@ -297,6 +348,8 @@ export default class GrokBackend extends CliAgentBackend<GrokSession> {
       if (stat.size < session.eventsOffset) {
         session.eventsOffset = 0;
         session.activeToolCount = 0;
+        session.turnEnded = false;
+        session.turnStartedThisPrompt = false;
         if (activity) activity.executingTool = false;
       }
       if (stat.size === session.eventsOffset) return;
@@ -544,6 +597,17 @@ function estimateGrokContextTokens(usage?: GrokUsage): number | undefined {
   return total > 0 ? total : undefined;
 }
 
+/** 允许 grok 本地时钟比发 prompt 略早几秒；更早的事件视为上一轮残留。 */
+const GROK_PROMPT_EVENT_SKEW_MS = 5_000;
+
+function isGrokEventForThisPrompt(session: GrokSession, event: { ts?: string }): boolean {
+  if (!session.promptStartedAt) return true;
+  if (!event.ts) return true;
+  const eventTime = Date.parse(event.ts);
+  if (!Number.isFinite(eventTime)) return true;
+  return eventTime >= session.promptStartedAt - GROK_PROMPT_EVENT_SKEW_MS;
+}
+
 function applyGrokActivityEvent(
   session: GrokSession,
   activity: AgentSessionActivity | undefined,
@@ -563,17 +627,22 @@ function applyGrokActivityEvent(
 
   const type = event.type ?? "";
   if (type === "turn_started") {
-    session.turnEnded = false;
     session.activeToolCount = 0;
     if (activity) activity.executingTool = false;
+    if (isGrokEventForThisPrompt(session, event)) {
+      session.turnStartedThisPrompt = true;
+      session.turnEnded = false;
+    }
     return;
   }
   if (type === "turn_ended") {
-    session.turnEnded = event.outcome === "completed";
     session.activeToolCount = 0;
     if (activity) {
       activity.executingTool = false;
       activity.compacting = false;
+    }
+    if (session.turnStartedThisPrompt && isGrokEventForThisPrompt(session, event)) {
+      session.turnEnded = event.outcome === "completed";
     }
     return;
   }

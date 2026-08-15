@@ -35,7 +35,7 @@
 | 只发**当前轮最后一条**面向用户的 assistant 文本 | 不能把 tool 前的旁白、流式碎片拼成一条 |
 | 优先读原生 session 文件 | stdout 终态字段经常是「整轮拼接」（cursor `result`、grok `text`） |
 | 终态事件与失败 | `error` 之后可能还有 `end`/`result`；有 error 必须 `failed`，不能当成功回复 |
-| `turnCompleted` | 只有**回合**终态才算完成（`result` / `agent_end` / `turn.completed` / grok `turn_ended`）；进程收摊（grok stdout `end`）≠ 完成 |
+| `turnCompleted` | 只有**回合**终态才算完成（`result` / `agent_end` / `turn.completed` / grok **本轮** `turn_started` 之后的 `turn_ended`）。grok 本进程 stdout `end` 仍可收摊；上一轮残留的结束标记、上一句回答、以及别人进程的 `end` 不能当本轮完成 |
 
 ### 3. Token 与 footer
 
