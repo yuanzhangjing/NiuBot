@@ -185,6 +185,8 @@ export interface ExecHooks {
   onLine?: (line: string) => void;
   /** 判断某行是否为完成事件。返回 true 则标记 completionDetected */
   isComplete?: (line: string) => boolean;
+  /** 终态不在 stdout 时由 exec 轮询；返回 true 则与 isComplete 一样提前收工 */
+  pollComplete?: () => boolean;
   /** 状态变更回调（如 compacting）。通知上层展示提示 */
   onStatus?: (status: string) => void;
 }

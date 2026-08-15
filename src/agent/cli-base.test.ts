@@ -298,6 +298,37 @@ describe("CliAgentBackend diagnostic logging", () => {
     }));
   });
 
+  test("reaps a leftover early-resolved process before the next prompt", async () => {
+    let prompts = 0;
+    const pids: Array<number | undefined> = [];
+    const backend = new (class extends ParsedOutputBackend {
+      constructor() {
+        super({ text: "ok", turnCompleted: true });
+      }
+
+      buildInput(_session: BaseCliSession, _message: string): { args: string[]; stdin?: string } {
+        prompts += 1;
+        if (prompts === 1) {
+          return {
+            args: ["-e", "process.stdout.write('DONE\\n'); setTimeout(() => {}, 30000);"],
+          };
+        }
+        return { args: ["-e", "process.stdout.write('DONE\\n');"] };
+      }
+
+      protected getExecHooks(): ExecHooks {
+        return { isComplete: (line) => line === "DONE" };
+      }
+    })();
+    const session = await backend.createSession({ workingDirectory: process.cwd() });
+    await expect(backend.sendMessage(session as AgentSession, "one")).resolves.toMatchObject({ text: "ok" });
+    const leftover = (backend as any).activeProcesses.get(session.id) as { pid?: number; killed?: boolean } | undefined;
+    expect(leftover?.pid).toBeTruthy();
+    pids.push(leftover?.pid);
+    await expect(backend.sendMessage(session as AgentSession, "two")).resolves.toMatchObject({ text: "ok" });
+    expect((backend as any).activeProcesses.get(session.id)?.pid).not.toBe(pids[0]);
+  }, 10_000);
+
   test("rejects a zero-exit turn without a terminal event and includes the last message", async () => {
     const backend = new ParsedOutputBackend({
       text: "开始修复关闭竞态",

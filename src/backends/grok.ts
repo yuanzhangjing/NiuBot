@@ -25,6 +25,8 @@ interface GrokSession extends BaseCliSession {
   activeToolCount: number;
   /** 从 events.jsonl 整理出的最近日志，覆盖 stdout 碎片。 */
   statusLines: string[];
+  /** 本轮 events 已出现 outcome=completed 的 turn_ended。 */
+  turnEnded: boolean;
 }
 
 interface GrokJsonResult {
@@ -78,10 +80,12 @@ export default class GrokBackend extends CliAgentBackend<GrokSession> {
       eventsOffset: 0,
       activeToolCount: 0,
       statusLines: [],
+      turnEnded: false,
     };
   }
 
   buildInput(session: GrokSession, message: string): { args: string[]; stdin?: string } {
+    session.turnEnded = false;
     // 首轮若已写出 session 目录（进程中途挂了），必须改 resume，不能重复 --session-id。
     if (session.isNewSession && this.sessionExists(session)) {
       session.isNewSession = false;
@@ -132,6 +136,7 @@ export default class GrokBackend extends CliAgentBackend<GrokSession> {
           return false;
         }
       },
+      pollComplete: () => this.isTurnReadyToSend(session),
     };
   }
 
@@ -152,18 +157,26 @@ export default class GrokBackend extends CliAgentBackend<GrokSession> {
   parseOutput(stdout: string, session: GrokSession): ParsedOutput {
     const stream = parseGrokStream(stdout);
     const errorMessage = stream.error;
-    const agentSessionId = stream.completed
+    if (stream.sessionId) {
+      session.agentSessionId = stream.sessionId;
+      session.isNewSession = false;
+    }
+    if (session.agentSessionId || session.clientSessionId) {
+      this.consumeNewEvents(session);
+    }
+
+    const lastAssistant = this.readLastAssistant(session);
+    const turnCompleted = stream.completed || (session.turnEnded && !!(lastAssistant.text || stream.text.trim()));
+    const agentSessionId = turnCompleted
       ? (stream.sessionId ?? session.agentSessionId ?? session.clientSessionId)
       : session.agentSessionId;
     const stdoutModel = firstModelUsageId(stream.modelUsage);
     const stdoutContextTokens = estimateGrokContextTokens(stream.usage);
 
-    if (stream.completed && agentSessionId) {
+    if (turnCompleted && agentSessionId) {
       session.agentSessionId = agentSessionId;
       session.isNewSession = false;
     }
-
-    const lastAssistant = this.readLastAssistant(session);
     const lastAssistantText = lastAssistant.text;
     const stdoutText = stream.text.trim();
     // history 正文不在本轮 stdout 里时，说明是上一轮残留，模型和正文一起丢掉。
@@ -174,7 +187,6 @@ export default class GrokBackend extends CliAgentBackend<GrokSession> {
     let contextWindow: number | undefined;
 
     if (agentSessionId) {
-      this.consumeNewEvents(session);
       this.refreshCompactCount(session);
       const signals = this.readSignals(session);
       if (signals) {
@@ -195,14 +207,13 @@ export default class GrokBackend extends CliAgentBackend<GrokSession> {
       });
     }
 
-    const turnCompleted = stream.completed;
     const failed = !!errorMessage;
 
     return {
       text: failed ? "" : text,
       turnCompleted,
       lastMessage: text,
-      incompleteReason: turnCompleted ? undefined : (errorMessage ? "grok 返回 error" : "未收到 grok end 事件"),
+      incompleteReason: turnCompleted ? undefined : (errorMessage ? "grok 返回 error" : "未收到 grok turn_ended / end"),
       agentSessionId,
       model,
       contextTokens,
@@ -211,6 +222,11 @@ export default class GrokBackend extends CliAgentBackend<GrokSession> {
       error: errorMessage,
       failed,
     };
+  }
+
+  private isTurnReadyToSend(session: GrokSession): boolean {
+    this.consumeNewEvents(session);
+    return session.turnEnded && !!this.readLastAssistant(session).text;
   }
 
   private readLastAssistant(session: GrokSession): { text?: string; model?: string } {
@@ -239,6 +255,7 @@ export default class GrokBackend extends CliAgentBackend<GrokSession> {
     if (!session) return;
     this.consumeNewEvents(session, activity);
     this.refreshCompactCount(session);
+    if (this.isTurnReadyToSend(session)) activity.completionDetected = true;
     activity.executingTool = session.activeToolCount > 0;
     const historyLines = this.readHistoryStatusLines(session);
     if (historyLines.length > 0) session.statusLines = historyLines;
@@ -532,9 +549,9 @@ function applyGrokActivityEvent(
   activity: AgentSessionActivity | undefined,
   line: string,
 ): void {
-  let event: { type?: string; ts?: string; tool_name?: string; phase?: string };
+  let event: { type?: string; ts?: string; tool_name?: string; phase?: string; outcome?: string };
   try {
-    event = JSON.parse(line) as { type?: string; ts?: string; tool_name?: string; phase?: string };
+    event = JSON.parse(line) as { type?: string; ts?: string; tool_name?: string; phase?: string; outcome?: string };
   } catch {
     return;
   }
@@ -546,11 +563,13 @@ function applyGrokActivityEvent(
 
   const type = event.type ?? "";
   if (type === "turn_started") {
+    session.turnEnded = false;
     session.activeToolCount = 0;
     if (activity) activity.executingTool = false;
     return;
   }
   if (type === "turn_ended") {
+    session.turnEnded = event.outcome === "completed";
     session.activeToolCount = 0;
     if (activity) {
       activity.executingTool = false;

@@ -161,6 +161,7 @@ describe("GrokBackend", () => {
     expect(session.isNewSession).toBe(false);
     expect(hooks.isComplete(endLine)).toBe(true);
     expect(hooks.isComplete(JSON.stringify({ type: "text", data: "hi" }))).toBe(false);
+    expect(typeof hooks.pollComplete).toBe("function");
   });
 
   it("hides prompt and rules in log args", () => {
@@ -338,10 +339,75 @@ describe("GrokBackend", () => {
     const parsed = backend.parseOutput(JSON.stringify({ type: "text", data: "still thinking..." }), session);
 
     expect(parsed.turnCompleted).toBe(false);
-    expect(parsed.incompleteReason).toBe("未收到 grok end 事件");
+    expect(parsed.incompleteReason).toBe("未收到 grok turn_ended / end");
     expect(parsed.text).toBe("still thinking...");
     expect(parsed.agentSessionId).toBeUndefined();
     expect(session.agentSessionId).toBeUndefined();
+  });
+
+  it("completes a turn from events turn_ended without waiting for stdout end", () => {
+    const sessionId = "019ffb94-eded-72f3-b3eb-42e766619372";
+    const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "grok-home-"));
+    const workingDirectory = path.join(tempHome, "workspace");
+    fs.mkdirSync(workingDirectory, { recursive: true });
+    setTestHome(tempHome);
+
+    const sessionDir = path.join(
+      tempHome,
+      ".grok",
+      "sessions",
+      encodeGrokSessionDir(workingDirectory),
+      sessionId,
+    );
+    fs.mkdirSync(sessionDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(sessionDir, "events.jsonl"),
+      JSON.stringify({ type: "turn_ended", outcome: "completed" }) + "\n",
+    );
+    fs.writeFileSync(
+      path.join(sessionDir, "chat_history.jsonl"),
+      JSON.stringify({ type: "assistant", content: "已经写完了。", model_id: "grok-4.6-build" }),
+    );
+
+    const backend = new GrokBackend();
+    const session = backend.buildSession({ workingDirectory, agentSessionId: sessionId });
+    const hooks = (backend as any).getExecHooks(session);
+    expect(hooks.pollComplete()).toBe(true);
+
+    const parsed = backend.parseOutput(JSON.stringify({ type: "text", data: "已经写完了。" }), session);
+    expect(parsed.turnCompleted).toBe(true);
+    expect(parsed.text).toBe("已经写完了。");
+    expect(parsed.model).toBe("grok-4.6-build");
+  });
+
+  it("does not treat a cancelled turn_ended as sendable", () => {
+    const sessionId = "019ffb94-ca11-72f3-b3eb-42e766619372";
+    const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "grok-home-"));
+    const workingDirectory = path.join(tempHome, "workspace");
+    fs.mkdirSync(workingDirectory, { recursive: true });
+    setTestHome(tempHome);
+    const sessionDir = path.join(
+      tempHome,
+      ".grok",
+      "sessions",
+      encodeGrokSessionDir(workingDirectory),
+      sessionId,
+    );
+    fs.mkdirSync(sessionDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(sessionDir, "events.jsonl"),
+      JSON.stringify({ type: "turn_ended", outcome: "cancelled" }) + "\n",
+    );
+    fs.writeFileSync(
+      path.join(sessionDir, "chat_history.jsonl"),
+      JSON.stringify({ type: "assistant", content: "半截。" }),
+    );
+
+    const backend = new GrokBackend();
+    const session = backend.buildSession({ workingDirectory, agentSessionId: sessionId });
+    const hooks = (backend as any).getExecHooks(session);
+    expect(hooks.pollComplete()).toBe(false);
+    expect(backend.parseOutput(JSON.stringify({ type: "text", data: "半截。" }), session).turnCompleted).toBe(false);
   });
 
   it("surfaces grok error objects", () => {

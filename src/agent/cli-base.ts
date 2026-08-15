@@ -377,6 +377,26 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
     return this.loadSessionTranscript(internal);
   }
 
+  private async reapLeftoverProcess(sessionId: string): Promise<void> {
+    const child = this.activeProcesses.get(sessionId);
+    if (!child || child.exitCode !== null || child.signalCode !== null) return;
+    this.log.info("reaping leftover process before next prompt", {
+      sessionId,
+      pid: child.pid ?? null,
+    });
+    if (child.pid) terminateSpawnedProcessTree(child.pid, false);
+    const exited = await this.waitForSessionProcessExit(sessionId, 2_000);
+    if (!exited) {
+      this.log.warn("leftover process still running after reap", {
+        sessionId,
+        pid: child.pid ?? null,
+      });
+    }
+    if (this.activeProcesses.get(sessionId) === child) {
+      this.activeProcesses.delete(sessionId);
+    }
+  }
+
   private async waitForSessionProcessExit(sessionId: string, timeoutMs: number): Promise<boolean> {
     const child = this.activeProcesses.get(sessionId);
     if (!child || child.exitCode !== null || child.signalCode !== null) return true;
@@ -470,13 +490,14 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
 
   // ── 子进程执行 ───────────────────────────────────────────
 
-  protected exec(
+  protected async exec(
     cmd: string,
     args: string[],
     opts?: { cwd?: string; env?: Record<string, string>; stdin?: string },
     sessionId?: string,
     hooks?: ExecHooks,
   ): Promise<string> {
+    if (sessionId) await this.reapLeftoverProcess(sessionId);
     return new Promise((resolve, reject) => {
       const startedAt = Date.now();
       const stdinDefined = opts?.stdin !== undefined;
@@ -521,10 +542,44 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
       const stderrChunks: Buffer[] = [];
       let settled = false;
       let earlyResolveAt: number | undefined;
+      let pollTimer: ReturnType<typeof setInterval> | undefined;
       let stdoutBytes = 0;
       /** stdout 累计字节上限：防止超大输出（如 100MB）join 时抛 RangeError 导致 exec 永不 resolve */
       const MAX_STDOUT_BYTES = 32 * 1024 * 1024; // 32MB
       let stdoutTruncated = false;
+
+      const completeEarly = (source: "stdout" | "poll") => {
+        if (myActivity) myActivity.completionDetected = true;
+        // 注意顺序：先拼 stdout 再置 settled。
+        // 若 join 抛异常（超大输出），settled 保持 false，进程 close 时会走
+        // 正常退出分支重新 resolve，不会因 settled=true 而卡死。
+        const completionStdout = lines.join("\n");
+        if (settled) return;
+        settled = true;
+        if (pollTimer) clearInterval(pollTimer);
+        earlyResolveAt = Date.now();
+        this.log.info("completion detected, resolving immediately", {
+          sessionId: sessionId ?? null,
+          source,
+          linesCollected: lines.length,
+          stdoutLength: completionStdout.length,
+          stdoutTruncated,
+          elapsedMs: earlyResolveAt - startedAt,
+        });
+        this.maybeDumpAgentStdout(sessionId, "complete", {
+          cmd,
+          args: logArgs,
+          cwd: opts?.cwd,
+          stdinLength,
+          stdinPreview,
+          stdout: completionStdout,
+          stderr: Buffer.concat(stderrChunks).toString(),
+          durationMs: earlyResolveAt - startedAt,
+          linesCollected: lines.length,
+        });
+        resolve(completionStdout);
+        // 进程继续在后台运行，等它自行退出；退不了的由 watchdog 收尸
+      };
 
       // ── 流式逐行读取 stdout ──
       if (hooks) {
@@ -582,37 +637,7 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
           }
           // 完成检测 → 立即 resolve，不等进程退出
           try {
-            if (hooks.isComplete?.(line)) {
-              if (myActivity) myActivity.completionDetected = true;
-              // 注意顺序：先拼 stdout 再置 settled。
-              // 若 join 抛异常（超大输出），settled 保持 false，进程 close 时会走
-              // 正常退出分支重新 resolve，不会因 settled=true 而卡死。
-              const completionStdout = lines.join("\n");
-              if (!settled) {
-                settled = true;
-                earlyResolveAt = Date.now();
-                this.log.info("completion detected, resolving immediately", {
-                  sessionId: sessionId ?? null,
-                  linesCollected: lines.length,
-                  stdoutLength: completionStdout.length,
-                  stdoutTruncated,
-                  elapsedMs: earlyResolveAt - startedAt,
-                });
-                this.maybeDumpAgentStdout(sessionId, "complete", {
-                  cmd,
-                  args: logArgs,
-                  cwd: opts?.cwd,
-                  stdinLength,
-                  stdinPreview,
-                  stdout: completionStdout,
-                  stderr: Buffer.concat(stderrChunks).toString(),
-                  durationMs: earlyResolveAt - startedAt,
-                  linesCollected: lines.length,
-                });
-                resolve(completionStdout);
-                // 进程继续在后台运行，等它自行退出；退不了的由 watchdog 收尸
-              }
-            }
+            if (hooks.isComplete?.(line)) completeEarly("stdout");
           } catch (err) {
             this.log.warn("stdout completion hook failed", {
               sessionId: sessionId ?? null,
@@ -620,6 +645,22 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
             });
           }
         });
+        if (hooks.pollComplete) {
+          pollTimer = setInterval(() => {
+            if (settled) {
+              if (pollTimer) clearInterval(pollTimer);
+              return;
+            }
+            try {
+              if (hooks.pollComplete?.()) completeEarly("poll");
+            } catch (err) {
+              this.log.warn("poll completion hook failed", {
+                sessionId: sessionId ?? null,
+                error: String(err),
+              });
+            }
+          }, 200);
+        }
       } else {
         // 无 hooks 时退化为 buffer 模式（兼容 checkAvailable 等非业务调用）
         child.stdout.on("data", (chunk: Buffer) => {
@@ -643,6 +684,7 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
       });
 
       child.on("close", (code, signal) => {
+        if (pollTimer) clearInterval(pollTimer);
         const durationMs = Date.now() - startedAt;
 
         // 已经在收到 result 时提前 resolve 了，这里只做清理
@@ -754,6 +796,7 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
       });
 
       child.on("error", (err) => {
+        if (pollTimer) clearInterval(pollTimer);
         if (sessionId) {
           if (this.activeProcesses.get(sessionId) === child) {
             this.activeProcesses.delete(sessionId);
