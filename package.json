@@ -1,6 +1,6 @@
 {
   "name": "@yuanzhangjing/niubot",
-  "version": "0.2.28",
+  "version": "0.2.29",
   "description": "NiuBot Engine — AI Persona Runtime powering autonomous digital coworkers with memory and personality",
   "repository": {
     "type": "git",
