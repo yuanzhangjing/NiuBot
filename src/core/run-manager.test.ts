@@ -258,11 +258,12 @@ describe("RunManager", () => {
     expect(store.getRun(runId)?.stage).toBe("stopped");
   });
 
-  test("aborts a hung agent run after the run timeout and marks it failed", async () => {
+  test("does not abort a hung agent run after two hours", async () => {
     vi.useFakeTimers();
+    const controller = new AbortController();
     const { store, runId } = createStore();
     const manager = new RunManager(
-      new RecordingAgent(() => new Promise<AgentResponse>(() => {})), // 永不 settle，模拟进程挂起
+      new RecordingAgent(() => new Promise<AgentResponse>(() => {})),
       store,
       createSender(),
     );
@@ -272,17 +273,14 @@ describe("RunManager", () => {
       chatId: "c1",
       session: { id: "agent-1" },
       message: "hello",
+      signal: controller.signal,
     });
-    // 先挂拒绝处理器，再推进假时钟；否则 Promise 会在下一行断言注册前拒绝，
-    // Vitest 会把它记成未处理 rejection，即使随后 rejects 断言通过。
-    const rejection = expect(pending).rejects.toThrow("agent run timed out");
     await vi.advanceTimersByTimeAsync(2 * 60 * 60 * 1000 + 1_000);
 
-    await rejection;
-    expect(store.getRun(runId)).toMatchObject({
-      stage: "failed",
-      lastError: "Error: agent run timed out after 7200000ms",
-    });
+    expect(store.getRun(runId)?.stage).toBe("agent_running");
+    controller.abort(new Error("stopped"));
+    await expect(pending).resolves.toEqual({ status: "stopped" });
+    expect(store.getRun(runId)?.stage).toBe("stopped");
   });
 
   test("uses the standard empty response fallback", async () => {

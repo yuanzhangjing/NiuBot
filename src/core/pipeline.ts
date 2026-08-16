@@ -175,7 +175,6 @@ const AGENT_IDLE_THRESHOLD_MS = 600_000;       // 10 分钟：第一次 idle 通
 const AGENT_IDLE_THRESHOLD_2_MS = 1_800_000;   // 30 分钟：第二次 idle 通知
 const AGENT_LONG_RUNNING_FIRST_NOTIFY_MS = 3_600_000;  // 1 小时：主会话长运行提醒
 const AGENT_LONG_RUNNING_REPEAT_NOTIFY_MS = 3_600_000; // 1 小时：主会话长运行重复提醒
-const AGENT_RUN_HARD_TIMEOUT_MS = 7_200_000;  // 2 小时：主会话 run 硬超时，无 completion 时强制中止（防进程挂起卡死队列）
 const INDEPENDENT_IDLE_KILL_MS = 3_600_000;    // 1 小时：独立 session 无活动自动 kill
 const INDEPENDENT_LONG_RUNNING_NOTIFY_MS = 3_600_000;  // 1 小时：独立 session 仍活跃时提醒
 const WORKER_DELIVERY_MARKER = "> ⚙️ 本回复基于 Worker 后台任务结果整理";
@@ -5301,38 +5300,13 @@ ${jobParts.join("\n\n")}
         continue;
       }
 
-      // ── 策略 2b: run 硬超时 → 强制中止（进程挂起但无 completion 时队列会永久卡死）
-      if (!a.completionDetected && runningMs > AGENT_RUN_HARD_TIMEOUT_MS) {
-        const runningHours = formatLongRunningHours(runningMs);
-        this.log.warn("watchdog: hard timeout, aborting stuck run", {
-          chatId,
-          sessionId: session.agentSession.id,
-          runningMs,
-          idleMs,
-        });
-        this.sendWatchdogNotification(chatId, `任务运行超过 ${runningHours} 小时且未完成，已强制中止。`);
-        this.cancelChat(chatId).catch(() => {});
-        continue;
-      }
-
       // 工具执行期间可能长时间没有新日志；一小时内先不按“无输出”误报。
       // tool_started 不是持续心跳，超过一小时仍恢复原 idle 策略，避免永久挂住。
       if (a.executingTool && idleMs <= INDEPENDENT_IDLE_KILL_MS) continue;
 
-      // ── 策略 3: 无 completion + 长时间无活动 → 通知两次后强制中止 ──
+      // ── 策略 3: 无 completion + 长时间无活动 → 通知，不杀 ──
       if (!a.completionDetected) {
-        // 两次通知后（30+ 分钟无输出）仍无进展 → 视为挂起，强制中止（防止队列永久 busy）
-        if (a.notifyCount >= 2) {
-          this.log.warn("watchdog: no progress after notifications, aborting stuck run", {
-            chatId,
-            sessionId: session.agentSession.id,
-            idleMs,
-            runningMs,
-          });
-          this.sendWatchdogNotification(chatId, "任务长时间无输出且未完成，已强制中止。可以重新发送需求。");
-          this.cancelChat(chatId).catch(() => {});
-          continue;
-        }
+        if (a.notifyCount >= 2) continue;  // 两次封顶，只提醒，不强制中止
 
         const thresholdMs = a.notifyCount === 0
           ? AGENT_IDLE_THRESHOLD_MS       // 第一次：10 分钟

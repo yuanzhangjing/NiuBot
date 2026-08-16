@@ -4,11 +4,7 @@ import { RuntimeStateStore, type RunStage } from "./runtime-state.js";
 import { ResponseSender, type SendResult } from "./response-sender.js";
 
 const EMPTY_RESPONSE_FALLBACK = "（处理完成，但未生成回复。如果没收到预期结果，请重试）";
-/** 单个 agent run 的最大运行时长：超过即视为挂起，强制中止（防止进程挂起时队列永久卡死） */
-export const AGENT_RUN_TIMEOUT_MS = 2 * 60 * 60 * 1000; // 2 小时
 const log = createLogger("run-manager");
-/** 已确认超时并主动中止的 runId（用于与用户主动 stop 区分） */
-const timedOutRunIds = new Set<string>();
 
 type RunAgentInput = {
   runId: string;
@@ -63,20 +59,6 @@ export class RunManager {
       const response = await abortable(
         this.agent.sendMessage(input.session, input.message),
         input.signal,
-        AGENT_RUN_TIMEOUT_MS,
-        () => {
-          timedOutRunIds.add(input.runId);
-          log.warn("agent run timed out, aborting", {
-            runId: input.runId,
-            chatId: input.chatId,
-            agentSessionId: input.session.id,
-            timeoutMs: AGENT_RUN_TIMEOUT_MS,
-            elapsedMs: Date.now() - startedAt,
-          });
-          // 超时后终止底层进程，避免进程残留（sendMessage 的 promise 被 race 丢弃，但进程还在跑）
-          input.signal?.dispatchEvent(new Event("abort"));
-          void this.agent.cancelSession(input.session).catch(() => {});
-        },
       );
 
       if (response.cancelled && !response.text.trim()) {
@@ -102,18 +84,6 @@ export class RunManager {
       });
       return { status: "response", response };
     } catch (err) {
-      // 超时中止：abortable 会先 abort signal，这里与主动 stop 区分开，标记为 failed
-      const timedOut = timedOutRunIds.delete(input.runId);
-      if (timedOut) {
-        this.markRun(input.runId, "failed", String(err));
-        log.error("agent run timed out and was aborted", {
-          runId: input.runId,
-          chatId: input.chatId,
-          error: String(err),
-          elapsedMs: Date.now() - startedAt,
-        });
-        throw err;
-      }
       if (input.signal?.aborted) {
         this.markRun(input.runId, "stopped");
         log.info("agent run stopped by abort", {
@@ -213,8 +183,6 @@ function isTimeoutErrorMessage(error: string): boolean {
 async function abortable<T>(
   operation: Promise<T>,
   signal?: AbortSignal,
-  timeoutMs?: number,
-  onTimeout?: () => void,
 ): Promise<T> {
   if (signal?.aborted) throw getAbortReason(signal);
 
@@ -226,23 +194,9 @@ async function abortable<T>(
       })
     : undefined;
 
-  // 超时兜底：agent 进程挂起（不退出也不输出）时 sendMessage 永不 settle，
-  // 队列会永久 busy。超时后 reject，让 run 退出、队列恢复。
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  let timedOutPromise: Promise<never> | undefined;
-  if (timeoutMs) {
-    timedOutPromise = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => {
-        onTimeout?.();
-        reject(new Error(`agent run timed out after ${timeoutMs}ms`));
-      }, timeoutMs);
-    });
-  }
-
   try {
-    return await Promise.race([operation, aborted, timedOutPromise].filter((p): p is Promise<T | never> => !!p));
+    return await Promise.race([operation, aborted].filter((p): p is Promise<T | never> => !!p));
   } finally {
-    if (timer) clearTimeout(timer);
     if (abortHandler && signal) {
       signal.removeEventListener("abort", abortHandler);
     }

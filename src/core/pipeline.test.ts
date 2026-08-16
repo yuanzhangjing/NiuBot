@@ -1019,6 +1019,91 @@ describe("Pipeline runtime", () => {
     expect(sentCards[0].content).toContain("输出状态：已经 45 分钟没有输出，按输出看任务不活跃，可能卡住。");
   });
 
+  test("does not force-kill a main chat session after idle notices are exhausted", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const { im, sentTexts, sentCards } = createRecordingImStub();
+    const agent = new WatchdogAgent();
+    const agentSession = await agent.createSession({ workingDirectory: dir });
+    agent.markRunning(agentSession.id);
+    const activity = (agent as any).activityMap.get(agentSession.id);
+    const now = Date.now();
+    activity.startedAt = now - 40 * 60_000;
+    activity.lastActiveAt = now - 35 * 60_000;
+    activity.notifyCount = 2;
+    activity.lastNotifiedAt = now - 5 * 60_000;
+    const cancelSpy = vi.spyOn(agent, "cancelSession").mockResolvedValue();
+
+    const pipeline = new Pipeline(
+      db,
+      im,
+      agent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+    (pipeline as any).platformChatIds.set("c1", "chat-open-id");
+    (pipeline as any).chatSessions.set("c1", {
+      agentSession,
+      sessionId: "s1",
+      platformChatId: "chat-open-id",
+      userId: "u2",
+      hasReplied: false,
+    });
+
+    (pipeline as any).runIdleWatchdog();
+
+    expect(cancelSpy).not.toHaveBeenCalled();
+    expect(sentTexts.some((text) => text.includes("已强制中止"))).toBe(false);
+    expect(sentCards).toHaveLength(0);
+  });
+
+  test("does not force-kill a main chat session after two hours of running", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const { im, sentTexts, sentCards } = createRecordingImStub();
+    const agent = new WatchdogAgent();
+    const agentSession = await agent.createSession({ workingDirectory: dir });
+    agent.markRunning(agentSession.id);
+    const activity = (agent as any).activityMap.get(agentSession.id);
+    const now = Date.now();
+    activity.startedAt = now - 121 * 60_000;
+    activity.lastActiveAt = now - 30_000;
+    activity.lastLongRunningNotifiedAt = now - 10_000;
+    const cancelSpy = vi.spyOn(agent, "cancelSession").mockResolvedValue();
+
+    const pipeline = new Pipeline(
+      db,
+      im,
+      agent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+    (pipeline as any).platformChatIds.set("c1", "chat-open-id");
+    (pipeline as any).chatSessions.set("c1", {
+      agentSession,
+      sessionId: "s1",
+      platformChatId: "chat-open-id",
+      userId: "u2",
+      hasReplied: false,
+    });
+
+    (pipeline as any).runIdleWatchdog();
+
+    expect(cancelSpy).not.toHaveBeenCalled();
+    expect(sentTexts.some((text) => text.includes("已强制中止"))).toBe(false);
+    expect(sentCards).toHaveLength(0);
+  });
+
   test("does not send a long-running notice before one hour for a main chat session", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
