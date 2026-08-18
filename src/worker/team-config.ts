@@ -41,7 +41,7 @@ export interface TeamProfileConfig {
   skills?: TeamProfileSkills;
   /** 专属 backend 类型（如 "claude"）；未设置时复用主 Agent 的 backend */
   backend?: string;
-  /** 专属模型（backend 支持时生效）；未设置时使用 Bot 全局模型 */
+  /** 专属模型（backend 支持时生效）；未设置时走该 backend 自己的默认模型 */
   model?: string;
 }
 
@@ -149,12 +149,18 @@ export function parseTeamConfig(yamlText: string): TeamConfig {
       access: access as WorkspaceAccess,
       maxConcurrent,
       skills,
-      // 空串视为未配置（避免 backend: "" 静默回退主 backend 但 model 仍覆盖生效）
-      backend: typeof p["backend"] === "string" && p["backend"].trim() !== "" ? p["backend"] : undefined,
-      model: typeof p["model"] === "string" && p["model"].trim() !== "" ? p["model"] : undefined,
+      // 空串视为未配置：backend 回退主 backend；model 交给该 backend 自己的默认模型
+      backend: normalizeOptionalString(p["backend"]),
+      model: normalizeOptionalString(p["model"]),
     });
   }
   return config;
+}
+
+function normalizeOptionalString(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed === "" ? undefined : trimmed;
 }
 
 function toPositiveInt(value: unknown, fallback: number, field: string): number {

@@ -224,11 +224,60 @@ describe("PersistentTransport outbox", () => {
   });
 
   test("records a definite adapter rejection as failed", async () => {
-    const fake = createAdapter({ async sendText() { throw new Error("platform rejected"); } });
+    let calls = 0;
+    const fake = createAdapter({
+      async sendText() {
+        calls += 1;
+        throw new Error("platform rejected");
+      },
+    });
     const { runtime } = createRuntime(fake.adapter);
 
     await expect(runtime.sendText("chat-1", "hello")).rejects.toThrow("platform rejected");
+    expect(calls).toBe(2);
     expect(runtime.getStatusCounts().outbox.failed).toBe(1);
+  });
+
+  test("retries a definite adapter rejection once and then succeeds", async () => {
+    let calls = 0;
+    const fake = createAdapter({
+      async sendText() {
+        calls += 1;
+        if (calls === 1) throw new Error("platform rejected");
+        return "retry-id";
+      },
+    });
+    const { runtime } = createRuntime(fake.adapter);
+
+    await expect(runtime.sendText("chat-1", "hello")).resolves.toBe("retry-id");
+    expect(calls).toBe(2);
+    expect(runtime.getStatusCounts().outbox.sent).toBe(1);
+    expect(runtime.getStatusCounts().outbox.failed).toBe(0);
+  });
+
+  test("retries once after a timed out send is later rejected", async () => {
+    let rejectSend!: (error: Error) => void;
+    let calls = 0;
+    const first = new Promise<string>((_, reject) => { rejectSend = reject; });
+    const fake = createAdapter({
+      async sendText() {
+        calls += 1;
+        if (calls === 1) return first;
+        return "retry-id";
+      },
+    });
+    const { runtime } = createRuntime(fake.adapter);
+
+    await expect(runtime.sendText("chat-1", "hello", { timeoutMs: 5 }))
+      .rejects.toBeInstanceOf(DeliveryUncertainError);
+    expect(runtime.getStatusCounts().outbox.unknown).toBe(1);
+
+    rejectSend(new Error("Client network socket disconnected before secure TLS connection was established"));
+    await first.catch(() => {});
+    await viWaitFor(() => runtime.getStatusCounts().outbox.sent === 1);
+
+    expect(calls).toBe(2);
+    expect(runtime.getStatusCounts().outbox.sent).toBe(1);
   });
 
   test("sends a pending request during recovery", async () => {

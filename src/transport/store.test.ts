@@ -163,6 +163,21 @@ describe("TransportStore outbox", () => {
     expect(store.getOutbound("sending")?.status).toBe("unknown");
   });
 
+  test("requeues a confirmed failure for one extra send", () => {
+    const { store } = createStore();
+    store.insertOutbound("req-1", { kind: "text", chatId: "chat-1", text: "hello" }, "{}");
+    store.markOutboundSending("req-1");
+    store.markOutboundUnknown("req-1", new Error("timeout"));
+
+    expect(store.requeueOutbound("req-1")).toBe(true);
+    expect(store.getOutbound("req-1")).toMatchObject({ status: "pending", attemptCount: 1 });
+
+    store.markOutboundSending("req-1");
+    store.markOutboundUnknown("req-1", new Error("timeout"));
+    expect(store.requeueOutbound("req-1")).toBe(false);
+    expect(store.getOutbound("req-1")?.status).toBe("unknown");
+  });
+
   test("accepts a late success for the same unknown request without creating a new send", () => {
     const { store } = createStore();
     store.insertOutbound("req-1", { kind: "text", chatId: "chat-1", text: "hello" }, "{}");

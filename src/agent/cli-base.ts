@@ -164,6 +164,43 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
     return false;
   }
 
+  /** CLI 瞬时失败时额外重试次数；默认不重试。 */
+  protected transientRetryLimit(): number {
+    return 0;
+  }
+
+  /** 是否为可自动 resume 再试的瞬时 CLI 错误（网络断流等）。 */
+  protected isTransientCliError(_err: unknown): boolean {
+    return false;
+  }
+
+  /** 子进程非零退出时，尽量把 stdout 里的 backend 错误提成用户可见原因。 */
+  private promoteExecError(agentSession: AgentSession, err: unknown): unknown {
+    if (!err || typeof err !== "object") return err;
+    const stdout = "stdout" in err && typeof err.stdout === "string" ? err.stdout : undefined;
+    if (!stdout) return err;
+    const session = this.sessions.get(agentSession.id);
+    if (!session) return err;
+    const message = err instanceof Error ? err.message : "";
+    if (message && !message.startsWith("Command failed:")) return err;
+    try {
+      const parsed = this.parseOutput(stdout, session);
+      if (parsed.agentSessionId) {
+        session.agentSessionId = parsed.agentSessionId;
+      }
+      const parsedError = this.getParsedError(parsed);
+      if (!parsedError && parsed.turnCompleted) return err;
+      const next = parsed.turnCompleted && parsedError
+        ? Object.assign(new Error(parsedError), { stdout })
+        : this.buildIncompleteTurnError(parsed, stdout);
+      if ("stderr" in err) (next as { stderr?: unknown }).stderr = err.stderr;
+      if ("code" in err) (next as { code?: unknown }).code = err.code;
+      return next;
+    } catch {
+      return err;
+    }
+  }
+
   // ── 可选 override ───────────────────────────────────────────
 
   /** 检查 CLI 工具是否可用（start 时调用）。默认执行 command() --version */
@@ -215,6 +252,14 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
   }
 
   async sendMessage(agentSession: AgentSession, message: string): Promise<AgentResponse> {
+    return this.sendMessageAttempt(agentSession, message, 0);
+  }
+
+  private async sendMessageAttempt(
+    agentSession: AgentSession,
+    message: string,
+    attempt: number,
+  ): Promise<AgentResponse> {
     const s = this.sessions.get(agentSession.id);
     if (!s) throw new Error(`Session not found: ${agentSession.id}`);
 
@@ -226,6 +271,7 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
       mode,
       agentSessionId: s.agentSessionId ?? null,
       textLength: message.length,
+      attempt,
       stdinDefined: stdin !== undefined,
       stdinLength: stdin?.length ?? 0,
     });
@@ -305,8 +351,17 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
         this.log.warn("prompt cancelled", { sessionId: agentSession.id });
         return { text: "", cancelled: true };
       }
+      const promoted = this.promoteExecError(agentSession, err);
+      if (attempt < this.transientRetryLimit() && this.isTransientCliError(promoted)) {
+        this.log.warn("retrying after transient CLI error", {
+          sessionId: agentSession.id,
+          attempt: attempt + 1,
+          error: promoted instanceof Error ? promoted.message : String(promoted),
+        });
+        return this.sendMessageAttempt(agentSession, message, attempt + 1);
+      }
       if (activity) activity.status = "failed";
-      throw err;
+      throw promoted;
     }
   }
 

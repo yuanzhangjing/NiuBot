@@ -553,6 +553,28 @@ describe("GrokBackend", () => {
     expect(parsed.failed).toBe(true);
   });
 
+  it("unwraps grok Internal error JSON to the inner network message", () => {
+    const backend = new GrokBackend();
+    const session = backend.buildSession({ workingDirectory: "/tmp" });
+
+    const parsed = backend.parseOutput(JSON.stringify({
+      type: "error",
+      message: "Internal error: {\n  \"message\": \"reqwest error stream: error sending request for url (https://cli-chat-proxy.grok.com/v1/responses)\",\n  \"promptUsage\": {\"inputTokens\": 1}\n}",
+    }), session);
+
+    expect(parsed.error).toBe("reqwest error stream: error sending request for url (https://cli-chat-proxy.grok.com/v1/responses)");
+    expect(parsed.failed).toBe(true);
+  });
+
+  it("treats streaming error as a completed stdout frame", () => {
+    const backend = new GrokBackend();
+    const session = backend.buildSession({ workingDirectory: "/tmp" });
+    const hooks = (backend as any).getExecHooks(session);
+    expect(hooks.isComplete(JSON.stringify({ type: "error", message: "reqwest error stream" }))).toBe(true);
+    expect(hooks.isComplete(JSON.stringify({ type: "end" }))).toBe(true);
+    expect(hooks.isComplete(JSON.stringify({ type: "text", data: "still going" }))).toBe(false);
+  });
+
   it("treats error followed by end as a failed turn", () => {
     const backend = new GrokBackend();
     const session = backend.buildSession({ workingDirectory: "/tmp" });

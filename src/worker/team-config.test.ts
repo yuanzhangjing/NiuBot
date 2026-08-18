@@ -58,6 +58,22 @@ describe("parseTeamConfig", () => {
     expect(() => parseTeamConfig("profiles:\n  - id: a\n    prompt: x\nmaxConcurrent: -1")).toThrow(/正整数/);
   });
 
+  test("backend/model 空串视为未配置", () => {
+    const config = parseTeamConfig(`
+profiles:
+  - id: researcher
+    prompt: 调研
+    backend: ""
+    model: "  "
+  - id: developer
+    prompt: 开发
+    backend: pi
+    model: grok-4.6
+`);
+    expect(config.profiles[0]).toMatchObject({ id: "researcher", backend: undefined, model: undefined });
+    expect(config.profiles[1]).toMatchObject({ id: "developer", backend: "pi", model: "grok-4.6" });
+  });
+
   test("兼容旧值 access：scratch/git_worktree 映射为 direct（存量配置不失效）", () => {
     const config = parseTeamConfig(`
 profiles:

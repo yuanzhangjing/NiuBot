@@ -382,11 +382,29 @@ export class PersistentTransport implements TransportClient {
           { cause: error },
         );
       }
+      const retried = this.requeueOutbound(row, error);
+      if (retried) {
+        return this.deliverPersisted(retried, options);
+      }
       this.store.markOutboundFailed(row.requestId, error);
       await this.cleanupManagedFile(request);
       this.log.warn("outbox delivery failed", { requestId: row.requestId, kind: row.kind, error: errorMessage(error) });
       throw error;
     }
+  }
+
+  private requeueOutbound(row: OutboundRow, error: unknown): OutboundRow | undefined {
+    if (this.stopped) return undefined;
+    if (!this.store.requeueOutbound(row.requestId)) return undefined;
+    const next = this.store.getOutbound(row.requestId);
+    if (!next) return undefined;
+    this.log.warn("retrying outbox delivery", {
+      requestId: row.requestId,
+      kind: row.kind,
+      attempt: next.attemptCount,
+      error: errorMessage(error),
+    });
+    return next;
   }
 
   private callAdapter(request: OutboundRequest): Promise<DeliveryResult> {
@@ -428,6 +446,17 @@ export class PersistentTransport implements TransportClient {
         requestId: row.requestId,
         kind: row.kind,
         error: errorMessage(error),
+      });
+      const current = this.store.getOutbound(row.requestId);
+      if (current?.status !== "unknown") return;
+      const retried = this.requeueOutbound(current, error);
+      if (!retried) return;
+      void this.deliverPersisted(retried, {}).catch((retryError) => {
+        this.log.warn("outbox retry delivery failed", {
+          requestId: retried.requestId,
+          kind: retried.kind,
+          error: errorMessage(retryError),
+        });
       });
     });
   }

@@ -95,6 +95,77 @@ class MissingCliBackend extends ParsedOutputBackend {
   }
 }
 
+class TransientRetryBackend extends CliAgentBackend<BaseCliSession> {
+  attempts = 0;
+
+  constructor() {
+    super("retry-cli");
+  }
+
+  command(): string {
+    return "node";
+  }
+
+  buildSession(_config: SessionConfig): BaseCliSession {
+    return {
+      workingDirectory: process.cwd(),
+      extraEnv: {},
+      cumulativeBytes: 0,
+      compactCount: 0,
+      jsonlOffset: 0,
+    };
+  }
+
+  buildInput(_session: BaseCliSession, _message: string): { args: string[]; stdin?: string } {
+    this.attempts += 1;
+    if (this.attempts === 1) {
+      return {
+        args: [
+          "-e",
+          "process.stdout.write('{\"type\":\"error\",\"message\":\"reqwest error stream\"}\\n'); process.exit(1);",
+        ],
+      };
+    }
+    return {
+      args: ["-e", "process.stdout.write('{\"type\":\"end\"}\\n');"],
+    };
+  }
+
+  parseOutput(stdout: string): ParsedOutput {
+    if (stdout.includes("reqwest")) {
+      return { text: "", turnCompleted: false, failed: true, error: "reqwest error stream", incompleteReason: "grok 返回 error" };
+    }
+    return { text: "recovered", turnCompleted: true };
+  }
+
+  protected transientRetryLimit(): number {
+    return 1;
+  }
+
+  protected isTransientCliError(err: unknown): boolean {
+    return /reqwest/.test(err instanceof Error ? err.message : String(err ?? ""));
+  }
+}
+
+describe("CliAgentBackend transient retry", () => {
+  test("retries once after a transient CLI error and then succeeds", async () => {
+    const backend = new TransientRetryBackend();
+    const session = await backend.createSession({ workingDirectory: process.cwd() });
+    await expect(backend.sendMessage(session as AgentSession, "continue")).resolves.toMatchObject({
+      text: "recovered",
+    });
+    expect(backend.attempts).toBe(2);
+  });
+
+  test("does not retry a non-transient command failure", async () => {
+    const backend = new FailingCliBackend("test-cli");
+    const session = await backend.createSession({ workingDirectory: process.cwd() });
+    await expect(backend.sendMessage(session as AgentSession, "publish to npm")).rejects.toMatchObject({
+      message: expect.stringMatching(/^Command failed: node \(exit 1\)$/),
+    });
+  });
+});
+
 describe("CliAgentBackend diagnostic logging", () => {
   const tempHome = join(tmpdir(), `niubot-cli-base-stdout-${process.pid}`);
 

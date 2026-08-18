@@ -25,7 +25,7 @@ export interface WorkerProfile {
   skills?: TeamProfileSkills;
   /** 专属 backend 类型（如 "claude"）；未设置时复用主 Agent 的 backend */
   backend?: string;
-  /** 专属模型（backend 支持时生效）；未设置时使用 Bot 全局模型 */
+  /** 专属模型（backend 支持时生效）；未设置时走该 backend 自己的默认模型 */
   model?: string;
 }
 

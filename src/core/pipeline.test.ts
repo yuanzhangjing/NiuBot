@@ -4754,6 +4754,46 @@ describe("Pipeline runtime", () => {
     );
   });
 
+  test("unwraps grok Internal error JSON when surfacing CLI failures", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const { im, sentTexts } = createRecordingImStub();
+    const err = new Error("Command failed: grok (exit 1)");
+    err.stdout = [
+      JSON.stringify({
+        type: "error",
+        message: "Internal error: {\n  \"message\": \"reqwest error stream: error sending request for url (https://cli-chat-proxy.grok.com/v1/responses)\",\n  \"promptUsage\": {\"inputTokens\": 1814298}\n}",
+      }),
+      "",
+    ].join("\n");
+
+    const pipeline = new Pipeline(
+      db,
+      im,
+      new ErrorAgent(err),
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "grok",
+    );
+    await pipeline.start();
+
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "hello",
+      platformMsgId: "m1",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const text = sentTexts.at(-1) ?? "";
+    expect(text).toContain("reqwest error stream: error sending request for url");
+    expect(text).not.toContain("promptUsage");
+    expect(text).not.toContain("1814298");
+  });
+
   test("strips internal continuation tags from incomplete-turn errors", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
@@ -5095,6 +5135,92 @@ describe("Pipeline runtime", () => {
     expect(assistantMessages).toHaveLength(2); // 初始回复 + 取消确认；没有被取消的 Loop 回复
     expect(assistantMessages.some((message) => message.content_text.includes("cancel while running"))).toBe(false);
     agent.resolveNext(); // 只清理测试桩；队列在此之前已经恢复。
+  });
+
+  test("allows a Loop turn to cancel itself and still deliver the final reply", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-loop-self-cancel-test-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u2', 'admin', 'feishu', 'user-open-id')").run();
+    db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c1', 'p2p', 'feishu', 'chat-open-id')").run();
+    let pipeline!: Pipeline;
+    let loopId = 0;
+    class SelfCancelLoopAgent extends RecordingAgent {
+      override async sendMessage(_session: AgentSession, message: string): Promise<AgentResponse> {
+        this.sendMessageCalls.push(message);
+        if (message.includes("<loop-continuation>")) {
+          const context = (pipeline as any).activeScheduleAgentCommands.get("c1");
+          const result = await pipeline.executeScheduleAgentCommand("c1", {
+            type: "cancel", scheduleId: `loop:${loopId}`,
+          }, context.token);
+          expect(result.output).toContain(`Cancelled loop:${loopId}`);
+          return { text: "目标已达成，停止循环。" };
+        }
+        return { text: "ok" };
+      }
+    }
+    const agent = new SelfCancelLoopAgent();
+    const { im, sentCards } = createRecordingImStub();
+    pipeline = new Pipeline(
+      db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex",
+    );
+    await pipeline.start();
+
+    (pipeline as any).handleMessage(createMessage({ contentText: "create main session", platformMsgId: "m-initial" }));
+    await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(1));
+
+    loopId = addLoopJob(db, {
+      chatId: "c1", creatorUserId: "u2", intervalSeconds: 60, prompt: "check and maybe stop",
+      now: new Date(Date.now() - 60_000),
+    });
+    const scheduler = new LoopScheduler(db, (job) => pipeline.enqueueLoopJob(job.id));
+    expect(await scheduler.tick(new Date())).toBe(1);
+    await vi.waitFor(() => expect(getLoopJob(db, loopId)?.status).toBe("cancelled"));
+    await vi.waitFor(() => sentCards.some((card) => card.content.includes("目标已达成，停止循环。")));
+    expect(agent.cancelSessionCalls).toHaveLength(0);
+    expect(getLoopJob(db, loopId)?.status).toBe("cancelled");
+  });
+
+  test("lets a Loop turn create a follow-up schedule", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-loop-create-test-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u2', 'admin', 'feishu', 'user-open-id')").run();
+    db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c1', 'p2p', 'feishu', 'chat-open-id')").run();
+    const pipeline = new Pipeline(
+      db, createImStub(), new RecordingAgent(), createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex",
+    );
+    const run = (pipeline as any).runtimeState.createRun({
+      chatId: "c1", triggerMessageIds: [], triggerPlatformMsgIds: [], mergedText: "loop",
+    });
+    (pipeline as any).runtimeState.markRunStage(run.runId, "agent_running");
+    (pipeline as any).activeScheduleAgentCommands.set("c1", {
+      runId: run.runId, userId: "u2", chatType: "p2p", userTurn: true, token: "tok-loop",
+    });
+
+    const created = await pipeline.executeScheduleAgentCommand("c1", {
+      type: "create.schedule", mode: "main", trigger: "after", afterSeconds: 60, prompt: "follow-up",
+    }, "tok-loop");
+    expect(created.output).toContain("Created loop:1");
+  });
+
+  test("still rejects schedule writes outside a user turn or Loop turn", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-schedule-gate-test-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const pipeline = new Pipeline(
+      db, createImStub(), new RecordingAgent(), createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex",
+    );
+    const run = (pipeline as any).runtimeState.createRun({
+      chatId: "c1", triggerMessageIds: [], triggerPlatformMsgIds: [], mergedText: "cont",
+    });
+    (pipeline as any).runtimeState.markRunStage(run.runId, "agent_running");
+    (pipeline as any).activeScheduleAgentCommands.set("c1", {
+      runId: run.runId, userId: "u2", chatType: "p2p", userTurn: false, token: "tok-cont",
+    });
+    await expect(pipeline.executeScheduleAgentCommand("c1", {
+      type: "cancel", scheduleId: "loop:1",
+    }, "tok-cont")).rejects.toThrow("只有用户消息回合");
   });
 
   test("routes /task stop through the command entrypoint and scopes it to the current chat", async () => {

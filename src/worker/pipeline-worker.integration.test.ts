@@ -1144,10 +1144,83 @@ test("角色配置 backend 时使用专属 backend，否则复用主 Agent backe
   expect(service.getJob(specialJob.id)?.responseText).toBe("专属后端结果");
   expect(service.getJob(normalJob.id)?.responseText).toBe(backend.resultText);
   // 专属 backend 确实被使用（session 被创建），且收到角色配置的 model；
-  // 普通角色走主 backend（session 模型为全局 model——本测试 botIdentity 无 model → 空）
+  // 普通角色走主 backend，未配 model 时不传模型名，交给该 backend 默认。
   expect(specialBackend.sessions).toHaveLength(1);
   expect(specialBackend.sessionModels).toEqual(["special-model"]);
   expect(backend.sessions).toContain(service.getJob(normalJob.id)?.backendSessionId);
+  expect(backend.sessionModels.filter((_, i) => backend.sessions[i] === service.getJob(normalJob.id)?.backendSessionId)).toEqual([""]);
+}, 15000);
+
+test("角色换了 backend 但没配 model 时走该 backend 默认，不继承主会话模型", async () => {
+  const specialBackend = new FakeWorkerBackend();
+  specialBackend.resultText = "专属后端默认模型结果";
+  pipeline.stop();
+  pipeline = new Pipeline(
+    db,
+    transport as unknown as TransportClient,
+    backend as unknown as AgentBackend,
+    { name: BOT_ID, platform: "feishu", platformBotId: "bot", model: "main-session-model" },
+    tempRoot,
+    path.join(tempRoot, "niubot.db"),
+    10,
+    "test",
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    false,
+    undefined,
+    undefined,
+    {
+      jobService: service,
+      registry,
+      maxConcurrent: 2,
+      tickMs: 50,
+      artifactRoot: path.join(tempRoot, "tmp"),
+      teamConfigStore: teamConfig,
+      resolveBackend: async (type) => (type === "special" ? specialBackend : backend),
+    },
+  );
+  registry.setProfiles([
+    ...registry.list(),
+    {
+      id: "special-default-model",
+      displayName: "Special Default",
+      description: "",
+      prompt: "你是专用后端角色",
+      access: "read_only",
+      backend: "special",
+    },
+  ]);
+  await pipeline.start();
+
+  const work = service.createWork({
+    botId: BOT_ID,
+    ownerUserId: OWNER,
+    sourceChatId: CHAT_ID,
+    visibility: "private",
+    request: "验证默认模型",
+  });
+  const specialJob = service.createJob({
+    workId: work.id,
+    workerProfileId: "special-default-model",
+    prompt: "用专属后端默认模型执行",
+    workdir: tempRoot,
+  });
+  const normalJob = service.createJob({
+    workId: work.id,
+    workerProfileId: "researcher",
+    prompt: "用主后端默认模型执行",
+    workdir: tempRoot,
+  });
+
+  await waitFor(() => service.getJob(specialJob.id)?.status === "completed");
+  await waitFor(() => service.getJob(normalJob.id)?.status === "completed");
+
+  expect(specialBackend.sessions).toHaveLength(1);
+  expect(specialBackend.sessionModels).toEqual([""]);
+  expect(backend.sessionModels.filter((_, i) => backend.sessions[i] === service.getJob(normalJob.id)?.backendSessionId)).toEqual([""]);
 }, 15000);
 
 test("未知 backend 类型：Job 失败且错误带角色上下文", async () => {

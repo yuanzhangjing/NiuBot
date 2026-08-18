@@ -53,6 +53,8 @@ export type TransportStatusCounts = {
 };
 
 const ERROR_LIMIT = 2_000;
+/** 首次发送 + 确认失败后再试一次。 */
+export const OUTBOUND_MAX_SEND_ATTEMPTS = 2;
 
 export class TransportStore {
   constructor(
@@ -287,6 +289,18 @@ export class TransportStore {
       SET status = 'unknown', error = ?, completed_at = datetime('now'), updated_at = datetime('now')
       WHERE bot_id = ? AND platform = ? AND request_id = ? AND status = 'sending'
     `).run(limitError(error), this.botId, this.platform, requestId).changes === 1;
+  }
+
+  /** 发送失败后回到 pending，再试一次。超时当时先标 unknown，等确认失败后再走这里。 */
+  requeueOutbound(requestId: string): boolean {
+    return this.db.prepare(`
+      UPDATE transport_outbox
+      SET status = 'pending', error = NULL, sending_at = NULL, completed_at = NULL,
+          updated_at = datetime('now')
+      WHERE bot_id = ? AND platform = ? AND request_id = ?
+        AND status IN ('sending', 'unknown')
+        AND attempt_count < ?
+    `).run(this.botId, this.platform, requestId, OUTBOUND_MAX_SEND_ATTEMPTS).changes === 1;
   }
 
   prepareOutboundRecovery(): { pending: OutboundRow[]; unknown: number } {

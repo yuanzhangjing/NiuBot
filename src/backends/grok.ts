@@ -140,7 +140,9 @@ export default class GrokBackend extends CliAgentBackend<GrokSession> {
       },
       isComplete: (line) => {
         try {
-          return (JSON.parse(line) as { type?: string }).type === "end";
+          const type = (JSON.parse(line) as { type?: string }).type;
+          // error 是回合终态：立刻收口，避免再空等到进程 exit 1。
+          return type === "end" || type === "error";
         } catch {
           return false;
         }
@@ -161,6 +163,17 @@ export default class GrokBackend extends CliAgentBackend<GrokSession> {
     const stdout = err.stdout as string | undefined;
     const text = `${stderr ?? ""} ${stdout ?? ""}`;
     return /model/i.test(text);
+  }
+
+  protected transientRetryLimit(): number {
+    return 1;
+  }
+
+  protected isTransientCliError(err: unknown): boolean {
+    const message = err instanceof Error ? err.message : String(err ?? "");
+    const stdout = err && typeof err === "object" && "stdout" in err ? String(err.stdout ?? "") : "";
+    const stderr = err && typeof err === "object" && "stderr" in err ? String(err.stderr ?? "") : "";
+    return TRANSIENT_GROK_CLI_ERROR.test(`${message}\n${stdout}\n${stderr}`);
   }
 
   parseOutput(stdout: string, session: GrokSession): ParsedOutput {
@@ -573,13 +586,32 @@ function parseGrokStream(stdout: string): {
   return { completed, sessionId, usage, modelUsage, text, error };
 }
 
+const TRANSIENT_GROK_CLI_ERROR = /reqwest|error stream|connection (error|reset|refused)|timed? ?out|econnreset|enotfound|socket hang up|broken pipe|tls handshake|cli-chat-proxy/i;
+
 function extractGrokError(result: GrokJsonResult): string | undefined {
-  if (typeof result.error === "string" && result.error.trim()) return result.error.trim();
-  if (result.error && typeof result.error === "object" && result.error.message?.trim()) {
-    return result.error.message.trim();
+  let raw: string | undefined;
+  if (typeof result.error === "string" && result.error.trim()) raw = result.error.trim();
+  else if (result.error && typeof result.error === "object" && result.error.message?.trim()) {
+    raw = result.error.message.trim();
+  } else if (result.type === "error" && result.message?.trim()) {
+    raw = result.message.trim();
   }
-  if (result.type === "error" && result.message?.trim()) return result.message.trim();
-  return undefined;
+  return raw ? unwrapGrokInternalError(raw) : undefined;
+}
+
+/** grok 常把瞬时网络失败包成 Internal error: { message, promptUsage... }，只留内层原因。 */
+function unwrapGrokInternalError(raw: string): string {
+  const match = raw.match(/^Internal error:\s*(\{[\s\S]*\})\s*$/);
+  if (!match?.[1]) return raw;
+  try {
+    const inner = JSON.parse(match[1]) as { message?: unknown };
+    if (typeof inner.message === "string" && inner.message.trim()) {
+      return inner.message.trim();
+    }
+  } catch {
+    // 内层不是 JSON 就保留原文
+  }
+  return raw;
 }
 
 function firstModelUsageId(modelUsage?: Record<string, unknown>): string | undefined {

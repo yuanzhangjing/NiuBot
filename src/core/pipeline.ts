@@ -443,7 +443,7 @@ export class Pipeline {
   private chatScheduleTokens = new Map<string, string>();
 
   /** 正在占用主聊天队列的 Loop 回合；取消命令用它精确中止对应 run。 */
-  private activeLoopRuns = new Map<number, { chatId: string; runId?: string }>();
+  private activeLoopRuns = new Map<number, { chatId: string; runId?: string; selfCancelled?: boolean }>();
 
   /** chatId → 未结束的 Goal（纯内存；重启即断）。 */
   private activeGoals = new Map<string, ActiveGoal>();
@@ -573,7 +573,6 @@ export class Pipeline {
           botId: this.botIdentity.platformBotId,
           botName: this.botIdentity.name,
           platform: this.botIdentity.platform,
-          model: this.botIdentity.model,
           botProfilePath: this.stableContextOptions.botProfilePath,
         },
         buildPrompt: (job, execDir, artifactDir) => this.buildWorkerPrompt(job, execDir, artifactDir),
@@ -998,6 +997,13 @@ export class Pipeline {
             userId: context.userId,
           });
           if (!job) throw new Error(`loop:${id} 不存在或已经结束`);
+          const active = this.activeLoopRuns.get(id);
+          if (active?.chatId === chatId) {
+            // 当前这轮自己退出：别杀掉 Agent，让它把结论发完。
+            active.selfCancelled = true;
+          } else if (job.status === "running") {
+            this.cancelActiveLoopRun(id, chatId);
+          }
           return { output: `Cancelled loop:${id}` };
         }
         const job = deleteCronJobForAccess(this.db, id, {
@@ -3176,6 +3182,7 @@ ${jobParts.join("\n\n")}
     }).replace(/</g, "\\u003c").replace(/>/g, "\\u003e");
     return `<loop-continuation>\n${payload}\n</loop-continuation>\n\n` +
       "这是当前会话中的定时 Loop 回合。请结合已有对话上下文执行 prompt，只处理本轮任务并直接给出用户可读结果。" +
+      "如果判定不必再循环，用 nbt schedule cancel loop:<id> 结束这个 Loop，并在回复里说明为什么停。" +
       "不要复述或展示 loop-continuation 标签、内部字段和本段说明。";
   }
 
@@ -4636,7 +4643,7 @@ ${jobParts.join("\n\n")}
           runId: runId!,
           userId: uniqueSenderIds.length === 1 ? uniqueSenderIds[0]! : commandUserId,
           chatType: processChatType,
-          userTurn: !isContinuationTurn && !isLoopTurn && uniqueSenderIds.length === 1,
+          userTurn: !isContinuationTurn && (isLoopTurn || uniqueSenderIds.length === 1),
           token: this.chatScheduleTokens.get(chatId) ?? "",
         });
         if (this.workerConfig) {
@@ -4708,14 +4715,17 @@ ${jobParts.join("\n\n")}
       }
 
       // `/loop del` 可在 Agent 执行期间由内置命令立即处理。Agent 返回后先查持久状态，
-      // 被取消的本轮不写入主会话历史，也不向平台发送。检查后到 sendCard 之间没有 await，
-      // 因此同一进程内的新取消命令不能插入这段同步路径；已经开始的平台请求只能尽力取消。
+      // 被用户取消的本轮不写入主会话历史，也不向平台发送。Loop 自己取消则保留本轮结论。
+      // 检查后到 sendCard 之间没有 await，因此同一进程内的新取消命令不能插入这段同步路径。
       if (isLoopTurn && activeLoopJob && getLoopJob(this.db, activeLoopJob.id)?.status !== "running") {
-        loopSettled = true;
-        clearActiveLoopRun();
-        this.log.info("cancelled loop result discarded", { chatId, loopJobId: activeLoopJob.id });
-        this.markRuntimeRun(runId, "stopped");
-        return;
+        if (!this.activeLoopRuns.get(activeLoopJob.id)?.selfCancelled) {
+          loopSettled = true;
+          clearActiveLoopRun();
+          this.log.info("cancelled loop result discarded", { chatId, loopJobId: activeLoopJob.id });
+          this.markRuntimeRun(runId, "stopped");
+          return;
+        }
+        this.log.info("loop self-cancelled, delivering final result", { chatId, loopJobId: activeLoopJob.id });
       }
       const compactedThisTurn = this.updateCompactRecoveryState(chatId, response.compactCount);
 
@@ -5426,7 +5436,7 @@ function extractAgentErrorDetail(err: unknown): string | null {
         }
         // Codex / generic format: {type:"error", message:"..."}
         if (event.type === "error" && typeof event.message === "string" && event.message.trim()) {
-          parts.push(event.message.trim());
+          parts.push(unwrapNestedAgentError(event.message.trim()));
         }
         // Opencode format: {type:"error", error:{name:"...", data:{message:"..."}}}
         if (event.type === "error" && typeof event.error === "object" && event.error !== null) {
@@ -5464,6 +5474,21 @@ function extractAgentErrorDetail(err: unknown): string | null {
   // readable and don't flood IM.
   const joined = unique.join("\n");
   return joined.length > ERROR_DISPLAY_MAX_LEN ? joined.slice(0, ERROR_DISPLAY_MAX_LEN) + "…" : joined;
+}
+
+/** grok 会把瞬时网络失败包成 Internal error: { message, promptUsage... }，只留内层原因。 */
+function unwrapNestedAgentError(text: string): string {
+  const match = text.match(/^Internal error:\s*(\{[\s\S]*\})\s*$/);
+  if (!match?.[1]) return text;
+  try {
+    const inner = JSON.parse(match[1]) as { message?: unknown };
+    if (typeof inner.message === "string" && inner.message.trim()) {
+      return inner.message.trim();
+    }
+  } catch {
+    // 内层不是 JSON 就保留原文
+  }
+  return text;
 }
 
 function extractPlatformErrorDetail(err: unknown): string {

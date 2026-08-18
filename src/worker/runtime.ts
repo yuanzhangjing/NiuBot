@@ -268,7 +268,8 @@ export class WorkerRuntime {
         chatId: work?.sourceChatId,
         workingDirectory: prepared.execDir,
         importantContext,
-        model: profile.model ?? sessionConfig.model,
+        // 未配置时不传 model，让对应 backend 走自己的默认模型。
+        model: profile.model?.trim() || undefined,
       });
       // session 创建期间用户可能已取消：进入 running 前最后检查一次
       ensureNotCancelled();
