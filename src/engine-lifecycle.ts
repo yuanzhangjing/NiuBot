@@ -1,7 +1,8 @@
 import { existsSync, rmSync } from "node:fs";
 import path from "node:path";
 import type { RestartConfig } from "./config.js";
-import { loadConfig, writeAutoUpdateEnabledToConfig, writeKeepAwakeEnabledToConfig } from "./config.js";
+import { loadConfig, writeAutoUpdateEnabledToConfig, writeKeepAwakeEnabledToConfig, writeTimezoneToConfig } from "./config.js";
+import { normalizeTimeZoneInput, setDisplayTimezone } from "./tz.js";
 import type { AutoUpdateConfig } from "./core/auto-update.js";
 import { createLogger } from "./logger.js";
 import { assertInstallablePackageArchive } from "./package-archive.js";
@@ -49,6 +50,7 @@ export interface EngineLifecycle {
   getAutoUpdateConfig(): AutoUpdateConfig | undefined;
   canPersistAutoUpdate(): boolean;
   setAutoUpdateEnabled(enabled: boolean): void;
+  setTimezone(timezone: string): void;
   getKeepAwakeStatus(): KeepAwakeStatus;
   setKeepAwakeEnabled(enabled: boolean, options?: { persist?: boolean }): Promise<KeepAwakeStatus>;
   /** 重启后恢复持久化的防休眠状态；无配置或已关闭时保持现状。 */
@@ -205,6 +207,16 @@ export class EngineLifecycleService implements EngineLifecycle {
 
   canPersistAutoUpdate(): boolean {
     return this.configPath !== undefined;
+  }
+
+  setTimezone(timezone: string): void {
+    const resolved = normalizeTimeZoneInput(timezone);
+    if (!resolved) throw new Error(`未知时区: ${timezone}`);
+    if (!this.configPath) {
+      throw new Error("当前服务没有配置文件，无法保存时区。");
+    }
+    writeTimezoneToConfig(this.configPath, resolved);
+    setDisplayTimezone(resolved);
   }
 
   setAutoUpdateEnabled(enabled: boolean): void {

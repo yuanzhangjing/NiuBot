@@ -3,8 +3,8 @@
  */
 
 import type Database from "better-sqlite3";
-import { listCronJobsForAccess } from "../core/cron.js";
-import { formatLocalDateTimeWithTZ, labelLocalTime, TZ } from "../tz.js";
+import { describeCronSchedule, listCronJobsForAccess } from "../core/cron.js";
+import { formatLocalDateTimeWithTZ, TZ } from "../tz.js";
 import { handleSchedule, type ScheduleCommandExecutor } from "./schedule.js";
 
 export function formatCronScheduleForDisplay(job: {
@@ -12,9 +12,8 @@ export function formatCronScheduleForDisplay(job: {
   runAt: string | null;
   timezone?: string;
 }): string {
-  const timeZone = job.timezone ?? TZ;
-  if (job.cronExpr) return labelLocalTime(job.cronExpr, timeZone);
-  if (job.runAt) return `at ${formatLocalDateTimeWithTZ(job.runAt, timeZone)}`;
+  if (job.cronExpr) return describeCronSchedule(job.cronExpr, null, job.timezone);
+  if (job.runAt) return `at ${formatLocalDateTimeWithTZ(job.runAt)}`;
   return "unknown";
 }
 
@@ -142,7 +141,7 @@ Commands:
   del   <id>  Delete a job
 
 Datetime formats: "2026-03-17T10:52:00", "2026-03-17 10:52", "2026-03-17"
-Times without Z/offset and recurring cron expressions use NIUBOT_TZ (${TZ}).
+Times without Z/offset and recurring cron expressions use the Engine display timezone (${TZ}).
 
 Example:
   nbt cron add --cron "0 9 * * 1-5" --prompt "Send daily standup summary" --desc "standup"`);

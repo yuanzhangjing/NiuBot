@@ -48,6 +48,7 @@ import {
   completeRuntimeHomeMigrationAfterStartup,
 } from "./runtime-home-migration.js";
 import { isProductionVersion, runtimeEnvironmentForVersion } from "./version.js";
+import { applyDisplayTimezone } from "./tz.js";
 import { writeLegacyRuntimeVersion } from "./legacy-runtime-metadata.js";
 
 const log = createLogger("main");
@@ -139,6 +140,12 @@ async function main(): Promise<void> {
   log.info("config loaded", {
     botCount: config.bots.length,
     bots: config.bots.map((b) => `${b.id}(${b.backend})`).join(", "),
+  });
+  log.info("display timezone applied", {
+    timezone: applyDisplayTimezone({
+      env: process.env["NIUBOT_TZ"],
+      config: config.timezone,
+    }),
   });
 
   const capabilityStartedAt = Date.now();

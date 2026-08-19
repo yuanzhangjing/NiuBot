@@ -58,7 +58,11 @@ import {
 } from "../memory/inject.js";
 import {
   dateTimeInTimeZone,
+  DEFAULT_TIMEZONE,
   formatLocalDateTimeWithTZ,
+  isTimezoneChangeUtterance,
+  normalizeTimeZoneInput,
+  timezoneCommandIsResolved,
   TZ,
   userDateTimeToUtcSql,
   utcDateTimeForSql,
@@ -137,7 +141,7 @@ const INTERRUPT_WORDS = new Set([
 const BUILTIN_COMMANDS = new Set([
   "/restart", "/update", "/service", "/new", "/agent", "/model", "/effort", "/autoupdate",
   "/admin", "/help", "/stop", "/clear", "/flush", "/task", "/status", "/history", "/awake",
-  "/worker",
+  "/worker", "/timezone", "/tz",
 ]);
 const HYBRID_SCHEDULE_COMMANDS = new Set(["/loop", "/cron"]);
 const SCHEDULE_BUILTIN_SUBCOMMANDS = new Set([
@@ -165,6 +169,9 @@ function rewriteHybridCreationCommand(text: string): string | null {
       return `${rest}（用户要求创建循环任务，请使用 nbt schedule create --mode current_session）`;
     case "/cron":
       return `${rest}（用户要求创建定时任务，请使用 nbt schedule create --mode new_session）`;
+    case "/tz":
+    case "/timezone":
+      return `${rest}（用户要切换展示时区，内置 /tz 没认出这个名字。请根据常识解析成 IANA，然后立刻执行 \`nbt timezone set <IANA>\`，例如 \`nbt timezone set America/Los_Angeles\`。不要让用户再打一遍 /tz。）`;
     default:
       return null;
   }
@@ -892,7 +899,7 @@ export class Pipeline {
 
     switch (command.type) {
       case "create.schedule": {
-        const timeZone = command.timeZone ?? TZ;
+        const timeZone = TZ;
         if (command.mode === "main") {
           let id: number;
           if (command.trigger === "every") {
@@ -937,7 +944,7 @@ export class Pipeline {
           const triggerLabel = command.trigger === "every"
             ? `每 ${formatLoopInterval(job.intervalSeconds)}`
             : command.trigger === "cron"
-              ? `${describeCronExpr(job.cronExpr ?? command.cronExpr!)} (${job.timezone})`
+              ? describeCronExpr(job.cronExpr ?? command.cronExpr!, job.timezone)
               : `一次性 · ${formatLocalDateTimeWithTZ(job.nextRunAt, TZ)}`;
           return { output: [
             `Created loop:${id}`,
@@ -982,7 +989,7 @@ export class Pipeline {
         return { output: [
           `Created cron:${id}`,
           "Mode: isolated (独立会话)",
-          job.cronExpr ? `Schedule: ${job.cronExpr} (${job.timezone})` : `Run at: ${formatLocalDateTimeWithTZ(job.runAt!, job.timezone)}`,
+          job.cronExpr ? `Schedule: ${describeCronSchedule(job.cronExpr, null, job.timezone)}` : `Run at: ${formatLocalDateTimeWithTZ(job.runAt!)}`,
           `Task: ${job.prompt}`,
         ].join("\n") };
       }
@@ -1599,6 +1606,15 @@ export class Pipeline {
     const cmd = parts[0].toLowerCase();
     const isAdmin = this.adminRoles.has(userId);
 
+    if (isTimezoneChangeUtterance(text)) {
+      if (!isAdmin) {
+        this.replyText(chatId, platformChatId, msgId, "/tz 仅管理员可用。");
+        return true;
+      }
+      this.handleTimezoneCommand([text], chatId, platformChatId, msgId);
+      return true;
+    }
+
     // 1. 内置命令
     switch (cmd) {
       case "/restart": {
@@ -1696,6 +1712,15 @@ export class Pipeline {
           return true;
         }
         this.handleEffortCommand(parts.slice(1), chatId, platformChatId, msgId);
+        return true;
+      }
+      case "/timezone":
+      case "/tz": {
+        if (!isAdmin) {
+          this.replyText(chatId, platformChatId, msgId, "/timezone 仅管理员可用。");
+          return true;
+        }
+        this.handleTimezoneCommand(parts.slice(1), chatId, platformChatId, msgId);
         return true;
       }
       case "/autoupdate": {
@@ -1840,6 +1865,7 @@ export class Pipeline {
   }
 
   private isBuiltinCommand(text: string, userId: string): boolean {
+    if (isTimezoneChangeUtterance(text)) return true;
     if (!text.startsWith("/") || text.startsWith("//")) return false;
     const firstToken = text.split(/\s+/, 1)[0]?.toLowerCase();
     if (firstToken && HYBRID_SCHEDULE_COMMANDS.has(firstToken)) {
@@ -1855,6 +1881,10 @@ export class Pipeline {
     if (firstToken === "/worker") {
       const subcommand = text.trim().split(/\s+/)[1]?.toLowerCase();
       return subcommand === undefined || WORKER_BUILTIN_SUBCOMMANDS.has(subcommand);
+    }
+    // /tz：能认出的时区本地切换；认不出的放行给 Agent 做语义解析
+    if (firstToken === "/tz" || firstToken === "/timezone") {
+      return timezoneCommandIsResolved(text.trim().split(/\s+/).slice(1));
     }
     if (firstToken && BUILTIN_COMMANDS.has(firstToken)) return true;
     return shouldHandleAdminShellCommand(text, this.adminRoles.has(userId), {
@@ -1943,8 +1973,8 @@ export class Pipeline {
     } else {
       for (const job of listCronJobs(this.db, chatId)) {
         const schedule = job.cronExpr
-          ? `${job.cronExpr}（${job.timezone}）`
-          : formatLocalDateTimeWithTZ(job.runAt!, job.timezone);
+          ? describeCronSchedule(job.cronExpr, null, job.timezone)
+          : formatLocalDateTimeWithTZ(job.runAt!);
         const progress = job.maxTimes ? ` · ${job.runCount}/${job.maxTimes}` : job.runCount ? ` · 已执行 ${job.runCount} 次` : "";
         lines.push(`· cron:${job.id} · ${job.status} · ${schedule}${progress}`);
         lines.push(`  ${escapeLarkMarkdownText(job.prompt.replace(/\s+/g, " ").slice(0, 120))}`);
@@ -2268,6 +2298,7 @@ export class Pipeline {
       `**Platform:** ${this.botIdentity.platform}`,
       `**Backend:** ${displayBackendType(this.backendType)}`,
       `**Model:** ${this.botIdentity.model ?? "default"}`,
+      `**Timezone:** ${TZ}`,
       `**Uptime:** ${uptimeStr}`,
       `**Active sessions:** ${activeSessions}`,
       `**Cron jobs:** ${cronCount}`,
@@ -3869,6 +3900,57 @@ ${jobParts.join("\n\n")}
     this.log.info("effort switched (runtime)", { effort: level, backend: this.backendType });
   }
 
+  /**
+   * /tz：查看或切换展示时区。时刻仍按 UTC 存储。
+   * - /tz                         → 显示当前时区
+   * - /tz 东京 或 /tz 把时区改成纽约 → 切换并写入配置
+   * - /tz reset                   → 恢复默认北京时间
+   */
+  private handleTimezoneCommand(args: string[], chatId: string, platformChatId: string, msgId?: string): void {
+    const action = args[0]?.toLowerCase();
+    if (args.length === 0 || (args.length === 1 && (action === "get" || action === "show"))) {
+      this.sendAgentCard(
+        chatId, platformChatId, msgId, "Timezone|blue",
+        [
+          `**Timezone:** ${TZ}`,
+          "",
+          "`/tz 东京` 立即切换，并写入配置文件 `timezone`",
+          "也可以改配置文件的 `timezone`，或设环境变量 `NIUBOT_TZ`（配置文件优先，这两处改完要重启）",
+          "`/tz reset` 恢复默认（Asia/Shanghai）",
+        ].join("\n"),
+      );
+      return;
+    }
+
+    const requested = action === "reset" ? DEFAULT_TIMEZONE : args.join(" ");
+    try {
+      const resolved = this.setEngineTimezone(requested);
+      this.sendAgentCard(
+        chatId, platformChatId, msgId, "Timezone|green",
+        `展示时区已切换为 **${resolved}**。\n已写入配置文件 \`timezone\`。卡片和下次执行时间按此时区显示，库里仍存 UTC。`,
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.log.warn("failed to update timezone", { error: message });
+      this.sendAgentCard(
+        chatId, platformChatId, msgId, message.startsWith("未知时区") ? "Timezone|orange" : "Timezone|red",
+        message.startsWith("未知时区")
+          ? `未知时区 **${requested}**。\n可以说北京、东京、纽约，或 \`Asia/Shanghai\`。`
+          : `时区保存失败：${message}`,
+      );
+    }
+  }
+
+  /** /tz 和 agent（nbt timezone set）共用：解析后写入配置并切换展示时区。 */
+  setEngineTimezone(raw: string): string {
+    const resolved = normalizeTimeZoneInput(raw);
+    if (!resolved) throw new Error(`未知时区: ${raw}`);
+    if (!this.engineLifecycle) throw new Error("Engine 生命周期服务不可用。");
+    this.engineLifecycle.setTimezone(resolved);
+    this.log.info("timezone switched", { timezone: resolved });
+    return resolved;
+  }
+
   /** /autoupdate：查看/开关自动升级。 */
   private handleAutoUpdateCommand(args: string[], chatId: string, platformChatId: string, msgId?: string): void {
     const config = this.effectiveAutoUpdateConfig();
@@ -4094,6 +4176,7 @@ ${jobParts.join("\n\n")}
         "`/admin`　　管理员列表/添加/移除",
         "`/model`　　查看/切换模型",
         "`/effort`　 查看/切换推理强度",
+        "`/tz`　　查看/切换展示时区",
         "`/agent`　　查看/切换 Agent backend",
         "`/restart`　重启引擎",
         "`/update`　　检查更新",

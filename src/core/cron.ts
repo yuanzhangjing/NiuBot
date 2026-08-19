@@ -13,6 +13,7 @@ import {
   TZ,
   userDateTimeToUtcSql,
   utcDateTimeForSql,
+  zonedDateTimeToDate,
 } from "../tz.js";
 import { assertChatAccess, type ChatAccessContext } from "./access.js";
 
@@ -23,8 +24,9 @@ const DOW_CN: Record<string, string> = {
   "4": "每周四", "5": "每周五", "6": "每周六", "7": "每周日",
 };
 
-/** 把 cron 表达式转成人类可读频率描述（用于卡片标题）；无法识别时原样返回。 */
-export function describeCronExpr(expr: string): string {
+/** 把 cron 表达式转成人类可读频率描述（用于卡片标题）；无法识别时原样返回。
+ *  展示一律按当前展示时区。旧任务的钟点数字可能按当时机器时区写入，换算后再显示。 */
+export function describeCronExpr(expr: string, sourceTz: string = TZ, displayTz: string = TZ): string {
   const parts = expr.trim().split(/\s+/);
   if (parts.length !== 5) return expr;
   const [min, hour, dom, month, dow] = parts;
@@ -44,21 +46,91 @@ export function describeCronExpr(expr: string): string {
   }
   // 每天 HH:MM
   if (dom === "*" && month === "*" && dow === "*" && isNum(min) && isNum(hour)) {
-    return `每天 ${hour.padStart(2, "0")}:${min.padStart(2, "0")}`;
+    const clock = cronClockForDisplay(Number(hour), Number(min), sourceTz, displayTz);
+    return clock ? `每天 ${clock}` : expr;
   }
   // 工作日 / 每周某天 HH:MM
   if (dom === "*" && month === "*" && isNum(min) && isNum(hour)) {
-    if (dow === "1-5") return `工作日 ${hour.padStart(2, "0")}:${min.padStart(2, "0")}`;
-    const day = DOW_CN[dow];
-    if (day) return `${day} ${hour.padStart(2, "0")}:${min.padStart(2, "0")}`;
+    if (dow === "1-5") {
+      const clock = cronWorkdayClockForDisplay(Number(hour), Number(min), sourceTz, displayTz);
+      return clock ? `工作日 ${clock}` : expr;
+    }
+    const sourceDow = Number(dow);
+    if (DOW_CN[dow] && Number.isInteger(sourceDow)) {
+      const converted = cronWeekdayForDisplay(Number(hour), Number(min), sourceDow, sourceTz, displayTz);
+      if (converted) return `${DOW_CN[String(converted.dow)]} ${converted.clock}`;
+    }
   }
   return expr;
 }
 
+function cronClockForDisplay(hour: number, minute: number, sourceTz: string, displayTz: string): string | undefined {
+  const instant = instantForCronClock(hour, minute, sourceTz);
+  if (!instant) return undefined;
+  const parts = getZonedDateTimeParts(instant, displayTz);
+  return `${String(parts.hour).padStart(2, "0")}:${String(parts.minute).padStart(2, "0")}`;
+}
+
+function cronWeekdayForDisplay(
+  hour: number,
+  minute: number,
+  sourceDow: number,
+  sourceTz: string,
+  displayTz: string,
+): { clock: string; dow: number } | undefined {
+  const instant = instantForCronClock(hour, minute, sourceTz, sourceDow % 7);
+  if (!instant) return undefined;
+  const parts = getZonedDateTimeParts(instant, displayTz);
+  return {
+    clock: `${String(parts.hour).padStart(2, "0")}:${String(parts.minute).padStart(2, "0")}`,
+    dow: weekdayInZone(instant, displayTz),
+  };
+}
+
+function cronWorkdayClockForDisplay(hour: number, minute: number, sourceTz: string, displayTz: string): string | undefined {
+  const monday = cronWeekdayForDisplay(hour, minute, 1, sourceTz, displayTz);
+  const friday = cronWeekdayForDisplay(hour, minute, 5, sourceTz, displayTz);
+  if (!monday || !friday) return undefined;
+  if (monday.clock !== friday.clock) return undefined;
+  if (monday.dow < 1 || monday.dow > 5 || friday.dow < 1 || friday.dow > 5) return undefined;
+  return monday.clock;
+}
+
+function instantForCronClock(hour: number, minute: number, sourceTz: string, sourceDow?: number): Date | undefined {
+  const now = getZonedDateTimeParts(new Date(), sourceTz);
+  const start = Date.UTC(now.year, now.month - 1, now.day);
+  for (let i = 0; i < 14; i++) {
+    const probe = new Date(start + i * 86_400_000);
+    let instant: Date;
+    try {
+      instant = zonedDateTimeToDate({
+        year: probe.getUTCFullYear(),
+        month: probe.getUTCMonth() + 1,
+        day: probe.getUTCDate(),
+        hour,
+        minute,
+        second: 0,
+      }, sourceTz);
+    } catch {
+      continue;
+    }
+    const parts = getZonedDateTimeParts(instant, sourceTz);
+    if (parts.hour !== hour || parts.minute !== minute) continue;
+    if (sourceDow === undefined || weekdayInZone(instant, sourceTz) === sourceDow) return instant;
+  }
+  return undefined;
+}
+
+function weekdayInZone(date: Date, timeZone: string): number {
+  const name = new Intl.DateTimeFormat("en-US", { timeZone, weekday: "short" }).format(date);
+  const map: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+  return map[name] ?? -1;
+}
+
 /** Cron 任务触发节奏描述：表达式优先；一次性任务显示本地时间。 */
 export function describeCronSchedule(expr: string | null, runAt: string | null, timezone: string = TZ): string {
-  if (expr) return describeCronExpr(expr);
-  if (runAt) return `一次性 · ${formatLocalDateTimeWithTZ(runAt, timezone)}`;
+  if (expr) return describeCronExpr(expr, timezone, TZ);
+  if (runAt) return `一次性 · ${formatLocalDateTimeWithTZ(runAt)}`;
   return "未设置";
 }
 

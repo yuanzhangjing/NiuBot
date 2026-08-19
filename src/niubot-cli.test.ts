@@ -14,6 +14,7 @@ import {
   prependNiubotBinToPath,
 } from "./platform/cli-runtime.js";
 import { resolveBotEndpoint } from "./platform/ipc.js";
+import { TZ } from "./tz.js";
 
 describe("niubot CLI path helpers", () => {
   it("publishes nbt as a stable package binary", () => {
@@ -121,6 +122,11 @@ describe("niubot CLI path helpers", () => {
 
     expect(adminEnv["NIUBOT_BOT_PROFILE_PATH"]).toBe("/tmp/bot_profile.md");
     expect(userEnv["NIUBOT_BOT_PROFILE_PATH"]).toBeUndefined();
+  });
+
+  it("injects the current display timezone for agent CLI processes", () => {
+    const env = buildNiubotEnv({ workingDirectory: "/tmp/project" });
+    expect(env["NIUBOT_TZ"]).toBe(TZ);
   });
 
   it("includes NIUBOT_HOME so agent subprocesses connect to the correct service", () => {

@@ -88,7 +88,7 @@ export function parseScheduleAgentCommand(value: unknown): ScheduleAgentCommand 
         description: command.description,
         maxTimes: command.maxTimes,
         untilTime: command.untilTime,
-        timeZone: command.timeZone ?? TZ,
+        timeZone: TZ,
       };
     }
     case "cancel":
@@ -162,7 +162,7 @@ function parseCreateSchedule(command: Record<string, unknown>): CreateScheduleCo
     maxTimes: command.maxTimes,
     durationSeconds: command.durationSeconds,
     untilTime: command.untilTime,
-    timeZone: command.timeZone ?? TZ,
+    timeZone: TZ,
   };
 }
 

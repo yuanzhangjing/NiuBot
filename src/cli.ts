@@ -41,6 +41,8 @@ import { handleTask } from "./cli/task.js";
 import { handleSessions } from "./cli/session.js";
 import { handleWorker } from "./cli/worker.js";
 import { handleGoal } from "./cli/goal.js";
+import { handleFeishu } from "./cli/feishu.js";
+import { handleTimezoneCli } from "./cli/timezone.js";
 import { parseArgs } from "./cli/args.js";
 import { formatLocalDateTimeWithTZ } from "./tz.js";
 
@@ -60,6 +62,9 @@ const sessionCommands = new Set([
   "task",
   "worker",
   "whoami",
+  "feishu",
+  "timezone",
+  "tz",
   "restart",
   "goal",
 ]);
@@ -202,6 +207,18 @@ async function main(): Promise<void> {
       break;
     case "whoami":
       handleWhoami();
+      break;
+    case "feishu":
+      handleFeishu(args.slice(1), {
+        botName: BOT_NAME,
+        botProfilePath: BOT_PROFILE_PATH,
+        dbPath: DB_PATH,
+        platformBotId: BOT_ID,
+      });
+      break;
+    case "timezone":
+    case "tz":
+      await handleTimezoneCli(args.slice(1), IS_ADMIN);
       break;
     default:
       printUsage();
@@ -535,6 +552,8 @@ Commands:
   goal          finish                      End the current Goal (token-protected)
   system-rules                             Show NiuBot Engine system rules
   whoami                                    Show current scene info
+  feishu                                    Show current Bot Feishu appId/appSecret
+  timezone      get|set|reset               Agent: apply display timezone
 
 Use "nbt <command> --help" for detailed syntax.
 

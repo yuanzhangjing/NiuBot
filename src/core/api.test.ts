@@ -6,7 +6,7 @@ import { afterEach, expect, test, vi } from "vitest";
 
 import { localApiRequest } from "../local-api/client.js";
 import { resolveBotEndpoint } from "../platform/ipc.js";
-import { TZ } from "../tz.js";
+import { TZ, normalizeTimeZoneInput } from "../tz.js";
 import { ApiServer, type ApiHandler } from "./api.js";
 
 const tempDirs: string[] = [];
@@ -119,4 +119,35 @@ test("/schedule 在 API 边界拒绝未知操作和非法字段", async () => {
     expect(response.statusCode).toBe(400);
   }
   expect(executeScheduleCommand).not.toHaveBeenCalled();
+});
+
+test("/timezone lets the agent apply a resolved zone", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "niubot-timezone-api-"));
+  tempDirs.push(root);
+  const endpoint = resolveBotEndpoint(root, "test-bot");
+  let current = "Asia/Shanghai";
+  const handler: ApiHandler = {
+    sendMessage: async () => {},
+    sendCard: async () => {},
+    sendFile: async () => {},
+    resolveChatPlatformId: () => undefined,
+    getDefaultPlatformChatId: () => undefined,
+    getTimezone: () => current,
+    setTimezone: (raw) => {
+      const resolved = normalizeTimeZoneInput(raw);
+      if (!resolved) throw new Error(`未知时区: ${raw}`);
+      current = resolved;
+      return resolved;
+    },
+  };
+  const server = new ApiServer(endpoint, handler);
+  servers.push(server);
+  await server.start();
+
+  const switched = await localApiRequest(endpoint, "/timezone", {
+    method: "POST",
+    body: { timezone: "西雅图" },
+  });
+  expect(switched.statusCode).toBe(200);
+  expect(JSON.parse(switched.body)).toEqual({ timezone: "America/Los_Angeles" });
 });

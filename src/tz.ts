@@ -2,11 +2,158 @@
  * Time utilities.
  *
  * Instants are persisted and compared as UTC. Calendar input and human-facing
- * output use the configured IANA timezone (NIUBOT_TZ).
+ * output use one display timezone: config.yaml `timezone`, else NIUBOT_TZ, else Asia/Shanghai.
  */
 
-/** Configured timezone (IANA name). */
-export const TZ = process.env["NIUBOT_TZ"] || Intl.DateTimeFormat().resolvedOptions().timeZone;
+export const DEFAULT_TIMEZONE = "Asia/Shanghai";
+
+const TIMEZONE_ALIASES: Record<string, string> = {
+  "北京": DEFAULT_TIMEZONE,
+  "上海": DEFAULT_TIMEZONE,
+  beijing: DEFAULT_TIMEZONE,
+  shanghai: DEFAULT_TIMEZONE,
+  china: DEFAULT_TIMEZONE,
+  cn: DEFAULT_TIMEZONE,
+  utc: "UTC",
+  "东京": "Asia/Tokyo",
+  tokyo: "Asia/Tokyo",
+  japan: "Asia/Tokyo",
+  "日本": "Asia/Tokyo",
+  "大阪": "Asia/Tokyo",
+  "首尔": "Asia/Seoul",
+  seoul: "Asia/Seoul",
+  "韩国": "Asia/Seoul",
+  "香港": "Asia/Hong_Kong",
+  hongkong: "Asia/Hong_Kong",
+  "台北": "Asia/Taipei",
+  taipei: "Asia/Taipei",
+  "新加坡": "Asia/Singapore",
+  singapore: "Asia/Singapore",
+  "纽约": "America/New_York",
+  newyork: "America/New_York",
+  "new york": "America/New_York",
+  nyc: "America/New_York",
+  "洛杉矶": "America/Los_Angeles",
+  losangeles: "America/Los_Angeles",
+  "los angeles": "America/Los_Angeles",
+  "旧金山": "America/Los_Angeles",
+  sanfrancisco: "America/Los_Angeles",
+  "san francisco": "America/Los_Angeles",
+  "西雅图": "America/Los_Angeles",
+  seattle: "America/Los_Angeles",
+  "hong kong": "Asia/Hong_Kong",
+  "伦敦": "Europe/London",
+  london: "Europe/London",
+  "巴黎": "Europe/Paris",
+  paris: "Europe/Paris",
+  "柏林": "Europe/Berlin",
+  berlin: "Europe/Berlin",
+  "悉尼": "Australia/Sydney",
+  sydney: "Australia/Sydney",
+};
+
+/** Current display timezone (IANA name). */
+export let TZ = resolveInitialTimezone();
+
+export function isValidTimeZone(timezone: string): boolean {
+  try {
+    Intl.DateTimeFormat("en-US", { timeZone: timezone }).format(new Date());
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function resolveIanaToken(token: string): string | undefined {
+  const titled = token.split("/").map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join("/");
+  if (isValidTimeZone(titled)) return titled;
+  if (titled !== token && isValidTimeZone(token)) return token;
+  return undefined;
+}
+
+/** Resolve IANA names, aliases, or a short natural-language phrase. */
+export function normalizeTimeZoneInput(raw: string): string | undefined {
+  const trimmed = raw.trim();
+  if (!trimmed) return undefined;
+  const lower = trimmed.toLowerCase();
+  const compact = lower.replace(/[\s_-]+/g, "");
+  const exact = TIMEZONE_ALIASES[lower] ?? TIMEZONE_ALIASES[trimmed] ?? TIMEZONE_ALIASES[compact];
+  if (exact) return exact;
+  const exactIana = resolveIanaToken(trimmed);
+  if (exactIana) return exactIana;
+
+  let best: { index: number; length: number; timezone: string } | undefined;
+  const consider = (index: number, length: number, timezone: string) => {
+    if (index < 0) return;
+    if (!best || index > best.index || (index === best.index && length > best.length)) {
+      best = { index, length, timezone };
+    }
+  };
+
+  for (const [alias, timezone] of Object.entries(TIMEZONE_ALIASES)) {
+    const aliasLower = alias.toLowerCase();
+    if (/^[a-z]{1,3}$/i.test(alias)) {
+      const re = new RegExp(`(?<![a-z])${aliasLower}(?![a-z])`, "g");
+      let match: RegExpExecArray | null;
+      while ((match = re.exec(lower))) consider(match.index, alias.length, timezone);
+      continue;
+    }
+    consider(trimmed.lastIndexOf(alias), alias.length, timezone);
+    consider(lower.lastIndexOf(aliasLower), aliasLower.length, timezone);
+  }
+  if (best) return best.timezone;
+
+  const iana = trimmed.match(/[A-Za-z]+(?:\/[A-Za-z0-9_+-]+)+/);
+  if (iana?.[0]) return resolveIanaToken(iana[0]);
+  return undefined;
+}
+
+const TZ_CHANGE_INTENT_RE = /改成|换成|设成|设为|调成|切到|切换到/;
+const TZ_TOPIC_RE = /时区|时间/;
+
+/** True for utterances like「帮我改成北京时区」「改成北京时间」— not `/tz` itself. */
+export function isTimezoneChangeUtterance(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed || trimmed.startsWith("/")) return false;
+  if (!TZ_CHANGE_INTENT_RE.test(trimmed) || !TZ_TOPIC_RE.test(trimmed)) return false;
+  return Boolean(normalizeTimeZoneInput(trimmed));
+}
+
+/** `/tz` args the builtin can handle locally. Unknown names should fall through to the agent. */
+export function timezoneCommandIsResolved(args: string[]): boolean {
+  if (args.length === 0) return true;
+  const action = args[0]!.toLowerCase();
+  if (action === "reset" || action === "get" || action === "show" || action === "help") return true;
+  return Boolean(normalizeTimeZoneInput(args.join(" ")));
+}
+
+export function setDisplayTimezone(timezone: string): void {
+  const resolved = normalizeTimeZoneInput(timezone);
+  if (!resolved) throw new Error(`未知时区: ${timezone}`);
+  TZ = resolved;
+}
+
+/** Startup: config.yaml (from /tz) wins, then NIUBOT_TZ, then Beijing. */
+export function applyDisplayTimezone(options: { env?: string; config?: string } = {}): string {
+  const config = options.config?.trim();
+  if (config && isValidTimeZone(config)) {
+    TZ = config;
+    return TZ;
+  }
+  const env = options.env?.trim();
+  if (env && isValidTimeZone(env)) {
+    TZ = env;
+    return TZ;
+  }
+  TZ = DEFAULT_TIMEZONE;
+  return TZ;
+}
+
+function resolveInitialTimezone(): string {
+  const fromEnv = process.env["NIUBOT_TZ"]?.trim();
+  if (fromEnv && isValidTimeZone(fromEnv)) return fromEnv;
+  return DEFAULT_TIMEZONE;
+}
 
 export interface ZonedDateTimeParts {
   year: number;

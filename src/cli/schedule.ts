@@ -1,7 +1,7 @@
 /** Unified model-facing scheduler tool for chat-scoped Loop and independent Cron jobs. */
 
 import type Database from "better-sqlite3";
-import { describeCronExpr, listCronJobsForAccess } from "../core/cron.js";
+import { describeCronExpr, describeCronSchedule, listCronJobsForAccess } from "../core/cron.js";
 import {
   formatLoopInterval,
   listLoopJobs,
@@ -9,7 +9,7 @@ import {
 } from "../core/loop.js";
 import { normalizeScheduleMode, type CreateScheduleCommand, type ScheduleAgentCommand, type ScheduleAgentCommandResult, type ScheduleMode, type ScheduleTrigger } from "../core/schedule-command.js";
 import { localApiRequest } from "../local-api/client.js";
-import { formatLocalDateTimeWithTZ, labelLocalTime, TZ } from "../tz.js";
+import { formatLocalDateTimeWithTZ, TZ } from "../tz.js";
 import { resolveSendEndpoint } from "./send.js";
 
 type ParseArgs = (args: string[]) => { positional: string[]; flags: Record<string, string> };
@@ -157,7 +157,7 @@ function listSchedules(
   if (!mode || mode === "main") {
     for (const job of listLoopJobs(db, chatId)) {
       const schedule = job.cronExpr
-        ? `${describeCronExpr(job.cronExpr)} (${job.timezone})`
+        ? describeCronExpr(job.cronExpr, job.timezone)
         : `every ${formatLoopInterval(job.intervalSeconds)}`;
       console.log(`loop:${job.id} [${job.status}] ${schedule} (${job.runCount}${job.maxTimes ? `/${job.maxTimes}` : " runs"})`);
       console.log(`  Task: ${truncate(job.prompt, 100)}`);
@@ -166,7 +166,7 @@ function listSchedules(
   }
   if (!mode || mode === "isolated") {
     for (const job of listCronJobsForAccess(db, { currentChatId: chatId, targetChatId: chatId, chatType })) {
-      const schedule = job.cronExpr ? labelLocalTime(job.cronExpr, job.timezone) : formatLocalDateTimeWithTZ(job.runAt!, job.timezone);
+      const schedule = job.cronExpr ? describeCronSchedule(job.cronExpr, null, job.timezone) : formatLocalDateTimeWithTZ(job.runAt!);
       console.log(`cron:${job.id} [${schedule}] (${job.runCount}${job.maxTimes ? `/${job.maxTimes}` : " runs"})`);
       console.log(`  Task: ${truncate(job.prompt, 100)}`);
       count++;
@@ -241,5 +241,5 @@ function printHelp(): void {
   list [--mode current_session|new_session]
   cancel <loop:id|cron:id>
 
-时长使用 5m、2h、1d。Local calendar times use NIUBOT_TZ (${TZ}).`);
+时长使用 5m、2h、1d。本地钟点按引擎展示时区（${TZ}）。`);
 }

@@ -1,7 +1,7 @@
 ---
 name: nbt-tools
 description: NiuBot 工具手册（nbt CLI）。命令速查：任务、记忆、身份/规则/消息恢复、发送、Loop 定时/循环任务（cron）、Goal 多轮、Worker 派工、引擎重启。
-when_to_use: "用户提到任务/进度、记忆、身份/场景、消息或上下文丢失、系统规则，要求定时/循环/提醒/稍后，或英文 loop/goal/cron/定时检查/定期跟进、多轮/分步/持续跟进、拆活派活、重启/更新，或需要发送文件时加载。"
+when_to_use: "用户提到任务/进度、记忆、身份/场景、消息或上下文丢失、系统规则，要求定时/循环/提醒/稍后，或英文 loop/goal/cron/定时检查/定期跟进、多轮/分步/持续跟进、拆活派活、重启/更新，或需要发送文件，或提到时区/改时区/timezone 时加载。"
 ---
 
 # NBT Tools — nbt CLI 速查
@@ -15,8 +15,9 @@ when_to_use: "用户提到任务/进度、记忆、身份/场景、消息或上�
 
 ## 身份、规则与恢复
 
-- **nbt whoami**：身份/场景恢复。**nbt system-rules**：规则恢复。**nbt messages**：`list [-n 20] [--since/--before] [--role]` / `search <query>` / `get <id>`。**nbt sessions**：`list` / `search <query>` / `get <id>`。**nbt contacts**：`list-users` / `list-chats` / `get-user` / `get-chat` / `set-name`。
+- **nbt whoami**：身份/场景恢复。**nbt feishu**：当前 Bot 的飞书 `appId` / `appSecret`，需要应用身份时再用。**nbt system-rules**：规则恢复。**nbt messages**：`list [-n 20] [--since/--before] [--role]` / `search <query>` / `get <id>`。**nbt sessions**：`list` / `search <query>` / `get <id>`。**nbt contacts**：`list-users` / `list-chats` / `get-user` / `get-chat` / `set-name`。
 - 上下文丢失按对应命令恢复；用户数据只能通过 nbt CLI 访问。
+- `nbt feishu` 的 secret 不要写进用户可见回复。
 
 ## 发送
 
@@ -44,6 +45,10 @@ when_to_use: "用户提到任务/进度、记忆、身份/场景、消息或上�
 - `nbt worker work create --file <需求.md>`
 - `nbt worker job create --work <id> --worker <general|researcher|reviewer|developer|tester> --file <任务.md> [--workdir <dir>] [--depends-on <job-id>]`
 - `nbt worker list` / `get <id>` / `cancel <id>`
+
+## 时区
+
+`/tz` 能认出的名字由引擎立刻切。认不出的会到你这里：根据常识解析成 IANA，然后自己执行 \`nbt timezone set America/Los_Angeles\`（立刻写配置并改内存）。不要让用户再打一遍 /tz。
 
 ## 引擎重启
 

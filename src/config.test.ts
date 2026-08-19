@@ -10,6 +10,7 @@ import {
   resolveHomePath,
   writeAutoUpdateEnabledToConfig,
   writeKeepAwakeEnabledToConfig,
+  writeTimezoneToConfig,
 } from "./config.js";
 import { acquireProcessLock } from "./process-lock.js";
 
@@ -270,6 +271,23 @@ keepAwake: true
     writeKeepAwakeEnabledToConfig(configPath, false);
     expect(loadConfig(configPath).keepAwake).toBe(false);
     expect(fs.readFileSync(configPath, "utf-8")).toContain("keepAwake: false");
+  });
+
+  it("parses and persists timezone", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-config-"));
+    tempDirs.push(dir);
+    const configPath = path.join(dir, "config.yaml");
+    fs.writeFileSync(configPath, `
+bots:
+  - id: NiuBot
+    appId: app-id
+    appSecret: app-secret
+    workingDirectory: ${dir}/workspace
+timezone: UTC
+`, "utf-8");
+    expect(loadConfig(configPath).timezone).toBe("UTC");
+    writeTimezoneToConfig(configPath, "Asia/Shanghai");
+    expect(loadConfig(configPath).timezone).toBe("Asia/Shanghai");
   });
 
   it("skips autoUpdate config when disabled", () => {

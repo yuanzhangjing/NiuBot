@@ -19,7 +19,8 @@ import type { NormalizedMessage, PlatformAdapter } from "../im/types.js";
 import { COMPACT_RECOVERY_REMINDER } from "../memory/inject.js";
 import { loadConfig } from "../config.js";
 import { SYSTEM_RULES } from "../system-rules.js";
-import { addCronJob, claimDueCronJobs, deleteCronJob } from "./cron.js";
+import { addCronJob, claimDueCronJobs, deleteCronJob, describeCronExpr } from "./cron.js";
+import { applyDisplayTimezone, TZ, userDateTimeToUtcSql } from "../tz.js";
 import { addLoopJob, claimDueLoopJobs, getLoopJob, LoopScheduler } from "./loop.js";
 import {
   formatShellExecError,
@@ -707,7 +708,7 @@ describe("Pipeline Loop integration", () => {
     }, "tok-a");
     expect(loopResult.output).toContain("Created loop:1");
     expect(db.prepare("SELECT max_times, next_run_at, interval_seconds FROM loop_jobs WHERE id = 1").get()).toEqual({
-      max_times: 1, next_run_at: "2026-08-05 10:00:00", interval_seconds: 60,
+      max_times: 1, next_run_at: userDateTimeToUtcSql("2026-08-05 18:00", TZ), interval_seconds: 60,
     });
 
     // isolated + every：相对间隔转日历表达式
@@ -726,10 +727,10 @@ describe("Pipeline Loop integration", () => {
       prompt: "x", timeZone: "Asia/Shanghai",
     }, "tok-a");
     expect(loopCronResult.output).toContain("Created loop:2");
-    expect(loopCronResult.output).toContain("每天 08:00");
+    expect(loopCronResult.output).toContain(describeCronExpr("0 8 * * *", TZ));
     expect(db.prepare("SELECT cron_expr, timezone FROM loop_jobs WHERE id = 2").get()).toEqual({
       cron_expr: "0 8 * * *",
-      timezone: "Asia/Shanghai",
+      timezone: TZ,
     });
   });
 
@@ -1583,6 +1584,7 @@ describe("Pipeline runtime", () => {
     expect(sentCards[0]?.header).toBe("服务|blue");
     expect(sentCards[0]?.content).toContain("**Version:** 1.2.3");
     expect(sentCards[0]?.content).toContain("**Uptime:** 1m 5s");
+    expect(sentCards[0]?.content).toContain("**Timezone:**");
     expect(sentCards[0]?.content).toContain("/shared/releases/1.2.3/package");
   });
 
@@ -1640,6 +1642,66 @@ describe("Pipeline runtime", () => {
 
     expect(handled).toBe(false);
     expect(sentTexts).toHaveLength(0);
+  });
+
+  test("/timezone shows and switches the display timezone", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-timezone-"));
+    tempDirs.push(dir);
+    const configPath = path.join(dir, "config.yaml");
+    writeFileSync(configPath, `
+bots:
+  - name: NiuBot
+    appId: app-id
+    appSecret: app-secret
+    workingDirectory: ${dir}/workspace
+`);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const { im, sentCards, sentTexts } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db, im, new RecordingAgent(), createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex",
+    );
+    (pipeline as any).engineLifecycle = createTestLifecycle(dir, configPath);
+    (pipeline as any).adminRoles.set("u2", "owner");
+
+    expect((pipeline as any).handleBuiltinCommand("/timezone", "u3", "c1", "chat-open-id", "p2p")).toBe(true);
+    expect(sentTexts.at(-1)).toBe("/timezone 仅管理员可用。");
+
+    expect((pipeline as any).handleBuiltinCommand("/timezone", "u2", "c1", "chat-open-id", "p2p")).toBe(true);
+    expect(sentCards.at(-1)?.content).toContain("**Timezone:**");
+    expect(sentCards.at(-1)?.content).toContain("配置文件");
+    expect(sentCards.at(-1)?.content).toContain("NIUBOT_TZ");
+
+    expect((pipeline as any).handleBuiltinCommand("/timezone Not/AZone", "u2", "c1", "chat-open-id", "p2p")).toBe(false);
+    expect((pipeline as any).isBuiltinCommand("/tz 改成火星时区", "u2")).toBe(false);
+    expect((pipeline as any).isBuiltinCommand("/tz 改成西雅图时区", "u2")).toBe(true);
+    expect((pipeline as any).handleBuiltinCommand("/tz 改成西雅图时区", "u2", "c1", "chat-open-id", "p2p")).toBe(true);
+    expect(loadConfig(configPath).timezone).toBe("America/Los_Angeles");
+
+    expect((pipeline as any).handleBuiltinCommand("/timezone UTC", "u2", "c1", "chat-open-id", "p2p")).toBe(true);
+    expect(sentCards.at(-1)?.header).toBe("Timezone|green");
+    expect(sentCards.at(-1)?.content).toContain("**UTC**");
+    expect(loadConfig(configPath).timezone).toBe("UTC");
+
+    expect((pipeline as any).handleBuiltinCommand("/timezone 北京", "u2", "c1", "chat-open-id", "p2p")).toBe(true);
+    expect(loadConfig(configPath).timezone).toBe("Asia/Shanghai");
+
+    expect((pipeline as any).handleBuiltinCommand("/tz 把时区改成东京", "u2", "c1", "chat-open-id", "p2p")).toBe(true);
+    expect(sentCards.at(-1)?.header).toBe("Timezone|green");
+    expect(sentCards.at(-1)?.content).toContain("**Asia/Tokyo**");
+    expect(loadConfig(configPath).timezone).toBe("Asia/Tokyo");
+
+    expect((pipeline as any).handleBuiltinCommand("/service", "u2", "c1", "chat-open-id", "p2p")).toBe(true);
+    expect(sentCards.at(-1)?.content).toContain("**Timezone:** Asia/Tokyo");
+
+    expect((pipeline as any).handleBuiltinCommand("/tz reset", "u2", "c1", "chat-open-id", "p2p")).toBe(true);
+    expect(loadConfig(configPath).timezone).toBe("Asia/Shanghai");
+
+    expect((pipeline as any).handleBuiltinCommand("/tz UTC", "u2", "c1", "chat-open-id", "p2p")).toBe(true);
+    expect((pipeline as any).handleBuiltinCommand("你能帮我改成北京时区吗？", "u2", "c1", "chat-open-id", "p2p")).toBe(true);
+    expect(sentCards.at(-1)?.header).toBe("Timezone|green");
+    expect(loadConfig(configPath).timezone).toBe("Asia/Shanghai");
+    expect((pipeline as any).handleBuiltinCommand("东京时间几点了", "u2", "c1", "chat-open-id", "p2p")).toBe(false);
+    applyDisplayTimezone({});
   });
 
   test("/update reports a newer version without installing or restarting", async () => {

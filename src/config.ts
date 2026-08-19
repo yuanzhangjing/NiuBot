@@ -114,6 +114,8 @@ export interface NiuBotConfig {
   autoUpdate?: AutoUpdateConfig;
   /** 可选：防休眠持久化开关。true 时 Engine 启动自动执行 /awake on。 */
   keepAwake?: boolean;
+  /** 展示时区（IANA）。未配置时默认 Asia/Shanghai。 */
+  timezone?: string;
   queue: {
     /** 消息缓冲合并窗口（ms），默认 1500 */
     bufferMs: number;
@@ -241,6 +243,7 @@ export function loadConfig(configPath?: string): NiuBotConfig {
     restart: parseRestartConfig(fileConfig["restart"]),
     autoUpdate: parseAutoUpdateConfig(fileConfig["autoUpdate"]),
     keepAwake: typeof fileConfig["keepAwake"] === "boolean" ? fileConfig["keepAwake"] : undefined,
+    timezone: parseTimezoneConfig(fileConfig["timezone"]),
     queue: queueConfig,
   };
 }
@@ -276,6 +279,33 @@ export function writeAutoUpdateEnabledToConfig(configPath: string, enabled: bool
       throw new Error("配置文件根节点必须是对象");
     }
     document.set("autoUpdate", enabled);
+    return document.toString({ lineWidth: 0 });
+  });
+}
+
+function parseTimezoneConfig(raw: unknown): string | undefined {
+  if (typeof raw !== "string") return undefined;
+  const trimmed = raw.trim();
+  return trimmed === "" ? undefined : trimmed;
+}
+
+/** 原子修改配置文件中的展示时区，并保留 YAML 注释。 */
+export function writeTimezoneToConfig(configPath: string, timezone: string): void {
+  updateConfigFileAtomically(configPath, (raw, format) => {
+    if (format === "json") {
+      const parsed = JSON.parse(raw) as unknown;
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error("配置文件根节点必须是对象");
+      }
+      (parsed as Record<string, unknown>)["timezone"] = timezone;
+      return `${JSON.stringify(parsed, null, 2)}\n`;
+    }
+    const document = yaml.parseDocument(raw);
+    if (document.errors.length > 0) throw document.errors[0];
+    if (document.contents !== null && !yaml.isMap(document.contents)) {
+      throw new Error("配置文件根节点必须是对象");
+    }
+    document.set("timezone", timezone);
     return document.toString({ lineWidth: 0 });
   });
 }

@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { initDatabase } from "../database/schema.js";
-import { addCronJob, deleteCronJobForAccess, listCronJobsForAccess } from "../core/cron.js";
+import { addCronJob, deleteCronJobForAccess, describeCronSchedule, listCronJobsForAccess } from "../core/cron.js";
 import { parseArgs } from "./args.js";
 import { formatCronScheduleForDisplay, handleCron } from "./cron.js";
 
@@ -74,13 +74,14 @@ describe("cron access rules", () => {
     expect(execute).toHaveBeenLastCalledWith("c1", { type: "cancel", scheduleId: "cron:3" });
   });
 
-  it("labels cron schedules as local time", () => {
-    expect(formatCronScheduleForDisplay({ cronExpr: "0 10 * * *", runAt: null })).toContain("0 10 * * * (local time, ");
+  it("labels cron schedules in the display timezone", () => {
+    expect(formatCronScheduleForDisplay({ cronExpr: "0 10 * * *", runAt: null, timezone: "UTC" })).toBe(
+      describeCronSchedule("0 10 * * *", null, "UTC"),
+    );
     expect(formatCronScheduleForDisplay({
       cronExpr: null,
       runAt: "2026-04-25 10:00:00",
-      timezone: "UTC",
-    })).toBe("at 2026-04-25 10:00 (UTC)");
+    })).toMatch(/^at 2026-04-25 \d{2}:00 \(/);
   });
 
   it("blocks group list for another chat", () => {

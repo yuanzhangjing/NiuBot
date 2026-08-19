@@ -16,6 +16,7 @@ import { shouldDetachChildProcessForTree, terminateSpawnedProcessTree } from "..
 import { resolveSessionBotEndpoint } from "../platform/ipc.js";
 import { runCommand } from "../platform/command.js";
 import { resolveBackendProbeTimeoutMs } from "../lifecycle-timeouts.js";
+import { TZ } from "../tz.js";
 
 /** 子类 session 的基础字段 */
 export interface BaseCliSession {
@@ -951,6 +952,7 @@ export function buildNiubotEnv(config: SessionConfig): Record<string, string> {
   if (config.isAdmin && config.botProfilePath) env["NIUBOT_BOT_PROFILE_PATH"] = config.botProfilePath;
   if (config.workingDirectory) env["NIUBOT_WORK_DIR"] = config.workingDirectory;
   if (config.scheduleToken) env["NIUBOT_SCHEDULE_TOKEN"] = config.scheduleToken;
+  env["NIUBOT_TZ"] = TZ;
   env["NIUBOT_AGENT_SESSION"] = "1";
   return env;
 }

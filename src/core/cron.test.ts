@@ -4,6 +4,7 @@ import path from "node:path";
 import type Database from "better-sqlite3";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { initDatabase } from "../database/schema.js";
+import { TZ } from "../tz.js";
 import {
   addCronJob,
   claimDueCronJobs,
@@ -49,6 +50,15 @@ describe("describeCronSchedule", () => {
     expect(describeCronExpr("0 10 * * 1-5")).toBe("工作日 10:00");
     expect(describeCronExpr("0 9 * * 1")).toBe("每周一 09:00");
     expect(describeCronExpr("30 8 * * 0")).toBe("每周日 08:30");
+  });
+
+  test("converts clock times from the job timezone to the display timezone", () => {
+    expect(describeCronExpr("30 1 * * *", "UTC", "Asia/Shanghai")).toBe("每天 09:30");
+    expect(describeCronExpr("0 20 * * 1", "UTC", "Asia/Shanghai")).toBe("每周二 04:00");
+    expect(describeCronExpr("0 1 * * 1-5", "UTC", "Asia/Shanghai")).toBe("工作日 09:00");
+    expect(describeCronSchedule("30 1 * * *", null, "UTC")).toBe(
+      describeCronExpr("30 1 * * *", "UTC", TZ),
+    );
   });
 
   test("falls back to raw expression for unrecognized patterns", () => {

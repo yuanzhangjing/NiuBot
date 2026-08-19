@@ -1,11 +1,18 @@
 import { describe, expect, it } from "vitest";
 import {
+  applyDisplayTimezone,
   dateTimeInTimeZone,
+  DEFAULT_TIMEZONE,
+  isTimezoneChangeUtterance,
+  timezoneCommandIsResolved,
   formatLocalDateTimeWithTZ,
   isInLocalHourWindow,
+  isValidTimeZone,
   labelLocalDateTime,
   labelLocalTime,
   millisecondsUntilLocalHour,
+  normalizeTimeZoneInput,
+  TZ,
   userDateTimeToUtcSql,
   userTimeRangeToUtc,
   utcDateTimeForSql,
@@ -13,6 +20,48 @@ import {
 } from "./tz.js";
 
 describe("timezone display helpers", () => {
+  it("defaults to Beijing time and accepts aliases", () => {
+    expect(DEFAULT_TIMEZONE).toBe("Asia/Shanghai");
+    expect(isValidTimeZone("Asia/Shanghai")).toBe(true);
+    expect(isValidTimeZone("Not/AZone")).toBe(false);
+    expect(normalizeTimeZoneInput("北京")).toBe("Asia/Shanghai");
+    expect(normalizeTimeZoneInput("utc")).toBe("UTC");
+    expect(normalizeTimeZoneInput("beijing")).toBe("Asia/Shanghai");
+    expect(normalizeTimeZoneInput("把时区改成东京")).toBe("Asia/Tokyo");
+    expect(normalizeTimeZoneInput("切换到纽约")).toBe("America/New_York");
+    expect(normalizeTimeZoneInput("use Tokyo time")).toBe("Asia/Tokyo");
+    expect(normalizeTimeZoneInput("new york")).toBe("America/New_York");
+    expect(normalizeTimeZoneInput("set timezone to utc")).toBe("UTC");
+    expect(normalizeTimeZoneInput("set timezone to Asia/Tokyo")).toBe("Asia/Tokyo");
+    expect(normalizeTimeZoneInput("America/Argentina/Buenos_Aires")).toBe("America/Argentina/Buenos_Aires");
+    expect(normalizeTimeZoneInput("set timezone to America/Argentina/Buenos_Aires")).toBe("America/Argentina/Buenos_Aires");
+    expect(normalizeTimeZoneInput("america/chicago")).toBe("America/Chicago");
+    expect(normalizeTimeZoneInput("把东京改成纽约")).toBe("America/New_York");
+    expect(normalizeTimeZoneInput("从北京改成东京")).toBe("Asia/Tokyo");
+    expect(normalizeTimeZoneInput("乱写的时区")).toBeUndefined();
+    expect(normalizeTimeZoneInput("改成北京时间")).toBe("Asia/Shanghai");
+    expect(normalizeTimeZoneInput("改成西雅图时间")).toBe("America/Los_Angeles");
+    expect(normalizeTimeZoneInput("改成西雅图时区")).toBe("America/Los_Angeles");
+    expect(timezoneCommandIsResolved(["改成西雅图时区"])).toBe(true);
+    expect(timezoneCommandIsResolved(["改成火星时区"])).toBe(false);
+    expect(timezoneCommandIsResolved(["Not/AZone"])).toBe(false);
+    expect(timezoneCommandIsResolved([])).toBe(true);
+    expect(timezoneCommandIsResolved(["reset"])).toBe(true);
+    expect(isTimezoneChangeUtterance("改成西雅图时间")).toBe(true);
+    expect(normalizeTimeZoneInput("你能帮我改成北京时区吗？")).toBe("Asia/Shanghai");
+    expect(isTimezoneChangeUtterance("改成北京时间")).toBe(true);
+    expect(isTimezoneChangeUtterance("你能帮我改成北京时区吗？")).toBe(true);
+    expect(isTimezoneChangeUtterance("/tz 改成北京时间")).toBe(false);
+    expect(isTimezoneChangeUtterance("东京时间几点了")).toBe(false);
+    expect(isTimezoneChangeUtterance("时区怎么配")).toBe(false);
+    expect(applyDisplayTimezone({})).toBe("Asia/Shanghai");
+    expect(TZ).toBe("Asia/Shanghai");
+    expect(applyDisplayTimezone({ config: "UTC" })).toBe("UTC");
+    expect(applyDisplayTimezone({ env: "Asia/Tokyo", config: "UTC" })).toBe("UTC");
+    expect(applyDisplayTimezone({ env: "Asia/Tokyo" })).toBe("Asia/Tokyo");
+    applyDisplayTimezone({});
+  });
+
   it("labels local time with the configured timezone", () => {
     const formatted = formatLocalDateTimeWithTZ("2026-04-24 16:30:00");
 

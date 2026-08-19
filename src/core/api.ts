@@ -45,6 +45,8 @@ export interface ApiHandler {
   executeGoalProgressCommand?(chatId: string, content: string, status?: string): Promise<GoalCommandResult>;
   /** 重启唤醒：注入主会话任务（nbt restart --wake 完成后调用）。 */
   executeWakeCommand?(chatId: string, prompt: string): Promise<GoalCommandResult>;
+  getTimezone?(): string;
+  setTimezone?(raw: string): string;
 }
 
 export class ApiServer {
@@ -251,6 +253,35 @@ export class ApiServer {
       const result = await this.handler.executeWakeCommand(chatId, prompt.trim());
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(result));
+    } else if (url === "/timezone" && req.method === "GET") {
+      if (!this.handler.getTimezone) {
+        res.writeHead(503);
+        res.end(JSON.stringify({ error: "Timezone API unavailable" }));
+        return;
+      }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ timezone: this.handler.getTimezone() }));
+    } else if (url === "/timezone" && req.method === "POST") {
+      if (!this.handler.setTimezone) {
+        res.writeHead(503);
+        res.end(JSON.stringify({ error: "Timezone API unavailable" }));
+        return;
+      }
+      const raw = typeof data.timezone === "string" ? data.timezone : "";
+      if (!raw.trim()) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: "Missing timezone" }));
+        return;
+      }
+      try {
+        const timezone = this.handler.setTimezone(raw);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ timezone }));
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        res.writeHead(message.startsWith("未知时区") ? 400 : 500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: message }));
+      }
     } else if (url === "/ping") {
       res.writeHead(200);
       res.end(JSON.stringify({ status: "ok" }));

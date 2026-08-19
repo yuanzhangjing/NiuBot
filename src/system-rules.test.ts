@@ -36,6 +36,7 @@ describe("SYSTEM_RULES", () => {
     expect(SYSTEM_RULES).toContain("Privacy");
     expect(SYSTEM_RULES).toContain("nbt system-rules");
     expect(SYSTEM_RULES).toContain("nbt whoami");
+    expect(SYSTEM_RULES).toContain("不要把飞书 appSecret 写进用户可见回复");
     expect(SYSTEM_RULES).toContain("nbt task");
     expect(SYSTEM_RULES).toContain("普通方式启动的进程及其子进程");
     expect(SYSTEM_RULES).toContain("会跟随当前命令或会话结束而退出");

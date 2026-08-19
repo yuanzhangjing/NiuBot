@@ -866,6 +866,7 @@ export function generateConfigTemplate(
     : '    # model: ""            # 主模型（不设则由 CLI 自行决定）\n';
 
   return `# NiuBot 配置文件
+# timezone: Asia/Shanghai   # 展示时区（默认北京时间）
 
 bots:
   - id: ${botId}              # 唯一标识，决定数据目录路径，初始化后不可修改
@@ -882,6 +883,7 @@ ${modelLine}    # workingDirectory: ~/niubot-workspace/NiuBot  # agent 工作目
 function generateEnvTemplate(): string {
   return `# NiuBot 环境变量
 # NIUBOT_LOG_LEVEL=info
+# NIUBOT_TZ=Asia/Shanghai       # 展示时区（config.yaml timezone 优先，没有再读这个，再默认北京时间）
 # NIUBOT_DEBUG_AGENT_STDOUT=1   # 将每轮 agent 完整 stdout 追加到 logs/agent-stdout-YYYY-MM-DD.log
 `;
 }

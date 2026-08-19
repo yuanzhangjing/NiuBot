@@ -26,6 +26,7 @@ import { createLogger } from "./logger.js";
 import type { ResolvedBotRuntimeConfig } from "./runtime-config.js";
 import type Database from "better-sqlite3";
 import { resolveBotEndpoint } from "./platform/ipc.js";
+import { TZ } from "./tz.js";
 import type { BackendCapability } from "./agent/backend-capability.js";
 
 export interface BotInstance {
@@ -174,6 +175,8 @@ export async function createBotInstance(
     executeGoalStartCommand: (chatId, objective, token) => pipeline.executeGoalStartCommand(chatId, objective, token),
     executeGoalProgressCommand: (chatId, content, status) => pipeline.executeGoalProgressCommand(chatId, content, status),
     executeWakeCommand: (chatId, prompt) => pipeline.executeWakeCommand(chatId, prompt),
+    getTimezone: () => TZ,
+    setTimezone: (raw) => pipeline.setEngineTimezone(raw),
     resolveChatPlatformId: (input: string) => {
       // Try as internal ID (c1, c2)
       const lower = input.toLowerCase();
