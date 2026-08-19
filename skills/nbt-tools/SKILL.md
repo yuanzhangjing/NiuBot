@@ -15,9 +15,9 @@ when_to_use: "用户提到任务/进度、记忆、身份/场景、消息或上�
 
 ## 身份、规则与恢复
 
-- **nbt whoami**：身份/场景恢复。**nbt feishu**：当前 Bot 的飞书 `appId` / `appSecret`，需要应用身份时再用。**nbt system-rules**：规则恢复。**nbt messages**：`list [-n 20] [--since/--before] [--role]` / `search <query>` / `get <id>`。**nbt sessions**：`list` / `search <query>` / `get <id>`。**nbt contacts**：`list-users` / `list-chats` / `get-user` / `get-chat` / `set-name`。
+- **nbt whoami**：身份/场景恢复。**nbt feishu-creds**：当前 Bot 的飞书应用身份（`appId` / `appSecret`），调开放接口时再用。**nbt system-rules**：规则恢复。**nbt messages**：`list [-n 20] [--since/--before] [--role]` / `search <query>` / `get <id>`。**nbt sessions**：`list` / `search <query>` / `get <id>`。**nbt contacts**：`list-users` / `list-chats` / `get-user` / `get-chat` / `set-name`。
 - 上下文丢失按对应命令恢复；用户数据只能通过 nbt CLI 访问。
-- `nbt feishu` 的 secret 不要写进用户可见回复。
+- `nbt feishu-creds` 的 secret 不要写进用户可见回复。
 
 ## 发送
 

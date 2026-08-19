@@ -5,6 +5,7 @@ import {
   DEFAULT_TIMEZONE,
   isTimezoneChangeUtterance,
   timezoneCommandIsResolved,
+  resolveSystemTimeZone,
   formatLocalDateTimeWithTZ,
   isInLocalHourWindow,
   isValidTimeZone,
@@ -47,6 +48,8 @@ describe("timezone display helpers", () => {
     expect(timezoneCommandIsResolved(["Not/AZone"])).toBe(false);
     expect(timezoneCommandIsResolved([])).toBe(true);
     expect(timezoneCommandIsResolved(["reset"])).toBe(true);
+    expect(timezoneCommandIsResolved(["sys"])).toBe(true);
+    expect(isValidTimeZone(resolveSystemTimeZone())).toBe(true);
     expect(isTimezoneChangeUtterance("改成西雅图时间")).toBe(true);
     expect(normalizeTimeZoneInput("你能帮我改成北京时区吗？")).toBe("Asia/Shanghai");
     expect(isTimezoneChangeUtterance("改成北京时间")).toBe(true);

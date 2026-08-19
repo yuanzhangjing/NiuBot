@@ -20,7 +20,7 @@ import { COMPACT_RECOVERY_REMINDER } from "../memory/inject.js";
 import { loadConfig } from "../config.js";
 import { SYSTEM_RULES } from "../system-rules.js";
 import { addCronJob, claimDueCronJobs, deleteCronJob, describeCronExpr } from "./cron.js";
-import { applyDisplayTimezone, TZ, userDateTimeToUtcSql } from "../tz.js";
+import { applyDisplayTimezone, isValidTimeZone, TZ, userDateTimeToUtcSql } from "../tz.js";
 import { addLoopJob, claimDueLoopJobs, getLoopJob, LoopScheduler } from "./loop.js";
 import {
   formatShellExecError,
@@ -1668,8 +1668,8 @@ bots:
 
     expect((pipeline as any).handleBuiltinCommand("/timezone", "u2", "c1", "chat-open-id", "p2p")).toBe(true);
     expect(sentCards.at(-1)?.content).toContain("**Timezone:**");
-    expect(sentCards.at(-1)?.content).toContain("配置文件");
-    expect(sentCards.at(-1)?.content).toContain("NIUBOT_TZ");
+    expect(sentCards.at(-1)?.content).toContain("`/tz sys`");
+    expect(sentCards.at(-1)?.content).toContain("`/tz reset`");
 
     expect((pipeline as any).handleBuiltinCommand("/timezone Not/AZone", "u2", "c1", "chat-open-id", "p2p")).toBe(false);
     expect((pipeline as any).isBuiltinCommand("/tz 改成火星时区", "u2")).toBe(false);
@@ -1692,6 +1692,10 @@ bots:
 
     expect((pipeline as any).handleBuiltinCommand("/service", "u2", "c1", "chat-open-id", "p2p")).toBe(true);
     expect(sentCards.at(-1)?.content).toContain("**Timezone:** Asia/Tokyo");
+
+    expect((pipeline as any).handleBuiltinCommand("/tz sys", "u2", "c1", "chat-open-id", "p2p")).toBe(true);
+    expect(sentCards.at(-1)?.header).toBe("Timezone|green");
+    expect(isValidTimeZone(loadConfig(configPath).timezone ?? "")).toBe(true);
 
     expect((pipeline as any).handleBuiltinCommand("/tz reset", "u2", "c1", "chat-open-id", "p2p")).toBe(true);
     expect(loadConfig(configPath).timezone).toBe("Asia/Shanghai");

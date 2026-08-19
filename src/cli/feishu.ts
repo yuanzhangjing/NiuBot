@@ -64,12 +64,12 @@ export function handleFeishu(
   load: typeof loadConfig = loadConfig,
 ): void {
   if (args[0] === "--help" || args[0] === "help") {
-    io.log(`Show the current Bot's Feishu app identity (appId / appSecret).
+    io.log(`Show this Bot's Feishu app credentials: appId / appSecret.
 
 Usage:
-  nbt feishu
+  nbt feishu-creds
 
-Use when the agent needs this Bot's Feishu app credentials.
+Use when calling Feishu Open APIs as this Bot.
 Do not put appSecret in user-visible replies.`);
     return;
   }

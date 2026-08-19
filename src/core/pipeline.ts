@@ -62,6 +62,7 @@ import {
   formatLocalDateTimeWithTZ,
   isTimezoneChangeUtterance,
   normalizeTimeZoneInput,
+  resolveSystemTimeZone,
   timezoneCommandIsResolved,
   TZ,
   userDateTimeToUtcSql,
@@ -3914,20 +3915,24 @@ ${jobParts.join("\n\n")}
         [
           `**Timezone:** ${TZ}`,
           "",
-          "`/tz 东京` 立即切换，并写入配置文件 `timezone`",
-          "也可以改配置文件的 `timezone`，或设环境变量 `NIUBOT_TZ`（配置文件优先，这两处改完要重启）",
-          "`/tz reset` 恢复默认（Asia/Shanghai）",
+          "`/tz 纽约` 切换",
+          "`/tz sys` 跟随系统",
+          "`/tz reset` 恢复北京",
         ].join("\n"),
       );
       return;
     }
 
-    const requested = action === "reset" ? DEFAULT_TIMEZONE : args.join(" ");
+    const requested = action === "reset"
+      ? DEFAULT_TIMEZONE
+      : (action === "sys" || action === "system")
+        ? resolveSystemTimeZone()
+        : args.join(" ");
     try {
       const resolved = this.setEngineTimezone(requested);
       this.sendAgentCard(
         chatId, platformChatId, msgId, "Timezone|green",
-        `展示时区已切换为 **${resolved}**。\n已写入配置文件 \`timezone\`。卡片和下次执行时间按此时区显示，库里仍存 UTC。`,
+        `已切换为 **${resolved}**`,
       );
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);

@@ -56,7 +56,7 @@ describe("formatFeishuCreds", () => {
   });
 });
 
-describe("nbt feishu", () => {
+describe("nbt feishu-creds", () => {
   const config = {
     bots: [bot({ id: "NiuBot", appId: "cli_test_id", appSecret: "cli_test_secret" })],
   } as NiuBotConfig;

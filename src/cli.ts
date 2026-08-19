@@ -62,7 +62,7 @@ const sessionCommands = new Set([
   "task",
   "worker",
   "whoami",
-  "feishu",
+  "feishu-creds",
   "timezone",
   "tz",
   "restart",
@@ -208,7 +208,7 @@ async function main(): Promise<void> {
     case "whoami":
       handleWhoami();
       break;
-    case "feishu":
+    case "feishu-creds":
       handleFeishu(args.slice(1), {
         botName: BOT_NAME,
         botProfilePath: BOT_PROFILE_PATH,
@@ -552,7 +552,7 @@ Commands:
   goal          finish                      End the current Goal (token-protected)
   system-rules                             Show NiuBot Engine system rules
   whoami                                    Show current scene info
-  feishu                                    Show current Bot Feishu appId/appSecret
+  feishu-creds                              Show this Bot's Feishu appId/appSecret
   timezone      get|set|reset               Agent: apply display timezone
 
 Use "nbt <command> --help" for detailed syntax.

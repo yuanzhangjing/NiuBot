@@ -119,11 +119,22 @@ export function isTimezoneChangeUtterance(text: string): boolean {
   return Boolean(normalizeTimeZoneInput(trimmed));
 }
 
+/** Host IANA timezone: process TZ, else the OS zone from Intl. */
+export function resolveSystemTimeZone(): string {
+  const fromEnv = process.env["TZ"]?.trim();
+  if (fromEnv && isValidTimeZone(fromEnv)) return fromEnv;
+  const intl = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  if (intl && isValidTimeZone(intl)) return intl;
+  return DEFAULT_TIMEZONE;
+}
+
 /** `/tz` args the builtin can handle locally. Unknown names should fall through to the agent. */
 export function timezoneCommandIsResolved(args: string[]): boolean {
   if (args.length === 0) return true;
   const action = args[0]!.toLowerCase();
-  if (action === "reset" || action === "get" || action === "show" || action === "help") return true;
+  if (action === "reset" || action === "sys" || action === "system" || action === "get" || action === "show" || action === "help") {
+    return true;
+  }
   return Boolean(normalizeTimeZoneInput(args.join(" ")));
 }
 
