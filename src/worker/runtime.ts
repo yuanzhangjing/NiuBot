@@ -101,6 +101,12 @@ export class WorkerRuntime {
     return this.inFlight.size;
   }
 
+  /** 取消所有准备中/运行中的 Job（测试拆卸与强制停机）。 */
+  async cancelAll(reason: string): Promise<void> {
+    const ids = new Set<string>([...this.running.keys(), ...this.inFlight]);
+    await Promise.all([...ids].map((id) => this.cancel(id, reason).catch(() => false)));
+  }
+
   /** Job 是否仍在准备阶段（已认领、session 尚未创建完成）。 */
   hasInFlight(jobId: string): boolean {
     return this.inFlight.has(jobId);

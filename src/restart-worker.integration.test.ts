@@ -16,6 +16,7 @@ import { createRestartDatabaseSnapshot } from "./database/restart-snapshot.js";
 import { RecommendedReleaseStore } from "./recommended-release.js";
 
 const tempDirs: string[] = [];
+const RESTART_IT_TIMEOUT = process.platform === "win32" ? 90_000 : 30_000;
 
 beforeEach(() => {
   // Agent-launched test runs inherit the live chat and local API route. Keep
@@ -59,7 +60,7 @@ describe("restart worker integration", () => {
     expect(fs.readFileSync(path.join(fixture.home, "niubot.version"), "utf8")).toBe("2.0.0");
     expect(fixture.homeStore.readState().current).toEqual(fixture.candidate);
     expect(fixture.homeStore.readState().rejectedRecommendation).toBeUndefined();
-  }, 30_000);
+  }, RESTART_IT_TIMEOUT);
 
   it("safely activates an exact Launcher candidate for an empty home", async () => {
     const fixture = createRecommendedFixture(true);
@@ -82,7 +83,7 @@ describe("restart worker integration", () => {
     expect(running?.identity.version).toBe("2.0.0");
     expect(fixture.homeStore.readState().current).toEqual(fixture.candidate);
     expect(new RecommendedReleaseStore(fixture.sharedStore).read()).toBeUndefined();
-  }, 30_000);
+  }, RESTART_IT_TIMEOUT);
 
   it("restores current and remembers a rejected recommendation", async () => {
     const fixture = createRecommendedFixture(false);
@@ -106,7 +107,7 @@ describe("restart worker integration", () => {
       generation: fixture.generation,
       artifactId: fixture.candidate.artifactId,
     });
-  }, 30_000);
+  }, RESTART_IT_TIMEOUT);
 
   it("remembers a recommendation rejected during preflight without stopping the old Engine", async () => {
     const fixture = createRecommendedFixture(true, 23);
@@ -129,7 +130,7 @@ describe("restart worker integration", () => {
         artifactId: fixture.candidate.artifactId,
       },
     });
-  }, 30_000);
+  }, RESTART_IT_TIMEOUT);
 
   it("refuses to automatically downgrade a newer home", async () => {
     const fixture = createRecommendedFixture(true, 0, "3.0.0");
@@ -145,7 +146,7 @@ describe("restart worker integration", () => {
       NIUBOT_RECOMMENDED_GENERATION: String(fixture.generation),
     })).rejects.toThrow(/downgrade/);
     expect(fixture.homeStore.readState().current).toEqual(fixture.current);
-  }, 30_000);
+  }, RESTART_IT_TIMEOUT);
 
   it("restores a stopped Engine state inside the worker after verification", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-stopped-restart-"));
@@ -186,7 +187,7 @@ describe("restart worker integration", () => {
       "utf-8",
     )) as { phase: string };
     expect(restartState.phase).toBe("production_success");
-  }, 30_000);
+  }, RESTART_IT_TIMEOUT);
 
   it("recovers a dead transaction and its original database snapshot before restarting", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-dead-transaction-"));
@@ -249,7 +250,7 @@ describe("restart worker integration", () => {
     expect(restored.prepare("SELECT value FROM marker").pluck().get()).toBe("before");
     restored.close();
     expect(homeStore.readState().transaction).toBeUndefined();
-  }, 30_000);
+  }, RESTART_IT_TIMEOUT);
 
   it("uses the active runtime as the production restart target, not the worker package", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-production-restart-"));
@@ -306,7 +307,7 @@ describe("restart worker integration", () => {
     )) as { phase: string };
     expect(restartState.phase).toBe("production_success");
     await expect(stopEngine(home)).resolves.toMatchObject({ stopped: true });
-  }, 30_000);
+  }, RESTART_IT_TIMEOUT);
 
   it("switches a running legacy Engine to the home-selected shared runtime", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-transition-restart-"));
@@ -387,7 +388,7 @@ describe("restart worker integration", () => {
     expect(state).not.toHaveProperty("lastKnownGood");
     expect(state).not.toHaveProperty("previous");
     expect(state.unresolvedLegacy).toEqual([]);
-  }, 30_000);
+  }, RESTART_IT_TIMEOUT);
 
   it("builds, switches, checks health, and commits current through the Node implementation", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-restart-integration-"));

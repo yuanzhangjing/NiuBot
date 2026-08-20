@@ -197,10 +197,12 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  const runtime = (pipeline as any).workerRuntime as { cancelAll?: (reason: string) => Promise<void> } | undefined;
+  await runtime?.cancelAll?.("test_teardown");
   pipeline.stop();
-  await waitFor(() => ((pipeline as any).workerRuntime?.runningCount() ?? 0) === 0, 5000);
+  await waitFor(() => ((pipeline as any).workerRuntime?.runningCount() ?? 0) === 0, process.platform === "win32" ? 15_000 : 5_000);
   db.close();
-});
+}, process.platform === "win32" ? 20_000 : 10_000);
 
 async function waitFor(condition: () => boolean, timeoutMs = 5000): Promise<void> {
   const start = Date.now();

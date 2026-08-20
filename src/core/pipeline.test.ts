@@ -21,6 +21,7 @@ import { loadConfig } from "../config.js";
 import { SYSTEM_RULES } from "../system-rules.js";
 import { addCronJob, claimDueCronJobs, deleteCronJob, describeCronExpr } from "./cron.js";
 import { applyDisplayTimezone, isValidTimeZone, TZ, userDateTimeToUtcSql } from "../tz.js";
+import * as displayStatus from "../platform/display-status.js";
 import { addLoopJob, claimDueLoopJobs, getLoopJob, LoopScheduler } from "./loop.js";
 import {
   formatShellExecError,
@@ -5379,6 +5380,7 @@ bots:
   });
 
   test("controls the Engine-level keep-awake service through /awake", async () => {
+    vi.spyOn(displayStatus, "collectDisplayStatus").mockResolvedValue(undefined);
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
     const db = initDatabase(path.join(dir, "niubot.db"));

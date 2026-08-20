@@ -79,14 +79,25 @@ describe("niubot CLI path helpers", () => {
     ].join(":"));
   });
 
-  it("injects the repo-local niubot bin directory into agent env", () => {
+  it("injects the nbt entry directory into agent env", () => {
     const env = buildNiubotEnv({
       workingDirectory: "/tmp/project",
       chatId: "c1",
       userId: "u2",
     });
+    const pathValue = env["PATH"] ?? "";
 
-    expect(env["PATH"]).toContain(getBundledNiubotBinDir());
+    if (process.platform === "win32") {
+      const shimDir = path.join(
+        process.env["LOCALAPPDATA"] || path.join(os.homedir(), "AppData", "Local"),
+        "NiuBot",
+        "bin",
+      );
+      expect(pathValue).toContain(shimDir);
+      expect(pathValue.split(path.delimiter)).not.toContain(getBundledNiubotBinDir());
+    } else {
+      expect(pathValue).toContain(getBundledNiubotBinDir());
+    }
   });
 
   it("uses Windows PATH separators, the managed cmd shim directory, and excludes the bash bin directory", () => {
