@@ -105,7 +105,8 @@ npm run release -- patch   # 或 minor / major
 - **必须**走上述命令；不要手搓 `npm version` / `npm publish` / 单独打 tag  
 - worktree 必须干净  
 - 脚本会跑 `release:check`，再 version + tag，再 `git push --follow-tags`  
-- npm 发布由 GitHub Actions 承接  
+- npm 发布由 GitHub Actions `Publish` 承接：先跑与 CI 相同的 OS/Node 矩阵，**全部绿了才 `npm publish`**  
+- 打 `v*` tag 不再单独跑一遍 CI，避免和发包抢跑  
 - 是否发版听用户/负责人明确指令；默认不擅自发版  
 
 发版后本机若要吃正式包：等 registry 出包再 `/update`。dev 源码重启用的是本地 build，与 npm 版本不是一回事。

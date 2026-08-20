@@ -11,7 +11,11 @@ permissions:
   id-token: write
 
 jobs:
+  test:
+    uses: ./.github/workflows/test-matrix.yml
+
   publish:
+    needs: test
     runs-on: ubuntu-latest
 
     steps:
@@ -30,10 +34,7 @@ jobs:
       - name: Install
         run: npm ci
 
-      - name: Check
-        run: npm run release:check
-
-      - name: Check every public upgrade and rollback path
+      - name: Check public upgrade paths
         run: npm run test:public-upgrades
 
       - name: Publish
