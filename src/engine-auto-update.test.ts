@@ -106,7 +106,7 @@ afterEach(() => {
 describe("EngineAutoUpdateCoordinator", () => {
   test("owns the daily timer and does not check at Engine startup", async () => {
     vi.useFakeTimers();
-    vi.setSystemTime(new Date(2026, 3, 25, 10, 0, 0));
+    vi.setSystemTime(new Date("2026-04-25T02:00:00Z")); // 10:00 Asia/Shanghai
     const { coordinator } = createFixture(false);
     let checks = 0;
     (coordinator as any).runDailyCheck = async () => { checks++; };
@@ -671,7 +671,7 @@ describe("EngineAutoUpdateCoordinator", () => {
 
   test("stop prevents a completed daily check from scheduling another timer", async () => {
     vi.useFakeTimers();
-    vi.setSystemTime(new Date(2026, 3, 25, 9, 59, 0));
+    vi.setSystemTime(new Date("2026-04-25T01:59:00Z")); // 09:59 Asia/Shanghai
     const { coordinator } = createFixture(false);
     let finish!: () => void;
     let checks = 0;
