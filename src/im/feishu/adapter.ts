@@ -14,6 +14,12 @@ const log = createLogger("feishu");
 /** 超过此字节数的消息转为文件发送 */
 const FILE_THRESHOLD_BYTES = 10_000;
 
+/** 这些扩展名的文件按图片消息（msg_type=image）发送，其余按文件消息发送 */
+const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"]);
+
+/** 飞书图片上传接口上限 10MB，超出时降级为文件消息 */
+const IMAGE_MAX_BYTES = 10 * 1024 * 1024;
+
 function describeDownloadError(code: number | undefined, status: number | string | undefined): string | null {
   switch (code) {
     case 234037: return "文件超过飞书 API 100MB 下载上限";
@@ -328,6 +334,18 @@ export class FeishuAdapter implements PlatformAdapter {
 
   async sendFile(chatId: string, filePath: string, fileName?: string): Promise<string> {
     const name = fileName ?? path.basename(filePath);
+    if (IMAGE_EXTENSIONS.has(path.extname(name).toLowerCase())) {
+      const bytes = fs.statSync(filePath).size;
+      if (bytes > IMAGE_MAX_BYTES) {
+        log.info("sendFile: image exceeds 10MB, sending as file", { chatId, fileName: name, bytes });
+      } else {
+        try {
+          return await this.sendImage(chatId, filePath);
+        } catch (err) {
+          log.warn("sendFile: image API failed, fallback to file", { chatId, fileName: name, error: String(err) });
+        }
+      }
+    }
     // Upload file first
     const uploadResp = await this.client.im.file.create({
       data: {
@@ -346,6 +364,26 @@ export class FeishuAdapter implements PlatformAdapter {
         receive_id: chatId,
         msg_type: "file",
         content: JSON.stringify({ file_key: fileKey }),
+      },
+    });
+    return resp?.data?.message_id ?? "";
+  }
+
+  private async sendImage(chatId: string, filePath: string): Promise<string> {
+    const uploadResp = await this.client.im.image.create({
+      data: {
+        image_type: "message",
+        image: fs.createReadStream(filePath) as any,
+      },
+    });
+    const imageKey = (uploadResp as any)?.data?.image_key ?? (uploadResp as any)?.image_key;
+    if (!imageKey) throw new Error("Image upload failed: no image_key returned");
+    const resp = await this.client.im.message.create({
+      params: { receive_id_type: "chat_id" },
+      data: {
+        receive_id: chatId,
+        msg_type: "image",
+        content: JSON.stringify({ image_key: imageKey }),
       },
     });
     return resp?.data?.message_id ?? "";

@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
@@ -43,6 +43,148 @@ describe("FeishuAdapter", () => {
     expect(messageId).toBe("message-id");
     expect(uploadedName).toBe("reply.md");
     expect(uploadedContent).toBe(content);
+    expect(sentMessages).toEqual([{
+      msgType: "file",
+      content: JSON.stringify({ file_key: "file-key" }),
+    }]);
+  });
+
+  test("sends image files as image messages and keeps other files as file messages", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-feishu-adapter-"));
+    tempDirs.push(dir);
+    const imagePath = path.join(dir, "shot.png");
+    writeFileSync(imagePath, "png-bytes");
+    const textPath = path.join(dir, "notes.txt");
+    writeFileSync(textPath, "text-bytes");
+
+    const adapter = new FeishuAdapter("app-id", "app-secret");
+    const sentMessages: Array<{ msgType: string; content: string }> = [];
+    let imageUploads = 0;
+    let uploadedImageType = "";
+    let uploadedImageBytes = "";
+    let fileUploads = 0;
+    (adapter as any).client = {
+      im: {
+        image: {
+          create: async ({ data }: any) => {
+            imageUploads += 1;
+            uploadedImageType = data.image_type;
+            for await (const chunk of data.image) uploadedImageBytes += chunk.toString();
+            return { data: { image_key: "image-key" } };
+          },
+        },
+        file: {
+          create: async ({ data }: any) => {
+            fileUploads += 1;
+            for await (const chunk of data.file) /* drain */;
+            return { data: { file_key: "file-key" } };
+          },
+        },
+        message: {
+          create: async ({ data }: any) => {
+            sentMessages.push({ msgType: data.msg_type, content: data.content });
+            return { data: { message_id: "message-id" } };
+          },
+        },
+      },
+    };
+
+    await adapter.sendFile("chat-id", imagePath);
+    await adapter.sendFile("chat-id", textPath);
+
+    expect(imageUploads).toBe(1);
+    expect(uploadedImageType).toBe("message");
+    expect(uploadedImageBytes).toBe("png-bytes");
+    expect(fileUploads).toBe(1);
+    expect(sentMessages).toEqual([
+      { msgType: "image", content: JSON.stringify({ image_key: "image-key" }) },
+      { msgType: "file", content: JSON.stringify({ file_key: "file-key" }) },
+    ]);
+  });
+
+  test("falls back to a file message for images over the 10 MB upload limit", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-feishu-adapter-"));
+    tempDirs.push(dir);
+    const bigImagePath = path.join(dir, "big.png");
+    writeFileSync(bigImagePath, Buffer.alloc(10 * 1024 * 1024 + 1));
+
+    const adapter = new FeishuAdapter("app-id", "app-secret");
+    const sentMessages: Array<{ msgType: string; content: string }> = [];
+    let imageUploads = 0;
+    let uploadedFileName = "";
+    (adapter as any).client = {
+      im: {
+        image: {
+          create: async () => {
+            imageUploads += 1;
+            return { data: { image_key: "should-not-happen" } };
+          },
+        },
+        file: {
+          create: async ({ data }: any) => {
+            uploadedFileName = data.file_name;
+            for await (const chunk of data.file) /* drain */;
+            return { data: { file_key: "file-key" } };
+          },
+        },
+        message: {
+          create: async ({ data }: any) => {
+            sentMessages.push({ msgType: data.msg_type, content: data.content });
+            return { data: { message_id: "message-id" } };
+          },
+        },
+      },
+    };
+
+    await adapter.sendFile("chat-id", bigImagePath);
+
+    expect(imageUploads).toBe(0);
+    expect(uploadedFileName).toBe("big.png");
+    expect(sentMessages).toEqual([{
+      msgType: "file",
+      content: JSON.stringify({ file_key: "file-key" }),
+    }]);
+  });
+
+  test("falls back to a file message when the image API rejects the upload", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-feishu-adapter-"));
+    tempDirs.push(dir);
+    const imagePath = path.join(dir, "shot.gif");
+    writeFileSync(imagePath, "gif-bytes");
+
+    const adapter = new FeishuAdapter("app-id", "app-secret");
+    const sentMessages: Array<{ msgType: string; content: string }> = [];
+    let imageUploads = 0;
+    let uploadedFileName = "";
+    (adapter as any).client = {
+      im: {
+        image: {
+          create: async () => {
+            imageUploads += 1;
+            throw new Error("resolution exceeds limit");
+          },
+        },
+        file: {
+          create: async ({ data }: any) => {
+            uploadedFileName = data.file_name;
+            for await (const chunk of data.file) /* drain */;
+            return { data: { file_key: "file-key" } };
+          },
+        },
+        message: {
+          create: async ({ data }: any) => {
+            sentMessages.push({ msgType: data.msg_type, content: data.content });
+            return { data: { message_id: "message-id" } };
+          },
+        },
+      },
+    };
+
+    const messageId = await adapter.sendFile("chat-id", imagePath);
+
+    expect(messageId).toBe("message-id");
+    expect(imageUploads).toBe(1);
+    expect(uploadedFileName).toBe("shot.gif");
     expect(sentMessages).toEqual([{
       msgType: "file",
       content: JSON.stringify({ file_key: "file-key" }),
