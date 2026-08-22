@@ -91,10 +91,15 @@ export function handleSend(
       process.exit(1);
     }
     const endpoint = resolveSendEndpoint();
+    const scheduleToken = process.env["NIUBOT_SCHEDULE_TOKEN"];
     (async () => {
       for (const filePath of filePaths) {
         const absPath = path.resolve(filePath);
-        await ipcRequest(endpoint, "/send-file", { chat_id: targetChatId, file_path: absPath }, 120_000);
+        await ipcRequest(endpoint, "/send-file", {
+          chat_id: targetChatId,
+          file_path: absPath,
+          schedule_token: scheduleToken,
+        }, 120_000);
       }
       console.log(filePaths.length === 1 ? "File sent." : `${filePaths.length} files sent.`);
     })()
@@ -114,7 +119,12 @@ export function handleSend(
       process.exit(1);
     }
     const endpoint = resolveSendEndpoint();
-    ipcRequest(endpoint, "/send", { chat_id: targetChatId, text: content, card_header: cardHeader }, 30_000)
+    ipcRequest(endpoint, "/send", {
+      chat_id: targetChatId,
+      text: content,
+      card_header: cardHeader,
+      schedule_token: process.env["NIUBOT_SCHEDULE_TOKEN"],
+    }, 30_000)
       .then(() => console.log("Card sent."))
       .catch((err) => {
         console.error(`Error: ${err.message}`);
@@ -130,7 +140,11 @@ export function handleSend(
     process.exit(1);
   }
   const endpoint = resolveSendEndpoint();
-  ipcRequest(endpoint, "/send", { chat_id: targetChatId, text }, 30_000)
+  ipcRequest(endpoint, "/send", {
+    chat_id: targetChatId,
+    text,
+    schedule_token: process.env["NIUBOT_SCHEDULE_TOKEN"],
+  }, 30_000)
     .then(() => console.log("Message sent."))
     .catch((err) => {
       console.error(`Error: ${err.message}`);

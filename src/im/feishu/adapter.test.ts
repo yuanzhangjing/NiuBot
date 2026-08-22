@@ -49,6 +49,36 @@ describe("FeishuAdapter", () => {
     }]);
   });
 
+  test("replies with a markdown file when a long reply exceeds the text threshold", async () => {
+    const adapter = new FeishuAdapter("app-id", "app-secret");
+    const sent: Array<{ method: string; msgType: string; replyTo?: string }> = [];
+    (adapter as any).client = {
+      im: {
+        file: {
+          create: async ({ data }: any) => {
+            for await (const chunk of data.file) /* drain */;
+            return { data: { file_key: "file-key" } };
+          },
+        },
+        message: {
+          create: async ({ data }: any) => {
+            sent.push({ method: "create", msgType: data.msg_type });
+            return { data: { message_id: "created-id" } };
+          },
+          reply: async ({ path: replyPath, data }: any) => {
+            sent.push({ method: "reply", msgType: data.msg_type, replyTo: replyPath.message_id });
+            return { data: { message_id: "reply-id" } };
+          },
+        },
+      },
+    };
+
+    const messageId = await adapter.sendReply("chat-id", "长消息".repeat(4_000), "om-user");
+
+    expect(messageId).toBe("reply-id");
+    expect(sent).toEqual([{ method: "reply", msgType: "file", replyTo: "om-user" }]);
+  });
+
   test("sends image files as image messages and keeps other files as file messages", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-feishu-adapter-"));
     tempDirs.push(dir);
@@ -188,6 +218,51 @@ describe("FeishuAdapter", () => {
     expect(sentMessages).toEqual([{
       msgType: "file",
       content: JSON.stringify({ file_key: "file-key" }),
+    }]);
+  });
+
+  test("replies with an image message when sendFile is given a reply target", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-feishu-adapter-"));
+    tempDirs.push(dir);
+    const imagePath = path.join(dir, "shot.png");
+    writeFileSync(imagePath, "png-bytes");
+
+    const adapter = new FeishuAdapter("app-id", "app-secret");
+    const sent: Array<{ method: string; msgType: string; content: string; replyTo?: string }> = [];
+    (adapter as any).client = {
+      im: {
+        image: {
+          create: async ({ data }: any) => {
+            for await (const chunk of data.image) /* drain */;
+            return { data: { image_key: "image-key" } };
+          },
+        },
+        message: {
+          create: async ({ data }: any) => {
+            sent.push({ method: "create", msgType: data.msg_type, content: data.content });
+            return { data: { message_id: "created-id" } };
+          },
+          reply: async ({ path: replyPath, data }: any) => {
+            sent.push({
+              method: "reply",
+              msgType: data.msg_type,
+              content: data.content,
+              replyTo: replyPath.message_id,
+            });
+            return { data: { message_id: "reply-id" } };
+          },
+        },
+      },
+    };
+
+    const messageId = await adapter.sendFile("chat-id", imagePath, undefined, { replyToMsgId: "om-user" });
+
+    expect(messageId).toBe("reply-id");
+    expect(sent).toEqual([{
+      method: "reply",
+      msgType: "image",
+      content: JSON.stringify({ image_key: "image-key" }),
+      replyTo: "om-user",
     }]);
   });
 

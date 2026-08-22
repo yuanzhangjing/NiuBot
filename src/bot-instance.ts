@@ -166,9 +166,9 @@ export async function createBotInstance(
   // 6. 创建 API Server
   const endpoint = resolveBotEndpoint(NIUBOT_HOME, botConfig.id, { unixSocketDirectory: path.dirname(botConfig.dbPath) });
   const apiHandler: ApiHandler = {
-    sendMessage: (chatId, text) => pipeline.sendToChat(chatId, text),
-    sendCard: (chatId, header, content) => pipeline.sendCardToChat(chatId, header, content),
-    sendFile: (chatId, filePath) => pipeline.sendFileToChat(chatId, filePath),
+    sendMessage: (chatId, text, token) => pipeline.sendToChat(chatId, text, token),
+    sendCard: (chatId, header, content, token) => pipeline.sendCardToChat(chatId, header, content, token),
+    sendFile: (chatId, filePath, token) => pipeline.sendFileToChat(chatId, filePath, token),
     executeWorkerCommand: (chatId, command, token) => pipeline.executeWorkerAgentCommand({ chatId, command, scheduleToken: token }),
     executeScheduleCommand: (chatId, command, token) => pipeline.executeScheduleAgentCommand(chatId, command, token),
     executeGoalFinishCommand: (chatId, command, token) => pipeline.executeGoalFinishCommand(chatId, command, token),

@@ -39,6 +39,7 @@ export interface NormalizedMessage {
 export type DeliveryOptions = {
   timeoutMs?: number;
   signal?: AbortSignal;
+  replyToMsgId?: string;
 };
 
 export type InboundTerminalStatus = "completed" | "failed" | "stopped" | "discarded";
@@ -96,5 +97,5 @@ export type OutboundRequest =
   | { kind: "reply"; chatId: string; text: string; replyToMsgId: string }
   | { kind: "markdown_card"; chatId: string; markdown: string }
   | { kind: "card"; chatId: string; header: string; content: string; footer?: string; replyToMsgId?: string }
-  | { kind: "file"; chatId: string; filePath: string; fileName?: string }
+  | { kind: "file"; chatId: string; filePath: string; fileName?: string; replyToMsgId?: string }
   | { kind: "edit"; msgId: string; text: string };

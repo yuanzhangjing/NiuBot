@@ -5,6 +5,7 @@ import type Database from "better-sqlite3";
 import { escapeYamlContent, renderMessageNodes } from "../im/render.js";
 import { findLatestUserPlatformMsgId } from "../messages/store.js";
 import type { InboundDelivery, NormalizedMessage, TransportClient } from "../transport/types.js";
+import { isDeliveryUncertainError } from "../transport/errors.js";
 import { ERROR_DISPLAY_MAX_LEN } from "../agent/types.js";
 import { AgentSessionNotStartedError, type AgentBackend, type AgentResponse, type AgentSession, type AgentSessionActivity, type SessionConfig } from "../agent/types.js";
 import { CliAgentBackend, buildNiubotEnv } from "../agent/cli-base.js";
@@ -1032,9 +1033,46 @@ export class Pipeline {
     return this.botUserId;
   }
 
+  /** IPC 发送：仅主 Agent 当前回合（schedule token 匹配）才挂到用户消息下 */
+  private currentTurnReplyTarget(platformChatId: string, scheduleToken?: string): string | undefined {
+    if (!scheduleToken) return undefined;
+    const chatRow = this.db.prepare("SELECT id FROM chats WHERE platform_id = ?")
+      .get(platformChatId) as { id: string } | undefined;
+    if (!chatRow) return undefined;
+    if (this.chatScheduleTokens.get(chatRow.id) !== scheduleToken) return undefined;
+    return this.runtimeState.getActiveRun(chatRow.id)?.replyToPlatformMsgId;
+  }
+
+  private async sendPreferringReply(
+    platformChatId: string,
+    logLabel: string,
+    sendReply: (replyToMsgId: string) => Promise<string>,
+    sendChat: () => Promise<string>,
+    replyToMsgId?: string,
+  ): Promise<string> {
+    if (!replyToMsgId) return sendChat();
+    try {
+      return await sendReply(replyToMsgId);
+    } catch (err) {
+      if (isDeliveryUncertainError(err)) throw err;
+      this.log.warn(`${logLabel}: reply failed, fallback to chat`, {
+        chatId: platformChatId,
+        replyToMsgId,
+        error: String(err),
+      });
+      return sendChat();
+    }
+  }
+
   /** 通过 IPC 发送消息到指定 chat */
-  async sendToChat(platformChatId: string, text: string): Promise<void> {
-    const platformMsgId = await this.transport.sendText(platformChatId, text);
+  async sendToChat(platformChatId: string, text: string, scheduleToken?: string): Promise<void> {
+    const platformMsgId = await this.sendPreferringReply(
+      platformChatId,
+      "sendToChat",
+      (replyToMsgId) => this.transport.sendReply(platformChatId, text, replyToMsgId),
+      () => this.transport.sendText(platformChatId, text),
+      this.currentTurnReplyTarget(platformChatId, scheduleToken),
+    );
     const chatRow = this.db.prepare("SELECT id FROM chats WHERE platform_id = ?")
       .get(platformChatId) as { id: string } | undefined;
     if (chatRow) {
@@ -1043,8 +1081,14 @@ export class Pipeline {
   }
 
   /** 通过 IPC 发送卡片到指定 chat */
-  async sendCardToChat(platformChatId: string, header: string, content: string): Promise<void> {
-    const platformMsgId = await this.transport.sendCard(platformChatId, header, content);
+  async sendCardToChat(platformChatId: string, header: string, content: string, scheduleToken?: string): Promise<void> {
+    const platformMsgId = await this.sendPreferringReply(
+      platformChatId,
+      "sendCardToChat",
+      (replyToMsgId) => this.transport.sendCard(platformChatId, header, content, undefined, replyToMsgId),
+      () => this.transport.sendCard(platformChatId, header, content),
+      this.currentTurnReplyTarget(platformChatId, scheduleToken),
+    );
     const chatRow = this.db.prepare("SELECT id FROM chats WHERE platform_id = ?")
       .get(platformChatId) as { id: string } | undefined;
     if (chatRow) {
@@ -1053,8 +1097,14 @@ export class Pipeline {
   }
 
   /** 通过 IPC 发送文件到指定 chat */
-  async sendFileToChat(platformChatId: string, filePath: string): Promise<void> {
-    const platformMsgId = await this.transport.sendFile(platformChatId, filePath);
+  async sendFileToChat(platformChatId: string, filePath: string, scheduleToken?: string): Promise<void> {
+    const platformMsgId = await this.sendPreferringReply(
+      platformChatId,
+      "sendFileToChat",
+      (replyToMsgId) => this.transport.sendFile(platformChatId, filePath, undefined, { replyToMsgId }),
+      () => this.transport.sendFile(platformChatId, filePath),
+      this.currentTurnReplyTarget(platformChatId, scheduleToken),
+    );
     const chatRow = this.db.prepare("SELECT id FROM chats WHERE platform_id = ?")
       .get(platformChatId) as { id: string } | undefined;
     if (chatRow) {
@@ -1394,7 +1444,13 @@ export class Pipeline {
         this.queue.cancel(chatId);
       }
       const interruptText = "好的，已停止。";
-      this.transport.sendText(msg.chatPlatformId, interruptText).then((pmid) => {
+      this.sendPreferringReply(
+        msg.chatPlatformId,
+        "interrupt",
+        (replyToMsgId) => this.transport.sendReply(msg.chatPlatformId, interruptText, replyToMsgId),
+        () => this.transport.sendText(msg.chatPlatformId, interruptText),
+        msg.platformMsgId,
+      ).then((pmid) => {
         this.storeBotResponse(chatId, interruptText, pmid);
       }).catch(() => {});
       if (inboxId != null && claimToken) {
@@ -1624,7 +1680,7 @@ export class Pipeline {
           return true;
         }
         this.log.info("builtin command: restart", { userId });
-        this.triggerRestart({ platformChatId });
+        this.triggerRestart({ platformChatId, replyToMsgId: msgId });
         return true;
       }
       case "/update": {
@@ -4351,11 +4407,11 @@ ${jobParts.join("\n\n")}
         return;
       }
 
-      this.replyText(chatId, platformChatId, undefined, `正在准备 ${latestVersion} 的独立 release；旧服务会保留到新版本预检通过。`);
-      this.triggerRestart({ platformChatId, updateVersion: latestVersion });
+      this.replyText(chatId, platformChatId, msgId, `正在准备 ${latestVersion} 的独立 release；旧服务会保留到新版本预检通过。`);
+      this.triggerRestart({ platformChatId, updateVersion: latestVersion, replyToMsgId: msgId, silent: true });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      this.replyText(chatId, platformChatId, undefined, `更新失败：${msg.slice(0, 500)}`);
+      this.replyText(chatId, platformChatId, msgId, `更新失败：${msg.slice(0, 500)}`);
     }
   }
 
@@ -4400,7 +4456,13 @@ ${jobParts.join("\n\n")}
   }
 
   /** 请求 Engine 启动 restart worker；Pipeline 只负责定位通知会话和展示结果。 */
-  triggerRestart(opts?: { platformChatId?: string; chatId?: string; updateVersion?: string; silent?: boolean }): void {
+  triggerRestart(opts?: {
+    platformChatId?: string;
+    chatId?: string;
+    updateVersion?: string;
+    silent?: boolean;
+    replyToMsgId?: string;
+  }): void {
     // 解析 chatId 和 platformChatId（互相反查）
     let chatId = opts?.chatId;
     let platformChatId = opts?.platformChatId;
@@ -4412,9 +4474,20 @@ ${jobParts.join("\n\n")}
       platformChatId = this.platformChatIds.get(chatId);
     }
 
+    const sendRestartNotice = (text: string): void => {
+      if (!platformChatId) return;
+      this.sendPreferringReply(
+        platformChatId,
+        "restart",
+        (replyToMsgId) => this.transport.sendReply(platformChatId, text, replyToMsgId),
+        () => this.transport.sendText(platformChatId, text),
+        opts?.replyToMsgId,
+      ).catch(() => {});
+    };
+
     // 发送"正在重启..."通知（自动升级静默，不打扰用户）
     if (platformChatId && !opts?.silent) {
-      this.transport.sendText(platformChatId, "正在重启...").catch(() => {});
+      sendRestartNotice("正在重启...");
     }
 
     try {
@@ -4433,9 +4506,7 @@ ${jobParts.join("\n\n")}
     } catch (err) {
       const errMsg = (err instanceof Error ? err.message : String(err)).slice(0, ERROR_DISPLAY_MAX_LEN);
       this.log.error("restart worker failed to launch", { error: errMsg });
-      if (platformChatId) {
-        this.transport.sendText(platformChatId, `重启失败：\n\`\`\`\n${errMsg.replace(/`{3,}/g, "``")}\n\`\`\``).catch(() => {});
-      }
+      sendRestartNotice(`重启失败：\n\`\`\`\n${errMsg.replace(/`{3,}/g, "``")}\n\`\`\``);
     }
   }
 
@@ -5002,7 +5073,13 @@ ${jobParts.join("\n\n")}
           ? `${buildLoopDeliveryMarker(activeLoopJob)}\n\n${baseErrorText}`
           : baseErrorText;
         try {
-          const pmid = await this.transport.sendText(platformChatId, errorText);
+          const pmid = await this.sendPreferringReply(
+            platformChatId,
+            "process-error",
+            (replyToMsgId) => this.transport.sendReply(platformChatId, errorText, replyToMsgId),
+            () => this.transport.sendText(platformChatId, errorText),
+            triggerMsgId,
+          );
           this.storeBotResponse(chatId, errorText, pmid);
         } catch { /* give up */ }
       }
@@ -5287,15 +5364,30 @@ ${jobParts.join("\n\n")}
   private sendWatchdogNotification(chatId: string, text: string): void {
     const platformChatId = this.platformChatIds.get(chatId);
     if (!platformChatId) return;
-    this.transport.sendText(platformChatId, text).then((pmid) => {
+    this.sendPreferringReply(
+      platformChatId,
+      "watchdog",
+      (replyToMsgId) => this.transport.sendReply(platformChatId, text, replyToMsgId),
+      () => this.transport.sendText(platformChatId, text),
+      this.runtimeState.getActiveRun(chatId)?.replyToPlatformMsgId,
+    ).then((pmid) => {
       this.storeBotResponse(chatId, text, pmid);
     }).catch(() => {});
   }
 
-  private sendWatchdogCard(chatId: string, header: string, content: string): void {
+  private sendWatchdogCard(chatId: string, header: string, content: string, preferReply = false): void {
     const platformChatId = this.platformChatIds.get(chatId);
     if (!platformChatId) return;
-    this.transport.sendCard(platformChatId, header, content).then((pmid) => {
+    const send = preferReply
+      ? this.sendPreferringReply(
+        platformChatId,
+        "watchdog-card",
+        (replyToMsgId) => this.transport.sendCard(platformChatId, header, content, undefined, replyToMsgId),
+        () => this.transport.sendCard(platformChatId, header, content),
+        this.runtimeState.getActiveRun(chatId)?.replyToPlatformMsgId,
+      )
+      : this.transport.sendCard(platformChatId, header, content);
+    send.then((pmid) => {
       this.storeBotResponse(chatId, content, pmid);
     }).catch(() => {});
   }
@@ -5393,7 +5485,7 @@ ${jobParts.join("\n\n")}
           formatOutputActivity(idleMs),
           "不急的话可以继续等；如果想结束当前任务，可以发送 /stop。",
         ];
-        this.sendWatchdogCard(chatId, header, parts.join("\n\n"));
+        this.sendWatchdogCard(chatId, header, parts.join("\n\n"), true);
         a.lastLongRunningNotifiedAt = now;
         continue;
       }
@@ -5419,7 +5511,7 @@ ${jobParts.join("\n\n")}
             parts.push(`**最近 ${a.recentLines.length} 条日志：**\n\`\`\`\n${logBlock}\n\`\`\``);
           }
           const content = parts.join("\n\n");
-          this.sendWatchdogCard(chatId, header, content);
+          this.sendWatchdogCard(chatId, header, content, true);
           a.notifyCount++;
           a.lastNotifiedAt = now;
         }

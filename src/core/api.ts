@@ -24,11 +24,11 @@ const log = createLogger("api");
 
 export interface ApiHandler {
   /** Send text message to a chat */
-  sendMessage(chatId: string, text: string): Promise<void>;
+  sendMessage(chatId: string, text: string, scheduleToken?: string): Promise<void>;
   /** Send card message to a chat */
-  sendCard(chatId: string, header: string, content: string): Promise<void>;
+  sendCard(chatId: string, header: string, content: string, scheduleToken?: string): Promise<void>;
   /** Send file to a chat */
-  sendFile(chatId: string, filePath: string): Promise<void>;
+  sendFile(chatId: string, filePath: string, scheduleToken?: string): Promise<void>;
   /** Resolve chat platform_id from short ID or platform ID */
   resolveChatPlatformId(chatIdOrShort: string): string | undefined;
   /** Get the default platform chat ID (from current session context) */
@@ -116,10 +116,11 @@ export class ApiServer {
         res.end(JSON.stringify({ error: "Chat not found" }));
         return;
       }
+      const scheduleToken = typeof data.schedule_token === "string" ? data.schedule_token : undefined;
       if (cardHeader != null) {
-        await this.handler.sendCard(platformChatId, String(cardHeader), text);
+        await this.handler.sendCard(platformChatId, String(cardHeader), text, scheduleToken);
       } else {
-        await this.handler.sendMessage(platformChatId, text);
+        await this.handler.sendMessage(platformChatId, text, scheduleToken);
       }
       res.writeHead(200);
       res.end(JSON.stringify({ status: "ok" }));
@@ -142,7 +143,8 @@ export class ApiServer {
         res.end(JSON.stringify({ error: "Chat not found" }));
         return;
       }
-      await this.handler.sendFile(platformChatId, filePath);
+      const scheduleToken = typeof data.schedule_token === "string" ? data.schedule_token : undefined;
+      await this.handler.sendFile(platformChatId, filePath, scheduleToken);
       res.writeHead(200);
       res.end(JSON.stringify({ status: "ok" }));
     } else if (url === "/worker" && req.method === "POST") {

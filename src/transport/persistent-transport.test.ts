@@ -332,6 +332,19 @@ describe("PersistentTransport outbox", () => {
     expect(existsSync(source)).toBe(true);
   });
 
+  test("passes replyToMsgId through to the file adapter", async () => {
+    const fake = createAdapter();
+    const { runtime, dir } = createRuntime(fake.adapter);
+    const source = path.join(dir, "source.txt");
+    writeFileSync(source, "content");
+
+    await runtime.sendFile("chat-1", source, "report.txt", { replyToMsgId: "om-user" });
+
+    const sendFile = fake.calls.find((call) => call.method === "sendFile");
+    expect(sendFile?.args[2]).toBe("report.txt");
+    expect(sendFile?.args[3]).toEqual({ replyToMsgId: "om-user" });
+  });
+
   test("cleans managed copies for expired unknown file deliveries during recovery", async () => {
     let deliveredPath = "";
     const never = new Promise<string>(() => {});

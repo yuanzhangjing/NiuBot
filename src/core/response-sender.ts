@@ -67,11 +67,15 @@ export class ResponseSender {
       this.transport.sendCard(chatId, header, content, footer, replyToMsgId, deliveryOptions)));
   }
 
-  sendFile(chatId: string, filePath: string, fileName?: string, signal?: AbortSignal): Promise<string> {
+  sendFile(chatId: string, filePath: string, fileName?: string, signal?: AbortSignal, replyToMsgId?: string): Promise<string> {
     return this.sendWithTelemetry("im.sendFile", chatId, {
       fileName: fileName ?? path.basename(filePath),
+      hasReply: !!replyToMsgId,
     }, () => this.runDelivery("im.sendFile", signal, (deliveryOptions) =>
-      this.transport.sendFile(chatId, filePath, fileName, deliveryOptions)));
+      this.transport.sendFile(chatId, filePath, fileName, {
+        ...deliveryOptions,
+        replyToMsgId,
+      })));
   }
 
   addReaction(chatId: string, msgId: string, emoji: string, signal?: AbortSignal): Promise<void> {
@@ -174,7 +178,13 @@ export class ResponseSender {
     if (createText) return createText;
     if (uncertain) return uncertainResult();
 
-    const fileContent = options.footer ? `${options.content}\n\n---\n${options.footer}` : options.content;
+    if (options.replyToMsgId) {
+      const replyFile = await trySend("file:reply", "file", () =>
+        this.sendResponseFile(options.chatId, options.content, options.footer, options.signal, options.replyToMsgId),
+        options.content);
+      if (replyFile) return replyFile;
+      if (uncertain) return uncertainResult();
+    }
     const createFile = await trySend("file:create", "file", () =>
       this.sendResponseFile(options.chatId, options.content, options.footer, options.signal),
       // deliveredContent 只回写正文（不带 footer 拼装产物，避免污染历史/FTS）
@@ -189,13 +199,19 @@ export class ResponseSender {
     };
   }
 
-  private async sendResponseFile(chatId: string, content: string, footer?: string, signal?: AbortSignal): Promise<string> {
+  private async sendResponseFile(
+    chatId: string,
+    content: string,
+    footer?: string,
+    signal?: AbortSignal,
+    replyToMsgId?: string,
+  ): Promise<string> {
     const dir = mkdtempSync(path.join(this.tempDir, "niubot-response-"));
     const filePath = path.join(dir, "reply.md");
     const fileContent = footer ? `${content}\n\n---\n${footer}` : content;
     writeFileSync(filePath, fileContent, "utf-8");
     try {
-      return await this.sendFile(chatId, filePath, "reply.md", signal);
+      return await this.sendFile(chatId, filePath, "reply.md", signal, replyToMsgId);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

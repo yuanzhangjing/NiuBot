@@ -200,6 +200,7 @@ export class PersistentTransport implements TransportClient {
       chatId,
       filePath: managedPath,
       fileName: fileName ?? path.basename(filePath),
+      replyToMsgId: options?.replyToMsgId,
     };
     try {
       return await this.enqueueOutbound(request, options, requestId) as string;
@@ -424,7 +425,12 @@ export class PersistentTransport implements TransportClient {
           request.replyToMsgId,
         );
       case "file":
-        return this.adapter.sendFile(request.chatId, request.filePath, request.fileName);
+        return this.adapter.sendFile(
+          request.chatId,
+          request.filePath,
+          request.fileName,
+          request.replyToMsgId ? { replyToMsgId: request.replyToMsgId } : undefined,
+        );
       case "edit":
         return this.adapter.editMessage(request.msgId, request.text).then(() => undefined);
     }

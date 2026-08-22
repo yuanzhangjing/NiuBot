@@ -6,6 +6,7 @@ import { pipeline } from "node:stream/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { NormalizedMessage, MessageHandler, PlatformAdapter, MentionInfo, MessageNode } from "../types.js";
+import type { DeliveryOptions } from "../../transport/types.js";
 import { renderMessageNodes } from "../render.js";
 import { createLogger } from "../../logger.js";
 
@@ -217,7 +218,7 @@ export class FeishuAdapter implements PlatformAdapter {
   async sendReply(chatId: string, text: string, replyToMsgId: string): Promise<string> {
     if (Buffer.byteLength(text, "utf-8") > FILE_THRESHOLD_BYTES) {
       log.info("sendReply: content exceeds threshold, sending as file", { chatId, bytes: Buffer.byteLength(text, "utf-8") });
-      return this.sendContentAsFile(chatId, text);
+      return this.sendContentAsFile(chatId, text, replyToMsgId);
     }
     const resp = await this.client.im.message.reply({
       path: { message_id: replyToMsgId },
@@ -237,7 +238,7 @@ export class FeishuAdapter implements PlatformAdapter {
     if (Buffer.byteLength(content, "utf-8") > FILE_THRESHOLD_BYTES) {
       log.info("sendCard: content exceeds threshold, sending as file", { chatId, bytes: Buffer.byteLength(content, "utf-8") });
       const fileContent = footer ? `${content}\n\n---\n${footer}` : content;
-      return this.sendContentAsFile(chatId, fileContent);
+      return this.sendContentAsFile(chatId, fileContent, replyToMsgId);
     }
     const cardJson = buildCardJSON(header, content, footer);
     try {
@@ -263,7 +264,7 @@ export class FeishuAdapter implements PlatformAdapter {
     } catch (err) {
       log.warn("sendCard: card API failed, fallback to file", { chatId, error: String(err) });
       const fileContent = footer ? `${content}\n\n---\n${footer}` : content;
-      return this.sendContentAsFile(chatId, fileContent);
+      return this.sendContentAsFile(chatId, fileContent, replyToMsgId);
     }
   }
 
@@ -321,26 +322,27 @@ export class FeishuAdapter implements PlatformAdapter {
   }
 
   /** 将文本内容写入临时 .md 文件并发送 */
-  private async sendContentAsFile(chatId: string, content: string): Promise<string> {
+  private async sendContentAsFile(chatId: string, content: string, replyToMsgId?: string): Promise<string> {
     const dir = mkdtempSync(path.join(tmpdir(), "niubot-msg-"));
     const filePath = path.join(dir, "reply.md");
     writeFileSync(filePath, content, "utf-8");
     try {
-      return await this.sendFile(chatId, filePath, "reply.md");
+      return await this.sendFile(chatId, filePath, "reply.md", replyToMsgId ? { replyToMsgId } : undefined);
     } finally {
       try { unlinkSync(filePath); } catch { /* ignore */ }
     }
   }
 
-  async sendFile(chatId: string, filePath: string, fileName?: string): Promise<string> {
+  async sendFile(chatId: string, filePath: string, fileName?: string, options?: DeliveryOptions): Promise<string> {
     const name = fileName ?? path.basename(filePath);
+    const replyToMsgId = options?.replyToMsgId;
     if (IMAGE_EXTENSIONS.has(path.extname(name).toLowerCase())) {
       const bytes = fs.statSync(filePath).size;
       if (bytes > IMAGE_MAX_BYTES) {
         log.info("sendFile: image exceeds 10MB, sending as file", { chatId, fileName: name, bytes });
       } else {
         try {
-          return await this.sendImage(chatId, filePath);
+          return await this.sendImage(chatId, filePath, replyToMsgId);
         } catch (err) {
           log.warn("sendFile: image API failed, fallback to file", { chatId, fileName: name, error: String(err) });
         }
@@ -356,20 +358,10 @@ export class FeishuAdapter implements PlatformAdapter {
     });
     const fileKey = (uploadResp as any)?.data?.file_key ?? (uploadResp as any)?.file_key;
     if (!fileKey) throw new Error("File upload failed: no file_key returned");
-
-    // Send file message
-    const resp = await this.client.im.message.create({
-      params: { receive_id_type: "chat_id" },
-      data: {
-        receive_id: chatId,
-        msg_type: "file",
-        content: JSON.stringify({ file_key: fileKey }),
-      },
-    });
-    return resp?.data?.message_id ?? "";
+    return this.postMessage(chatId, "file", JSON.stringify({ file_key: fileKey }), replyToMsgId);
   }
 
-  private async sendImage(chatId: string, filePath: string): Promise<string> {
+  private async sendImage(chatId: string, filePath: string, replyToMsgId?: string): Promise<string> {
     const uploadResp = await this.client.im.image.create({
       data: {
         image_type: "message",
@@ -378,12 +370,23 @@ export class FeishuAdapter implements PlatformAdapter {
     });
     const imageKey = (uploadResp as any)?.data?.image_key ?? (uploadResp as any)?.image_key;
     if (!imageKey) throw new Error("Image upload failed: no image_key returned");
+    return this.postMessage(chatId, "image", JSON.stringify({ image_key: imageKey }), replyToMsgId);
+  }
+
+  private async postMessage(chatId: string, msgType: string, content: string, replyToMsgId?: string): Promise<string> {
+    if (replyToMsgId) {
+      const resp = await this.client.im.message.reply({
+        path: { message_id: replyToMsgId },
+        data: { msg_type: msgType, content },
+      });
+      return resp?.data?.message_id ?? "";
+    }
     const resp = await this.client.im.message.create({
       params: { receive_id_type: "chat_id" },
       data: {
         receive_id: chatId,
-        msg_type: "image",
-        content: JSON.stringify({ image_key: imageKey }),
+        msg_type: msgType,
+        content,
       },
     });
     return resp?.data?.message_id ?? "";

@@ -82,7 +82,7 @@ describe("handleSend", () => {
     tempDirs.push(tempDir);
     const endpoint = resolveBotEndpoint(tempDir, "TestBot");
     await prepareLocalIpcEndpoint(endpoint);
-    const bodies: Array<{ chat_id: string; file_path: string }> = [];
+    const bodies: Array<{ chat_id: string; file_path: string; schedule_token?: string }> = [];
     const server = http.createServer((req, res) => {
       const chunks: Buffer[] = [];
       req.on("data", (chunk) => chunks.push(chunk));
@@ -120,7 +120,7 @@ describe("handleSend", () => {
     await received;
     await logged;
 
-    expect(bodies).toEqual([
+    expect(bodies.map(({ schedule_token: _scheduleToken, ...rest }) => rest)).toEqual([
       { chat_id: "c1", file_path: path.resolve("eval-cases.yaml") },
       { chat_id: "c1", file_path: path.resolve("eval-cases-report.md") },
     ]);

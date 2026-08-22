@@ -16,6 +16,7 @@ import {
   setBotBackendModelState,
 } from "../database/schema.js";
 import type { NormalizedMessage, PlatformAdapter } from "../im/types.js";
+import { DeliveryUncertainError } from "../transport/errors.js";
 import { COMPACT_RECOVERY_REMINDER } from "../memory/inject.js";
 import { loadConfig } from "../config.js";
 import { SYSTEM_RULES } from "../system-rules.js";
@@ -219,7 +220,8 @@ function createImStub(): PlatformAdapter {
 
 function createRecordingImStub() {
   const sentTexts: string[] = [];
-  const sentCards: Array<{ header: string; content: string; footer?: string }> = [];
+  const sentReplies: Array<{ text: string; replyToMsgId: string }> = [];
+  const sentCards: Array<{ header: string; content: string; footer?: string; replyToMsgId?: string }> = [];
   const reactions: Array<{ chatId: string; msgId: string; emoji: string }> = [];
   const removedReactions: Array<{ chatId: string; msgId: string; emoji: string }> = [];
   let messageHandler: ((msg: NormalizedMessage) => void) | undefined;
@@ -229,10 +231,14 @@ function createRecordingImStub() {
     async start() {},
     async stop() {},
     async sendText(_chatId, text) { sentTexts.push(text); return "pmid"; },
-    async sendReply(_chatId, text) { sentTexts.push(text); return "pmid"; },
+    async sendReply(_chatId, text, replyToMsgId) {
+      sentTexts.push(text);
+      sentReplies.push({ text, replyToMsgId });
+      return "pmid";
+    },
     async sendMarkdownCard() { return "pmid"; },
-    async sendCard(_chatId, header, content, footer) {
-      sentCards.push({ header, content, footer });
+    async sendCard(_chatId, header, content, footer, replyToMsgId) {
+      sentCards.push({ header, content, footer, replyToMsgId });
       return "pmid";
     },
     async editMessage() {},
@@ -251,7 +257,7 @@ function createRecordingImStub() {
     messageHandler(msg);
   };
 
-  return { im, sentTexts, sentCards, reactions, removedReactions, dispatchMessage };
+  return { im, sentTexts, sentReplies, sentCards, reactions, removedReactions, dispatchMessage };
 }
 
 function createImStubWithSendFailures(options: {
@@ -1807,6 +1813,8 @@ bots:
     expect(restartOptions).toEqual({
       platformChatId: "chat-open-id",
       updateVersion: "9.9.9",
+      replyToMsgId: undefined,
+      silent: true,
     });
     expect(sentTexts.at(-1)).toContain("独立 release");
   });
@@ -1882,7 +1890,7 @@ bots:
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
     const db = initDatabase(path.join(dir, "niubot.db"));
-    const { im, sentTexts } = createRecordingImStub();
+    const { im, sentTexts, sentReplies } = createRecordingImStub();
     const pipeline = new Pipeline(
       db,
       im,
@@ -1897,11 +1905,12 @@ bots:
     (pipeline as any).engineLifecycle = createTestLifecycle(dir, undefined, { restart });
     (pipeline as any).platformChatIds.set("c1", "chat-open-id");
 
-    pipeline.triggerRestart({ platformChatId: "chat-open-id" });
+    pipeline.triggerRestart({ platformChatId: "chat-open-id", replyToMsgId: "om-restart" });
     await Promise.resolve();
 
     expect(restart).toHaveBeenCalledWith({ botName: "NiuBot", chatId: "c1", updateVersion: undefined });
     expect(sentTexts).toContain("正在重启...");
+    expect(sentReplies).toContainEqual({ text: "正在重启...", replyToMsgId: "om-restart" });
   });
 
   test("shell command timeout is five minutes and shown in output", () => {
@@ -3400,7 +3409,7 @@ bots:
     tempDirs.push(dir);
 
     const db = initDatabase(path.join(dir, "niubot.db"));
-    const { im, sentTexts } = createRecordingImStub();
+    const { im, sentTexts, sentReplies } = createRecordingImStub();
     const pipeline = new Pipeline(
       db,
       im,
@@ -3428,6 +3437,7 @@ bots:
       activeRunId: null,
     });
     expect(sentTexts.some((text) => text.includes("处理出错了"))).toBe(true);
+    expect(sentReplies.some((item) => item.replyToMsgId === "m1" && item.text.includes("处理出错了"))).toBe(true);
   });
 
   test("syncs runtime state while preserving pending queue behavior", async () => {
@@ -4642,7 +4652,7 @@ bots:
 
     const db = initDatabase(path.join(dir, "niubot.db"));
     const agent = new DeferredAgent();
-    const { im, sentTexts } = createRecordingImStub();
+    const { im, sentTexts, sentReplies } = createRecordingImStub();
     const pipeline = new Pipeline(
       db,
       im,
@@ -4672,6 +4682,7 @@ bots:
     expect(store.getRunsForChat("c1")[0].stage).toBe("stopped");
     expect((pipeline as any).queue.isBusy("c1")).toBe(false);
     expect(sentTexts).toContain("好的，已停止。");
+    expect(sentReplies).toContainEqual({ text: "好的，已停止。", replyToMsgId: "m2" });
 
     // 后续消息不能一直 pending——必须能被处理
     // 先清理中断词 abort 后残留的第一次 sendMessage promise，再发新消息
@@ -5649,6 +5660,207 @@ describe("Pipeline Goal mode", () => {
     await vi.waitFor(() => expect(agent.sendMessageCalls.length).toBeGreaterThanOrEqual(2));
     expect(agent.sendMessageCalls[1]).toContain("【重启完成】");
     expect(agent.sendMessageCalls[1]).toContain("继续之前的工作");
+    agent.resolveNext();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+});
+
+describe("nbt send prefers the active-run reply target", () => {
+  function createSendTrackingIm() {
+    const sent: Array<{ method: string; payload: unknown }> = [];
+    const im = createImStub();
+    im.sendText = async (_chatId, text) => {
+      sent.push({ method: "text", payload: text });
+      return "text-id";
+    };
+    im.sendReply = async (_chatId, text, replyToMsgId) => {
+      sent.push({ method: "reply", payload: { text, replyToMsgId } });
+      return "reply-id";
+    };
+    im.sendCard = async (_chatId, header, content, footer, replyToMsgId) => {
+      sent.push({ method: "card", payload: { header, content, footer, replyToMsgId } });
+      return "card-id";
+    };
+    im.sendFile = async (_chatId, filePath, _fileName, options) => {
+      sent.push({ method: "file", payload: { filePath, replyToMsgId: options?.replyToMsgId } });
+      return "file-id";
+    };
+    return { im, sent };
+  }
+
+  function turnToken(pipeline: Pipeline): string {
+    const token = (pipeline as any).chatScheduleTokens.get("c1");
+    if (typeof token !== "string" || !token) throw new Error("missing schedule token");
+    return token;
+  }
+
+  test("sendToChat replies to the active user message", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-send-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const agent = new DeferredAgent();
+    const { im, sent } = createSendTrackingIm();
+    const pipeline = new Pipeline(db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");
+    await pipeline.start();
+
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "hello",
+      platformMsgId: "om-user",
+    }));
+    await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(1));
+
+    await pipeline.sendToChat("chat-open-id", "from send", turnToken(pipeline));
+
+    expect(sent).toEqual([{ method: "reply", payload: { text: "from send", replyToMsgId: "om-user" } }]);
+    agent.resolveNext();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
+  test("sendToChat goes to the chat when no run is active", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-send-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const agent = new ReplyAgent("done");
+    const { im, sent } = createSendTrackingIm();
+    const pipeline = new Pipeline(db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");
+    await pipeline.start();
+
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "hello",
+      platformMsgId: "om-user",
+    }));
+    await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(1));
+    await vi.waitFor(() => expect((pipeline as any).runtimeState.getActiveRun("c1")).toBeNull());
+
+    sent.length = 0;
+    await pipeline.sendToChat("chat-open-id", "from send");
+
+    expect(sent).toEqual([{ method: "text", payload: "from send" }]);
+  });
+
+  test("sendToChat stays on chat when the caller is not the current main turn", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-send-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const agent = new DeferredAgent();
+    const { im, sent } = createSendTrackingIm();
+    const pipeline = new Pipeline(db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");
+    await pipeline.start();
+
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "hello",
+      platformMsgId: "om-user",
+    }));
+    await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(1));
+
+    await pipeline.sendToChat("chat-open-id", "restart notify");
+
+    expect(sent).toEqual([{ method: "text", payload: "restart notify" }]);
+    agent.resolveNext();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
+  test("sendToChat falls back to the chat when reply fails", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-send-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const agent = new DeferredAgent();
+    const { im, sent } = createSendTrackingIm();
+    im.sendReply = async () => {
+      throw new Error("reply unavailable");
+    };
+    const pipeline = new Pipeline(db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");
+    await pipeline.start();
+
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "hello",
+      platformMsgId: "om-user",
+    }));
+    await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(1));
+
+    await pipeline.sendToChat("chat-open-id", "from send", turnToken(pipeline));
+
+    expect(sent).toEqual([{ method: "text", payload: "from send" }]);
+    agent.resolveNext();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
+  test("sendToChat does not fall back when reply result is uncertain", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-send-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const agent = new DeferredAgent();
+    const { im, sent } = createSendTrackingIm();
+    im.sendReply = async () => {
+      throw new DeliveryUncertainError("req-1", "timeout");
+    };
+    const pipeline = new Pipeline(db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");
+    await pipeline.start();
+
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "hello",
+      platformMsgId: "om-user",
+    }));
+    await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(1));
+
+    await expect(pipeline.sendToChat("chat-open-id", "from send", turnToken(pipeline))).rejects.toBeInstanceOf(DeliveryUncertainError);
+    expect(sent).toEqual([]);
+    agent.resolveNext();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
+  test("sendCardToChat and sendFileToChat pass the active-run reply target", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-send-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const agent = new DeferredAgent();
+    const { im, sent } = createSendTrackingIm();
+    const pipeline = new Pipeline(db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");
+    await pipeline.start();
+
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "hello",
+      platformMsgId: "om-user",
+    }));
+    await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(1));
+
+    const token = turnToken(pipeline);
+    await pipeline.sendCardToChat("chat-open-id", "Title", "card body", token);
+    await pipeline.sendFileToChat("chat-open-id", "/tmp/note.txt", token);
+
+    expect(sent).toEqual([
+      { method: "card", payload: { header: "Title", content: "card body", footer: undefined, replyToMsgId: "om-user" } },
+      { method: "file", payload: { filePath: "/tmp/note.txt", replyToMsgId: "om-user" } },
+    ]);
+    agent.resolveNext();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
+  test("sendCardToChat falls back to the chat when reply fails", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-send-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const agent = new DeferredAgent();
+    const { im, sent } = createSendTrackingIm();
+    im.sendCard = async (_chatId, header, content, footer, replyToMsgId) => {
+      if (replyToMsgId) throw new Error("reply unavailable");
+      sent.push({ method: "card", payload: { header, content, footer, replyToMsgId } });
+      return "card-id";
+    };
+    const pipeline = new Pipeline(db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");
+    await pipeline.start();
+
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "hello",
+      platformMsgId: "om-user",
+    }));
+    await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(1));
+
+    await pipeline.sendCardToChat("chat-open-id", "Title", "card body", turnToken(pipeline));
+
+    expect(sent).toEqual([
+      { method: "card", payload: { header: "Title", content: "card body", footer: undefined, replyToMsgId: undefined } },
+    ]);
     agent.resolveNext();
     await new Promise((resolve) => setTimeout(resolve, 0));
   });

@@ -9,7 +9,7 @@ type Call =
   | { method: "card"; chatId: string; content: string; replyToMsgId?: string }
   | { method: "text"; chatId: string; text: string }
   | { method: "reply"; chatId: string; text: string; replyToMsgId: string }
-  | { method: "file"; chatId: string; filePath: string; fileName?: string };
+  | { method: "file"; chatId: string; filePath: string; fileName?: string; replyToMsgId?: string };
 
 const tempDirs: string[] = [];
 
@@ -54,8 +54,8 @@ function createAdapter(overrides: Partial<PlatformAdapter> = {}) {
     async editMessage() {},
     async addReaction() {},
     async removeReaction() {},
-    async sendFile(chatId, filePath, fileName) {
-      calls.push({ method: "file", chatId, filePath, fileName });
+    async sendFile(chatId, filePath, fileName, options) {
+      calls.push({ method: "file", chatId, filePath, fileName, replyToMsgId: options?.replyToMsgId });
       return "file-msg";
     },
     async getBotOpenId() { return "bot-open-id"; },
@@ -226,9 +226,9 @@ describe("ResponseSender", () => {
     const { im, calls } = createAdapter({
       async sendCard() { throw new Error("card failed"); },
       async sendText() { throw new Error("text failed"); },
-      async sendFile(chatId, filePath, fileName) {
+      async sendFile(chatId, filePath, fileName, options) {
         filePathFromSend = filePath;
-        calls.push({ method: "file", chatId, filePath, fileName });
+        calls.push({ method: "file", chatId, filePath, fileName, replyToMsgId: options?.replyToMsgId });
         return "file-msg";
       },
     });
@@ -246,6 +246,27 @@ describe("ResponseSender", () => {
     expect(calls.map((call) => call.method)).toEqual(["file"]);
     expect(filePathFromSend).toBeDefined();
     expect(existsSync(filePathFromSend!)).toBe(false);
+  });
+
+  test("keeps the reply target when falling back to a file", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-response-sender-test-"));
+    tempDirs.push(dir);
+    const { im, calls } = createAdapter({
+      async sendCard() { throw new Error("card failed"); },
+      async sendText() { throw new Error("text failed"); },
+      async sendReply() { throw new Error("reply failed"); },
+    });
+    const sender = new ResponseSender(im, { timeoutMs: 100, tempDir: dir });
+
+    const result = await sender.sendFinalResponse({
+      chatId: "chat-1",
+      header: "Reply",
+      content: "hello",
+      replyToMsgId: "msg-1",
+    });
+
+    expect(result).toEqual({ ok: true, platformMsgId: "file-msg", method: "file", deliveredContent: "hello" });
+    expect(calls.some((call) => call.method === "file" && call.replyToMsgId === "msg-1")).toBe(true);
   });
 
   test("keeps long text on the existing text path so adapter file fallback still works", async () => {
