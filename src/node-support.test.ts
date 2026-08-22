@@ -40,7 +40,7 @@ describe("Node runtime support", () => {
     expect(packageJson.engines.node).toBe(`>=${MINIMUM_NODE_MAJOR}`);
 
     const workflow = yaml.parse(fs.readFileSync(
-      fileURLToPath(new URL("../.github/workflows/ci.yml", import.meta.url)),
+      fileURLToPath(new URL("../.github/workflows/test-matrix.yml", import.meta.url)),
       "utf-8",
     )) as {
       jobs: {
