@@ -24,6 +24,8 @@ type SendFinalResponseOptions = {
   footer?: string;
   replyToMsgId?: string;
   signal?: AbortSignal;
+  /** 跳过卡片，直接走文本（群聊 at 其他 Bot 时飞书只投递纯文本 at） */
+  preferText?: boolean;
   /** 卡片发送失败后的文本降级内容（默认 = content）；可传函数按卡片失败原因动态构建（如「发送失败：<原因>」提示） */
   textFallback?: string | ((error: unknown) => string);
 };
@@ -148,35 +150,47 @@ export class ResponseSender {
       ? options.textFallback(lastError)
       : (options.textFallback ?? options.content);
 
-    if (options.replyToMsgId) {
-      const replyCard = await trySend("card:reply", "card", () =>
-        this.sendCard(options.chatId, options.header, options.content, options.footer, options.replyToMsgId, options.signal),
+    if (!options.preferText) {
+      if (options.replyToMsgId) {
+        const replyCard = await trySend("card:reply", "card", () =>
+          this.sendCard(options.chatId, options.header, options.content, options.footer, options.replyToMsgId, options.signal),
+          options.content);
+        if (replyCard) return replyCard;
+        if (uncertain) return uncertainResult();
+      }
+
+      const createCard = await trySend("card:create", "card", () =>
+        this.sendCard(options.chatId, options.header, options.content, options.footer, undefined, options.signal),
         options.content);
-      if (replyCard) return replyCard;
+      if (createCard) return createCard;
       if (uncertain) return uncertainResult();
     }
 
-    const createCard = await trySend("card:create", "card", () =>
-      this.sendCard(options.chatId, options.header, options.content, options.footer, undefined, options.signal),
-      options.content);
-    if (createCard) return createCard;
-    if (uncertain) return uncertainResult();
+    // preferText：正文就是 content。textFallback 只在卡片失败后的降级路径使用。
+    const textBody = options.preferText ? options.content : resolveFallbackText();
 
     if (options.replyToMsgId) {
-      const fallbackText = resolveFallbackText();
       const replyText = await trySend("text:reply", "text", () =>
-        this.sendReply(options.chatId, fallbackText, options.replyToMsgId!, options.signal),
-        fallbackText);
+        this.sendReply(options.chatId, textBody, options.replyToMsgId!, options.signal),
+        textBody);
       if (replyText) return replyText;
       if (uncertain) return uncertainResult();
     }
 
-    const fallbackText = resolveFallbackText();
     const createText = await trySend("text:create", "text", () =>
-      this.sendText(options.chatId, fallbackText, options.signal),
-      fallbackText);
+      this.sendText(options.chatId, textBody, options.signal),
+      textBody);
     if (createText) return createText;
     if (uncertain) return uncertainResult();
+
+    // preferText 是为了投递飞书 at；改成文件后对方 Bot 收不到，不再降级。
+    if (options.preferText) {
+      return {
+        ok: false,
+        error: errorMessage(lastError),
+        methodsTried,
+      };
+    }
 
     if (options.replyToMsgId) {
       const replyFile = await trySend("file:reply", "file", () =>

@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import type Database from "better-sqlite3";
 import { listUserMemory } from "./user-memory.js";
-import { formatShortLabel, formatSenderLabel } from "../database/schema.js";
+import { formatShortLabel, formatSenderLabel, listChatBots } from "../database/schema.js";
 import { listContinuationMessages } from "../messages/store.js";
 import { hasEndedUserSession } from "../sessions/store.js";
 import { listTasks, type TaskEntry } from "../tasks/store.js";
@@ -169,6 +169,10 @@ export function buildImportantContext(
   }
   parts.push(`<current-scene>\n${sceneLines.join("\n")}\n</current-scene>`);
 
+  if (isGroup) {
+    parts.push(buildBotCollabContext(db, scene.chatId, scene.botLabel));
+  }
+
   // 2. User memory（仅私聊注入，群聊由消息级注入）
   if (!isGroup && scene.userId) {
     const memories = listUserMemory(db, scene.userId);
@@ -192,6 +196,33 @@ export interface SpeakerInfo {
   userId: string;
   userName?: string;
   isAdmin?: boolean;
+  isBot?: boolean;
+}
+
+const BOT_COLLAB_RULES = `叫其他 Bot 用 @U4(CowBot) 这种短号；引擎会转成飞书 at，并用纯文本发出。
+不要手写 ou_ 或飞书 at 标签。
+想让对方 Bot 收到这一句，必须 at 它；说完就不要 at。
+人在群里能看见所有消息，不必为了让人看见去 at 人。
+不要为了打招呼无意义互 at。`;
+
+function extractUserIdFromShortLabel(label: string | undefined): string | undefined {
+  if (!label) return undefined;
+  const match = label.match(/^U(\d+)/i);
+  return match ? `u${match[1]}` : undefined;
+}
+
+export function buildBotCollabContext(
+  db: Database.Database,
+  chatId: string,
+  botLabel?: string,
+): string {
+  const selfUserId = extractUserIdFromShortLabel(botLabel);
+  const bots = listChatBots(db, chatId, selfUserId);
+  const lines = [BOT_COLLAB_RULES];
+  if (bots.length > 0) {
+    lines.push(`本群 Bot：${bots.map((bot) => formatShortLabel(bot.id, bot.name)).join("、")}`);
+  }
+  return `<bot-collab>\n${lines.join("\n")}\n</bot-collab>`;
 }
 
 /**
@@ -209,12 +240,15 @@ export function buildSpeakerContext(
     const s = speakers[0];
     const label = formatShortLabel(s.userId, s.userName);
     const adminTag = s.isAdmin ? "（admin）" : "";
-    const lines: string[] = [`用户：${label}${adminTag}`];
-    const memories = listUserMemory(db, s.userId, "public");
-    if (memories.length > 0) {
-      lines.push("记忆：");
-      for (const m of memories) {
-        lines.push(`  #${m.id}  ${m.summary}`);
+    const role = s.isBot ? "Bot" : "用户";
+    const lines: string[] = [`${role}：${label}${s.isBot ? "" : adminTag}`];
+    if (!s.isBot) {
+      const memories = listUserMemory(db, s.userId, "public");
+      if (memories.length > 0) {
+        lines.push("记忆：");
+        for (const m of memories) {
+          lines.push(`  #${m.id}  ${m.summary}`);
+        }
       }
     }
     return `<current-speaker>\n${lines.join("\n")}\n</current-speaker>`;
@@ -224,15 +258,18 @@ export function buildSpeakerContext(
   const blocks: string[] = [];
   for (const s of speakers) {
     const label = formatShortLabel(s.userId, s.userName);
-    const adminTag = s.isAdmin ? "（admin）" : "";
+    const adminTag = !s.isBot && s.isAdmin ? "（admin）" : "";
+    const rolePrefix = s.isBot ? "Bot " : "";
     const memLines: string[] = [];
-    const memories = listUserMemory(db, s.userId, "public");
-    for (const m of memories) {
-      memLines.push(`  #${m.id}  ${m.summary}`);
+    if (!s.isBot) {
+      const memories = listUserMemory(db, s.userId, "public");
+      for (const m of memories) {
+        memLines.push(`  #${m.id}  ${m.summary}`);
+      }
     }
     blocks.push(memLines.length > 0
-      ? `${label}${adminTag}：\n${memLines.join("\n")}`
-      : `${label}${adminTag}`);
+      ? `${rolePrefix}${label}${adminTag}：\n${memLines.join("\n")}`
+      : `${rolePrefix}${label}${adminTag}`);
   }
   return `<speakers>\n${blocks.join("\n")}\n</speakers>`;
 }

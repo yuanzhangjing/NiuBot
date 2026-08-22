@@ -200,7 +200,7 @@ export class FeishuAdapter implements PlatformAdapter {
   }
 
   async sendText(chatId: string, text: string): Promise<string> {
-    if (Buffer.byteLength(text, "utf-8") > FILE_THRESHOLD_BYTES) {
+    if (Buffer.byteLength(text, "utf-8") > FILE_THRESHOLD_BYTES && !text.includes("<at ")) {
       log.info("sendText: content exceeds threshold, sending as file", { chatId, bytes: Buffer.byteLength(text, "utf-8") });
       return this.sendContentAsFile(chatId, text);
     }
@@ -216,7 +216,7 @@ export class FeishuAdapter implements PlatformAdapter {
   }
 
   async sendReply(chatId: string, text: string, replyToMsgId: string): Promise<string> {
-    if (Buffer.byteLength(text, "utf-8") > FILE_THRESHOLD_BYTES) {
+    if (Buffer.byteLength(text, "utf-8") > FILE_THRESHOLD_BYTES && !text.includes("<at ")) {
       log.info("sendReply: content exceeds threshold, sending as file", { chatId, bytes: Buffer.byteLength(text, "utf-8") });
       return this.sendContentAsFile(chatId, text, replyToMsgId);
     }
@@ -577,6 +577,7 @@ export class FeishuAdapter implements PlatformAdapter {
       children,
       mentions: mentions.length > 0 ? mentions : undefined,
       botMentioned,
+      senderIsBot: event.sender?.sender_type === "app",
       parentPlatformMsgId: msg.parent_id ?? undefined,
       platformTs,
       timestamp: platformTs ? new Date(platformTs) : new Date(),

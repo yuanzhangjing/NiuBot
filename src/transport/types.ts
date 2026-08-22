@@ -20,6 +20,8 @@ export interface NormalizedMessage {
   chatPlatformId: string;
   chatType: "p2p" | "group";
   chatName?: string;
+  /** 飞书 sender_type=app。未设置视为人。 */
+  senderIsBot?: boolean;
   contentText: string;
   contentType: "text" | "image" | "file" | "audio" | "media" | "post" | "interactive" | "merge_forward" | "mixed";
   mentions?: MentionInfo[];

@@ -351,7 +351,35 @@ describe("FeishuAdapter", () => {
       chatType: "group",
       contentText: "@NiuBot ping",
       botMentioned: true,
+      senderIsBot: false,
       platformMsgId: "message-id",
+    });
+  });
+
+  test("marks app senders as bots", async () => {
+    const adapter = new FeishuAdapter("app-id", "app-secret");
+    (adapter as any).botOpenId = "bot-open-id";
+
+    const message = await (adapter as any).normalize({
+      message: {
+        chat_id: "group-id",
+        chat_type: "group",
+        message_id: "message-id",
+        message_type: "text",
+        content: JSON.stringify({ text: "@_user_1 at测试收到" }),
+        mentions: [{
+          key: "@_user_1",
+          id: { open_id: "bot-open-id" },
+          name: "NiuBot",
+        }],
+      },
+      sender: { sender_id: { open_id: "ou-cow" }, sender_type: "app" },
+    });
+
+    expect(message).toMatchObject({
+      senderPlatformId: "ou-cow",
+      senderIsBot: true,
+      botMentioned: true,
     });
   });
 });

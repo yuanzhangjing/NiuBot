@@ -1530,6 +1530,38 @@ export function ensureUser(
   return tx(platform, platformId, name ?? null, nameSource ?? null) as string;
 }
 
+/** 将用户标为应用机器人。只升不降。 */
+export function setUserIsBot(db: Database.Database, userId: string): void {
+  db.prepare("UPDATE users SET is_bot = 1 WHERE id = ? AND is_bot != 1").run(userId);
+}
+
+export function getUserIsBot(db: Database.Database, userId: string): boolean {
+  const row = db.prepare("SELECT is_bot FROM users WHERE id = ?").get(userId) as { is_bot: number } | undefined;
+  return row?.is_bot === 1;
+}
+
+/** 本群见过的 Bot：自己 + 曾在本群发过言且 is_bot=1 的用户。 */
+export function listChatBots(
+  db: Database.Database,
+  chatId: string,
+  selfUserId?: string | null,
+): Array<{ id: string; name: string | null }> {
+  const rows = db.prepare(
+    `SELECT DISTINCT u.id, u.name
+     FROM users u
+     WHERE u.is_bot = 1
+       AND (
+         u.id = ?
+         OR EXISTS (
+           SELECT 1 FROM messages m
+           WHERE m.chat_id = ? AND m.sender_id = u.id
+         )
+       )
+     ORDER BY CAST(SUBSTR(u.id, 2) AS INTEGER)`,
+  ).all(selfUserId ?? "", chatId) as Array<{ id: string; name: string | null }>;
+  return rows;
+}
+
 /** Update user name with source priority check */
 export function updateUserName(
   db: Database.Database,

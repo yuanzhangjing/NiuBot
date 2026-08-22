@@ -8,6 +8,7 @@ import { ensureChat, ensureUser, initDatabase as openDatabase, storeMessage } fr
 import {
   buildImportantContext,
   buildNormalContext,
+  buildSpeakerContext,
   buildStableSystemContext,
   COMPACT_RECOVERY_REMINDER,
 } from "./inject.js";
@@ -141,6 +142,37 @@ describe("buildImportantContext", () => {
 
     expect(context).not.toContain("Bot profile");
     expect(context).not.toContain("/tmp/bot_profile.md");
+  });
+
+  it("injects bot-collab rules in group chats", () => {
+    const workingDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-inject-"));
+    tempDirs.push(workingDirectory);
+    const db = initDatabase(path.join(workingDirectory, "niubot.db"));
+    const context = buildImportantContext(db, {
+      botName: "NiuBot",
+      botLabel: "U3(NiuBot)",
+      platform: "feishu",
+      chatId: "c4",
+      chatLabel: "C4(Zhangjing Yuan)",
+      chatType: "group",
+    });
+    expect(context).toContain("<bot-collab>");
+    expect(context).toContain("@U4(CowBot)");
+    expect(context).toContain("会话：C4(Zhangjing Yuan)（群聊）");
+    expect(context).not.toContain("用户：");
+  });
+});
+
+describe("buildSpeakerContext", () => {
+  it("labels bot speakers separately and skips their memories", () => {
+    const workingDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-inject-"));
+    tempDirs.push(workingDirectory);
+    const db = initDatabase(path.join(workingDirectory, "niubot.db"));
+    const ctx = buildSpeakerContext(db, [
+      { userId: "u4", userName: "CowBot", isBot: true },
+    ]);
+    expect(ctx).toContain("Bot：U4(CowBot)");
+    expect(ctx).not.toContain("用户：");
   });
 });
 

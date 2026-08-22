@@ -5,6 +5,12 @@ import Database from "better-sqlite3";
 import { afterEach, describe, expect, test } from "vitest";
 import {
   initDatabase as openDatabase,
+  ensureUser,
+  ensureChat,
+  storeMessage,
+  setUserIsBot,
+  getUserIsBot,
+  listChatBots,
   getBotRuntimeState,
   setBotRuntimeState,
   clearBotRuntimeModels,
@@ -571,5 +577,38 @@ describe("transport inbox claim schema", () => {
     database.close();
 
     expect(() => openDatabase(dbPath)).toThrow(/claim schema is incomplete/);
+  });
+});
+
+describe("bot identity helpers", () => {
+  test("setUserIsBot and listChatBots include self and speakers", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-bot-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const selfId = ensureUser(db, "feishu", "ou-self", "NiuBot");
+    const cowId = ensureUser(db, "feishu", "ou-cow", "CowBot");
+    const humanId = ensureUser(db, "feishu", "ou-zen", "Zen");
+    setUserIsBot(db, selfId);
+    setUserIsBot(db, cowId);
+    const chatId = ensureChat(db, "feishu", "oc-group", "group");
+    storeMessage(db, {
+      chatId,
+      senderId: cowId,
+      role: "user",
+      contentText: "hi",
+      platform: "feishu",
+    });
+    storeMessage(db, {
+      chatId,
+      senderId: humanId,
+      role: "user",
+      contentText: "hey",
+      platform: "feishu",
+    });
+
+    expect(getUserIsBot(db, selfId)).toBe(true);
+    expect(getUserIsBot(db, cowId)).toBe(true);
+    expect(getUserIsBot(db, humanId)).toBe(false);
+    expect(listChatBots(db, chatId, selfId).map((row) => row.id).sort()).toEqual([cowId, selfId].sort());
   });
 });

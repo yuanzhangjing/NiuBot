@@ -293,6 +293,16 @@ On the **事件订阅** page, add:
 
 This event is only available after the bot has established a WebSocket connection (which happened in Step 4).
 
+### 5.3 Bot-to-bot @ in group chats (optional)
+
+To let other app bots @ this bot (and vice versa), enable **on every participating app**:
+
+`im:message.group_at_msg.include_bot:readonly`
+
+Then **create a version and publish** each app. Without this scope, Feishu only delivers human @mentions. Enabling it on NiuBot alone is not enough.
+
+NiuBot converts `@U4(CowBot)` in text replies and `nbt send` into Feishu `<at>` tags. Card @mentions are not delivered to other bots.
+
 ## Step 6: Publish and Verify
 
 1. **Publish the app**: Create a version → Submit for review → Release

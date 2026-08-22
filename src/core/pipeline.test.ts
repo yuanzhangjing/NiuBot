@@ -8,12 +8,15 @@ import { CliAgentBackend, type BaseCliSession, type ParsedOutput } from "../agen
 import type { BackendCapability } from "../agent/backend-capability.js";
 import { AgentSessionNotStartedError, type AgentBackend, type AgentResponse, type AgentSession, type SessionConfig } from "../agent/types.js";
 import {
+  ensureUser,
   getBotBackendModelState,
   getBotRuntimeState,
   getRecentRuntimeEvents,
+  getUserIsBot,
   initDatabase as openDatabase,
   recordRuntimeEvent,
   setBotBackendModelState,
+  setUserIsBot,
 } from "../database/schema.js";
 import type { NormalizedMessage, PlatformAdapter } from "../im/types.js";
 import { DeliveryUncertainError } from "../transport/errors.js";
@@ -5736,6 +5739,164 @@ describe("nbt send prefers the active-run reply target", () => {
     await pipeline.sendToChat("chat-open-id", "from send");
 
     expect(sent).toEqual([{ method: "text", payload: "from send" }]);
+  });
+
+  test("sendToChat converts other-bot short labels into Feishu at tags", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-send-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const agent = new ReplyAgent("done");
+    const { im, sent } = createSendTrackingIm();
+    const pipeline = new Pipeline(db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");
+    await pipeline.start();
+    const cowId = ensureUser(db, "feishu", "ou-cow", "CowBot");
+    setUserIsBot(db, cowId);
+
+    await pipeline.sendToChat("chat-open-id", `ping @${cowId.toUpperCase()}(CowBot)`);
+
+    expect(sent).toEqual([{
+      method: "text",
+      payload: 'ping <at user_id="ou-cow">CowBot</at>',
+    }]);
+  });
+
+  test("sendCardToChat demotes to text in group chats even before the peer is marked is_bot", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-send-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const agent = new ReplyAgent("done");
+    const { im, sent } = createSendTrackingIm();
+    const pipeline = new Pipeline(db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");
+    await pipeline.start();
+    (pipeline as any).handleMessage(createMessage({
+      chatPlatformId: "group-open-id",
+      chatType: "group",
+      contentText: "@NiuBot ping",
+      platformMsgId: "g-open",
+      botMentioned: true,
+    }));
+    await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(1));
+    await vi.waitFor(() => expect((pipeline as any).runtimeState.getActiveRun("c1")).toBeNull());
+    const cowId = ensureUser(db, "feishu", "ou-cow", "CowBot");
+    sent.length = 0;
+
+    await pipeline.sendCardToChat("group-open-id", "Header", `ping @${cowId.toUpperCase()}`);
+
+    expect(getUserIsBot(db, cowId)).toBe(false);
+    expect(sent).toEqual([{
+      method: "text",
+      payload: 'Header\n\nping <at user_id="ou-cow">CowBot</at>',
+    }]);
+    const stored = db.prepare(
+      "SELECT content_text FROM messages WHERE role = 'assistant' ORDER BY id DESC LIMIT 1",
+    ).get() as { content_text: string };
+    expect(stored.content_text).toContain(`@${cowId.toUpperCase()}(CowBot)`);
+    expect(stored.content_text).not.toContain("<at ");
+  });
+
+  test("sendCardToChat keeps cards in p2p even when mentioning another user", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-send-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const agent = new ReplyAgent("done");
+    const { im, sent } = createSendTrackingIm();
+    const pipeline = new Pipeline(db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");
+    await pipeline.start();
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "hello",
+      platformMsgId: "om-user",
+    }));
+    await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(1));
+    await vi.waitFor(() => expect((pipeline as any).runtimeState.getActiveRun("c1")).toBeNull());
+    const cowId = ensureUser(db, "feishu", "ou-cow", "CowBot");
+    setUserIsBot(db, cowId);
+    sent.length = 0;
+
+    await pipeline.sendCardToChat("chat-open-id", "Header", `ping @${cowId.toUpperCase()}`);
+
+    expect(sent[0]?.method).toBe("card");
+    expect((sent[0]?.payload as { content: string }).content).toContain('<at user_id="ou-cow">CowBot</at>');
+  });
+
+  test("sendToChat strips other-bot ats and appends the fuse notice after 20 bot turns", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-send-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const agent = new ReplyAgent("done");
+    const { im, sent } = createSendTrackingIm();
+    const pipeline = new Pipeline(db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");
+    await pipeline.start();
+    const cowId = ensureUser(db, "feishu", "ou-cow", "CowBot");
+    setUserIsBot(db, cowId);
+    (pipeline as any).handleMessage(createMessage({
+      chatPlatformId: "group-open-id",
+      chatType: "group",
+      contentText: "@NiuBot ping",
+      platformMsgId: "g-open",
+      botMentioned: true,
+    }));
+    await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(1));
+    await vi.waitFor(() => expect((pipeline as any).runtimeState.getActiveRun("c1")).toBeNull());
+
+    (pipeline as any).botTurnCounts.set("c1", 21);
+    sent.length = 0;
+    await pipeline.sendToChat("group-open-id", `<at user_id="ou-cow">CowBot</at> ping`);
+
+    expect(sent).toEqual([{
+      method: "text",
+      payload: "CowBot ping\n\n互叫已停，需要人接手。",
+    }]);
+  });
+
+  test("marks app senders as bots and ignores bot replies that do not at the bot", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-send-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const agent = new ReplyAgent("done");
+    const { im } = createSendTrackingIm();
+    const pipeline = new Pipeline(db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");
+    await pipeline.start();
+
+    (pipeline as any).handleMessage(createMessage({
+      chatPlatformId: "group-open-id",
+      chatType: "group",
+      senderPlatformId: "ou-cow",
+      senderName: "CowBot",
+      senderIsBot: true,
+      botMentioned: true,
+      contentText: "@NiuBot hi",
+      platformMsgId: "g-bot-at",
+    }));
+    await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(1));
+    const cow = db.prepare("SELECT id FROM users WHERE platform_id = ?").get("ou-cow") as { id: string };
+    expect(getUserIsBot(db, cow.id)).toBe(true);
+
+    const callsAfterAt = agent.sendMessageCalls.length;
+    (pipeline as any).handleMessage(createMessage({
+      chatPlatformId: "group-open-id",
+      chatType: "group",
+      senderPlatformId: "ou-cow",
+      senderName: "CowBot",
+      senderIsBot: true,
+      botMentioned: false,
+      parentPlatformMsgId: "g-bot-at",
+      contentText: "just a reply",
+      platformMsgId: "g-bot-reply",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(agent.sendMessageCalls).toHaveLength(callsAfterAt);
+
+    const before = (pipeline as any).botTurnCounts.get("c1") ?? 0;
+    expect(before).toBeGreaterThanOrEqual(1);
+    (pipeline as any).noteBotCollabTurn("c1", "group", [{ senderId: cow.id, triggerKind: "user" }]);
+    expect((pipeline as any).botTurnCounts.get("c1")).toBe(before + 1);
+    (pipeline as any).noteBotCollabTurn("c1", "group", [{ senderId: cow.id, triggerKind: "user" }]);
+    expect((pipeline as any).botTurnCounts.get("c1")).toBe(before + 2);
+    const human = db.prepare("SELECT id FROM users WHERE platform_id = ?").get("user-open-id") as { id: string } | undefined;
+    if (human) {
+      (pipeline as any).noteBotCollabTurn("c1", "group", [{ senderId: human.id, triggerKind: "user" }]);
+      expect((pipeline as any).botTurnCounts.get("c1")).toBe(0);
+    }
   });
 
   test("sendToChat stays on chat when the caller is not the current main turn", async () => {

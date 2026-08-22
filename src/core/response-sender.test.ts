@@ -87,6 +87,48 @@ describe("ResponseSender", () => {
     expect(output).not.toContain("secret reply");
   });
 
+  test("preferText sends content even when textFallback is a function", async () => {
+    const { im, calls } = createAdapter();
+    const sender = new ResponseSender(im, { timeoutMs: 100 });
+
+    const result = await sender.sendFinalResponse({
+      chatId: "chat-1",
+      header: "Reply",
+      content: '<at user_id="ou-cow">CowBot</at> 收到',
+      replyToMsgId: "msg-1",
+      preferText: true,
+      textFallback: () => "发送失败：平台发送失败",
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      platformMsgId: "reply-msg",
+      method: "text",
+      deliveredContent: '<at user_id="ou-cow">CowBot</at> 收到',
+    });
+    expect(calls).toEqual([
+      { method: "reply", chatId: "chat-1", text: '<at user_id="ou-cow">CowBot</at> 收到', replyToMsgId: "msg-1" },
+    ]);
+  });
+
+  test("skips cards when preferText is set", async () => {
+    const { im, calls } = createAdapter();
+    const sender = new ResponseSender(im, { timeoutMs: 100 });
+
+    const result = await sender.sendFinalResponse({
+      chatId: "chat-1",
+      header: "Reply",
+      content: "hello @bot",
+      replyToMsgId: "msg-1",
+      preferText: true,
+    });
+
+    expect(result).toEqual({ ok: true, platformMsgId: "reply-msg", method: "text", deliveredContent: "hello @bot" });
+    expect(calls).toEqual([
+      { method: "reply", chatId: "chat-1", text: "hello @bot", replyToMsgId: "msg-1" },
+    ]);
+  });
+
   test("does not call fallback when card succeeds", async () => {
     const { im, calls } = createAdapter();
     const sender = new ResponseSender(im, { timeoutMs: 100 });
@@ -291,5 +333,28 @@ describe("ResponseSender", () => {
 
     expect(result).toEqual({ ok: true, platformMsgId: "adapter-file-msg", method: "text", deliveredContent: longText });
     expect(calls).toContainEqual({ method: "text", chatId: "chat-1", text: longText });
+  });
+
+  test("preferText does not fall back to a file", async () => {
+    const { im, calls } = createAdapter({
+      async sendReply() {
+        throw new Error("text failed");
+      },
+      async sendText() {
+        throw new Error("text failed");
+      },
+    });
+    const sender = new ResponseSender(im, { timeoutMs: 100 });
+
+    const result = await sender.sendFinalResponse({
+      chatId: "chat-1",
+      header: "Reply",
+      content: '<at user_id="ou-cow">CowBot</at> long',
+      replyToMsgId: "msg-1",
+      preferText: true,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(calls.some((call) => call.method === "file")).toBe(false);
   });
 });
