@@ -8,11 +8,10 @@ import { launchBotTransferWorker } from "./bot-transfer-launcher.js";
 import { exportBotBundle } from "./bot-transfer.js";
 import { initDatabase } from "./database/schema.js";
 import { waitForEngineIdentity } from "./local-api/engine-client.js";
-import { launchDetachedEngine, inspectRunningEngine, stopEngine } from "./process-manager.js";
+import { launchDetachedEngine, inspectRunningEngine } from "./process-manager.js";
 import { readProcessState } from "./process-state.js";
 import {
-  processStartMarkersMatch,
-  queryProcessStartMarker,
+  isProcessAlive,
   terminateSpawnedProcessTree,
   waitForProcessExit,
 } from "./platform/process.js";
@@ -20,26 +19,33 @@ import {
 const roots: string[] = [];
 const homes: string[] = [];
 const workerPids: number[] = [];
+const enginePids: number[] = [];
 
 afterEach(async () => {
-  for (const pid of workerPids.splice(0)) {
-    if (await waitForProcessExit(pid, 10_000, 100)) continue;
+  // Windows: cwd/open files in the tree block rm. Kill first; skip graceful
+  // stopEngine (named-pipe stall).
+  const pids = new Set<number>([...workerPids.splice(0), ...enginePids.splice(0)]);
+  for (const home of homes) {
+    const pid = readProcessState(home)?.processes.engine.pid;
+    if (pid) pids.add(pid);
+  }
+  for (const pid of pids) {
+    if (isProcessAlive(pid)) terminateSpawnedProcessTree(pid, true);
+  }
+  const alive: number[] = [];
+  for (const pid of pids) {
+    if (await waitForProcessExit(pid, 5_000, 100)) continue;
     terminateSpawnedProcessTree(pid, true);
-    await waitForProcessExit(pid, 5_000, 100);
+    if (!await waitForProcessExit(pid, 5_000, 100)) alive.push(pid);
   }
-  for (const home of homes.splice(0)) {
-    const recorded = readProcessState(home)?.processes.engine;
-    try { await stopEngine(home); } catch { /* force the test-owned process below */ }
-    if (recorded && !await waitForProcessExit(recorded.pid, 5_000, 100)
-      && processStartMarkersMatch(recorded.platformStartMarker, queryProcessStartMarker(recorded.pid))) {
-      terminateSpawnedProcessTree(recorded.pid, true);
-      await waitForProcessExit(recorded.pid, 5_000, 100);
-    }
+  if (alive.length > 0) {
+    throw new Error(`test processes still alive after force-kill: ${alive.join(", ")}`);
   }
+  homes.splice(0);
   for (const root of roots.splice(0)) {
-    fs.rmSync(root, { recursive: true, force: true, maxRetries: 100, retryDelay: 100 });
+    fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
-});
+}, 30_000);
 
 describe("Bot transfer detached worker integration", () => {
   it("survives the launcher, stops two isolated Engines, moves one Bot, and restores both", async () => {
@@ -139,6 +145,7 @@ async function startFixtureEngine(home: string, runtimePath: string) {
     runtimeMode: "dev",
     logFile,
   });
+  enginePids.push(launched.state.pid);
   const identity = await waitForEngineIdentity(launched.endpoint, launched.state.instanceId, 10_000, 50);
   if (!identity) {
     const log = fs.existsSync(logFile) ? fs.readFileSync(logFile, "utf-8") : "<missing log>";

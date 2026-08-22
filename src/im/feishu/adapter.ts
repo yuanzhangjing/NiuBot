@@ -348,29 +348,32 @@ export class FeishuAdapter implements PlatformAdapter {
         }
       }
     }
-    // Upload file first
-    const uploadResp = await this.client.im.file.create({
-      data: {
-        file_type: "stream",
-        file_name: name,
-        file: fs.createReadStream(filePath) as any,
-      },
+    return withFileReadStream(filePath, async (file) => {
+      const uploadResp = await this.client.im.file.create({
+        data: {
+          file_type: "stream",
+          file_name: name,
+          file: file as any,
+        },
+      });
+      const fileKey = (uploadResp as any)?.data?.file_key ?? (uploadResp as any)?.file_key;
+      if (!fileKey) throw new Error("File upload failed: no file_key returned");
+      return this.postMessage(chatId, "file", JSON.stringify({ file_key: fileKey }), replyToMsgId);
     });
-    const fileKey = (uploadResp as any)?.data?.file_key ?? (uploadResp as any)?.file_key;
-    if (!fileKey) throw new Error("File upload failed: no file_key returned");
-    return this.postMessage(chatId, "file", JSON.stringify({ file_key: fileKey }), replyToMsgId);
   }
 
   private async sendImage(chatId: string, filePath: string, replyToMsgId?: string): Promise<string> {
-    const uploadResp = await this.client.im.image.create({
-      data: {
-        image_type: "message",
-        image: fs.createReadStream(filePath) as any,
-      },
+    return withFileReadStream(filePath, async (image) => {
+      const uploadResp = await this.client.im.image.create({
+        data: {
+          image_type: "message",
+          image: image as any,
+        },
+      });
+      const imageKey = (uploadResp as any)?.data?.image_key ?? (uploadResp as any)?.image_key;
+      if (!imageKey) throw new Error("Image upload failed: no image_key returned");
+      return this.postMessage(chatId, "image", JSON.stringify({ image_key: imageKey }), replyToMsgId);
     });
-    const imageKey = (uploadResp as any)?.data?.image_key ?? (uploadResp as any)?.image_key;
-    if (!imageKey) throw new Error("Image upload failed: no image_key returned");
-    return this.postMessage(chatId, "image", JSON.stringify({ image_key: imageKey }), replyToMsgId);
   }
 
   private async postMessage(chatId: string, msgType: string, content: string, replyToMsgId?: string): Promise<string> {
@@ -1041,6 +1044,19 @@ function parsePlatformTs(val?: string): number | undefined {
   if (!val) return undefined;
   const n = Number(val);
   return Number.isNaN(n) || n === 0 ? undefined : n;
+}
+
+/** Close the fd even if the upload API throws before consuming the stream. */
+async function withFileReadStream<T>(
+  filePath: string,
+  use: (stream: fs.ReadStream) => Promise<T>,
+): Promise<T> {
+  const stream = fs.createReadStream(filePath);
+  try {
+    return await use(stream);
+  } finally {
+    stream.destroy();
+  }
 }
 
 /** MIME type → file extension */
