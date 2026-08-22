@@ -64,6 +64,14 @@ describe("trusted publishing release flow", () => {
       name: "Upgrade npm",
       run: "npm install -g npm@11",
     });
+    const stepNames = workflow.jobs.publish.steps.map((step) => step.name);
+    const buildAt = stepNames.indexOf("Build");
+    const upgradesAt = stepNames.indexOf("Check public upgrade paths");
+    expect(workflow.jobs.publish.steps[buildAt]).toEqual({
+      name: "Build",
+      run: "npm run build",
+    });
+    expect(upgradesAt).toBeGreaterThan(buildAt);
     expect(workflow.jobs.publish.steps).toContainEqual({
       name: "Publish",
       run: "npm publish --access public --registry https://registry.npmjs.org",

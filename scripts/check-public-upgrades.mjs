@@ -5,6 +5,9 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const repository = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
+if (!fs.existsSync(path.join(repository, "dist", "database", "schema.js"))) {
+  throw new Error("dist/ is missing; run npm run build before test:public-upgrades");
+}
 const packageName = "@yuanzhangjing/niubot";
 const registryUrl = `https://registry.npmjs.org/${encodeURIComponent(packageName)}`;
 const response = await fetch(registryUrl);
