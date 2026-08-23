@@ -121,6 +121,7 @@ import type { EngineLifecycle } from "../engine-lifecycle.js";
 import {
   appendFuseNotice,
   BOT_COLLAB_FUSE_LIMIT,
+  hasFeishuAtTag,
   invertFeishuAtsToShortLabels,
   rewriteOutboundMentions,
   type MentionUser,
@@ -1097,32 +1098,47 @@ export class Pipeline {
   /** 通过 IPC 发送卡片到指定 chat */
   async sendCardToChat(platformChatId: string, header: string, content: string, scheduleToken?: string): Promise<void> {
     const prepared = this.prepareOutboundText(platformChatId, content);
-    const demotedText = header ? `${header}\n\n${prepared.text}` : prepared.text;
-    const historyText = header && prepared.preferText
-      ? `${header}\n\n${prepared.historyText}`
-      : prepared.historyText;
-    const platformMsgId = prepared.preferText
-      ? await this.sendPreferringReply(
-        platformChatId,
-        "sendCardToChat",
-        (replyToMsgId) => this.transport.sendReply(platformChatId, demotedText, replyToMsgId),
-        () => this.transport.sendText(platformChatId, demotedText),
-        this.currentTurnReplyTarget(platformChatId, scheduleToken),
-      )
-      : await this.sendPreferringReply(
-        platformChatId,
-        "sendCardToChat",
-        (replyToMsgId) => this.transport.sendCard(platformChatId, header, prepared.text, undefined, replyToMsgId),
-        () => this.transport.sendCard(platformChatId, header, prepared.text),
-        this.currentTurnReplyTarget(platformChatId, scheduleToken),
-      );
-    if (prepared.preferText) {
-      this.log.info("bot-collab card demoted to text", { platformChatId });
-    }
+    const platformMsgId = await this.sendCardKeepingAt(
+      platformChatId,
+      "sendCardToChat",
+      header,
+      prepared.text,
+      this.currentTurnReplyTarget(platformChatId, scheduleToken),
+    );
     const chatRow = this.db.prepare("SELECT id FROM chats WHERE platform_id = ?")
       .get(platformChatId) as { id: string } | undefined;
     if (chatRow) {
-      this.storeBotResponse(chatRow.id, historyText, platformMsgId);
+      this.storeBotResponse(chatRow.id, prepared.historyText, platformMsgId);
+    }
+  }
+
+  /** 卡片失败时，完整飞书 at 改走文本，避免对方 Bot 收不到。 */
+  private async sendCardKeepingAt(
+    platformChatId: string,
+    logLabel: string,
+    header: string,
+    text: string,
+    replyToMsgId?: string,
+    preferReply = true,
+  ): Promise<string> {
+    const sendCard = () => this.transport.sendCard(platformChatId, header, text);
+    const sendCardReply = (id: string) => this.transport.sendCard(platformChatId, header, text, undefined, id);
+    try {
+      if (!preferReply) return await sendCard();
+      return await this.sendPreferringReply(platformChatId, logLabel, sendCardReply, sendCard, replyToMsgId);
+    } catch (err) {
+      if (isDeliveryUncertainError(err) || !hasFeishuAtTag(text)) throw err;
+      this.log.warn(`${logLabel}: card failed, fallback to at text`, {
+        chatId: platformChatId,
+        error: String(err),
+      });
+      return this.sendPreferringReply(
+        platformChatId,
+        logLabel,
+        (id) => this.transport.sendReply(platformChatId, text, id),
+        () => this.transport.sendText(platformChatId, text),
+        preferReply ? replyToMsgId : undefined,
+      );
     }
   }
 
@@ -1141,7 +1157,6 @@ export class Pipeline {
   private prepareOutboundText(platformChatId: string, text: string): {
     text: string;
     historyText: string;
-    preferText: boolean;
   } {
     const chatRow = this.db.prepare("SELECT id, type FROM chats WHERE platform_id = ?")
       .get(platformChatId) as { id: string; type: string } | undefined;
@@ -1161,7 +1176,6 @@ export class Pipeline {
     return {
       text: out,
       historyText: invertFeishuAtsToShortLabels(out, users),
-      preferText: isGroup && (result.mentionedNonSelf || fuseTripped),
     };
   }
 
@@ -1175,7 +1189,7 @@ export class Pipeline {
       signal?: AbortSignal;
       textFallback?: string | ((error: unknown) => string);
     },
-  ): Promise<SendResult & { preferText: boolean; historyText: string; sentText: string }> {
+  ): Promise<SendResult & { historyText: string; sentText: string }> {
     const prepared = this.prepareOutboundText(platformChatId, options.content);
     const result = await this.responseSender.sendFinalResponse({
       chatId: platformChatId,
@@ -1184,12 +1198,10 @@ export class Pipeline {
       footer: options.footer,
       replyToMsgId: options.replyToMsgId,
       signal: options.signal,
-      preferText: prepared.preferText,
       textFallback: options.textFallback,
     });
     return {
       ...result,
-      preferText: prepared.preferText,
       historyText: prepared.historyText,
       sentText: prepared.text,
     };
@@ -5101,7 +5113,7 @@ ${jobParts.join("\n\n")}
       if (sendResult.ok) {
         sentPlatformMsgId = sendResult.platformMsgId;
         deliveredResponseBody = sendResult.method === "card"
-          || (sendResult.preferText && sendResult.method === "text");
+          || sendResult.deliveredContent === sendResult.sentText;
         // 发出去用飞书 at；历史统一成短号。降级错误文案仍按实际交付内容回写。
         deliveredText = sendResult.deliveredContent === sendResult.sentText
           ? sendResult.historyText
@@ -5508,24 +5520,14 @@ ${jobParts.join("\n\n")}
     const platformChatId = this.platformChatIds.get(chatId);
     if (!platformChatId) return;
     const prepared = this.prepareOutboundText(platformChatId, content);
-    const send = prepared.preferText
-      ? this.sendPreferringReply(
-        platformChatId,
-        "watchdog-card",
-        (replyToMsgId) => this.transport.sendReply(platformChatId, prepared.text, replyToMsgId),
-        () => this.transport.sendText(platformChatId, prepared.text),
-        this.runtimeState.getActiveRun(chatId)?.replyToPlatformMsgId,
-      )
-      : preferReply
-        ? this.sendPreferringReply(
-          platformChatId,
-          "watchdog-card",
-          (replyToMsgId) => this.transport.sendCard(platformChatId, header, prepared.text, undefined, replyToMsgId),
-          () => this.transport.sendCard(platformChatId, header, prepared.text),
-          this.runtimeState.getActiveRun(chatId)?.replyToPlatformMsgId,
-        )
-        : this.transport.sendCard(platformChatId, header, prepared.text);
-    send.then((pmid) => {
+    this.sendCardKeepingAt(
+      platformChatId,
+      "watchdog-card",
+      header,
+      prepared.text,
+      this.runtimeState.getActiveRun(chatId)?.replyToPlatformMsgId,
+      preferReply,
+    ).then((pmid) => {
       this.storeBotResponse(chatId, prepared.historyText, pmid);
     }).catch(() => {});
   }

@@ -448,4 +448,70 @@ describe("sendCard header color", () => {
     expect(card.header.template).toBe("blue");
     expect(card.header.title.content).toBe("Shell | 输出");
   });
+
+  test("still files oversized cards when the at substring is incomplete", async () => {
+    const adapter = new FeishuAdapter("app-id", "app-secret");
+    const sentMessages: Array<{ msgType: string }> = [];
+    (adapter as any).client = {
+      im: {
+        file: {
+          create: async ({ data }: any) => {
+            for await (const chunk of data.file) /* drain */;
+            return { data: { file_key: "file-key" } };
+          },
+        },
+        message: {
+          create: async ({ data }: any) => {
+            sentMessages.push({ msgType: data.msg_type });
+            return { data: { message_id: "message-id" } };
+          },
+        },
+      },
+    };
+
+    await adapter.sendCard("chat-id", "Hi", `see <at ${"长消息".repeat(4_000)}`);
+
+    expect(sentMessages).toEqual([{ msgType: "file" }]);
+  });
+
+  test("converts text at tags into card markdown at tags", async () => {
+    const adapter = new FeishuAdapter("app-id", "app-secret");
+    let sentContent = "";
+    (adapter as any).client = {
+      im: {
+        message: {
+          create: async ({ data }: any) => {
+            sentContent = data.content;
+            return { data: { message_id: "card-id" } };
+          },
+        },
+      },
+    };
+
+    await adapter.sendCard("chat-id", "Hi", 'ping <at user_id="ou-cow">CowBot</at>');
+
+    const card = JSON.parse(sentContent);
+    expect(card.body.elements[0].content).toBe('ping <at id="ou-cow"></at>');
+  });
+
+  test("does not fall back to a file when card content contains an at tag", async () => {
+    const adapter = new FeishuAdapter("app-id", "app-secret");
+    (adapter as any).client = {
+      im: {
+        file: {
+          create: async () => {
+            throw new Error("should not upload file");
+          },
+        },
+        message: {
+          create: async () => {
+            throw new Error("card rejected");
+          },
+        },
+      },
+    };
+
+    await expect(adapter.sendCard("chat-id", "Hi", 'ping <at user_id="ou-cow">CowBot</at>'))
+      .rejects.toThrow("card rejected");
+  });
 });

@@ -8,6 +8,7 @@ import path from "node:path";
 import type { NormalizedMessage, MessageHandler, PlatformAdapter, MentionInfo, MessageNode } from "../types.js";
 import type { DeliveryOptions } from "../../transport/types.js";
 import { renderMessageNodes } from "../render.js";
+import { hasFeishuAtTag, toCardAtTags } from "../mentions.js";
 import { createLogger } from "../../logger.js";
 
 const log = createLogger("feishu");
@@ -200,7 +201,7 @@ export class FeishuAdapter implements PlatformAdapter {
   }
 
   async sendText(chatId: string, text: string): Promise<string> {
-    if (Buffer.byteLength(text, "utf-8") > FILE_THRESHOLD_BYTES && !text.includes("<at ")) {
+    if (Buffer.byteLength(text, "utf-8") > FILE_THRESHOLD_BYTES && !hasFeishuAtTag(text)) {
       log.info("sendText: content exceeds threshold, sending as file", { chatId, bytes: Buffer.byteLength(text, "utf-8") });
       return this.sendContentAsFile(chatId, text);
     }
@@ -216,7 +217,7 @@ export class FeishuAdapter implements PlatformAdapter {
   }
 
   async sendReply(chatId: string, text: string, replyToMsgId: string): Promise<string> {
-    if (Buffer.byteLength(text, "utf-8") > FILE_THRESHOLD_BYTES && !text.includes("<at ")) {
+    if (Buffer.byteLength(text, "utf-8") > FILE_THRESHOLD_BYTES && !hasFeishuAtTag(text)) {
       log.info("sendReply: content exceeds threshold, sending as file", { chatId, bytes: Buffer.byteLength(text, "utf-8") });
       return this.sendContentAsFile(chatId, text, replyToMsgId);
     }
@@ -235,7 +236,8 @@ export class FeishuAdapter implements PlatformAdapter {
   }
 
   async sendCard(chatId: string, header: string, content: string, footer?: string, replyToMsgId?: string): Promise<string> {
-    if (Buffer.byteLength(content, "utf-8") > FILE_THRESHOLD_BYTES) {
+    const hasAt = hasFeishuAtTag(content);
+    if (!hasAt && Buffer.byteLength(content, "utf-8") > FILE_THRESHOLD_BYTES) {
       log.info("sendCard: content exceeds threshold, sending as file", { chatId, bytes: Buffer.byteLength(content, "utf-8") });
       const fileContent = footer ? `${content}\n\n---\n${footer}` : content;
       return this.sendContentAsFile(chatId, fileContent, replyToMsgId);
@@ -262,6 +264,7 @@ export class FeishuAdapter implements PlatformAdapter {
       });
       return resp?.data?.message_id ?? "";
     } catch (err) {
+      if (hasAt) throw err;
       log.warn("sendCard: card API failed, fallback to file", { chatId, error: String(err) });
       const fileContent = footer ? `${content}\n\n---\n${footer}` : content;
       return this.sendContentAsFile(chatId, fileContent, replyToMsgId);
@@ -1005,7 +1008,7 @@ const CARD_HEADER_TEMPLATES = new Set([
 
 /** 构建飞书卡片 JSON。header 支持 "标题|颜色" 语法选择 header 模板颜色。 */
 function buildCardJSON(header: string, content: string, footer?: string): string {
-  let mdContent = content;
+  let mdContent = toCardAtTags(content);
   if (footer) {
     mdContent += `\n\n---\n<font color='grey'>${footer}</font>`;
   }

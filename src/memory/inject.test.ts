@@ -158,6 +158,8 @@ describe("buildImportantContext", () => {
     });
     expect(context).toContain("<bot-collab>");
     expect(context).toContain("@U4(CowBot)");
+    expect(context).toContain("放进卡片发出");
+    expect(context).not.toContain("纯文本发出");
     expect(context).toContain("会话：C4(Zhangjing Yuan)（群聊）");
     expect(context).not.toContain("用户：");
   });

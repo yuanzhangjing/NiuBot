@@ -2,7 +2,7 @@
 
 日期：2026-08-22  
 范围：NiuBot Engine（飞书适配器 + 出站发送 + 群聊注入）  
-状态：已落地，待发版验证回程（CowBot 需同步更新）
+状态：已落地。最终回复走卡片 at；CowBot 需同步更新才能测回程纯文本/卡片互叫
 
 ## 背景
 
@@ -13,16 +13,18 @@
 3. 被其他 Bot at 时正常入站、跑 Agent
 4. 由 Agent 决定还要不要继续叫对方；引擎只在极端轮次切断
 
-2026-08-22 在群 C4（Zhangjing Yuan）用 NiuBot 与 CowBot 验证：
+2026-08-22 在群 C4（Zhangjing Yuan）用 NiuBot 与 CowBot 验证；2026-08-23 补测卡片 at：
 
-- 纯文本 `<at user_id>` + 权限 `im:message.group_at_msg.include_bot:readonly`，双向能叫醒
-- 卡片里的 at、Bot 只回复不 at，对方收不到事件
+- 纯文本 `<at user_id>` + 权限 `im:message.group_at_msg.include_bot:readonly`，能叫醒
+- 卡片富文本 `<at id=ou_xxx></at>` 同样写入 `mentions` 并能叫醒对方 Bot
+- 卡片 markdown 里的字面 `@U4(Name)`、人员组件，不是飞书 at，不推事件
+- Bot 只回复不 at，对方收不到事件
 - 人只回复不 at，可以叫醒 NiuBot（现有 `isReplyToBot`）；Bot 回复不走这条
 
 ## 目标
 
 - Agent 在回复或 `nbt send` 里写 `@U4(CowBot)` / `@U4`，引擎转成飞书 `<at>` 并投递
-- 只要出站带了其他 Bot 的 at，走纯文本，不走卡片
+- 最终回复默认仍走卡片；卡片 markdown 里写成 `<at id>`，`nbt send` 文本仍用 `<at user_id>`
 - 入站 `sender_type=app` 记 `is_bot`，群聊 speaker 标成 Bot 而不是「用户」
 - 叫谁、停不停，由 Agent 决定；引擎不自动 at
 - 保险丝按**连续 Bot 触发回合**计数，阈值偏大，只防跑飞
@@ -42,8 +44,9 @@
 | `GET /im/v1/chats/{id}/members` | 不返回机器人 |
 | `GET /im/v1/chats/{id}` | 只有 `bot_count`，无名单 |
 | 人 @ Bot | 推 `im.message.receive_v1` |
-| Bot 纯文本 `<at>` 另一个 Bot（双方都开了 include_bot） | 推事件 |
-| Bot 卡片里的 at | 不推 |
+| Bot 纯文本 `<at user_id>` 另一个 Bot（双方都开了 include_bot） | 推事件 |
+| Bot 卡片富文本 `<at id>` 另一个 Bot | 推事件 |
+| 卡片里的字面 `@名字` / 人员组件 | 不推 |
 | Bot 回复另一条消息、不 at | 不推 |
 | 拉群历史 `GET /im/v1/messages` | 能看到消息，**不是**事件通道 |
 
@@ -112,15 +115,16 @@ https://open.feishu.cn/app/cli_a94929a79639dbb4/auth?q=im:message.group_at_msg.i
 
 `@所有人` / `@all` 不在本方案范围（现有逻辑保持）。
 
-### 4. 带 Bot at 则强制纯文本
+### 4. 最终回复走卡片，at 写进 markdown
 
-出站文本转换后，若包含**其他 Bot** 的 `<at>`（`users.is_bot=1` 且不是自己）：
+出站先把短号转成 `<at user_id>`。发卡片时再收成官方 `<at id="{platform_id}"></at>`。
 
-- 最终回复：不用 `sendFinalResponse` 的卡片路径，改 `sendText` / `sendReply`
-- `nbt send --card`：降成文本（header 可拼进正文或不发），打 log
-- 文件发送不转 at、不改类型
+- 最终回复 / `nbt send --card` / watchdog 卡片：保持卡片
+- `nbt send` 文本、系统通知：仍是文本 `<at user_id>`
+- 含完整飞书 at 标签的内容不降级成文件（文件叫不醒对方）；卡片 API 失败则用原文走文本，不换成「发送失败」提示。最终回复、`nbt send --card`、watchdog 卡片同一条降级。
+- 字面 `@U4(Name)` 不算 at，必须经过转换
 
-对人、不 at 其他 Bot 的回复，继续默认卡片。
+对人、不 at 其他 Bot 的回复，路径不变。
 
 ### 5. `nbt send` 与最终回复走同一套
 
@@ -128,10 +132,10 @@ https://open.feishu.cn/app/cli_a94929a79639dbb4/auth?q=im:message.group_at_msg.i
 
 | 入口 | 现状 | 改后 |
 | --- | --- | --- |
-| 回合最终回复 `sendFinalResponse` | 默认卡片 | 先 rewrite；有其他 Bot at → 文本 |
+| 回合最终回复 `sendFinalResponse` | 默认卡片 | 先 rewrite；卡片内转成 `<at id>` |
 | `nbt send` → `sendToChat` | 原文透传 | 先 rewrite + 保险丝，再 sendText/sendReply |
-| `nbt send --card` → `sendCardToChat` | 卡片 | 有其他 Bot at → 改文本；否则仍卡片 |
-| 系统通知 / watchdog 等 | 文本 | 同样走 rewrite（通常无短号，等价于原样） |
+| `nbt send --card` → `sendCardToChat` | 卡片 | 先 rewrite，仍发卡片 |
+| 系统通知 / watchdog 等 | 文本或卡片 | 同样走 rewrite（通常无短号，等价于原样） |
 
 Agent 不必为了 at 去调 `nbt send`。`nbt send` 不能用来绕过转换和保险丝。
 
@@ -149,7 +153,7 @@ Agent 不必为了 at 去调 `nbt send`。`nbt send` 不能用来绕过转换和
 
 **互叫规则**（可放在 `buildImportantContext` 或 speaker 旁的短块）：
 
-- 叫其他 Bot 用 `@U4(CowBot)` 这种短号；引擎会转成飞书 at，并用纯文本发出
+- 叫其他 Bot 用 `@U4(CowBot)` 这种短号；引擎会转成飞书 at 放进卡片发出
 - 不要手写 `ou_` / `<at user_id>`（写了也能过，但不作为用法）
 - 想让对方 Bot 收到这一句，必须 at 它；说完就不要 at
 - 人在群里能看见所有消息，不必为了「让人看见」去 at 人
@@ -181,7 +185,7 @@ Agent 不必为了 at 去调 `nbt send`。`nbt send` 不能用来绕过转换和
 
 1. **不自动 at**：叫醒对方是 Agent 的明确动作，不是引擎隐含协议。
 2. **`nbt send` 与最终回复同一套**：否则 Agent 用工具就能绕过转换和保险丝。
-3. **有其他 Bot at 才改纯文本**：不影响普通对人卡片。
+3. **卡片和文本都能投递正规 at**：最终回复保持卡片观感；`nbt send` 文本路径不变。
 4. **保险丝按连续 Bot 回合、默认 20**：只防跑飞，不替模型结束对话。
 5. **`is_bot` 以 `sender_type=app` 为准**：不靠猜 mention。
 6. **发现靠人 at 介绍 + 对方发过言**：不拉群成员列表。
@@ -202,9 +206,9 @@ Agent 不必为了 at 去调 `nbt send`。`nbt send` 不能用来绕过转换和
 ## 测试要点
 
 - `@U4(CowBot)` / `@U4` / `@u4` 转成正确 `<at>`
-- 已是 `<at user_id>` 的文本不重复包一层
-- 含其他 Bot at 的最终回复走 text，不走 card
-- `nbt send` 短号会被转换；`--card` 在含 Bot at 时降成 text
+- 已是 `<at user_id>` / `<at id>` 的文本不重复包一层
+- 含其他 Bot at 的最终回复仍走 card，markdown 为 `<at id>`
+- `nbt send` 短号会被转换；`--card` 仍发卡片
 - 人触发回合默认仍是卡片
 - `sender_type=app` → `is_bot=1`，speaker 为 `Bot：U4(...)`
 - 连续 20 轮 Bot 触发后第 21 轮剥 at，群消息仍发出

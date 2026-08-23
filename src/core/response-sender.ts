@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createLogger } from "../logger.js";
+import { hasFeishuAtTag } from "../im/mentions.js";
 import { isDeliveryUncertainError } from "../transport/errors.js";
 import type { DeliveryOptions, TransportClient } from "../transport/types.js";
 import { TimeoutError, withTimeout } from "./timeout.js";
@@ -24,7 +25,7 @@ type SendFinalResponseOptions = {
   footer?: string;
   replyToMsgId?: string;
   signal?: AbortSignal;
-  /** 跳过卡片，直接走文本（群聊 at 其他 Bot 时飞书只投递纯文本 at） */
+  /** 跳过卡片，直接走文本。 */
   preferText?: boolean;
   /** 卡片发送失败后的文本降级内容（默认 = content）；可传函数按卡片失败原因动态构建（如「发送失败：<原因>」提示） */
   textFallback?: string | ((error: unknown) => string);
@@ -166,8 +167,9 @@ export class ResponseSender {
       if (uncertain) return uncertainResult();
     }
 
-    // preferText：正文就是 content。textFallback 只在卡片失败后的降级路径使用。
-    const textBody = options.preferText ? options.content : resolveFallbackText();
+    // 带飞书 at 时正文必须原样走文本降级，不能换成「发送失败」提示，否则对方 Bot 收不到。
+    const keepAtPayload = options.preferText || hasFeishuAtTag(options.content);
+    const textBody = keepAtPayload ? options.content : resolveFallbackText();
 
     if (options.replyToMsgId) {
       const replyText = await trySend("text:reply", "text", () =>
@@ -183,8 +185,8 @@ export class ResponseSender {
     if (createText) return createText;
     if (uncertain) return uncertainResult();
 
-    // preferText 是为了投递飞书 at；改成文件后对方 Bot 收不到，不再降级。
-    if (options.preferText) {
+    // 带 at 或主动要求纯文本时不要再降成文件（文件里的 at 叫不醒对方）。
+    if (keepAtPayload) {
       return {
         ok: false,
         error: errorMessage(lastError),

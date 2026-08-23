@@ -363,7 +363,7 @@ class CompactCountingAgent extends RecordingAgent {
 }
 
 class ReplyAgent extends RecordingAgent {
-  constructor(private readonly replyText = "agent reply") {
+  constructor(public replyText = "agent reply") {
     super();
   }
 
@@ -530,6 +530,43 @@ describe("Pipeline Loop integration", () => {
     expect(sentTexts.at(-1)).toContain("> 任务：keep checking");
     expect(sentTexts.at(-1)).toContain("发送失败：card blocked");
     expect(getLoopJob(db, id)).toMatchObject({ status: "active", runCount: 0 });
+  });
+
+  test("settles a Loop turn when card fails but the original at payload is sent as text", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-loop-at-fallback-test-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const agent = new ReplyAgent("loop reply");
+    const { im, sentTexts } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex",
+    );
+    await pipeline.start();
+
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "create the main session",
+      platformMsgId: "initial-loop-at-fallback-message",
+    }));
+    await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(1));
+    const cowId = ensureUser(db, "feishu", "ou-cow", "CowBot");
+    agent.replyText = `loop reply @${cowId.toUpperCase()}(CowBot)`;
+    im.sendCard = async () => { throw new Error("card blocked"); };
+
+    const id = addLoopJob(db, {
+      chatId: "c1",
+      creatorUserId: "u1",
+      intervalSeconds: 60,
+      prompt: "keep checking",
+      maxTimes: 1,
+      now: new Date(Date.now() - 60_000),
+    });
+    const scheduler = new LoopScheduler(db, (job) => pipeline.enqueueLoopJob(job.id));
+    expect(await scheduler.tick(new Date())).toBe(1);
+
+    await vi.waitFor(() => expect(getLoopJob(db, id)?.status).toBe("completed"));
+    expect(sentTexts.at(-1)).toContain(`<at user_id="ou-cow">CowBot</at>`);
+    expect(sentTexts.at(-1)).not.toContain("发送失败");
+    expect(getLoopJob(db, id)).toMatchObject({ status: "completed", runCount: 1 });
   });
 
   test("keeps the Loop marker when the Agent turn throws", async () => {
@@ -5760,7 +5797,7 @@ describe("nbt send prefers the active-run reply target", () => {
     }]);
   });
 
-  test("sendCardToChat demotes to text in group chats even before the peer is marked is_bot", async () => {
+  test("sendCardToChat keeps cards in group chats and converts short labels", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-send-"));
     tempDirs.push(dir);
     const db = initDatabase(path.join(dir, "niubot.db"));
@@ -5783,10 +5820,9 @@ describe("nbt send prefers the active-run reply target", () => {
     await pipeline.sendCardToChat("group-open-id", "Header", `ping @${cowId.toUpperCase()}`);
 
     expect(getUserIsBot(db, cowId)).toBe(false);
-    expect(sent).toEqual([{
-      method: "text",
-      payload: 'Header\n\nping <at user_id="ou-cow">CowBot</at>',
-    }]);
+    expect(sent[0]?.method).toBe("card");
+    expect((sent[0]?.payload as { header: string; content: string }).header).toBe("Header");
+    expect((sent[0]?.payload as { content: string }).content).toContain('<at user_id="ou-cow">CowBot</at>');
     const stored = db.prepare(
       "SELECT content_text FROM messages WHERE role = 'assistant' ORDER BY id DESC LIMIT 1",
     ).get() as { content_text: string };
@@ -5816,6 +5852,52 @@ describe("nbt send prefers the active-run reply target", () => {
 
     expect(sent[0]?.method).toBe("card");
     expect((sent[0]?.payload as { content: string }).content).toContain('<at user_id="ou-cow">CowBot</at>');
+  });
+
+  test("sendCardToChat falls back to at text when the card API fails", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-send-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const agent = new ReplyAgent("done");
+    const { im, sent } = createSendTrackingIm();
+    const pipeline = new Pipeline(db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");
+    await pipeline.start();
+    const cowId = ensureUser(db, "feishu", "ou-cow", "CowBot");
+    im.sendCard = async () => { throw new Error("card blocked"); };
+
+    await pipeline.sendCardToChat("chat-open-id", "Header", `ping @${cowId.toUpperCase()}`);
+
+    expect(sent).toEqual([{
+      method: "text",
+      payload: 'ping <at user_id="ou-cow">CowBot</at>',
+    }]);
+  });
+
+  test("sendWatchdogCard falls back to at text when the card API fails", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-send-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const agent = new ReplyAgent("done");
+    const { im, sent } = createSendTrackingIm();
+    const pipeline = new Pipeline(db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");
+    await pipeline.start();
+    (pipeline as any).handleMessage(createMessage({
+      contentText: "hello",
+      platformMsgId: "om-user",
+    }));
+    await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(1));
+    await vi.waitFor(() => expect((pipeline as any).runtimeState.getActiveRun("c1")).toBeNull());
+    const cowId = ensureUser(db, "feishu", "ou-cow", "CowBot");
+    sent.length = 0;
+    im.sendCard = async () => { throw new Error("card blocked"); };
+
+    await (pipeline as any).sendWatchdogCard("c1", "Header", `ping @${cowId.toUpperCase()}`);
+    await vi.waitFor(() => expect(sent.length).toBeGreaterThan(0));
+
+    expect(sent).toEqual([{
+      method: "text",
+      payload: 'ping <at user_id="ou-cow">CowBot</at>',
+    }]);
   });
 
   test("sendToChat strips other-bot ats and appends the fuse notice after 20 bot turns", async () => {

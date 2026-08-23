@@ -301,7 +301,7 @@ To let other app bots @ this bot (and vice versa), enable **on every participati
 
 Then **create a version and publish** each app. Without this scope, Feishu only delivers human @mentions. Enabling it on NiuBot alone is not enough.
 
-NiuBot converts `@U4(CowBot)` in text replies and `nbt send` into Feishu `<at>` tags. Card @mentions are not delivered to other bots.
+NiuBot converts `@U4(CowBot)` in replies and `nbt send` into Feishu `<at>` tags. Final replies stay on cards (`<at id>`); `nbt send` without `--card` still sends text (`<at user_id>`). Literal `@Name` in a card is not a mention.
 
 ## Step 6: Publish and Verify
 

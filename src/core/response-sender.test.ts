@@ -335,6 +335,85 @@ describe("ResponseSender", () => {
     expect(calls).toContainEqual({ method: "text", chatId: "chat-1", text: longText });
   });
 
+  test("incomplete at substring still uses textFallback", async () => {
+    const { im, calls } = createAdapter({
+      async sendCard(chatId, _header, content, _footer, replyToMsgId) {
+        calls.push({ method: "card", chatId, content, replyToMsgId });
+        throw new Error("card failed");
+      },
+    });
+    const sender = new ResponseSender(im, { timeoutMs: 100 });
+
+    const result = await sender.sendFinalResponse({
+      chatId: "chat-1",
+      header: "Reply",
+      content: "see <at ",
+      textFallback: () => "发送失败：平台发送失败",
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      platformMsgId: "text-msg",
+      method: "text",
+      deliveredContent: "发送失败：平台发送失败",
+    });
+  });
+
+  test("card failure with at tags retries the original payload as text", async () => {
+    const { im, calls } = createAdapter({
+      async sendCard(chatId, _header, content, _footer, replyToMsgId) {
+        calls.push({ method: "card", chatId, content, replyToMsgId });
+        throw new Error("card failed");
+      },
+    });
+    const sender = new ResponseSender(im, { timeoutMs: 100 });
+
+    const result = await sender.sendFinalResponse({
+      chatId: "chat-1",
+      header: "Reply",
+      content: '<at user_id="ou-cow">CowBot</at> 收到',
+      replyToMsgId: "msg-1",
+      textFallback: () => "发送失败：平台发送失败",
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      platformMsgId: "reply-msg",
+      method: "text",
+      deliveredContent: '<at user_id="ou-cow">CowBot</at> 收到',
+    });
+    expect(calls).toEqual([
+      { method: "card", chatId: "chat-1", content: '<at user_id="ou-cow">CowBot</at> 收到', replyToMsgId: "msg-1" },
+      { method: "card", chatId: "chat-1", content: '<at user_id="ou-cow">CowBot</at> 收到' },
+      { method: "reply", chatId: "chat-1", text: '<at user_id="ou-cow">CowBot</at> 收到', replyToMsgId: "msg-1" },
+    ]);
+  });
+
+  test("at content does not fall back to a file", async () => {
+    const { im, calls } = createAdapter({
+      async sendCard() {
+        throw new Error("card failed");
+      },
+      async sendReply() {
+        throw new Error("text failed");
+      },
+      async sendText() {
+        throw new Error("text failed");
+      },
+    });
+    const sender = new ResponseSender(im, { timeoutMs: 100 });
+
+    const result = await sender.sendFinalResponse({
+      chatId: "chat-1",
+      header: "Reply",
+      content: '<at user_id="ou-cow">CowBot</at> long',
+      replyToMsgId: "msg-1",
+    });
+
+    expect(result.ok).toBe(false);
+    expect(calls.some((call) => call.method === "file")).toBe(false);
+  });
+
   test("preferText does not fall back to a file", async () => {
     const { im, calls } = createAdapter({
       async sendReply() {

@@ -199,7 +199,7 @@ export interface SpeakerInfo {
   isBot?: boolean;
 }
 
-const BOT_COLLAB_RULES = `叫其他 Bot 用 @U4(CowBot) 这种短号；引擎会转成飞书 at，并用纯文本发出。
+const BOT_COLLAB_RULES = `叫其他 Bot 用 @U4(CowBot) 这种短号；引擎会转成飞书 at 放进卡片发出。
 不要手写 ou_ 或飞书 at 标签。
 想让对方 Bot 收到这一句，必须 at 它；说完就不要 at。
 人在群里能看见所有消息，不必为了让人看见去 at 人。

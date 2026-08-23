@@ -19,7 +19,7 @@ export type RewriteOutboundMentionsResult = {
   text: string;
   /** 转换后、剥 at 前，是否 at 了其他 Bot */
   mentionedOtherBot: boolean;
-  /** 转换后是否 at 了自己以外的人（未标 is_bot 的对方 Bot 也算，避免首跳仍走卡片） */
+  /** 转换后是否 at 了自己以外的人（未标 is_bot 的对方 Bot 也算） */
   mentionedNonSelf: boolean;
   stripped: boolean;
 };
@@ -29,7 +29,28 @@ function shortAtPattern(): RegExp {
 }
 
 function feishuAtPattern(): RegExp {
-  return /<at\s+user_id="([^"]*)">([\s\S]*?)<\/at>/gi;
+  return /<at\s+(?:user_id="([^"]*)"|id="([^"]*)"|id=([^\s>"']+))>([\s\S]*?)<\/at>/gi;
+}
+
+export function hasFeishuAtTag(text: string): boolean {
+  return feishuAtPattern().test(text);
+}
+
+function feishuAtOuterPattern(): RegExp {
+  return /<at\s+(?:user_id="[^"]*"|id="[^"]*"|id=[^\s>"']+)>[\s\S]*?<\/at>/gi;
+}
+
+function atPlatformId(match: RegExpMatchArray): string {
+  return match[1] || match[2] || match[3] || "";
+}
+
+/** 卡片 markdown 用官方 `<at id>`；文本消息仍用 `<at user_id>`。 */
+export function toCardAtTags(text: string): string {
+  return text.replace(feishuAtPattern(), (full, userId?: string, idQuoted?: string, idBare?: string) => {
+    const id = userId || idQuoted || idBare;
+    if (!id) return full;
+    return `<at id="${id}"></at>`;
+  });
 }
 
 function isOtherBot(user: MentionUser | undefined, selfUserId?: string | null): boolean {
@@ -39,7 +60,7 @@ function isOtherBot(user: MentionUser | undefined, selfUserId?: string | null): 
 /** 只改 at 标签外的文本，避免把已有 `<at>` 再包一层。 */
 export function mapOutsideAtTags(text: string, rewrite: (chunk: string) => string): string {
   const parts: string[] = [];
-  const re = /<at\s+user_id="[^"]*">[\s\S]*?<\/at>/gi; // local instance, safe for matchAll
+  const re = feishuAtOuterPattern();
   let last = 0;
   for (const match of text.matchAll(re)) {
     const index = match.index ?? 0;
@@ -64,7 +85,7 @@ function convertShortAts(text: string, byId: Map<string, MentionUser>): string {
 
 function mentionedOtherBotIn(text: string, byPlatformId: Map<string, MentionUser>, selfUserId?: string | null): boolean {
   for (const match of text.matchAll(feishuAtPattern())) {
-    const user = byPlatformId.get(match[1] ?? "");
+    const user = byPlatformId.get(atPlatformId(match));
     if (isOtherBot(user, selfUserId)) return true;
   }
   return false;
@@ -72,8 +93,7 @@ function mentionedOtherBotIn(text: string, byPlatformId: Map<string, MentionUser
 
 function mentionedNonSelfIn(text: string, byPlatformId: Map<string, MentionUser>, selfUserId?: string | null): boolean {
   for (const match of text.matchAll(feishuAtPattern())) {
-    const platformId = match[1] ?? "";
-    const user = byPlatformId.get(platformId);
+    const user = byPlatformId.get(atPlatformId(match));
     if (selfUserId && user?.id === selfUserId) continue;
     return true;
   }
@@ -81,9 +101,10 @@ function mentionedNonSelfIn(text: string, byPlatformId: Map<string, MentionUser>
 }
 
 function stripOtherBotAtTags(text: string, byPlatformId: Map<string, MentionUser>, selfUserId?: string | null): string {
-  return text.replace(feishuAtPattern(), (full, platformId: string, name: string) => {
+  return text.replace(feishuAtPattern(), (full, userId?: string, idQuoted?: string, idBare?: string, name?: string) => {
+    const platformId = userId || idQuoted || idBare || "";
     const user = byPlatformId.get(platformId);
-    if (isOtherBot(user, selfUserId)) return name;
+    if (isOtherBot(user, selfUserId)) return user?.name?.trim() || name?.trim() || "";
     return full;
   });
 }
@@ -120,9 +141,11 @@ function shortLabel(id: string, name: string | null): string {
 /** 发出去的飞书 at 转回 @U4(Name)，供会话历史使用。 */
 export function invertFeishuAtsToShortLabels(text: string, users: MentionUser[]): string {
   const byPlatformId = new Map(users.filter((user) => user.platformId).map((user) => [user.platformId, user]));
-  return text.replace(feishuAtPattern(), (full, platformId: string, name: string) => {
+  return text.replace(feishuAtPattern(), (full, userId?: string, idQuoted?: string, idBare?: string, name?: string) => {
+    const platformId = userId || idQuoted || idBare || "";
+    const inner = name?.trim() ?? "";
     const user = byPlatformId.get(platformId);
-    if (!user) return name?.trim() ? `@${name.trim()}` : full;
-    return `@${shortLabel(user.id, user.name ?? name ?? null)}`;
+    if (!user) return inner ? `@${inner}` : full;
+    return `@${shortLabel(user.id, user.name ?? inner ?? null)}`;
   });
 }
