@@ -36,6 +36,16 @@ export function hasFeishuAtTag(text: string): boolean {
   return feishuAtPattern().test(text);
 }
 
+export function mapFeishuAtTags(
+  text: string,
+  replace: (platformId: string, inner: string) => string,
+): string {
+  return text.replace(feishuAtPattern(), (full, userId?: string, idQuoted?: string, idBare?: string, inner?: string) => {
+    const id = userId || idQuoted || idBare || "";
+    return replace(id, inner ?? "");
+  });
+}
+
 function feishuAtOuterPattern(): RegExp {
   return /<at\s+(?:user_id="[^"]*"|id="[^"]*"|id=[^\s>"']+)>[\s\S]*?<\/at>/gi;
 }

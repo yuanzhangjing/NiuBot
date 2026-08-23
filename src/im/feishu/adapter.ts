@@ -8,7 +8,7 @@ import path from "node:path";
 import type { NormalizedMessage, MessageHandler, PlatformAdapter, MentionInfo, MessageNode } from "../types.js";
 import type { DeliveryOptions } from "../../transport/types.js";
 import { renderMessageNodes } from "../render.js";
-import { hasFeishuAtTag, toCardAtTags } from "../mentions.js";
+import { hasFeishuAtTag, mapFeishuAtTags, toCardAtTags } from "../mentions.js";
 import { createLogger } from "../../logger.js";
 
 const log = createLogger("feishu");
@@ -424,18 +424,27 @@ export class FeishuAdapter implements PlatformAdapter {
 
   async getMessageContent(msgId: string): Promise<string | undefined> {
     try {
-      const resp = await this.client.im.message.get({
-        path: { message_id: msgId },
-      });
-      const msg = resp?.data?.items?.[0] ?? resp?.data;
-      const body = (msg as any)?.body?.content;
+      const body = await this.fetchMessageBody(msgId, true);
       if (!body) return undefined;
+
       try {
         const parsed = JSON.parse(body);
-        return parsed.text ?? body;
+        if (typeof parsed.text === "string") return parsed.text;
+
+        if (Array.isArray(parsed.content)) {
+          const post = this.extractPostText(parsed, []);
+          if (post) return post;
+        }
+
+        if (parsed.schema === "2.0" || parsed.header || parsed.body?.elements || parsed.elements) {
+          const card = this.extractInteractiveText(parsed);
+          return card === "[卡片消息]" ? undefined : card;
+        }
       } catch {
-        return body;
+        // Keep the original body for non-JSON message content.
       }
+
+      return body;
     } catch (err) {
       log.warn("getMessageContent failed", { msgId, error: String(err) });
       return undefined;
@@ -633,8 +642,13 @@ export class FeishuAdapter implements PlatformAdapter {
       }
 
       case "interactive": {
-        // Card message: extract fallback text
-        const text = this.extractInteractiveText(parsed);
+        let text = this.extractInteractiveText(parsed);
+        if (this.isDegradedCardText(text) && messageId) {
+          const original = await this.fetchOriginalCardParsed(messageId);
+          if (original) text = this.extractInteractiveText(original);
+        }
+        if (this.isDegradedCardText(text)) text = "[卡片消息]";
+        text = this.replaceCardMentions(text, mentions);
         return { text, contentType: "interactive" };
       }
 
@@ -784,38 +798,78 @@ export class FeishuAdapter implements PlatformAdapter {
     return parts.join("\n");
   }
 
+  /** 事件/默认 GET 里的 schema 2.0 卡片是「请升级客户端」占位，不是原文。 */
+  private isDegradedCardText(text: string): boolean {
+    if (!text || text === "[卡片消息]") return true;
+    return text.includes("请升级至最新版本客户端") || text.includes("请升级客户端");
+  }
+
+  private async fetchOriginalCardParsed(messageId: string): Promise<any | null> {
+    try {
+      const raw = await this.fetchMessageBody(messageId, true);
+      if (!raw) return null;
+      try {
+        return JSON.parse(raw);
+      } catch {
+        return null;
+      }
+    } catch (err) {
+      log.warn("fetch original card failed", { messageId, error: String(err) });
+      return null;
+    }
+  }
+
+  private async fetchMessageBody(messageId: string, originalCardContent: boolean): Promise<string | undefined> {
+    const request: any = { path: { message_id: messageId } };
+    if (originalCardContent) {
+      request.params = { card_msg_content_type: "user_card_content" };
+    }
+    const resp = await this.client.im.message.get(request);
+    const msg = (resp?.data as any)?.items?.[0] ?? (resp?.data as any);
+    const body = msg?.body?.content;
+    return typeof body === "string" ? body : undefined;
+  }
+
+  private replaceCardMentions(text: string, mentions: MentionInfo[]): string {
+    let out = this.replaceMentions(text, mentions);
+    out = mapFeishuAtTags(out, (platformId, inner) => {
+      const mention = mentions.find((m) => m.platformUserId === platformId);
+      const name = mention?.name?.trim() || inner.trim();
+      return name ? `@${name}` : "";
+    });
+    return out;
+  }
+
   /** Extract text from interactive card messages */
   private extractInteractiveText(parsed: any): string {
     const parts: string[] = [];
 
-    // Try card v2 format
-    if (parsed.body?.elements) {
-      for (const el of parsed.body.elements) {
-        if (el.tag === "markdown") {
-          parts.push(el.content ?? "");
-        } else if (el.tag === "div" && el.text?.content) {
-          parts.push(el.text.content);
-        }
+    const take = (el: any): void => {
+      if (!el) return;
+      if (Array.isArray(el)) {
+        for (const child of el) take(child);
+        return;
       }
-    }
+      if (typeof el !== "object") return;
+      if (el.tag === "markdown" || el.tag === "lark_md") {
+        parts.push(el.content ?? el.text?.content ?? "");
+      } else if (el.tag === "div" && el.text?.content) {
+        parts.push(el.text.content);
+      } else if (el.tag === "text" && typeof el.text === "string" && el.text) {
+        parts.push(el.text);
+      }
+      if (el.body?.elements) take(el.body.elements);
+      if (el.elements) take(el.elements);
+    };
 
-    // Try header
+    take(parsed.body?.elements);
     if (parsed.header?.title?.content) {
       parts.unshift(parsed.header.title.content);
     }
+    if (parts.length === 0) take(parsed.elements);
 
-    // Fallback: try to extract any text
-    if (parts.length === 0 && parsed.elements) {
-      for (const el of parsed.elements) {
-        if (el.tag === "div" && el.text?.content) {
-          parts.push(el.text.content);
-        } else if (el.tag === "markdown") {
-          parts.push(el.content ?? "");
-        }
-      }
-    }
-
-    return parts.join("\n") || "[卡片消息]";
+    const text = parts.map((part) => part.trim()).filter(Boolean).join("\n");
+    return text || "[卡片消息]";
   }
 
   /** Fetch and render merge_forward message content via API (recursive) */

@@ -382,6 +382,173 @@ describe("FeishuAdapter", () => {
       botMentioned: true,
     });
   });
+
+  test("fetches original card JSON when the event payload is the upgrade placeholder", async () => {
+    const adapter = new FeishuAdapter("app-id", "app-secret");
+    (adapter as any).botOpenId = "ou-bot";
+    const gets: unknown[] = [];
+    (adapter as any).client = {
+      im: {
+        message: {
+          get: async (args: any) => {
+            gets.push(args);
+            return {
+              data: {
+                items: [{
+                  body: {
+                    content: JSON.stringify({
+                      schema: "2.0",
+                      body: {
+                        elements: [{
+                          tag: "markdown",
+                          content: "<at id=ou-bot></at> 我先抛个观点：大爆炸不是从无到有。",
+                        }],
+                      },
+                    }),
+                  },
+                }],
+              },
+            };
+          },
+        },
+      },
+    };
+
+    const message = await (adapter as any).normalize({
+      message: {
+        chat_id: "group-id",
+        chat_type: "group",
+        message_id: "om-card",
+        message_type: "interactive",
+        content: JSON.stringify({
+          title: null,
+          elements: [[{
+            tag: "img",
+            image_key: "img_fallback",
+          }, {
+            tag: "text",
+            text: "请升级至最新版本客户端，以查看内容",
+          }]],
+        }),
+        mentions: [{
+          key: "@_user_1",
+          id: { open_id: "ou-bot" },
+          name: "NiuBot",
+        }],
+      },
+      sender: { sender_id: { open_id: "ou-cow" }, sender_type: "app" },
+    });
+
+    expect(gets).toEqual([{
+      path: { message_id: "om-card" },
+      params: { card_msg_content_type: "user_card_content" },
+    }]);
+    expect(message).toMatchObject({
+      contentType: "interactive",
+      contentText: "@NiuBot 我先抛个观点：大爆炸不是从无到有。",
+      botMentioned: true,
+      senderIsBot: true,
+    });
+  });
+
+  test("does not refetch when the event already has schema 2.0 card text", async () => {
+    const adapter = new FeishuAdapter("app-id", "app-secret");
+    let fetched = false;
+    (adapter as any).client = {
+      im: {
+        message: {
+          get: async () => {
+            fetched = true;
+            return { data: { items: [] } };
+          },
+        },
+      },
+    };
+
+    const message = await (adapter as any).normalize({
+      message: {
+        chat_id: "group-id",
+        chat_type: "group",
+        message_id: "om-card",
+        message_type: "interactive",
+        content: JSON.stringify({
+          schema: "2.0",
+          body: {
+            elements: [{ tag: "markdown", content: "already here" }],
+          },
+        }),
+      },
+      sender: { sender_id: { open_id: "ou-cow" }, sender_type: "app" },
+    });
+
+    expect(fetched).toBe(false);
+    expect(message.contentText).toBe("already here");
+  });
+
+  test("keeps a placeholder when original card fetch fails", async () => {
+    const adapter = new FeishuAdapter("app-id", "app-secret");
+    (adapter as any).client = {
+      im: {
+        message: {
+          get: async () => {
+            throw new Error("api down");
+          },
+        },
+      },
+    };
+
+    const message = await (adapter as any).normalize({
+      message: {
+        chat_id: "group-id",
+        chat_type: "group",
+        message_id: "om-card",
+        message_type: "interactive",
+        content: JSON.stringify({
+          title: null,
+          elements: [[{ tag: "text", text: "请升级至最新版本客户端，以查看内容" }]],
+        }),
+      },
+      sender: { sender_id: { open_id: "ou-cow" }, sender_type: "app" },
+    });
+
+    expect(message.contentText).toBe("[卡片消息]");
+  });
+
+  test("keeps generic message content working for fetched post messages", async () => {
+    const adapter = new FeishuAdapter("app-id", "app-secret");
+    const gets: unknown[] = [];
+    (adapter as any).client = {
+      im: {
+        message: {
+          get: async (args: any) => {
+            gets.push(args);
+            return {
+              data: {
+                items: [{
+                  body: {
+                    content: JSON.stringify({
+                      title: "标题",
+                      content: [[
+                        { tag: "text", text: "正文" },
+                        { tag: "a", text: "链接", href: "https://example.com" },
+                        { tag: "at", user_id: "ou-user", user_name: "用户" },
+                      ]],
+                    }),
+                  },
+                }],
+              },
+            };
+          },
+        },
+      },
+    };
+
+    await expect(adapter.getMessageContent("om-post")).resolves.toBe("标题\n正文链接@用户");
+    expect(gets).toEqual([{
+      path: { message_id: "om-post" },
+      params: { card_msg_content_type: "user_card_content" },
+    }]);
+  });
 });
 
 describe("sendCard header color", () => {

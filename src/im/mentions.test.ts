@@ -4,6 +4,7 @@ import {
   BOT_COLLAB_FUSE_NOTICE,
   hasFeishuAtTag,
   invertFeishuAtsToShortLabels,
+  mapFeishuAtTags,
   mapOutsideAtTags,
   rewriteOutboundMentions,
   toCardAtTags,
@@ -78,6 +79,16 @@ describe("mapOutsideAtTags", () => {
   test("does not rewrite inside card at tags", () => {
     const out = mapOutsideAtTags('a <at id="ou_cow"></at> b', (chunk) => chunk.toUpperCase());
     expect(out).toBe('A <at id="ou_cow"></at> B');
+  });
+});
+
+describe("mapFeishuAtTags", () => {
+  test("rewrites text and card at tags", () => {
+    const out = mapFeishuAtTags(
+      'hi <at user_id="ou_cow">CowBot</at> and <at id="ou_zen"></at>',
+      (id, inner) => `@${inner || id}`,
+    );
+    expect(out).toBe("hi @CowBot and @ou_zen");
   });
 });
 
