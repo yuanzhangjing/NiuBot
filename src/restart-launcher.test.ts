@@ -62,9 +62,15 @@ describe("restart launcher", () => {
       runtimeRoot: "/tmp/runtime",
       sourceDirectory: "/tmp/source",
       notifyChatId: "chat-a",
+      notifyScopeKey: "chat-a#omt_aaa",
+      notifyThreadId: "omt_aaa",
+      wakeReplyTo: "om-root",
       wakePrompt: "重启完成，继续之前的工作",
     });
     expect(env["NIUBOT_RESTART_WAKE_PROMPT"]).toBe("重启完成，继续之前的工作");
+    expect(env["NIUBOT_RESTART_SCOPE_KEY"]).toBe("chat-a#omt_aaa");
+    expect(env["NIUBOT_RESTART_THREAD_ID"]).toBe("omt_aaa");
+    expect(env["NIUBOT_WAKE_REPLY_TO"]).toBe("om-root");
   });
 
   it("passes an exact recommended artifact and generation", () => {
