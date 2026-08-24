@@ -3,6 +3,8 @@
  */
 
 import type Database from "better-sqlite3";
+import { assertChatAccess } from "../core/access.js";
+import { getGroupChatSyncTarget } from "../core/group-history.js";
 import {
   getMessageContextRows,
   getMessageForAccess,
@@ -17,19 +19,22 @@ interface MessageListItem {
   prefix?: string;
 }
 
-export function handleMessages(
+export type MessagesGroupSync = (db: Database.Database, chatId: string) => Promise<void>;
+
+export async function handleMessages(
   db: Database.Database,
   args: string[],
   chatId: string | undefined,
   chatType: "p2p" | "group",
   parseArgs: (args: string[]) => { positional: string[]; flags: Record<string, string> },
-): void {
+  syncGroupChat?: MessagesGroupSync,
+): Promise<void> {
   const sub = args[0];
 
   if (sub === "list") {
-    messagesList(db, args.slice(1), chatId, chatType, parseArgs);
+    await messagesList(db, args.slice(1), chatId, chatType, parseArgs, syncGroupChat);
   } else if (sub === "search") {
-    messagesSearch(db, args.slice(1), chatId, chatType, parseArgs);
+    await messagesSearch(db, args.slice(1), chatId, chatType, parseArgs, syncGroupChat);
   } else if (sub === "get") {
     messagesGet(db, args.slice(1), chatId, chatType, parseArgs);
   } else if (sub === "--help" || sub === "help") {
@@ -40,13 +45,14 @@ export function handleMessages(
   }
 }
 
-function messagesList(
+async function messagesList(
   db: Database.Database,
   args: string[],
   currentChatId: string | undefined,
   chatType: "p2p" | "group",
   parseArgs: (args: string[]) => { positional: string[]; flags: Record<string, string> },
-): void {
+  syncGroupChat?: MessagesGroupSync,
+): Promise<void> {
   const { flags } = parseArgs(args);
   const targetChatId = flags["chat-id"] ?? currentChatId;
   if (!targetChatId) {
@@ -55,6 +61,14 @@ function messagesList(
   }
   const limit = Number(flags["limit"] ?? flags["n"] ?? "20");
   const offset = flags["offset"] ? Number(flags["offset"]) : undefined;
+
+  try {
+    assertChatAccess({ currentChatId, chatType, targetChatId });
+  } catch (err) {
+    console.error(`Error: ${(err as Error).message}`);
+    process.exit(1);
+  }
+  await syncGroupMessagesIfNeeded(db, targetChatId, syncGroupChat);
 
   let rows: MessageRow[];
   try {
@@ -83,13 +97,14 @@ function messagesList(
   printMessagesForList(rows.map((row) => ({ row })));
 }
 
-function messagesSearch(
+async function messagesSearch(
   db: Database.Database,
   args: string[],
   currentChatId: string | undefined,
   chatType: "p2p" | "group",
   parseArgs: (args: string[]) => { positional: string[]; flags: Record<string, string> },
-): void {
+  syncGroupChat?: MessagesGroupSync,
+): Promise<void> {
   const { positional, flags } = parseArgs(args);
   const query = positional[0];
   if (!query) {
@@ -105,6 +120,15 @@ function messagesSearch(
   if (!searchAll && !targetChatId) {
     console.error("Error: NIUBOT_CHAT_ID not set. Use --all to search all chats.");
     process.exit(1);
+  }
+  if (!searchAll && targetChatId) {
+    try {
+      assertChatAccess({ currentChatId, chatType, targetChatId });
+    } catch (err) {
+      console.error(`Error: ${(err as Error).message}`);
+      process.exit(1);
+    }
+    await syncGroupMessagesIfNeeded(db, targetChatId, syncGroupChat);
   }
   let rows: MessageRow[];
   try {
@@ -242,18 +266,34 @@ function truncate(text: string, max: number): string {
   return runes.slice(0, max).join("") + "...";
 }
 
+async function syncGroupMessagesIfNeeded(
+  db: Database.Database,
+  chatId: string,
+  syncGroupChat?: MessagesGroupSync,
+): Promise<void> {
+  if (!syncGroupChat || !getGroupChatSyncTarget(db, chatId)) return;
+  try {
+    await syncGroupChat(db, chatId);
+  } catch (err) {
+    // 本地库仍可查；sync 失败不挡住 list/search。
+    console.error(`Warning: group history sync failed: ${(err as Error).message}`);
+  }
+}
+
 function printHelp(): void {
   console.log(`Query message history. Raw record of every chat message.
 
 Commands:
   list    List recent messages [default: -n 20]
-          Options: -n <count> | --offset <id> | --since/--before <datetime>
+          Options: -n <count> | --offset <id> (id-keyset, not skip-N) | --since/--before <datetime>
                    --role user|assistant | --user-id <id> | --content-type <t>
+          Group chats sync from the IM first, then read the local DB.
 
   search  <query>  Search messages by keyword [default: -n 10]
           Options: -n <count> | --all (all chats) | --chat-type p2p|group
                    -C <count> (context lines around match) | --since/--before <datetime>
                    --role user|assistant | --user-id <id>
+          Group chats sync from the IM first, then search the local DB.
 
   get     <id>     Show full content of a single message
 

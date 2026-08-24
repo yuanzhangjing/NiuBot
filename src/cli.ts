@@ -33,6 +33,7 @@ import { getUserShortLabel, getChatShortLabel, initDatabase } from "./database/s
 import { buildImportantContext, type SceneInfo } from "./memory/inject.js";
 import { SYSTEM_RULES } from "./system-rules.js";
 import { handleMessages } from "./cli/messages.js";
+import { syncGroupChatFromConfig } from "./cli/group-sync.js";
 import { handleContacts } from "./cli/contacts.js";
 import { handleSend } from "./cli/send.js";
 import { handleCron } from "./cli/cron.js";
@@ -84,7 +85,7 @@ if (!NIUBOT_HOME && !publicCommands.has(requestedCommand)) {
   process.exit(1);
 }
 if (NIUBOT_HOME) {
-  dotenv.config({ path: path.join(NIUBOT_HOME, ".env"), quiet: true });
+  dotenv.config({ path: path.join(NIUBOT_HOME, ".env"), quiet: true, override: true });
 }
 const globalFlags = extractGlobalFlags(cliArgs);
 const IS_AGENT_SESSION = process.env["NIUBOT_AGENT_SESSION"] === "1";
@@ -167,7 +168,14 @@ async function main(): Promise<void> {
       handleUserMemory(args.slice(1));
       break;
     case "messages":
-      handleMessages(openDb(), args.slice(1), CHAT_ID, CHAT_TYPE, parseArgs);
+      await handleMessages(openDb(), args.slice(1), CHAT_ID, CHAT_TYPE, parseArgs, (db, chatId) =>
+        syncGroupChatFromConfig(db, chatId, {
+          botName: BOT_NAME,
+          botProfilePath: BOT_PROFILE_PATH,
+          dbPath: DB_PATH,
+          platformBotId: BOT_ID,
+        }),
+      );
       break;
     case "sessions":
       await handleSessions(openDb(), args.slice(1), CHAT_ID, CHAT_TYPE, NIUBOT_HOME!, BOT_NAME, parseArgs);

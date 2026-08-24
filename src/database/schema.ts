@@ -740,6 +740,40 @@ const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 30,
+    description: "Group chat history sync cursor on chats",
+    up: (db) => {
+      const chatsExists = db.prepare(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'chats'",
+      ).get();
+      if (!chatsExists) return;
+      const columns = db.prepare("PRAGMA table_info(chats)").all() as Array<{ name: string }>;
+      const names = new Set(columns.map((column) => column.name));
+      if (!names.has("history_sync_ts")) {
+        db.exec("ALTER TABLE chats ADD COLUMN history_sync_ts INTEGER");
+      }
+      if (!names.has("history_fetched_at")) {
+        db.exec("ALTER TABLE chats ADD COLUMN history_fetched_at INTEGER");
+      }
+    },
+  },
+  {
+    version: 31,
+    description: "Unique index on messages(platform, platform_msg_id)",
+    up: (db) => {
+      const messagesExists = db.prepare(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'messages'",
+      ).get();
+      if (!messagesExists) return;
+      deleteDuplicatePlatformMessages(db);
+      db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_platform_msg_id
+        ON messages(platform, platform_msg_id)
+        WHERE platform_msg_id IS NOT NULL AND platform_msg_id != ''
+      `);
+    },
+  },
 ];
 
 const transportMigrations: Migration[] = [
@@ -1297,6 +1331,42 @@ function assertRequiredColumns(table: string, columns: Set<string>, required: st
   }
 }
 
+function deleteDuplicatePlatformMessages(db: Database.Database): void {
+  const dupes = db.prepare(`
+    SELECT m.id, m.content_text
+    FROM messages m
+    JOIN (
+      SELECT platform, platform_msg_id, MIN(id) AS keep_id
+      FROM messages
+      WHERE platform_msg_id IS NOT NULL AND platform_msg_id != ''
+      GROUP BY platform, platform_msg_id
+      HAVING COUNT(*) > 1
+    ) d
+      ON d.platform = m.platform
+     AND d.platform_msg_id = m.platform_msg_id
+     AND m.id != d.keep_id
+  `).all() as Array<{ id: number; content_text: string | null }>;
+  if (dupes.length === 0) return;
+
+  const ftsExists = db.prepare(
+    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'messages_fts'",
+  ).get();
+  const deleteFts = ftsExists
+    ? db.prepare("INSERT INTO messages_fts(messages_fts, rowid, content_text) VALUES('delete', ?, ?)")
+    : null;
+  const deleteMsg = db.prepare("DELETE FROM messages WHERE id = ?");
+  for (const row of dupes) {
+    if (deleteFts && row.content_text) deleteFts.run(row.id, row.content_text);
+    deleteMsg.run(row.id);
+  }
+}
+
+function isUniqueConstraintError(err: unknown): boolean {
+  if (typeof err !== "object" || err === null || !("code" in err)) return false;
+  const code = String((err as { code?: unknown }).code);
+  return code === "SQLITE_CONSTRAINT_UNIQUE" || code === "SQLITE_CONSTRAINT";
+}
+
 function runMigrations(db: Database.Database): void {
   ensureComponentSchemaTable(db);
   const observedVersion = getSchemaVersion(db);
@@ -1535,6 +1605,19 @@ export function setUserIsBot(db: Database.Database, userId: string): void {
   db.prepare("UPDATE users SET is_bot = 1 WHERE id = ? AND is_bot != 1").run(userId);
 }
 
+/** 按平台 ID 查本地用户身份。不存在则 undefined。 */
+export function getUserIdentityByPlatformId(
+  db: Database.Database,
+  platform: string,
+  platformId: string,
+): { id: string; isBot: boolean } | undefined {
+  const row = db.prepare(
+    "SELECT id, is_bot FROM users WHERE platform = ? AND platform_id = ?",
+  ).get(platform, platformId) as { id: string; is_bot: number } | undefined;
+  if (!row) return undefined;
+  return { id: row.id, isBot: row.is_bot === 1 };
+}
+
 export function getUserIsBot(db: Database.Database, userId: string): boolean {
   const row = db.prepare("SELECT is_bot FROM users WHERE id = ?").get(userId) as { is_bot: number } | undefined;
   return row?.is_bot === 1;
@@ -1708,38 +1791,92 @@ export function storeMessage(
     platformMsgId?: string;
     platformTs?: string;
     platformRaw?: string;
+    agentSeen?: boolean;
+    createdAt?: string;
   },
 ): number {
   const tx = db.transaction(() => {
-    const result = db.prepare(`
-      INSERT INTO messages (chat_id, sender_id, session_key, role, content_text, content_type, reply_to, platform, platform_msg_id, platform_ts, platform_raw)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      msg.chatId,
-      msg.senderId,
-      msg.sessionId ?? null,
-      msg.role,
-      msg.contentText ?? null,
-      msg.contentType ?? "text",
-      msg.replyTo ?? null,
-      msg.platform,
-      msg.platformMsgId ?? null,
-      msg.platformTs ?? null,
-      msg.platformRaw ?? null,
-    );
-
-    const msgId = Number(result.lastInsertRowid);
-
-    if (msg.contentText) {
-      db.prepare(
-        "INSERT INTO messages_fts (rowid, content_text) VALUES (?, ?)",
-      ).run(msgId, msg.contentText);
+    if (msg.platformMsgId) {
+      const existing = getMessageByPlatformId(db, msg.platform, msg.platformMsgId);
+      if (existing) return existing.id;
     }
 
-    return msgId;
+    try {
+      const result = db.prepare(`
+        INSERT INTO messages (chat_id, sender_id, session_key, role, content_text, content_type, reply_to, platform, platform_msg_id, platform_ts, platform_raw, agent_seen, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')))
+      `).run(
+        msg.chatId,
+        msg.senderId,
+        msg.sessionId ?? null,
+        msg.role,
+        msg.contentText ?? null,
+        msg.contentType ?? "text",
+        msg.replyTo ?? null,
+        msg.platform,
+        msg.platformMsgId ?? null,
+        msg.platformTs ?? null,
+        msg.platformRaw ?? null,
+        msg.agentSeen ? 1 : 0,
+        msg.createdAt ?? msg.platformTs ?? null,
+      );
+
+      const msgId = Number(result.lastInsertRowid);
+
+      if (msg.contentText) {
+        db.prepare(
+          "INSERT INTO messages_fts (rowid, content_text) VALUES (?, ?)",
+        ).run(msgId, msg.contentText);
+      }
+
+      return msgId;
+    } catch (err) {
+      if (isUniqueConstraintError(err) && msg.platformMsgId) {
+        const existing = getMessageByPlatformId(db, msg.platform, msg.platformMsgId);
+        if (existing) return existing.id;
+      }
+      throw err;
+    }
   });
 
   return tx();
+}
+
+export type ChatHistoryCursor = {
+  syncTs: number | null;
+  fetchedAt: number | null;
+};
+
+export function getChatHistoryCursor(
+  db: Database.Database,
+  chatId: string,
+): ChatHistoryCursor {
+  const row = db.prepare(
+    "SELECT history_sync_ts AS syncTs, history_fetched_at AS fetchedAt FROM chats WHERE id = ?",
+  ).get(chatId) as { syncTs: number | null; fetchedAt: number | null } | undefined;
+  return { syncTs: row?.syncTs ?? null, fetchedAt: row?.fetchedAt ?? null };
+}
+
+export function setChatHistoryCursor(
+  db: Database.Database,
+  chatId: string,
+  cursor: { syncTs?: number | null; fetchedAt?: number | null },
+): void {
+  db.prepare(
+    "UPDATE chats SET history_sync_ts = COALESCE(?, history_sync_ts), history_fetched_at = COALESCE(?, history_fetched_at) WHERE id = ?",
+  ).run(cursor.syncTs ?? null, cursor.fetchedAt ?? null, chatId);
+}
+
+export function markMessagesAgentSeen(
+  db: Database.Database,
+  ids: number[],
+): void {
+  if (ids.length === 0) return;
+  const stmt = db.prepare("UPDATE messages SET agent_seen = 1 WHERE id = ?");
+  const tx = db.transaction((rows: number[]) => {
+    for (const id of rows) stmt.run(id);
+  });
+  tx(ids);
 }
 
 /** Get message content by platform message ID (for reply context) */
@@ -1782,7 +1919,18 @@ export function updateMessagePlatformId(
   id: number,
   platformMsgId: string,
 ): void {
-  db.prepare("UPDATE messages SET platform_msg_id = ? WHERE id = ?").run(platformMsgId, id);
+  const row = db.prepare(
+    "SELECT platform, platform_msg_id FROM messages WHERE id = ?",
+  ).get(id) as { platform: string; platform_msg_id: string | null } | undefined;
+  if (!row) return;
+  if (row.platform_msg_id === platformMsgId) return;
+  if (getMessageByPlatformId(db, row.platform, platformMsgId)) return;
+  try {
+    db.prepare("UPDATE messages SET platform_msg_id = ? WHERE id = ?").run(platformMsgId, id);
+  } catch (err) {
+    if (isUniqueConstraintError(err)) return;
+    throw err;
+  }
 }
 
 // ── Admin helpers ──────────────────────────────────────────────────

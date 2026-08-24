@@ -157,8 +157,11 @@ describe("buildImportantContext", () => {
       chatType: "group",
     });
     expect(context).toContain("<bot-collab>");
-    expect(context).toContain("@U4(CowBot)");
-    expect(context).toContain("放进卡片发出");
+    expect(context).toContain("@U4");
+    expect(context).toContain("才 at 它");
+    expect(context).toContain("其他时候不要 at");
+    expect(context).toContain("转成飞书 at");
+    expect(context).not.toContain("ou_");
     expect(context).not.toContain("纯文本发出");
     expect(context).toContain("会话：C4(Zhangjing Yuan)（群聊）");
     expect(context).not.toContain("用户：");

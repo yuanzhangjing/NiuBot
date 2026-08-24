@@ -38,8 +38,8 @@ describe("restart database snapshot", () => {
     const root = temporaryDirectory();
     const database = initDatabase(path.join(root, "bridge.db"));
 
-    expect(LATEST_SCHEMA_VERSION).toBe(29);
-    expect(database.pragma("user_version", { simple: true })).toBe(29);
+    expect(LATEST_SCHEMA_VERSION).toBeGreaterThanOrEqual(31);
+    expect(database.pragma("user_version", { simple: true })).toBe(LATEST_SCHEMA_VERSION);
     expect(database.prepare(
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('transport_inbox', 'transport_outbox')",
     ).all()).toHaveLength(2);

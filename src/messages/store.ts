@@ -111,7 +111,7 @@ export function listMessages(
       params.push(options.offset, options.limit);
     }
   } else {
-    sql += " ORDER BY m.id DESC LIMIT ?";
+    sql += " ORDER BY COALESCE(m.platform_ts, m.created_at) DESC, m.id DESC LIMIT ?";
     params.push(Math.abs(options.limit));
   }
 
@@ -157,7 +157,7 @@ export function searchMessages(
     params.push(options.targetChatType);
   }
   sql = appendMessageFilters(sql, params, options);
-  sql += " ORDER BY m.id DESC LIMIT ?";
+  sql += " ORDER BY COALESCE(m.platform_ts, m.created_at) DESC, m.id DESC LIMIT ?";
   params.push(options.limit);
 
   const rows = db.prepare(sql).all(...params) as MessageRow[];
@@ -218,7 +218,7 @@ export function listContinuationMessages(
     LEFT JOIN users u ON m.sender_id = u.id
     WHERE m.chat_id = ? AND m.content_text IS NOT NULL ${cutoff}
     ${EXCLUDE_INTERNAL_SESSION_PROMPTS}
-    ORDER BY m.id DESC
+    ORDER BY COALESCE(m.platform_ts, m.created_at) DESC, m.id DESC
     LIMIT ?
   `).all(...params) as ContinuationMessageRow[];
   rows.reverse();
@@ -305,11 +305,11 @@ function getUserBeforeResponse(
 function appendMessageFilters(sql: string, params: unknown[], filters: MessageFilter): string {
   const range = userTimeRangeToUtc({ since: filters.since, before: filters.before });
   if (range.since) {
-    sql += " AND m.created_at >= ?";
+    sql += " AND COALESCE(m.platform_ts, m.created_at) >= ?";
     params.push(range.since);
   }
   if (range.before) {
-    sql += " AND m.created_at < ?";
+    sql += " AND COALESCE(m.platform_ts, m.created_at) < ?";
     params.push(range.before);
   }
   if (filters.role) {

@@ -238,6 +238,14 @@ export class PersistentTransport implements TransportClient {
     return this.adapter.getMessageContent(msgId);
   }
 
+  listChatMessages(
+    chatId: string,
+    options?: { sinceUnixSec?: number; limit?: number },
+  ): Promise<NormalizedMessage[]> {
+    if (!this.adapter.listChatMessages) return Promise.resolve([]);
+    return this.adapter.listChatMessages(chatId, options);
+  }
+
   getAppCreatorId(): Promise<string | undefined> {
     return this.adapter.getAppCreatorId();
   }

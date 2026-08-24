@@ -8,8 +8,10 @@ import {
   ensureUser,
   ensureChat,
   storeMessage,
+  updateMessagePlatformId,
   setUserIsBot,
   getUserIsBot,
+  getUserIdentityByPlatformId,
   listChatBots,
   getBotRuntimeState,
   setBotRuntimeState,
@@ -90,6 +92,108 @@ describe("loop schema", () => {
     expect(reopened.prepare("SELECT COUNT(*) FROM loop_jobs").pluck().get()).toBe(2);
     expect((reopened.prepare("PRAGMA index_list(loop_jobs)").all() as Array<{ name: string }>)
       .map((index) => index.name)).not.toContain("idx_loop_jobs_session");
+  });
+});
+
+describe("messages platform_msg_id unique index", () => {
+  test("new databases have a unique index on platform message ids", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-msg-unique-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const indexes = db.prepare("PRAGMA index_list(messages)").all() as Array<{ name: string; unique: number }>;
+    expect(indexes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: "idx_messages_platform_msg_id", unique: 1 }),
+    ]));
+  });
+
+  test("storeMessage reuses the existing row for the same platform message id", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-msg-dedupe-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const userId = ensureUser(db, "feishu", "ou-zen", "Zen");
+    const chatId = ensureChat(db, "feishu", "oc-group", "group", "bots");
+    const first = storeMessage(db, {
+      chatId,
+      senderId: userId,
+      role: "user",
+      contentText: "first",
+      platform: "feishu",
+      platformMsgId: "om-dup",
+    });
+    const second = storeMessage(db, {
+      chatId,
+      senderId: userId,
+      role: "user",
+      contentText: "second",
+      platform: "feishu",
+      platformMsgId: "om-dup",
+    });
+    expect(second).toBe(first);
+    expect(db.prepare("SELECT COUNT(*) AS n FROM messages WHERE platform_msg_id = 'om-dup'").get()).toEqual({ n: 1 });
+    expect(db.prepare("SELECT content_text FROM messages WHERE id = ?").get(first)).toEqual({ content_text: "first" });
+  });
+
+  test("updateMessagePlatformId does not steal an id already owned by another row", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-msg-platform-id-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const userId = ensureUser(db, "feishu", "ou-zen", "Zen");
+    const chatId = ensureChat(db, "feishu", "oc-group", "group", "bots");
+    const first = storeMessage(db, {
+      chatId,
+      senderId: userId,
+      role: "assistant",
+      contentText: "first",
+      platform: "feishu",
+      platformMsgId: "om-sent",
+    });
+    const second = storeMessage(db, {
+      chatId,
+      senderId: userId,
+      role: "assistant",
+      contentText: "second",
+      platform: "feishu",
+    });
+    updateMessagePlatformId(db, second, "om-sent");
+    expect(db.prepare("SELECT platform_msg_id FROM messages WHERE id = ?").get(first))
+      .toEqual({ platform_msg_id: "om-sent" });
+    expect(db.prepare("SELECT platform_msg_id FROM messages WHERE id = ?").get(second))
+      .toEqual({ platform_msg_id: null });
+  });
+
+  test("migrates duplicate platform messages down to one row", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-msg-migrate-"));
+    tempDirs.push(dir);
+    const dbPath = path.join(dir, "niubot.db");
+    const legacy = initDatabase(dbPath);
+    const userId = ensureUser(legacy, "feishu", "ou-zen", "Zen");
+    const chatId = ensureChat(legacy, "feishu", "oc-group", "group", "bots");
+    legacy.exec("DROP INDEX IF EXISTS idx_messages_platform_msg_id");
+    legacy.prepare(`
+      INSERT INTO messages (id, chat_id, sender_id, role, content_text, content_type, platform, platform_msg_id)
+      VALUES (21, ?, ?, 'user', 'keep', 'text', 'feishu', 'om-dup')
+    `).run(chatId, userId);
+    legacy.prepare(`
+      INSERT INTO messages (id, chat_id, sender_id, role, content_text, content_type, platform, platform_msg_id)
+      VALUES (22, ?, ?, 'user', 'drop', 'text', 'feishu', 'om-dup')
+    `).run(chatId, userId);
+    legacy.prepare("INSERT INTO messages_fts (rowid, content_text) VALUES (21, 'keep')").run();
+    legacy.prepare("INSERT INTO messages_fts (rowid, content_text) VALUES (22, 'drop')").run();
+    legacy.prepare(
+      "UPDATE niubot_component_schema_versions SET version = 30 WHERE component = 'core'",
+    ).run();
+    legacy.pragma("user_version = 30");
+    legacy.close();
+
+    const migrated = initDatabase(dbPath);
+    const rows = migrated.prepare(
+      "SELECT id, content_text FROM messages WHERE platform_msg_id = 'om-dup' ORDER BY id",
+    ).all();
+    expect(rows).toEqual([{ id: 21, content_text: "keep" }]);
+    const indexes = migrated.prepare("PRAGMA index_list(messages)").all() as Array<{ name: string; unique: number }>;
+    expect(indexes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: "idx_messages_platform_msg_id", unique: 1 }),
+    ]));
   });
 });
 
@@ -610,5 +714,18 @@ describe("bot identity helpers", () => {
     expect(getUserIsBot(db, cowId)).toBe(true);
     expect(getUserIsBot(db, humanId)).toBe(false);
     expect(listChatBots(db, chatId, selfId).map((row) => row.id).sort()).toEqual([cowId, selfId].sort());
+  });
+
+  test("getUserIdentityByPlatformId reports missing, human, and bot rows", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-identity-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const humanId = ensureUser(db, "feishu", "ou-zen", "Zen");
+    const cowId = ensureUser(db, "feishu", "ou-cow", "CowBot");
+    setUserIsBot(db, cowId);
+
+    expect(getUserIdentityByPlatformId(db, "feishu", "ou-missing")).toBeUndefined();
+    expect(getUserIdentityByPlatformId(db, "feishu", "ou-zen")).toEqual({ id: humanId, isBot: false });
+    expect(getUserIdentityByPlatformId(db, "feishu", "ou-cow")).toEqual({ id: cowId, isBot: true });
   });
 });

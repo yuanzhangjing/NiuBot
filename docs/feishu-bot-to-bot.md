@@ -11,7 +11,7 @@
 1. 认出其他 Bot
 2. 用飞书真正的 at 点名，叫醒对方
 3. 被其他 Bot at 时正常入站、跑 Agent
-4. 由 Agent 决定还要不要继续叫对方；引擎只在极端轮次切断
+4. 叫谁、停不停由 Agent 决定；引擎只做短号转换和互叫保险丝，不再做 Leader/参与者角色
 
 2026-08-22 在群 C4（Zhangjing Yuan）用 NiuBot 与 CowBot 验证；2026-08-23 补测卡片 at：
 
@@ -26,7 +26,7 @@
 - Agent 在回复或 `nbt send` 里写 `@U4(CowBot)` / `@U4`，引擎转成飞书 `<at>` 并投递
 - 最终回复默认仍走卡片；卡片 markdown 里写成 `<at id>`，`nbt send` 文本仍用 `<at user_id>`
 - 入站 `sender_type=app` 记 `is_bot`，群聊 speaker 标成 Bot 而不是「用户」
-- 叫谁、停不停，由 Agent 决定；引擎不自动 at
+- 叫谁、停不停，由 Agent 决定；引擎不做 Leader/参与者角色或出站白名单
 - 保险丝按**连续 Bot 触发回合**计数，阈值偏大，只防跑飞
 
 ## 非目标
@@ -139,13 +139,11 @@ https://open.feishu.cn/app/cli_a94929a79639dbb4/auth?q=im:message.group_at_msg.i
 
 Agent 不必为了 at 去调 `nbt send`。`nbt send` 不能用来绕过转换和保险丝。
 
-### 6. Agent 决策，引擎不自动 at
+### 6. 出站 at
 
-本回合即使由其他 Bot at 触发，引擎**也不**自动给对方加 at。
+本回合即使由其他 Bot at 触发，引擎也不自动给对方加 at。
 
-想让对方收到，Agent 在正文或 `nbt send` 里写 `@U4(CowBot)`。写了才转、才叫醒；不写就只是群可见回复，对方事件通道听不见。
-
-这是正常 break：事情说完不再 at。
+想让对方收到，Agent 在正文或 `nbt send` 里写 `@U4(CowBot)`。写了才转、才叫醒；不写就只是群可见回复，对方事件通道听不见。不按 Leader/参与者过滤 at。
 
 ### 7. 群聊注入
 
@@ -174,7 +172,7 @@ Agent 不必为了 at 去调 `nbt send`。`nbt send` 不能用来绕过转换和
 - 入站 `senderIsBot === true` 且本回合跑了 Agent：`bot_turn_count += 1`
 - 入站是人（含人回复我不 at）：`bot_turn_count = 0`
 - 默认上限 **20**（配置项，可调）
-- 达到上限：本回合仍生成并发送回复，但**剥掉所有其他 Bot 的 at**（自动转换的和原文 `<at>` 都剥），群里可见；并加一行「互叫已停，需要人接手。」
+- 达到上限：本回合仍生成并发送回复，但**剥掉所有 Bot 的 at**（包括自己、自动转换的和原文 `<at>` 都剥），群里可见；并加一行「互叫已停，需要人接手。」
 - `/stop`、人 @，都按人回合清零
 - 不按时间窗衰减；连续 20 轮 Bot 互叫才断
 - 计数存在进程内即可，重启清零可接受（保险丝不是主协议）
@@ -183,19 +181,20 @@ Agent 不必为了 at 去调 `nbt send`。`nbt send` 不能用来绕过转换和
 
 ## 关键决策
 
-1. **不自动 at**：叫醒对方是 Agent 的明确动作，不是引擎隐含协议。
+1. **不自动 at**：叫醒对方是 Agent 的明确动作，不是引擎隐含协议；出站白名单只限制目标。
 2. **`nbt send` 与最终回复同一套**：否则 Agent 用工具就能绕过转换和保险丝。
 3. **卡片和文本都能投递正规 at**：最终回复保持卡片观感；`nbt send` 文本路径不变。
-4. **保险丝按连续 Bot 回合、默认 20**：只防跑飞，不替模型结束对话。
-5. **`is_bot` 以 `sender_type=app` 为准**：不靠猜 mention。
-6. **发现靠人 at 介绍 + 对方发过言**：不拉群成员列表。
+4. **无 Leader/参与者角色**：引擎不指定谁收口；只保留短号转换和保险丝。
+5. **保险丝按连续 Bot 回合、默认 20**：只防跑飞，不替模型结束对话。
+6. **`is_bot` 以 `sender_type=app` 为准**：不靠猜 mention。
+7. **发现靠人 at 介绍 + 对方发过言**：不拉群成员列表。
 
 ## 涉及文件（预计）
 
 - `src/transport/types.ts` — `senderIsBot`
 - `src/im/feishu/adapter.ts` — 解析 `sender_type`
 - `src/database/schema.ts` — `ensureUser` / 标记 `is_bot`
-- `src/core/pipeline.ts` — 入站记账、出站收口、保险丝计数
+- `src/core/pipeline.ts` — 出站 rewrite、保险丝计数
 - `src/core/response-sender.ts` — 允许按 rewrite 结果走文本
 - `src/memory/inject.ts` — speaker 文案、群聊 Bot 名单与互叫规则
 - `INSTALL.md` — include_bot 权限与发布版本

@@ -7,6 +7,8 @@ import {
   mapFeishuAtTags,
   mapOutsideAtTags,
   rewriteOutboundMentions,
+  extractBuiltinCommandText,
+  stripLeadingAtMentions,
   toCardAtTags,
   type MentionUser,
 } from "./mentions.js";
@@ -15,6 +17,34 @@ const self: MentionUser = { id: "u3", platformId: "ou_self", name: "NiuBot", isB
 const cow: MentionUser = { id: "u4", platformId: "ou_cow", name: "CowBot", isBot: true };
 const zen: MentionUser = { id: "u2", platformId: "ou_zen", name: "Zen", isBot: false };
 const users = [self, cow, zen];
+
+describe("stripLeadingAtMentions", () => {
+  test("strips leading short labels and Feishu at tags before a command", () => {
+    expect(stripLeadingAtMentions("@U3(NiuBot) /help")).toBe("/help");
+    expect(stripLeadingAtMentions("@U3(NiuBot) @U4(CowBot) /new")).toBe("/new");
+    expect(stripLeadingAtMentions("@NiuBot /status")).toBe("/status");
+    expect(stripLeadingAtMentions("@U3(NiuBot)/help")).toBe("/help");
+    expect(stripLeadingAtMentions("@U3(John Smith) /help")).toBe("/help");
+    expect(stripLeadingAtMentions('<at user_id="ou_self">NiuBot</at> /help')).toBe("/help");
+    expect(stripLeadingAtMentions("/help")).toBe("/help");
+  });
+
+  test("does not strip mentions after the command or ordinary text", () => {
+    expect(stripLeadingAtMentions("看看 /help")).toBe("看看 /help");
+    expect(stripLeadingAtMentions("/help @U4")).toBe("/help @U4");
+    expect(stripLeadingAtMentions("@U3(NiuBot) 帮我 /help")).toBe("帮我 /help");
+  });
+});
+
+describe("extractBuiltinCommandText", () => {
+  test("accepts mention before, after, or glued to the command", () => {
+    expect(extractBuiltinCommandText("@U3(NiuBot) /status")).toBe("/status");
+    expect(extractBuiltinCommandText("/status@U3(NiuBot)")).toBe("/status");
+    expect(extractBuiltinCommandText("/status@@U3(NiuBot)")).toBe("/status");
+    expect(extractBuiltinCommandText("/status @U3(NiuBot)")).toBe("/status");
+    expect(extractBuiltinCommandText("/model grok @U3")).toBe("/model grok");
+  });
+});
 
 describe("rewriteOutboundMentions", () => {
   test("converts @U4(CowBot) and @U4 and @u4", () => {
@@ -67,6 +97,16 @@ describe("rewriteOutboundMentions", () => {
     const result = rewriteOutboundMentions("hello @U2", users, { selfUserId: "u3", stripOtherBotAts: true });
     expect(result.stripped).toBe(false);
     expect(result.text).toBe('hello <at user_id="ou_zen">Zen</at>');
+  });
+
+  test("stripAllBotAts removes every bot at including self", () => {
+    const result = rewriteOutboundMentions("@U4 and @U3 and @U2", users, {
+      selfUserId: "u3",
+      stripAllBotAts: true,
+    });
+    expect(result.stripped).toBe(true);
+    expect(result.mentionedOtherBot).toBe(true);
+    expect(result.text).toBe("CowBot and NiuBot and <at user_id=\"ou_zen\">Zen</at>");
   });
 });
 

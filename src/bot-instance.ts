@@ -8,8 +8,11 @@ import {
   ensureUser,
   getUserShortLabel,
   getUserShortLabelByPlatformId,
+  getUserIdentityByPlatformId,
   getMessageByPlatformId,
+  setUserIsBot,
 } from "./database/schema.js";
+import { seedPeerBots, type PeerBotDirectory } from "./peer-bots.js";
 import { FeishuAdapter } from "./im/feishu/adapter.js";
 import { PersistentTransport } from "./transport/persistent-transport.js";
 import { Pipeline, type BotIdentity } from "./core/pipeline.js";
@@ -52,7 +55,7 @@ export async function createBotInstance(
   getAvailableBackends?: () => string[],
   runtimeConfig?: ResolvedBotRuntimeConfig,
   getBackendCapabilities?: () => BackendCapability[] | Promise<BackendCapability[]>,
-  options: { preflight?: boolean; engineLifecycle?: EngineLifecycle } = {},
+  options: { preflight?: boolean; engineLifecycle?: EngineLifecycle; peerBots?: PeerBotDirectory } = {},
 ): Promise<BotInstance> {
   const log = createLogger("bot-instance", botConfig.id);
   if (!options.engineLifecycle) {
@@ -102,14 +105,31 @@ export async function createBotInstance(
     return label; // 有名字 "U2(名字)"，无名字 "U2"
   });
   // 注册新用户：写 DB，返回 label
-  im.setNameRegister((platformId) => {
+  im.setNameRegister((platformId, isBot) => {
     const userId = ensureUser(db, "feishu", platformId);
+    if (isBot) setUserIsBot(db, userId);
     return getUserShortLabel(db, userId);
   });
   im.setContentResolver((platformMsgId) => {
     const msg = getMessageByPlatformId(db, "feishu", platformMsgId);
     return msg?.contentText ?? undefined;
   });
+  im.setIdentityLookup((platformId) => {
+    const row = getUserIdentityByPlatformId(db, "feishu", platformId);
+    if (!row) return undefined;
+    return { isBot: row.isBot };
+  });
+  if (options.peerBots) {
+    const peerBots = options.peerBots;
+    peerBots.subscribe((peers) => seedPeerBots(db, botConfig.id, peers));
+    im.setOnIdentity(({ openId, name }) => {
+      peerBots.register({
+        botId: botConfig.id,
+        openId,
+        name: name || botConfig.id,
+      });
+    });
+  }
   im.setStorageDir(path.dirname(botConfig.dbPath));
 
   // 5. 创建 Pipeline

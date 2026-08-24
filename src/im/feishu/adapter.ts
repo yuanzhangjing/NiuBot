@@ -9,6 +9,8 @@ import type { NormalizedMessage, MessageHandler, PlatformAdapter, MentionInfo, M
 import type { DeliveryOptions } from "../../transport/types.js";
 import { renderMessageNodes } from "../render.js";
 import { hasFeishuAtTag, mapFeishuAtTags, toCardAtTags } from "../mentions.js";
+import { classifyFetchedMessage, type ClassifiedMessageIdentity } from "./message-identity.js";
+import { parseFeishuHistoryItem } from "./history.js";
 import { createLogger } from "../../logger.js";
 
 const log = createLogger("feishu");
@@ -21,6 +23,11 @@ const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bm
 
 /** 飞书图片上传接口上限 10MB，超出时降级为文件消息 */
 const IMAGE_MAX_BYTES = 10 * 1024 * 1024;
+
+/** 飞书会话消息列表单页上限。 */
+const FEISHU_MESSAGE_PAGE_SIZE = 50;
+/** 增量同步最多翻页数，避免 has_more 异常时打爆接口。 */
+const FEISHU_MESSAGE_MAX_PAGES = 20;
 
 function describeDownloadError(code: number | undefined, status: number | string | undefined): string | null {
   switch (code) {
@@ -55,10 +62,19 @@ export class FeishuAdapter implements PlatformAdapter {
   private nameLookup: ((platformId: string) => string | undefined) | null = null;
 
   /** 可选：注册未知用户并返回显示名称（写入，注入自 DB） */
-  private nameRegister: ((platformId: string) => string) | null = null;
+  private nameRegister: ((platformId: string, isBot?: boolean) => string) | null = null;
+
+  /** GET 成功确认为人的 open_id。失败不写入，下一条还能再刷。 */
+  private confirmedHumans = new Set<string>();
 
   /** 可选：通过 platform msg ID 查询已缓存的消息内容（注入自 DB） */
   private contentResolver: ((platformMsgId: string) => string | undefined) | null = null;
+
+  /** 可选：查询本地 users 表身份。undefined 表示第一次遇见。 */
+  private identityLookup: ((platformId: string) => { isBot: boolean } | undefined) | null = null;
+
+  /** 可选：自身 open_id 就绪后通知同机其他 Bot。 */
+  private onIdentity: ((identity: { openId: string; name: string | null }) => void) | null = null;
 
   /** 资源文件存储根目录（DB 同级，注入自 bot-instance） */
   private storageDir: string | null = null;
@@ -83,13 +99,23 @@ export class FeishuAdapter implements PlatformAdapter {
   }
 
   /** 注入未知用户注册（写 DB），用于 merge_forward 等场景 */
-  setNameRegister(fn: (platformId: string) => string): void {
+  setNameRegister(fn: (platformId: string, isBot?: boolean) => string): void {
     this.nameRegister = fn;
   }
 
   /** 注入消息内容缓存查询（DB 查询），用于 merge_forward 等场景 */
   setContentResolver(fn: (platformMsgId: string) => string | undefined): void {
     this.contentResolver = fn;
+  }
+
+  /** 注入本地用户身份查询，用于决定要不要 GET 消息补标 Bot。 */
+  setIdentityLookup(fn: (platformId: string) => { isBot: boolean } | undefined): void {
+    this.identityLookup = fn;
+  }
+
+  /** 自身飞书身份就绪后回调（open_id / 名称）。 */
+  setOnIdentity(fn: (identity: { openId: string; name: string | null }) => void): void {
+    this.onIdentity = fn;
   }
 
   /** 注入资源文件存储目录（DB 同级目录） */
@@ -422,6 +448,65 @@ export class FeishuAdapter implements PlatformAdapter {
     }
   }
 
+  async listChatMessages(
+    chatId: string,
+    options?: { sinceUnixSec?: number; limit?: number },
+  ): Promise<NormalizedMessage[]> {
+    const sinceUnixSec = options?.sinceUnixSec;
+    const incremental = sinceUnixSec != null;
+    const maxTotal = Math.min(
+      Math.max(
+        options?.limit ?? (incremental ? FEISHU_MESSAGE_PAGE_SIZE * FEISHU_MESSAGE_MAX_PAGES : FEISHU_MESSAGE_PAGE_SIZE),
+        1,
+      ),
+      FEISHU_MESSAGE_PAGE_SIZE * FEISHU_MESSAGE_MAX_PAGES,
+    );
+    const sortType = incremental ? "ByCreateTimeAsc" : "ByCreateTimeDesc";
+    const collected: NormalizedMessage[] = [];
+    let pageToken: string | undefined;
+    try {
+      for (let page = 0; page < FEISHU_MESSAGE_MAX_PAGES && collected.length < maxTotal; page += 1) {
+        const resp = await this.client.im.message.list({
+          params: {
+            container_id_type: "chat",
+            container_id: chatId,
+            page_size: FEISHU_MESSAGE_PAGE_SIZE,
+            sort_type: sortType,
+            ...(incremental ? { start_time: String(sinceUnixSec) } : {}),
+            ...(pageToken ? { page_token: pageToken } : {}),
+            // SDK 类型未声明，运行时带上以便 mention 能区分 Bot
+            user_id_type: "open_id",
+          } as {
+            container_id_type: string;
+            container_id: string;
+            start_time?: string;
+            page_token?: string;
+            sort_type?: "ByCreateTimeAsc" | "ByCreateTimeDesc";
+            page_size?: number;
+          },
+        });
+        const data = resp?.data as { items?: unknown[]; has_more?: boolean; page_token?: string } | undefined;
+        const items = Array.isArray(data?.items) ? data.items : [];
+        for (const item of items) {
+          const msg = parseFeishuHistoryItem(item, chatId, this.botOpenId, this.appId);
+          if (!msg) continue;
+          collected.push(msg);
+          if (collected.length >= maxTotal) break;
+        }
+        // 无 cursor 时只要最新一页；增量 ASC 才翻页，否则会漏掉 cursor 之后的新消息。
+        if (!incremental) break;
+        const hasMore = data?.has_more === true;
+        pageToken = typeof data?.page_token === "string" && data.page_token ? data.page_token : undefined;
+        if (!hasMore || !pageToken) break;
+      }
+    } catch (err) {
+      log.warn("listChatMessages failed", { chatId, error: String(err) });
+      throw err;
+    }
+    if (!incremental) collected.reverse();
+    return collected;
+  }
+
   async getMessageContent(msgId: string): Promise<string | undefined> {
     try {
       const body = await this.fetchMessageBody(msgId, true);
@@ -487,6 +572,7 @@ export class FeishuAdapter implements PlatformAdapter {
         this.botName = botInfo.app_name;
         log.info("bot name fetched", { name: this.botName });
       }
+      this.emitIdentity();
     } catch (err) {
       log.warn("failed to fetch bot open_id, will use app_id as fallback", { error: String(err) });
       // Fallback: construct a placeholder. Real bot_id will be detected from first mention.
@@ -494,6 +580,11 @@ export class FeishuAdapter implements PlatformAdapter {
 
     // Also try to get app creator
     await this.getAppCreatorId().catch(() => {});
+  }
+
+  private emitIdentity(): void {
+    if (!this.botOpenId || !this.onIdentity) return;
+    this.onIdentity({ openId: this.botOpenId, name: this.botName });
   }
 
   private async normalize(data: unknown): Promise<NormalizedMessage | null> {
@@ -507,7 +598,8 @@ export class FeishuAdapter implements PlatformAdapter {
         create_time?: string;
         mentions?: Array<{
           key?: string;
-          id?: { open_id?: string };
+          id?: { open_id?: string; app_id?: string } | string;
+          id_type?: string;
           name?: string;
         }>;
         parent_id?: string;
@@ -545,15 +637,33 @@ export class FeishuAdapter implements PlatformAdapter {
     let botMentioned = false;
     if (msg.mentions) {
       for (const m of msg.mentions) {
-        const mentionOpenId = m.id?.open_id ?? "";
-        const isBot = mentionOpenId === this.botOpenId;
+        const mentionId = typeof m.id === "string" ? m.id : (m.id?.open_id || m.id?.app_id || "");
+        const isBot = mentionId === this.botOpenId || mentionId === this.appId;
         if (isBot) botMentioned = true;
         mentions.push({
-          platformUserId: mentionOpenId,
+          platformUserId: mentionId,
           name: m.name ?? "",
           isBot,
+          isApp: isBot || m.id_type === "app_id" || mentionId.startsWith("cli_"),
           key: m.key ?? "",
         });
+      }
+    }
+
+    let senderIsBot = event.sender?.sender_type === "app"
+      || event.sender?.sender_id?.open_id?.startsWith("cli_") === true;
+    this.applyKnownIdentities(senderId, mentions, (isBot) => {
+      if (isBot) senderIsBot = true;
+    });
+    if (msg.message_id && this.needsIdentityFetch(chatType, senderId, senderIsBot, event.sender?.sender_type, mentions)) {
+      const fetched = await this.fetchMessageIdentity(msg.message_id);
+      if (fetched) {
+        if (fetched.senderIsApp) senderIsBot = true;
+        else this.rememberHuman(senderId);
+        for (const mention of mentions) {
+          if (fetched.appMentionKeys.has(mention.key)) mention.isApp = true;
+          else if (fetched.fetchedMentionKeys.has(mention.key)) this.rememberHuman(mention.platformUserId);
+        }
       }
     }
 
@@ -592,7 +702,7 @@ export class FeishuAdapter implements PlatformAdapter {
       children,
       mentions: mentions.length > 0 ? mentions : undefined,
       botMentioned,
-      senderIsBot: event.sender?.sender_type === "app",
+      senderIsBot,
       parentPlatformMsgId: msg.parent_id ?? undefined,
       platformTs,
       timestamp: platformTs ? new Date(platformTs) : new Date(),
@@ -830,6 +940,76 @@ export class FeishuAdapter implements PlatformAdapter {
     return typeof body === "string" ? body : undefined;
   }
 
+  private rememberHuman(platformId: string): void {
+    if (platformId) this.confirmedHumans.add(platformId);
+  }
+
+  private isConfirmedHuman(platformId: string): boolean {
+    return this.confirmedHumans.has(platformId);
+  }
+
+  private isKnownBot(platformId: string): boolean {
+    return this.identityLookup?.(platformId)?.isBot === true;
+  }
+
+  private applyKnownIdentities(
+    senderId: string,
+    mentions: MentionInfo[],
+    setSenderIsBot: (isBot: boolean) => void,
+  ): void {
+    if (this.isKnownBot(senderId)) setSenderIsBot(true);
+    for (const mention of mentions) {
+      if (mention.isBot || mention.isApp || !mention.platformUserId) continue;
+      if (this.isKnownBot(mention.platformUserId)) mention.isApp = true;
+    }
+  }
+
+  private needsIdentityFetch(
+    chatType: "p2p" | "group",
+    senderId: string,
+    senderIsBot: boolean,
+    senderType: string | undefined,
+    mentions: MentionInfo[],
+  ): boolean {
+    if (chatType !== "group" || !this.identityLookup) return false;
+    const senderNeedsFetch = !senderIsBot
+      && senderType !== "user"
+      && !this.isKnownBot(senderId)
+      && !this.isConfirmedHuman(senderId);
+    if (senderNeedsFetch) return true;
+    return mentions.some((mention) => {
+      if (!mention.platformUserId || mention.isBot || mention.isApp) return false;
+      if (this.isKnownBot(mention.platformUserId) || this.isConfirmedHuman(mention.platformUserId)) return false;
+      return true;
+    });
+  }
+
+  private async fetchMessageIdentity(messageId: string): Promise<ClassifiedMessageIdentity | null> {
+    try {
+      // 必须带 user_id_type。缺省时 Bot mention 会收成 open_id，带上后才是 app_id。
+      const resp = await this.client.im.message.get({
+        path: { message_id: messageId },
+        params: { user_id_type: "open_id" },
+      });
+      const item = (resp?.data as any)?.items?.[0] ?? (resp?.data as any);
+      if (!item) return null;
+      const classified = classifyFetchedMessage({
+        sender: item.sender,
+        mentions: Array.isArray(item.mentions) ? item.mentions : [],
+      });
+      log.info("message identity fetched", {
+        messageId,
+        senderIsApp: classified.senderIsApp,
+        appMentions: classified.appMentionKeys.size,
+        fetchedMentions: classified.fetchedMentionKeys.size,
+      });
+      return classified;
+    } catch (err) {
+      log.warn("fetch message identity failed", { messageId, error: String(err) });
+      return null;
+    }
+  }
+
   private replaceCardMentions(text: string, mentions: MentionInfo[]): string {
     let out = this.replaceMentions(text, mentions);
     out = mapFeishuAtTags(out, (platformId, inner) => {
@@ -976,14 +1156,14 @@ export class FeishuAdapter implements PlatformAdapter {
       // 其他 app/bot：注册并返回 label
       // TODO: fetchAppName — 通过飞书 API 获取 app 名称
       if (this.nameRegister) {
-        return this.nameRegister(sender.id);
+        return this.nameRegister(sender.id, true);
       }
       return "Bot";
     }
 
     // 3. 未知用户：注册并返回 "U{n}(未知用户)"
     if (this.nameRegister) {
-      return this.nameRegister(sender.id);
+      return this.nameRegister(sender.id, false);
     }
     return "用户";
   }

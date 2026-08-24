@@ -10,8 +10,15 @@ export type MessageNode = {
 export interface MentionInfo {
   platformUserId: string;
   name: string;
+  /** at 的是本 Bot（给 botMentioned 用）。 */
   isBot: boolean;
+  /** at 的对象是应用机器人（含其他 Bot）。与 isBot 分开，避免混用。 */
+  isApp?: boolean;
   key: string;
+}
+
+export function mentionMarksApp(mention: MentionInfo): boolean {
+  return mention.isApp === true || mention.isBot;
 }
 
 export interface NormalizedMessage {
@@ -83,6 +90,15 @@ export interface TransportClient {
   getChatName(chatId: string): Promise<string | undefined>;
   getMessageContent(msgId: string): Promise<string | undefined>;
   getAppCreatorId(): Promise<string | undefined>;
+  /**
+   * 拉群会话历史。没有该能力的平台可以不实现。
+   * sinceUnixSec：只取该秒之后（含）的消息，用于增量缓存；飞书实现会 ASC 翻页。
+   * 不传 since 时只取最新一页。
+   */
+  listChatMessages?(
+    chatId: string,
+    options?: { sinceUnixSec?: number; limit?: number },
+  ): Promise<NormalizedMessage[]>;
 
   /** Reliable implementations use these hooks to connect Engine lifecycle to inbox state. */
   markInboundQueued?(inboxId: number, claimToken: string, messageId: number): void;

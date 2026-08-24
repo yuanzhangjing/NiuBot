@@ -11,6 +11,7 @@ import {
 import type { AgentBackend } from "./agent/types.js";
 import type { CliAgentBackend } from "./agent/cli-base.js";
 import { createBotInstance, type BotInstance } from "./bot-instance.js";
+import { PeerBotDirectory } from "./peer-bots.js";
 import {
   LATEST_SCHEMA_VERSION,
   ROLLBACK_COMPATIBLE_SCHEMA_VERSIONS,
@@ -241,6 +242,7 @@ async function main(): Promise<void> {
   const getAvailableBackends = () => capabilityCache.availableBackends();
 
   const bots: BotInstance[] = [];
+  const peerBots = new PeerBotDirectory();
   let engineAutoUpdateCoordinator: EngineAutoUpdateCoordinator | undefined;
   const version = readRuntimeVersion(runtimePath);
   const startedAt = process.env["NIUBOT_STARTED_AT"] || new Date().toISOString();
@@ -282,6 +284,7 @@ async function main(): Promise<void> {
         {
           preflight,
           engineLifecycle,
+          peerBots,
         },
       );
       bots.push(instance);

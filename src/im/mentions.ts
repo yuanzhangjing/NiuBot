@@ -13,6 +13,8 @@ export type MentionUser = {
 export type RewriteOutboundMentionsOptions = {
   selfUserId?: string | null;
   stripOtherBotAts?: boolean;
+  /** 保险丝：剥掉所有 Bot at（含自己）。 */
+  stripAllBotAts?: boolean;
 };
 
 export type RewriteOutboundMentionsResult = {
@@ -34,6 +36,28 @@ function feishuAtPattern(): RegExp {
 
 export function hasFeishuAtTag(text: string): boolean {
   return feishuAtPattern().test(text);
+}
+
+const LEADING_AT_MENTION = /^(?:@U\d+(?:\([^)]*\))?|@[^\s/]+|<at\b[^>]*>[\s\S]*?<\/at>)[\s]*/i;
+
+/** 去掉开头连续的 @某人，让群聊 `@Bot /help` 仍能识别为内置命令。 */
+export function stripLeadingAtMentions(text: string): string {
+  let result = text.trimStart();
+  while (LEADING_AT_MENTION.test(result)) {
+    result = result.replace(LEADING_AT_MENTION, "");
+  }
+  return result;
+}
+
+const TRAILING_AT_MENTION = /(?:[\s@]*@U\d+(?:\([^)]*\))?|[\s@]*@[^\s/]+|[\s]*<at\b[^>]*>[\s\S]*?<\/at>)+$/i;
+
+/** 群聊认命令：剥开头/结尾的 at，以及 `/status@U3` 这种粘在命令上的 at。 */
+export function extractBuiltinCommandText(text: string): string {
+  let result = stripLeadingAtMentions(text.trim()).replace(TRAILING_AT_MENTION, "").replace(/@+$/g, "").trim();
+  const glued = result.match(/^(\/\/?[A-Za-z0-9_-]+)@([\s\S]*)$/);
+  if (!glued) return result;
+  const rest = extractBuiltinCommandText(`@${glued[2]}`);
+  return rest ? `${glued[1]} ${rest}` : glued[1];
 }
 
 export function mapFeishuAtTags(
@@ -119,6 +143,15 @@ function stripOtherBotAtTags(text: string, byPlatformId: Map<string, MentionUser
   });
 }
 
+function stripAllBotAtTags(text: string, byPlatformId: Map<string, MentionUser>): string {
+  return text.replace(feishuAtPattern(), (full, userId?: string, idQuoted?: string, idBare?: string, name?: string) => {
+    const platformId = userId || idQuoted || idBare || "";
+    const user = byPlatformId.get(platformId);
+    if (user?.isBot) return user.name?.trim() || name?.trim() || "";
+    return full;
+  });
+}
+
 export function rewriteOutboundMentions(
   text: string,
   users: MentionUser[],
@@ -129,6 +162,15 @@ export function rewriteOutboundMentions(
   const converted = convertShortAts(text, byId);
   const mentionedOtherBot = mentionedOtherBotIn(converted, byPlatformId, options.selfUserId);
   const mentionedNonSelf = mentionedNonSelfIn(converted, byPlatformId, options.selfUserId);
+  if (options.stripAllBotAts) {
+    const strippedText = stripAllBotAtTags(converted, byPlatformId);
+    return {
+      text: strippedText,
+      mentionedOtherBot,
+      mentionedNonSelf,
+      stripped: strippedText !== converted,
+    };
+  }
   if (!options.stripOtherBotAts) {
     return { text: converted, mentionedOtherBot, mentionedNonSelf, stripped: false };
   }

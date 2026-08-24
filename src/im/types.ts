@@ -6,6 +6,7 @@
 import type { NormalizedMessage, TransportClient } from "../transport/types.js";
 
 export type { MentionInfo, MessageNode, NormalizedMessage } from "../transport/types.js";
+export { mentionMarksApp } from "../transport/types.js";
 
 export type MessageHandler = (msg: NormalizedMessage) => void | Promise<void>;
 

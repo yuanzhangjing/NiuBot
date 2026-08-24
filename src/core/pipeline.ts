@@ -5,6 +5,7 @@ import type Database from "better-sqlite3";
 import { escapeYamlContent, renderMessageNodes } from "../im/render.js";
 import { findLatestUserPlatformMsgId } from "../messages/store.js";
 import type { InboundDelivery, NormalizedMessage, TransportClient } from "../transport/types.js";
+import { mentionMarksApp } from "../transport/types.js";
 import { isDeliveryUncertainError } from "../transport/errors.js";
 import { ERROR_DISPLAY_MAX_LEN } from "../agent/types.js";
 import { AgentSessionNotStartedError, type AgentBackend, type AgentResponse, type AgentSession, type AgentSessionActivity, type SessionConfig } from "../agent/types.js";
@@ -32,6 +33,7 @@ import type {
 import {
   ensureUser, ensureChat, storeMessage, updateChatName,
   getUserShortLabel, getChatShortLabel, getMessageByPlatformId, updateMessageContent, updateMessagePlatformId,
+  markMessagesAgentSeen,
   setUserIsBot, getUserIsBot,
   setUserAdminRole, getAdminUserIds, getUserAdminRole, type AdminRole,
   getBotBackendModelState, setBotBackendModelState, setBotRuntimeState, clearBotRuntimeModels,
@@ -124,6 +126,8 @@ import {
   hasFeishuAtTag,
   invertFeishuAtsToShortLabels,
   rewriteOutboundMentions,
+  extractBuiltinCommandText,
+  stripLeadingAtMentions,
   type MentionUser,
 } from "../im/mentions.js";
 
@@ -1154,7 +1158,10 @@ export class Pipeline {
     }));
   }
 
-  private prepareOutboundText(platformChatId: string, text: string): {
+  private prepareOutboundText(
+    platformChatId: string,
+    text: string,
+  ): {
     text: string;
     historyText: string;
   } {
@@ -1166,7 +1173,7 @@ export class Pipeline {
     const users = this.loadMentionUsers();
     const result = rewriteOutboundMentions(text, users, {
       selfUserId: this.botUserId,
-      stripOtherBotAts: fuseTripped,
+      stripAllBotAts: fuseTripped,
     });
     let out = result.text;
     if (fuseTripped) {
@@ -1450,10 +1457,13 @@ export class Pipeline {
     // Collect user info from mentions + replace @name with @shortLabel
     if (msg.mentions) {
       for (const m of msg.mentions) {
-        if (m.platformUserId && m.name) {
-          const mentionUserId = ensureUser(this.db, platform, m.platformUserId, m.name, m.isBot ? "bot_sender" : "mention");
-          const shortLabel = getUserShortLabel(this.db, mentionUserId);
-          msg.contentText = msg.contentText.replaceAll(`@${m.name}`, `@${shortLabel}`);
+        if (m.platformUserId) {
+          const mentionUserId = ensureUser(this.db, platform, m.platformUserId, m.name || undefined, mentionMarksApp(m) ? "bot_info" : "mention");
+          if (mentionMarksApp(m)) setUserIsBot(this.db, mentionUserId);
+          if (m.name) {
+            const shortLabel = getUserShortLabel(this.db, mentionUserId);
+            msg.contentText = msg.contentText.replaceAll(`@${m.name}`, `@${shortLabel}`);
+          }
         }
       }
     }
@@ -1550,8 +1560,10 @@ export class Pipeline {
       agentText = `- msg: "${escapeYamlContent(label)}: ${escaped}"\n${replyQuoted}`;
     } else {
       // 独立消息：纯文本（hybrid 创建命令在此翻译为「任务原文 + nbt 建议」；reply/forward 保持原样）
-      const text = this.normalizeUserTextForAgent(msg.contentText);
-      agentText = rewriteHybridCreationCommand(text) ?? text;
+      // 群聊 @Bot //cmd 与 @Bot /loop 创建：只剥开头 at，保留正文里的 @U4。
+      const strippedLeading = stripLeadingAtMentions(msg.contentText.trim());
+      const text = this.normalizeUserTextForAgent(strippedLeading.startsWith("//") ? strippedLeading : msg.contentText);
+      agentText = rewriteHybridCreationCommand(stripLeadingAtMentions(text)) ?? text;
     }
 
     // Save trigger msg ID for reply-to-message（process() 会快照并清除）
@@ -1592,8 +1604,9 @@ export class Pipeline {
       return;
     }
 
-    // 内置命令拦截：/xxx 开头的消息先匹配内置命令，命中则不传给 agent
-    const commandText = msg.contentText.trim();
+    // 内置命令拦截：/xxx 开头的消息先匹配内置命令，命中则不传给 agent。
+    // 群聊必须先 at，内容常是 `@U3(NiuBot) /help`，先剥掉开头的 at 再认。
+    const commandText = extractBuiltinCommandText(msg.contentText.trim());
     if (this.isBuiltinCommand(commandText, userId)) {
       persistIncomingMessage("processing");
       this.handleBuiltinCommand(commandText, userId, chatId, msg.chatPlatformId, msg.chatType, msg.platformMsgId);
@@ -1641,6 +1654,7 @@ export class Pipeline {
       contentType,
       platform: this.botIdentity.platform,
       platformMsgId,
+      agentSeen: true,
     });
   }
 
@@ -1670,8 +1684,9 @@ export class Pipeline {
     // Collect user info from mentions + replace @name with @shortLabel
     if (msg.mentions) {
       for (const m of msg.mentions) {
-        if (m.platformUserId && m.name) {
-          ensureUser(this.db, platform, m.platformUserId, m.name, m.isBot ? "bot_sender" : "mention");
+        if (m.platformUserId) {
+          const mentionUserId = ensureUser(this.db, platform, m.platformUserId, m.name || undefined, mentionMarksApp(m) ? "bot_info" : "mention");
+          if (mentionMarksApp(m)) setUserIsBot(this.db, mentionUserId);
         }
       }
     }
@@ -4858,24 +4873,23 @@ ${jobParts.join("\n\n")}
 
         // 群聊：消息级 speaker 注入；内部 Loop 回合没有当前发言者。
         if (!isLoopTurn && processChatType === "group" && messages.length > 0) {
-        // 提取去重的 sender 列表
-        const senderIds = [...new Set(messages.map((m) => m.senderId).filter((id): id is string => !!id))];
-        if (senderIds.length > 0) {
-          const speakers: SpeakerInfo[] = senderIds.map((id) => {
-            const row = this.db.prepare("SELECT name, is_bot FROM users WHERE id = ?").get(id) as { name: string | null; is_bot: number } | undefined;
-            return {
-              userId: id,
-              userName: row?.name ?? undefined,
-              isAdmin: this.adminRoles.has(id),
-              isBot: row?.is_bot === 1,
-            };
-          });
-          const speakerCtx = buildSpeakerContext(this.db, speakers);
-          if (speakerCtx) {
-            messageToSend = `${speakerCtx}\n\n${messageToSend}`;
+          const senderIds = [...new Set(messages.map((m) => m.senderId).filter((id): id is string => !!id))];
+          if (senderIds.length > 0) {
+            const speakers: SpeakerInfo[] = senderIds.map((id) => {
+              const row = this.db.prepare("SELECT name, is_bot FROM users WHERE id = ?").get(id) as { name: string | null; is_bot: number } | undefined;
+              return {
+                userId: id,
+                userName: row?.name ?? undefined,
+                isAdmin: this.adminRoles.has(id),
+                isBot: row?.is_bot === 1,
+              };
+            });
+            const speakerCtx = buildSpeakerContext(this.db, speakers);
+            if (speakerCtx) {
+              messageToSend = `${speakerCtx}\n\n${messageToSend}`;
+            }
           }
         }
-      }
 
         if (!isLoopTurn) {
           if (messageToSend === baseMessage) {
@@ -4884,6 +4898,7 @@ ${jobParts.join("\n\n")}
             messageToSend = `${messageToSend.slice(0, messageToSend.length - baseMessage.length)}${wrapInjectedUserMessage(baseMessage)}`;
           }
         }
+        markMessagesAgentSeen(this.db, msgIds);
         // 特殊场景提醒：/worker off 时强制告知模型停止派工（技能会继续被发现，
         // 不能用按需加载兜底，必须显式注入）。其余工具说明（调度/Worker）已 skill 化，
         // 由 agent CLI 按需加载 skills/nbt-tools/SKILL.md，不再注入。

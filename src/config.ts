@@ -28,8 +28,8 @@ function safeCurrentWorkingDirectory(): string {
 /** NIUBOT_HOME 默认 ~/.niubot */
 const NIUBOT_HOME = resolveHomePath(process.env["NIUBOT_HOME"] ?? path.join(os.homedir(), ".niubot"));
 
-// 从 NIUBOT_HOME 加载 .env
-dotenv.config({ path: path.join(NIUBOT_HOME, ".env"), quiet: true });
+// 从 NIUBOT_HOME 加载 .env（override：让 .env 能覆盖启动链继承的环境变量）
+dotenv.config({ path: path.join(NIUBOT_HOME, ".env"), quiet: true, override: true });
 
 export { NIUBOT_HOME };
 

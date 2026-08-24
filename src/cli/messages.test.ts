@@ -6,7 +6,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { initDatabase } from "../database/schema.js";
 import { getMessageForAccess, listContinuationMessages, listMessages, searchMessages } from "../messages/store.js";
 import { TZ, userTimeRangeToUtc, utcToLocalDateTime } from "../tz.js";
-import { formatMessagesForList } from "./messages.js";
+import { parseArgs } from "./args.js";
+import { formatMessagesForList, handleMessages } from "./messages.js";
 
 const tempDirs: string[] = [];
 const openDatabases: Database.Database[] = [];
@@ -123,6 +124,25 @@ describe("message access rules", () => {
     }).map((row) => row.id)).toEqual([2]);
   });
 
+  it("lists by original time so a later-synced old message is not the newest", () => {
+    const db = setupDb();
+    db.prepare(
+      "INSERT INTO messages (id, chat_id, sender_id, role, content_text, content_type, platform, platform_msg_id, platform_ts, created_at) VALUES (10, 'c1', 'u2', 'user', 'old synced', 'text', 'feishu', 'om-old', '2020-01-01 00:00:00', '2020-01-01 00:00:00')",
+    ).run();
+    db.prepare(
+      "INSERT INTO messages (id, chat_id, sender_id, role, content_text, content_type, platform, created_at) VALUES (11, 'c1', 'u2', 'user', 'new local', 'text', 'feishu', '2099-01-01 00:00:00')",
+    ).run();
+
+    expect(listMessages(db, {
+      currentChatId: "c1",
+      chatType: "group",
+      targetChatId: "c1",
+      limit: 1,
+    }).map((row) => row.content_text)).toEqual(["new local"]);
+    expect(listContinuationMessages(db, { chatId: "c1", limit: 1 }).map((row) => row.content_text))
+      .toEqual(["new local"]);
+  });
+
   it("keeps Cron internal prompts in the session transcript but out of normal messages", () => {
     const db = setupDb();
     db.prepare(`
@@ -146,5 +166,69 @@ describe("message access rules", () => {
       .not.toContain("INTERNAL_CRON_PROMPT");
     expect(db.prepare("SELECT content_text FROM messages WHERE session_key = 'cron-session'").get())
       .toEqual({ content_text: "INTERNAL_CRON_PROMPT" });
+  });
+});
+
+describe("handleMessages group sync", () => {
+  it("syncs a group chat before listing", async () => {
+    const db = setupDb();
+    let synced = 0;
+    const logs: string[] = [];
+    const origLog = console.log;
+    console.log = (...args: unknown[]) => {
+      logs.push(args.map(String).join(" "));
+    };
+    try {
+      await handleMessages(db, ["list", "-n", "20"], "c1", "group", parseArgs, async (database, chatId) => {
+        synced += 1;
+        expect(chatId).toBe("c1");
+        database.prepare(
+          "INSERT INTO messages (id, chat_id, sender_id, role, content_text, content_type, platform) VALUES (10, 'c1', 'u2', 'user', 'cow said hi', 'text', 'feishu')",
+        ).run();
+      });
+    } finally {
+      console.log = origLog;
+    }
+    expect(synced).toBe(1);
+    expect(logs.join("\n")).toContain("cow said hi");
+  });
+
+  it("does not sync p2p chats", async () => {
+    const db = setupDb();
+    let synced = 0;
+    const origLog = console.log;
+    console.log = () => {};
+    try {
+      await handleMessages(db, ["list", "-n", "20"], "c2", "p2p", parseArgs, async () => {
+        synced += 1;
+      });
+    } finally {
+      console.log = origLog;
+    }
+    expect(synced).toBe(0);
+  });
+
+  it("still lists when group sync fails", async () => {
+    const db = setupDb();
+    const logs: string[] = [];
+    const errors: string[] = [];
+    const origLog = console.log;
+    const origError = console.error;
+    console.log = (...args: unknown[]) => {
+      logs.push(args.map(String).join(" "));
+    };
+    console.error = (...args: unknown[]) => {
+      errors.push(args.map(String).join(" "));
+    };
+    try {
+      await handleMessages(db, ["list", "-n", "20"], "c1", "group", parseArgs, async () => {
+        throw new Error("feishu down");
+      });
+    } finally {
+      console.log = origLog;
+      console.error = origError;
+    }
+    expect(logs.join("\n")).toContain("current chat text");
+    expect(errors.join("\n")).toContain("group history sync failed: feishu down");
   });
 });

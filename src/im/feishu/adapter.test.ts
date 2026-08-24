@@ -79,6 +79,148 @@ describe("FeishuAdapter", () => {
     expect(sent).toEqual([{ method: "reply", msgType: "file", replyTo: "om-user" }]);
   });
 
+  test("lists chat history with open_id and returns chronological text", async () => {
+    const adapter = new FeishuAdapter("app-id", "app-secret");
+    const listed: Array<{ params: Record<string, unknown> }> = [];
+    (adapter as any).botOpenId = "ou-self";
+    (adapter as any).client = {
+      im: {
+        message: {
+          list: async ({ params }: any) => {
+            listed.push({ params });
+            return {
+              data: {
+                items: [
+                  {
+                    message_id: "om-2",
+                    msg_type: "text",
+                    create_time: "2000",
+                    sender: { id: "ou-cow", sender_type: "app", id_type: "open_id" },
+                    body: { content: JSON.stringify({ text: "second" }) },
+                  },
+                  {
+                    message_id: "om-1",
+                    msg_type: "text",
+                    create_time: "1000",
+                    sender: { id: "ou-user", sender_type: "user", id_type: "open_id" },
+                    body: { content: JSON.stringify({ text: "first" }) },
+                  },
+                ],
+              },
+            };
+          },
+        },
+      },
+    };
+
+    const messages = await adapter.listChatMessages("oc-group", { limit: 20 });
+    expect(listed[0]?.params).toMatchObject({
+      container_id_type: "chat",
+      container_id: "oc-group",
+      user_id_type: "open_id",
+      sort_type: "ByCreateTimeDesc",
+    });
+    expect(messages.map((msg) => msg.contentText)).toEqual(["first", "second"]);
+  });
+
+  test("listChatMessages paginates incremental ASC so newest after the cursor is kept", async () => {
+    const adapter = new FeishuAdapter("app-id", "app-secret");
+    const listed: Array<{ params: Record<string, unknown> }> = [];
+    (adapter as any).botOpenId = "ou-self";
+    (adapter as any).client = {
+      im: {
+        message: {
+          list: async ({ params }: any) => {
+            listed.push({ params });
+            if (!params.page_token) {
+              return {
+                data: {
+                  items: [{
+                    message_id: "om-old",
+                    msg_type: "text",
+                    create_time: "1000",
+                    sender: { id: "ou-user", sender_type: "user", id_type: "open_id" },
+                    body: { content: JSON.stringify({ text: "old" }) },
+                  }],
+                  has_more: true,
+                  page_token: "p2",
+                },
+              };
+            }
+            return {
+              data: {
+                items: [{
+                  message_id: "om-new",
+                  msg_type: "text",
+                  create_time: "2000",
+                  sender: { id: "ou-cow", sender_type: "app", id_type: "open_id" },
+                  body: { content: JSON.stringify({ text: "new" }) },
+                }],
+                has_more: false,
+              },
+            };
+          },
+        },
+      },
+    };
+
+    const messages = await adapter.listChatMessages("oc-group", { sinceUnixSec: 999, limit: 1000 });
+    expect(listed).toHaveLength(2);
+    expect(listed[0]?.params).toMatchObject({
+      sort_type: "ByCreateTimeAsc",
+      start_time: "999",
+      page_size: 50,
+    });
+    expect(listed[1]?.params).toMatchObject({ page_token: "p2" });
+    expect(messages.map((msg) => msg.contentText)).toEqual(["old", "new"]);
+  });
+
+  test("listChatMessages does not paginate the latest DESC page", async () => {
+    const adapter = new FeishuAdapter("app-id", "app-secret");
+    let calls = 0;
+    (adapter as any).botOpenId = "ou-self";
+    (adapter as any).client = {
+      im: {
+        message: {
+          list: async () => {
+            calls += 1;
+            return {
+              data: {
+                items: [{
+                  message_id: "om-latest",
+                  msg_type: "text",
+                  create_time: "3000",
+                  sender: { id: "ou-user", sender_type: "user", id_type: "open_id" },
+                  body: { content: JSON.stringify({ text: "latest" }) },
+                }],
+                has_more: true,
+                page_token: "older",
+              },
+            };
+          },
+        },
+      },
+    };
+
+    const messages = await adapter.listChatMessages("oc-group", { limit: 20 });
+    expect(calls).toBe(1);
+    expect(messages.map((msg) => msg.contentText)).toEqual(["latest"]);
+  });
+
+  test("listChatMessages throws when the Feishu API fails", async () => {
+    const adapter = new FeishuAdapter("app-id", "app-secret");
+    (adapter as any).client = {
+      im: {
+        message: {
+          list: async () => {
+            throw new Error("429");
+          },
+        },
+      },
+    };
+    await expect(adapter.listChatMessages("oc-group")).rejects.toThrow("429");
+  });
+
   test("sends image files as image messages and keeps other files as file messages", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-feishu-adapter-"));
     tempDirs.push(dir);
@@ -381,6 +523,284 @@ describe("FeishuAdapter", () => {
       senderIsBot: true,
       botMentioned: true,
     });
+  });
+
+  test("fetches message identity for first-seen group mentions", async () => {
+    const adapter = new FeishuAdapter("app-id", "app-secret");
+    (adapter as any).botOpenId = "ou-self";
+    const known = new Map<string, { isBot: boolean }>();
+    adapter.setIdentityLookup((platformId) => known.get(platformId));
+    let fetched = 0;
+    let fetchedParams: unknown;
+    (adapter as any).client = {
+      im: {
+        message: {
+          get: async ({ params }: any) => {
+            fetched += 1;
+            fetchedParams = params;
+            return {
+              data: {
+                items: [{
+                  sender: { id: "ou-zen", id_type: "open_id", sender_type: "user" },
+                  mentions: [
+                    { key: "@_user_1", id: "cli_self", id_type: "app_id", name: "NiuBot" },
+                    { key: "@_user_2", id: "cli_cow", id_type: "app_id", name: "CowBot" },
+                  ],
+                }],
+              },
+            };
+          },
+        },
+      },
+    };
+
+    const message = await (adapter as any).normalize({
+      message: {
+        chat_id: "group-id",
+        chat_type: "group",
+        message_id: "om-collab",
+        message_type: "text",
+        content: JSON.stringify({ text: "@_user_1 @_user_2 讨论天气" }),
+        mentions: [
+          { key: "@_user_1", id: { open_id: "ou-self" }, name: "NiuBot" },
+          { key: "@_user_2", id: { open_id: "ou-cow" }, name: "CowBot" },
+        ],
+      },
+      sender: { sender_id: { open_id: "ou-zen" }, sender_type: "user" },
+    });
+
+    expect(fetched).toBe(1);
+    expect(fetchedParams).toEqual({ user_id_type: "open_id" });
+    expect(message.botMentioned).toBe(true);
+    expect(message.mentions).toEqual([
+      { platformUserId: "ou-self", name: "NiuBot", isBot: true, isApp: true, key: "@_user_1" },
+      { platformUserId: "ou-cow", name: "CowBot", isBot: false, isApp: true, key: "@_user_2" },
+    ]);
+  });
+
+  test("does not remember mentions as human when GET returns no mention list", async () => {
+    const adapter = new FeishuAdapter("app-id", "app-secret");
+    (adapter as any).botOpenId = "ou-self";
+    adapter.setIdentityLookup(() => undefined);
+    let fetched = 0;
+    (adapter as any).client = {
+      im: {
+        message: {
+          get: async () => {
+            fetched += 1;
+            return {
+              data: {
+                items: [{
+                  sender: { id: "ou-zen", id_type: "open_id", sender_type: "user" },
+                  mentions: [],
+                }],
+              },
+            };
+          },
+        },
+      },
+    };
+
+    const eventFor = (messageId: string) => ({
+      message: {
+        chat_id: "group-id",
+        chat_type: "group",
+        message_id: messageId,
+        message_type: "text",
+        content: JSON.stringify({ text: "@_user_1 ping" }),
+        mentions: [{ key: "@_user_1", id: { open_id: "ou-cow" }, name: "CowBot" }],
+      },
+      sender: { sender_id: { open_id: "ou-zen" }, sender_type: "user" },
+    });
+
+    await (adapter as any).normalize(eventFor("om-empty-1"));
+    await (adapter as any).normalize(eventFor("om-empty-2"));
+    expect(fetched).toBe(2);
+  });
+
+  test("does not refetch when local identity already knows the parties", async () => {
+    const adapter = new FeishuAdapter("app-id", "app-secret");
+    (adapter as any).botOpenId = "ou-self";
+    adapter.setIdentityLookup((platformId) => {
+      if (platformId === "ou-zen") return { isBot: false };
+      if (platformId === "ou-cow") return { isBot: true };
+      return undefined;
+    });
+    let fetched = 0;
+    (adapter as any).client = {
+      im: { message: { get: async () => { fetched += 1; return { data: { items: [] } }; } } },
+    };
+
+    const message = await (adapter as any).normalize({
+      message: {
+        chat_id: "group-id",
+        chat_type: "group",
+        message_id: "om-known",
+        message_type: "text",
+        content: JSON.stringify({ text: "@_user_1 ping" }),
+        mentions: [{ key: "@_user_1", id: { open_id: "ou-cow" }, name: "CowBot" }],
+      },
+      sender: { sender_id: { open_id: "ou-zen" }, sender_type: "user" },
+    });
+
+    expect(fetched).toBe(0);
+    expect(message.mentions?.[0]?.isApp).toBe(true);
+    expect(message.senderIsBot).toBe(false);
+  });
+
+  test("classifies a card sender as a bot when the event omitted sender_type", async () => {
+    const adapter = new FeishuAdapter("app-id", "app-secret");
+    (adapter as any).botOpenId = "ou-self";
+    adapter.setIdentityLookup(() => undefined);
+    (adapter as any).client = {
+      im: {
+        message: {
+          get: async ({ path: requestPath, params }: any) => {
+            if (params?.card_msg_content_type) {
+              return {
+                data: {
+                  items: [{
+                    body: {
+                      content: JSON.stringify({
+                        schema: "2.0",
+                        body: { elements: [{ tag: "markdown", content: "<at id=ou-self></at> ping" }] },
+                      }),
+                    },
+                  }],
+                },
+              };
+            }
+            expect(requestPath.message_id).toBe("om-card");
+            return {
+              data: {
+                items: [{
+                  sender: { id: "cli_cow", id_type: "app_id", sender_type: "app" },
+                  mentions: [{ key: "@_user_1", id: "cli_self", id_type: "app_id", name: "NiuBot" }],
+                }],
+              },
+            };
+          },
+        },
+      },
+    };
+
+    const message = await (adapter as any).normalize({
+      message: {
+        chat_id: "group-id",
+        chat_type: "group",
+        message_id: "om-card",
+        message_type: "interactive",
+        content: JSON.stringify({
+          title: null,
+          elements: [[{ tag: "text", text: "请升级至最新版本客户端，以查看内容" }]],
+        }),
+        mentions: [{ key: "@_user_1", id: { open_id: "ou-self" }, name: "NiuBot" }],
+      },
+      sender: { sender_id: { open_id: "ou-cow" } },
+    });
+
+    expect(message.senderIsBot).toBe(true);
+    expect(message.botMentioned).toBe(true);
+    expect(message.contentText).toContain("ping");
+  });
+
+  test("keeps the inbound message when identity fetch fails", async () => {
+    const adapter = new FeishuAdapter("app-id", "app-secret");
+    (adapter as any).botOpenId = "ou-self";
+    adapter.setIdentityLookup(() => undefined);
+    (adapter as any).client = {
+      im: { message: { get: async () => { throw new Error("api down"); } } },
+    };
+
+    const message = await (adapter as any).normalize({
+      message: {
+        chat_id: "group-id",
+        chat_type: "group",
+        message_id: "om-fail",
+        message_type: "text",
+        content: JSON.stringify({ text: "@_user_1 hi" }),
+        mentions: [{ key: "@_user_1", id: { open_id: "ou-cow" }, name: "CowBot" }],
+      },
+      sender: { sender_id: { open_id: "ou-zen" }, sender_type: "user" },
+    });
+
+    expect(message.contentText).toBe("@CowBot hi");
+    expect(message.mentions?.[0]?.isApp).toBe(false);
+  });
+
+  test("retries identity fetch after a failure even if the user row already exists", async () => {
+    const adapter = new FeishuAdapter("app-id", "app-secret");
+    (adapter as any).botOpenId = "ou-self";
+    const known = new Map<string, { isBot: boolean }>([["ou-cow", { isBot: false }]]);
+    adapter.setIdentityLookup((platformId) => known.get(platformId));
+    let fetched = 0;
+    (adapter as any).client = {
+      im: {
+        message: {
+          get: async () => {
+            fetched += 1;
+            if (fetched === 1) throw new Error("api down");
+            return {
+              data: {
+                items: [{
+                  sender: { id: "ou-zen", id_type: "open_id", sender_type: "user" },
+                  mentions: [{ key: "@_user_1", id: "cli_cow", id_type: "app_id", name: "CowBot" }],
+                }],
+              },
+            };
+          },
+        },
+      },
+    };
+
+    await (adapter as any).normalize({
+      message: {
+        chat_id: "group-id",
+        chat_type: "group",
+        message_id: "om-retry-1",
+        message_type: "text",
+        content: JSON.stringify({ text: "@_user_1 hi" }),
+        mentions: [{ key: "@_user_1", id: { open_id: "ou-cow" }, name: "CowBot" }],
+      },
+      sender: { sender_id: { open_id: "ou-zen" }, sender_type: "user" },
+    });
+    const recovered = await (adapter as any).normalize({
+      message: {
+        chat_id: "group-id",
+        chat_type: "group",
+        message_id: "om-retry-2",
+        message_type: "text",
+        content: JSON.stringify({ text: "@_user_1 hi" }),
+        mentions: [{ key: "@_user_1", id: { open_id: "ou-cow" }, name: "CowBot" }],
+      },
+      sender: { sender_id: { open_id: "ou-zen" }, sender_type: "user" },
+    });
+
+    expect(fetched).toBe(2);
+    expect(recovered.mentions?.[0]?.isApp).toBe(true);
+  });
+
+  test("does not fetch when the sender is already a user and mentions are classified", async () => {
+    const adapter = new FeishuAdapter("app-id", "app-secret");
+    (adapter as any).botOpenId = "ou-self";
+    adapter.setIdentityLookup(() => undefined);
+    let fetched = 0;
+    (adapter as any).client = {
+      im: { message: { get: async () => { fetched += 1; return { data: { items: [] } }; } } },
+    };
+
+    await (adapter as any).normalize({
+      message: {
+        chat_id: "group-id",
+        chat_type: "group",
+        message_id: "om-human-only",
+        message_type: "text",
+        content: JSON.stringify({ text: "@_user_1 ping" }),
+        mentions: [{ key: "@_user_1", id: { open_id: "ou-self" }, name: "NiuBot" }],
+      },
+      sender: { sender_id: { open_id: "ou-zen" }, sender_type: "user" },
+    });
+    expect(fetched).toBe(0);
   });
 
   test("fetches original card JSON when the event payload is the upgrade placeholder", async () => {

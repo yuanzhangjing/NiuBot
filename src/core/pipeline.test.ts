@@ -200,19 +200,25 @@ class WatchdogAgent extends ThrowingProbeAgent {
   }
 }
 
+function uniqueSendId(prefix: string): () => string {
+  let n = 0;
+  return () => `${prefix}-${++n}`;
+}
+
 function createImStub(): PlatformAdapter {
+  const nextId = uniqueSendId("pmid");
   return {
     onMessage() {},
     async start() {},
     async stop() {},
-    async sendText() { return "pmid"; },
-    async sendReply() { return "pmid"; },
-    async sendMarkdownCard() { return "pmid"; },
-    async sendCard() { return "pmid"; },
+    async sendText() { return nextId(); },
+    async sendReply() { return nextId(); },
+    async sendMarkdownCard() { return nextId(); },
+    async sendCard() { return nextId(); },
     async editMessage() {},
     async addReaction() {},
     async removeReaction() {},
-    async sendFile() { return "pmid"; },
+    async sendFile() { return nextId(); },
     async getBotOpenId() { return "bot-open-id"; },
     async getBotName() { return "NiuBot"; },
     async getChatName() { return "Admin"; },
@@ -228,26 +234,27 @@ function createRecordingImStub() {
   const reactions: Array<{ chatId: string; msgId: string; emoji: string }> = [];
   const removedReactions: Array<{ chatId: string; msgId: string; emoji: string }> = [];
   let messageHandler: ((msg: NormalizedMessage) => void) | undefined;
+  const nextId = uniqueSendId("pmid");
 
   const im: PlatformAdapter = {
     onMessage(handler) { messageHandler = handler; },
     async start() {},
     async stop() {},
-    async sendText(_chatId, text) { sentTexts.push(text); return "pmid"; },
+    async sendText(_chatId, text) { sentTexts.push(text); return nextId(); },
     async sendReply(_chatId, text, replyToMsgId) {
       sentTexts.push(text);
       sentReplies.push({ text, replyToMsgId });
-      return "pmid";
+      return nextId();
     },
-    async sendMarkdownCard() { return "pmid"; },
+    async sendMarkdownCard() { return nextId(); },
     async sendCard(_chatId, header, content, footer, replyToMsgId) {
       sentCards.push({ header, content, footer, replyToMsgId });
-      return "pmid";
+      return nextId();
     },
     async editMessage() {},
     async addReaction(chatId, msgId, emoji) { reactions.push({ chatId, msgId, emoji }); },
     async removeReaction(chatId, msgId, emoji) { removedReactions.push({ chatId, msgId, emoji }); },
-    async sendFile() { return "pmid"; },
+    async sendFile() { return nextId(); },
     async getBotOpenId() { return "bot-open-id"; },
     async getBotName() { return "NiuBot"; },
     async getChatName() { return "Admin"; },
@@ -273,6 +280,7 @@ function createImStubWithSendFailures(options: {
   const sentFiles: Array<{ chatId: string; filePath: string }> = [];
   let sendTextCalls = 0;
   let sendReplyCalls = 0;
+  const nextId = uniqueSendId("pmid");
 
   const im: PlatformAdapter = {
     onMessage() {},
@@ -284,7 +292,7 @@ function createImStubWithSendFailures(options: {
         throw options.rawTextError;
       }
       sentTexts.push(text);
-      return "pmid";
+      return nextId();
     },
     async sendReply(chatId, text, replyToMsgId) {
       sendReplyCalls++;
@@ -292,9 +300,9 @@ function createImStubWithSendFailures(options: {
         throw options.rawTextError;
       }
       sentReplies.push({ chatId, text, replyToMsgId });
-      return "pmid";
+      return nextId();
     },
-    async sendMarkdownCard() { return "pmid"; },
+    async sendMarkdownCard() { return nextId(); },
     async sendCard(_chatId, header, content, footer) {
       sentCards.push({ header, content, footer });
       throw options.cardError;
@@ -304,7 +312,7 @@ function createImStubWithSendFailures(options: {
     async removeReaction() {},
     async sendFile(chatId, filePath) {
       sentFiles.push({ chatId, filePath });
-      return "pmid";
+      return nextId();
     },
     async getBotOpenId() { return "bot-open-id"; },
     async getBotName() { return "NiuBot"; },
@@ -325,6 +333,28 @@ class DeferredAgent extends RecordingAgent {
       this.pendingResolvers.push(resolve);
     });
     return { text: `reply:${message}` };
+  }
+
+  resolveNext(): void {
+    const resolve = this.pendingResolvers.shift();
+    if (!resolve) throw new Error("no pending sendMessage to resolve");
+    resolve();
+  }
+}
+
+class DeferredSequenceReplyAgent extends RecordingAgent {
+  private readonly pendingResolvers: Array<() => void> = [];
+
+  constructor(private readonly replies: string[]) {
+    super();
+  }
+
+  override async sendMessage(_session: AgentSession, message: string): Promise<AgentResponse> {
+    this.sendMessageCalls.push(message);
+    await new Promise<void>((resolve) => {
+      this.pendingResolvers.push(resolve);
+    });
+    return { text: this.replies.shift() ?? "" };
   }
 
   resolveNext(): void {
@@ -370,6 +400,17 @@ class ReplyAgent extends RecordingAgent {
   override async sendMessage(_session: AgentSession, message: string): Promise<AgentResponse> {
     this.sendMessageCalls.push(message);
     return { text: this.replyText };
+  }
+}
+
+class SequenceReplyAgent extends RecordingAgent {
+  constructor(private readonly replies: string[]) {
+    super();
+  }
+
+  override async sendMessage(_session: AgentSession, message: string): Promise<AgentResponse> {
+    this.sendMessageCalls.push(message);
+    return { text: this.replies.shift() ?? "" };
   }
 }
 
@@ -665,6 +706,30 @@ describe("Pipeline Loop integration", () => {
     expect(agent.sendMessageCalls[2]).toContain("每天上午9点提醒我提交日报");
     expect(db.prepare("SELECT COUNT(*) AS count FROM loop_jobs").get()).toEqual({ count: 0 });
     expect(db.prepare("SELECT COUNT(*) AS count FROM cron_jobs").get()).toEqual({ count: 0 });
+  });
+
+  test("group hybrid /loop keeps trailing mentions instead of stripping them", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-hybrid-mention-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const agent = new RecordingAgent();
+    const { im } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex",
+    );
+    await pipeline.start();
+
+    (pipeline as any).handleMessage(createMessage({
+      chatPlatformId: "group-open-id",
+      chatType: "group",
+      contentText: "@U3(NiuBot) /loop 每5分钟检查 @U4",
+      platformMsgId: "group-hybrid-loop",
+      botMentioned: true,
+    }));
+    await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(1));
+    expect(agent.sendMessageCalls[0]).not.toContain("/loop");
+    expect(agent.sendMessageCalls[0]).toContain("每5分钟检查 @U4");
+    expect(agent.sendMessageCalls[0]).toContain("nbt schedule create");
   });
 
   test("reply-form /loop keeps quoted context and reaches the model unchanged", async () => {
@@ -4805,6 +4870,31 @@ bots:
     expect(sentCards.some((card) => card.content.includes("`/flush`　　中断当前回复，合并处理排队消息"))).toBe(true);
   });
 
+  test("treats group @bot /help as a builtin command", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-group-help-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const agent = new RecordingAgent();
+    const { im, sentCards } = createRecordingImStub();
+    const pipeline = new Pipeline(db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");
+    await pipeline.start();
+
+    (pipeline as any).handleMessage(createMessage({
+      chatPlatformId: "group-open-id",
+      chatType: "group",
+      contentText: "@NiuBot /help",
+      platformMsgId: "om-group-help",
+      botMentioned: true,
+      mentions: [
+        { platformUserId: "bot-open-id", name: "NiuBot", isBot: true, key: "self" },
+      ],
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(agent.sendMessageCalls).toHaveLength(0);
+    expect(sentCards.some((card) => card.header.includes("帮助") && card.content.includes("`/new`"))).toBe(true);
+  });
+
   test("does not show installation setup guidance from /help", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
@@ -5069,7 +5159,7 @@ bots:
     `).get() as { content_text: string; platform_msg_id: string | null };
     expect(row).toEqual({
       content_text: "发送失败：The messages do NOT pass the audit, ext=contain sensitive data: EMAIL_ADDRESS (code: 230028)",
-      platform_msg_id: "pmid",
+      platform_msg_id: expect.stringMatching(/^pmid-\d+$/),
     });
     const ftsRow = db.prepare(`
       SELECT rowid
@@ -5130,7 +5220,7 @@ bots:
       ORDER BY id DESC
       LIMIT 1
     `).get() as { content_text: string; platform_msg_id: string | null };
-    expect(row.platform_msg_id).toBe("pmid");
+    expect(row.platform_msg_id).toMatch(/^pmid-\d+$/);
   });
 
   test("handles Loop/Cron management commands locally while creation stays on the model route", async () => {
@@ -5709,21 +5799,22 @@ describe("nbt send prefers the active-run reply target", () => {
   function createSendTrackingIm() {
     const sent: Array<{ method: string; payload: unknown }> = [];
     const im = createImStub();
+    const nextId = uniqueSendId("send");
     im.sendText = async (_chatId, text) => {
       sent.push({ method: "text", payload: text });
-      return "text-id";
+      return nextId();
     };
     im.sendReply = async (_chatId, text, replyToMsgId) => {
       sent.push({ method: "reply", payload: { text, replyToMsgId } });
-      return "reply-id";
+      return nextId();
     };
     im.sendCard = async (_chatId, header, content, footer, replyToMsgId) => {
       sent.push({ method: "card", payload: { header, content, footer, replyToMsgId } });
-      return "card-id";
+      return nextId();
     };
     im.sendFile = async (_chatId, filePath, _fileName, options) => {
       sent.push({ method: "file", payload: { filePath, replyToMsgId: options?.replyToMsgId } });
-      return "file-id";
+      return nextId();
     };
     return { im, sent };
   }
@@ -5828,6 +5919,250 @@ describe("nbt send prefers the active-run reply target", () => {
     ).get() as { content_text: string };
     expect(stored.content_text).toContain(`@${cowId.toUpperCase()}(CowBot)`);
     expect(stored.content_text).not.toContain("<at ");
+  });
+
+  test("rewrites group bot short-ats without a Leader prompt", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-collab-leader-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const cowId = ensureUser(db, "feishu", "ou-cow", "CowBot");
+    setUserIsBot(db, cowId);
+    const agent = new SequenceReplyAgent([
+      `先查降雨 @${cowId.toUpperCase()}`,
+      "天气适合户外活动。",
+      `单 Bot 回复 @${cowId.toUpperCase()}`,
+    ]);
+    const { im, sentCards } = createRecordingImStub();
+    const pipeline = new Pipeline(db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");
+    await pipeline.start();
+    const selfId = pipeline.getBotUserId()!;
+
+    (pipeline as any).handleMessage(createMessage({
+      chatPlatformId: "group-open-id",
+      chatType: "group",
+      contentText: `@${selfId.toUpperCase()} 讨论天气`,
+      platformMsgId: "human-weather-start",
+      botMentioned: true,
+      mentions: [
+        { platformUserId: "bot-open-id", name: "NiuBot", isBot: true, key: "self" },
+        { platformUserId: "ou-cow", name: "CowBot", isBot: false, key: "cow" },
+      ],
+    }));
+    await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(1));
+    await vi.waitFor(() => expect(sentCards).toHaveLength(1));
+
+    expect(agent.sendMessageCalls[0]).not.toContain("角色：Leader");
+    expect(sentCards[0]!.content).toContain('<at user_id="ou-cow">CowBot</at>');
+    expect((pipeline as any).botCollabContexts).toBeUndefined();
+
+    (pipeline as any).handleMessage(createMessage({
+      chatPlatformId: "group-open-id",
+      chatType: "group",
+      senderPlatformId: "ou-cow",
+      senderName: "CowBot",
+      senderIsBot: true,
+      contentText: `@${selfId.toUpperCase()} 降雨较小`,
+      platformMsgId: "cow-weather-result",
+      botMentioned: true,
+      mentions: [
+        { platformUserId: "bot-open-id", name: "NiuBot", isBot: false, key: "self" },
+      ],
+    }));
+    await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(2));
+    await vi.waitFor(() => expect(sentCards).toHaveLength(2));
+    expect(sentCards[1]!.content).toBe("天气适合户外活动。");
+
+    (pipeline as any).handleMessage(createMessage({
+      chatPlatformId: "group-open-id",
+      chatType: "group",
+      contentText: `@${selfId.toUpperCase()} 新的单 Bot 问题`,
+      platformMsgId: "human-single-bot-followup",
+      botMentioned: true,
+      mentions: [
+        { platformUserId: "bot-open-id", name: "NiuBot", isBot: true, key: "self" },
+      ],
+    }));
+    await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(3));
+    await vi.waitFor(() => expect(sentCards).toHaveLength(3));
+    expect(sentCards[2]!.content).toContain('<at user_id="ou-cow">CowBot</at>');
+  });
+
+  test("marks a first-seen isApp mention as a bot", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-collab-isapp-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const agent = new SequenceReplyAgent(["先看天气"]);
+    const { im, sentCards } = createRecordingImStub();
+    const pipeline = new Pipeline(db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");
+    await pipeline.start();
+    const selfId = pipeline.getBotUserId()!;
+
+    (pipeline as any).handleMessage(createMessage({
+      chatPlatformId: "group-open-id",
+      chatType: "group",
+      contentText: `@${selfId.toUpperCase()} 讨论天气`,
+      platformMsgId: "human-isapp-start",
+      botMentioned: true,
+      mentions: [
+        { platformUserId: "bot-open-id", name: "NiuBot", isBot: true, key: "@_user_1" },
+        { platformUserId: "ou-cow", name: "CowBot", isBot: false, isApp: true, key: "@_user_2" },
+      ],
+    }));
+    await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(1));
+    await vi.waitFor(() => expect(sentCards).toHaveLength(1));
+
+    const cow = db.prepare("SELECT id, is_bot FROM users WHERE platform_id = ?").get("ou-cow") as { id: string; is_bot: number };
+    expect(cow.is_bot).toBe(1);
+    expect(agent.sendMessageCalls[0]).not.toContain("角色：Leader");
+  });
+
+  test("keeps the first turn's outbound at when a second group message arrives mid-turn", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-collab-race-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const cowId = ensureUser(db, "feishu", "ou-cow", "CowBot");
+    const sheepId = ensureUser(db, "feishu", "ou-sheep", "SheepBot");
+    setUserIsBot(db, cowId);
+    setUserIsBot(db, sheepId);
+    const agent = new DeferredSequenceReplyAgent([
+      `旧任务结果 @${cowId.toUpperCase()}`,
+      "新任务完成",
+    ]);
+    const { im, sentCards } = createRecordingImStub();
+    const pipeline = new Pipeline(db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");
+    await pipeline.start();
+    const selfId = pipeline.getBotUserId()!;
+
+    (pipeline as any).handleMessage(createMessage({
+      chatPlatformId: "group-open-id",
+      chatType: "group",
+      contentText: `@${selfId.toUpperCase()} @${cowId.toUpperCase()} 旧任务`,
+      platformMsgId: "human-old-task",
+      botMentioned: true,
+      mentions: [
+        { platformUserId: "bot-open-id", name: "NiuBot", isBot: true, key: "self" },
+        { platformUserId: "ou-cow", name: "CowBot", isBot: false, key: "cow" },
+      ],
+    }));
+    await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(1));
+
+    (pipeline as any).handleMessage(createMessage({
+      chatPlatformId: "group-open-id",
+      chatType: "group",
+      contentText: `@${selfId.toUpperCase()} @${sheepId.toUpperCase()} 新任务`,
+      platformMsgId: "human-new-task",
+      botMentioned: true,
+      mentions: [
+        { platformUserId: "bot-open-id", name: "NiuBot", isBot: true, key: "self" },
+        { platformUserId: "ou-sheep", name: "SheepBot", isBot: false, key: "sheep" },
+      ],
+    }));
+
+    agent.resolveNext();
+    await vi.waitFor(() => expect(sentCards).toHaveLength(1));
+    expect(sentCards[0]!.content).toContain('<at user_id="ou-cow">CowBot</at>');
+
+    await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(2));
+    agent.resolveNext();
+    await vi.waitFor(() => expect(sentCards).toHaveLength(2));
+    expect(sentCards[1]!.content).not.toContain("<at ");
+  });
+
+  test("bots can at each other without a Leader/participant prompt", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-collab-participant-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const cowId = ensureUser(db, "feishu", "ou-cow", "CowBot");
+    setUserIsBot(db, cowId);
+    const agent = new SequenceReplyAgent([
+      `首轮结果 @${cowId.toUpperCase()}`,
+      `委托结果 @${cowId.toUpperCase()}`,
+    ]);
+    const { im, sentCards } = createRecordingImStub();
+    const pipeline = new Pipeline(db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");
+    await pipeline.start();
+    const selfId = pipeline.getBotUserId()!;
+
+    (pipeline as any).handleMessage(createMessage({
+      chatPlatformId: "group-open-id",
+      chatType: "group",
+      contentText: `@${cowId.toUpperCase()} @${selfId.toUpperCase()} 讨论天气`,
+      platformMsgId: "human-weather-start-participant",
+      botMentioned: true,
+      mentions: [
+        { platformUserId: "ou-cow", name: "CowBot", isBot: false, key: "cow" },
+        { platformUserId: "bot-open-id", name: "NiuBot", isBot: true, key: "self" },
+      ],
+    }));
+    await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(1));
+    await vi.waitFor(() => expect(sentCards).toHaveLength(1));
+
+    expect(agent.sendMessageCalls[0]).not.toContain("角色：参与者");
+    expect(sentCards[0]!.content).toContain('<at user_id="ou-cow">CowBot</at>');
+
+    (pipeline as any).handleMessage(createMessage({
+      chatPlatformId: "group-open-id",
+      chatType: "group",
+      senderPlatformId: "ou-cow",
+      senderName: "CowBot",
+      senderIsBot: true,
+      contentText: `@${selfId.toUpperCase()} 查询体感温度`,
+      platformMsgId: "cow-weather-delegation",
+      botMentioned: true,
+      mentions: [
+        { platformUserId: "bot-open-id", name: "NiuBot", isBot: false, key: "self" },
+      ],
+    }));
+    await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(2));
+    await vi.waitFor(() => expect(sentCards).toHaveLength(2));
+
+    expect(agent.sendMessageCalls[1]).not.toContain("Leader 已经委托你处理一个子问题");
+    expect(sentCards[1]!.content).toContain('<at user_id="ou-cow">CowBot</at>');
+  });
+
+  test("does not inject group history into the agent prompt", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-group-history-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const cowId = ensureUser(db, "feishu", "ou-cow", "CowBot");
+    setUserIsBot(db, cowId);
+    const agent = new RecordingAgent();
+    agent.needsCompactRecoveryReminderFlag = false;
+    const { im } = createRecordingImStub();
+    let listCalls = 0;
+    im.listChatMessages = async () => {
+      listCalls += 1;
+      return [
+        createMessage({
+          senderPlatformId: "ou-cow",
+          senderName: "CowBot",
+          chatPlatformId: "group-open-id",
+          chatType: "group",
+          contentText: "上一棒改完了，看 diff",
+          senderIsBot: true,
+          platformMsgId: "om-cow-prev",
+          platformTs: Date.now() - 5_000,
+        }),
+      ];
+    };
+    const pipeline = new Pipeline(db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");
+    await pipeline.start();
+    const selfId = pipeline.getBotUserId()!;
+
+    (pipeline as any).handleMessage(createMessage({
+      chatPlatformId: "group-open-id",
+      chatType: "group",
+      contentText: `@${selfId.toUpperCase()} review 刚才那版`,
+      platformMsgId: "om-human-now",
+      botMentioned: true,
+      mentions: [
+        { platformUserId: "bot-open-id", name: "NiuBot", isBot: true, key: "self" },
+      ],
+    }));
+    await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(1));
+    expect(agent.sendMessageCalls[0]).not.toContain("<group-history>");
+    expect(agent.sendMessageCalls[0]).not.toContain("上一棒改完了，看 diff");
+    expect(listCalls).toBe(0);
   });
 
   test("sendCardToChat keeps cards in p2p even when mentioning another user", async () => {
