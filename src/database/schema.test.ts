@@ -8,6 +8,9 @@ import {
   ensureUser,
   ensureChat,
   storeMessage,
+  getMessageByPlatformId,
+  getChatMetadata,
+  updateChatMetadata,
   updateMessagePlatformId,
   setUserIsBot,
   getUserIsBot,
@@ -194,6 +197,123 @@ describe("messages platform_msg_id unique index", () => {
     expect(indexes).toEqual(expect.arrayContaining([
       expect.objectContaining({ name: "idx_messages_platform_msg_id", unique: 1 }),
     ]));
+  });
+});
+
+describe("topic schema v32", () => {
+  test("adds topic columns, thread message fields, and thread history cursors", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-topic-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+
+    const chatColumns = db.prepare("PRAGMA table_info(chats)").all() as Array<{ name: string }>;
+    const messageColumns = db.prepare("PRAGMA table_info(messages)").all() as Array<{ name: string }>;
+    const sessionColumns = db.prepare("PRAGMA table_info(sessions)").all() as Array<{ name: string }>;
+    const runtimeColumns = db.prepare("PRAGMA table_info(runtime_events)").all() as Array<{ name: string }>;
+
+    expect(chatColumns.map((column) => column.name)).toEqual(expect.arrayContaining([
+      "chat_mode", "group_message_type", "chat_mode_fetched_at",
+    ]));
+    expect(messageColumns.map((column) => column.name)).toContain("thread_id");
+    expect(sessionColumns.map((column) => column.name)).toEqual(expect.arrayContaining([
+      "thread_id", "root_platform_msg_id", "last_inbound_platform_msg_id",
+    ]));
+    expect(runtimeColumns.map((column) => column.name)).toContain("thread_id");
+    expect((db.prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'thread_history_cursors'",
+    ).get() as { name: string } | undefined)?.name).toBe("thread_history_cursors");
+
+    const userId = ensureUser(db, "feishu", "ou-zen", "Zen");
+    const chatId = ensureChat(db, "feishu", "oc-topic", "group", "Topic group");
+    updateChatMetadata(db, chatId, {
+      chatMode: "topic",
+      groupMessageType: "thread",
+      fetchedAt: 123456,
+    });
+    expect(getChatMetadata(db, chatId)).toEqual({
+      chatMode: "topic",
+      groupMessageType: "thread",
+      fetchedAt: 123456,
+    });
+
+    const msgId = storeMessage(db, {
+      chatId,
+      senderId: userId,
+      role: "user",
+      contentText: "thread hello",
+      platform: "feishu",
+      platformMsgId: "om-thread",
+      threadId: "omt_aaa",
+    });
+    expect(getMessageByPlatformId(db, "feishu", "om-thread")).toMatchObject({
+      id: msgId,
+      threadId: "omt_aaa",
+    });
+
+    recordRuntimeEvent(db, {
+      botId: "NiuBot",
+      chatId,
+      threadId: "omt_aaa",
+      runId: "run-thread",
+      messageIds: [msgId],
+      stage: "queued",
+      event: "started",
+    });
+    expect(getRecentRuntimeEvents(db, {
+      chatId,
+      threadId: "omt_aaa",
+      limit: 10,
+    })[0]).toMatchObject({
+      threadId: "omt_aaa",
+      runId: "run-thread",
+    });
+  });
+
+  test("migrates a v31 database with duplicate active sessions without adding unique session indexes", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-topic-migrate-"));
+    tempDirs.push(dir);
+    const dbPath = path.join(dir, "niubot.db");
+    const legacy = initDatabase(dbPath);
+    const userId = ensureUser(legacy, "feishu", "ou-zen", "Zen");
+    const chatId = ensureChat(legacy, "feishu", "oc-group", "group", "Group");
+    legacy.exec(`
+      INSERT INTO sessions (id, chat_id, user_id, source, status, started_at, last_active_at)
+      VALUES ('s-old', '${chatId}', '${userId}', 'user', 'active', datetime('now'), datetime('now', '-1 hour'));
+      INSERT INTO sessions (id, chat_id, user_id, source, status, started_at, last_active_at)
+      VALUES ('s-new', '${chatId}', '${userId}', 'user', 'active', datetime('now'), datetime('now'));
+    `);
+    legacy.exec(`
+      DROP TABLE thread_history_cursors;
+      DROP INDEX IF EXISTS idx_messages_chat_thread_time;
+      DROP INDEX IF EXISTS idx_sessions_chat_thread;
+      ALTER TABLE messages DROP COLUMN thread_id;
+      ALTER TABLE sessions DROP COLUMN thread_id;
+      ALTER TABLE sessions DROP COLUMN root_platform_msg_id;
+      ALTER TABLE sessions DROP COLUMN last_inbound_platform_msg_id;
+      ALTER TABLE chats DROP COLUMN chat_mode;
+      ALTER TABLE chats DROP COLUMN group_message_type;
+      ALTER TABLE chats DROP COLUMN chat_mode_fetched_at;
+      ALTER TABLE loop_jobs DROP COLUMN thread_id;
+      ALTER TABLE cron_jobs DROP COLUMN thread_id;
+      ALTER TABLE runtime_events DROP COLUMN thread_id;
+    `);
+    legacy.prepare(
+      "UPDATE niubot_component_schema_versions SET version = 31 WHERE component = 'core'",
+    ).run();
+    legacy.pragma("user_version = 31");
+    legacy.close();
+
+    const migrated = initDatabase(dbPath);
+    expect(migrated.pragma("user_version", { simple: true })).toBe(LATEST_SCHEMA_VERSION);
+    expect(migrated.prepare(
+      "SELECT COUNT(*) AS count FROM sessions WHERE chat_id = ? AND status = 'active' AND source = 'user'",
+    ).get(chatId)).toEqual({ count: 2 });
+    const sessionIndexes = migrated.prepare("PRAGMA index_list(sessions)").all() as Array<{ name: string }>;
+    expect(sessionIndexes.map((index) => index.name)).not.toContain("idx_sessions_active_thread");
+    expect(sessionIndexes.map((index) => index.name)).not.toContain("idx_sessions_active_chat");
+    expect((migrated.prepare("PRAGMA table_info(chats)").all() as Array<{ name: string }>)
+      .map((column) => column.name)).toEqual(expect.arrayContaining(["chat_mode", "group_message_type"]));
+    migrated.close();
   });
 });
 

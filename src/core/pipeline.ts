@@ -1261,6 +1261,7 @@ export class Pipeline {
         contentType: msg.contentType,
         platform,
         platformMsgId: msg.platformMsgId,
+        threadId: msg.threadId,
         platformTs: platformTsStr,
         platformRaw: JSON.stringify(msg.raw),
       }),
@@ -1412,6 +1413,7 @@ export class Pipeline {
       contentType: msg.contentType,
       platform,
       platformMsgId: msg.platformMsgId,
+      threadId: msg.threadId,
       platformTs: platformTsStr,
       platformRaw: JSON.stringify(msg.raw),
     });

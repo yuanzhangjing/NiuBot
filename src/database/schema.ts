@@ -774,6 +774,56 @@ const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 32,
+    description: "Add topic metadata, thread ids, session anchors, and thread history cursor table",
+    up: (db) => {
+      const hasTable = (name: string) => !!db.prepare(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+      ).get(name);
+
+      if (hasTable("chats")) {
+        addColumnIfMissing(db, "chats", "chat_mode", "TEXT");
+        addColumnIfMissing(db, "chats", "group_message_type", "TEXT");
+        addColumnIfMissing(db, "chats", "chat_mode_fetched_at", "INTEGER");
+      }
+      if (hasTable("messages")) {
+        addColumnIfMissing(db, "messages", "thread_id", "TEXT");
+        db.exec(`
+          CREATE INDEX IF NOT EXISTS idx_messages_chat_thread_time
+          ON messages(chat_id, thread_id, created_at)
+        `);
+      }
+      if (hasTable("sessions")) {
+        addColumnIfMissing(db, "sessions", "thread_id", "TEXT");
+        addColumnIfMissing(db, "sessions", "root_platform_msg_id", "TEXT");
+        addColumnIfMissing(db, "sessions", "last_inbound_platform_msg_id", "TEXT");
+        db.exec(`
+          CREATE INDEX IF NOT EXISTS idx_sessions_chat_thread
+          ON sessions(chat_id, thread_id, status)
+        `);
+      }
+      if (hasTable("loop_jobs")) {
+        addColumnIfMissing(db, "loop_jobs", "thread_id", "TEXT");
+      }
+      if (hasTable("cron_jobs")) {
+        addColumnIfMissing(db, "cron_jobs", "thread_id", "TEXT");
+      }
+      if (hasTable("runtime_events")) {
+        addColumnIfMissing(db, "runtime_events", "thread_id", "TEXT");
+      }
+
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS thread_history_cursors (
+          chat_id    TEXT NOT NULL,
+          thread_id  TEXT NOT NULL,
+          sync_ts    INTEGER,
+          fetched_at INTEGER,
+          PRIMARY KEY (chat_id, thread_id)
+        )
+      `);
+    },
+  },
 ];
 
 const transportMigrations: Migration[] = [
@@ -956,6 +1006,7 @@ export type RuntimeEventName =
 export interface RuntimeEventInput {
   botId: string;
   chatId: string;
+  threadId?: string;
   runId: string;
   messageIds: number[];
   stage: string;
@@ -972,6 +1023,7 @@ export interface RuntimeEventRow extends RuntimeEventInput {
 export interface RuntimeEventQuery {
   botId?: string;
   chatId?: string;
+  threadId?: string;
   runId?: string;
   limit?: number;
 }
@@ -1109,12 +1161,13 @@ export function loadPersistedBotRuntimeState(dbPath: string, botName: string): B
 export function recordRuntimeEvent(db: Database.Database, input: RuntimeEventInput): number {
   const result = db.prepare(`
     INSERT INTO runtime_events (
-      bot_id, chat_id, run_id, message_ids_json, stage, event, error, elapsed_ms
+      bot_id, chat_id, thread_id, run_id, message_ids_json, stage, event, error, elapsed_ms
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     input.botId,
     input.chatId,
+    input.threadId ?? null,
     input.runId,
     JSON.stringify(input.messageIds),
     input.stage,
@@ -1136,6 +1189,10 @@ export function getRecentRuntimeEvents(db: Database.Database, query: RuntimeEven
     where.push("chat_id = ?");
     params.push(query.chatId);
   }
+  if (query.threadId) {
+    where.push("thread_id = ?");
+    params.push(query.threadId);
+  }
   if (query.runId) {
     where.push("run_id = ?");
     params.push(query.runId);
@@ -1143,7 +1200,7 @@ export function getRecentRuntimeEvents(db: Database.Database, query: RuntimeEven
 
   const limit = Math.max(1, Math.min(query.limit ?? 20, 100));
   const sql = `
-    SELECT id, bot_id, chat_id, run_id, message_ids_json, stage, event, error, elapsed_ms, created_at
+    SELECT id, bot_id, chat_id, thread_id, run_id, message_ids_json, stage, event, error, elapsed_ms, created_at
     FROM runtime_events
     ${where.length > 0 ? `WHERE ${where.join(" AND ")}` : ""}
     ORDER BY id DESC
@@ -1155,6 +1212,7 @@ export function getRecentRuntimeEvents(db: Database.Database, query: RuntimeEven
     id: number;
     bot_id: string;
     chat_id: string;
+    thread_id: string | null;
     run_id: string;
     message_ids_json: string;
     stage: string;
@@ -1168,6 +1226,7 @@ export function getRecentRuntimeEvents(db: Database.Database, query: RuntimeEven
     id: row.id,
     botId: row.bot_id,
     chatId: row.chat_id,
+    threadId: row.thread_id ?? undefined,
     runId: row.run_id,
     messageIds: parseMessageIds(row.message_ids_json),
     stage: row.stage,
@@ -1181,6 +1240,7 @@ export function getRecentRuntimeEvents(db: Database.Database, query: RuntimeEven
 export interface RestartFailedRunInfo {
   botId: string;
   chatId: string;
+  threadId?: string;
   runId: string;
   messageIds: number[];
   previousElapsedMs?: number;
@@ -1192,7 +1252,7 @@ export function markUnfinishedRuntimeRunsFailedByRestart(
   onMarked?: (run: RestartFailedRunInfo) => void,
 ): number {
   const rows = db.prepare(`
-    SELECT e.run_id, e.chat_id, e.message_ids_json, e.elapsed_ms
+    SELECT e.run_id, e.chat_id, e.thread_id, e.message_ids_json, e.elapsed_ms
     FROM runtime_events e
     JOIN (
       SELECT run_id, MAX(id) AS max_id
@@ -1204,6 +1264,7 @@ export function markUnfinishedRuntimeRunsFailedByRestart(
   `).all(botId) as Array<{
     run_id: string;
     chat_id: string;
+    thread_id: string | null;
     message_ids_json: string;
     elapsed_ms: number | null;
   }>;
@@ -1212,21 +1273,30 @@ export function markUnfinishedRuntimeRunsFailedByRestart(
 
   const insert = db.prepare(`
     INSERT INTO runtime_events (
-      bot_id, chat_id, run_id, message_ids_json, stage, event, error, elapsed_ms
+      bot_id, chat_id, thread_id, run_id, message_ids_json, stage, event, error, elapsed_ms
     )
-    VALUES (?, ?, ?, ?, 'failed', 'failed_by_restart', ?, ?)
+    VALUES (?, ?, ?, ?, ?, 'failed', 'failed_by_restart', ?, ?)
   `);
   const error = "Run did not reach a terminal state before restart";
   const markedRuns = rows.map((row) => ({
     botId,
     chatId: row.chat_id,
+    threadId: row.thread_id ?? undefined,
     runId: row.run_id,
     messageIds: parseMessageIds(row.message_ids_json),
     previousElapsedMs: row.elapsed_ms ?? undefined,
   }));
   const tx = db.transaction((items: typeof rows) => {
     for (const row of items) {
-      insert.run(botId, row.chat_id, row.run_id, row.message_ids_json, error, row.elapsed_ms ?? null);
+      insert.run(
+        botId,
+        row.chat_id,
+        row.thread_id ?? null,
+        row.run_id,
+        row.message_ids_json,
+        error,
+        row.elapsed_ms ?? null,
+      );
     }
   });
   tx(rows);
@@ -1328,6 +1398,18 @@ function assertRequiredColumns(table: string, columns: Set<string>, required: st
       `Transport schema table ${table} is missing columns: ${missing.join(", ")}; ` +
       "manual recovery is required.",
     );
+  }
+}
+
+function addColumnIfMissing(
+  db: Database.Database,
+  table: string,
+  column: string,
+  definition: string,
+): void {
+  const columns = tableColumns(db, table);
+  if (!columns.has(column)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   }
 }
 
@@ -1776,6 +1858,52 @@ export function updateChatName(
   db.prepare("UPDATE chats SET name = ? WHERE id = ?").run(name, chatId);
 }
 
+export interface StoredChatMetadata {
+  chatMode?: string;
+  groupMessageType?: string;
+  fetchedAt?: number;
+}
+
+export function getChatMetadata(
+  db: Database.Database,
+  chatId: string,
+): StoredChatMetadata | undefined {
+  const row = db.prepare(`
+    SELECT chat_mode AS chatMode, group_message_type AS groupMessageType,
+           chat_mode_fetched_at AS fetchedAt
+    FROM chats WHERE id = ?
+  `).get(chatId) as {
+    chatMode: string | null;
+    groupMessageType: string | null;
+    fetchedAt: number | null;
+  } | undefined;
+  if (!row) return undefined;
+  return {
+    chatMode: row.chatMode ?? undefined,
+    groupMessageType: row.groupMessageType ?? undefined,
+    fetchedAt: row.fetchedAt ?? undefined,
+  };
+}
+
+export function updateChatMetadata(
+  db: Database.Database,
+  chatId: string,
+  metadata: StoredChatMetadata,
+): void {
+  db.prepare(`
+    UPDATE chats
+    SET chat_mode = COALESCE(?, chat_mode),
+        group_message_type = COALESCE(?, group_message_type),
+        chat_mode_fetched_at = COALESCE(?, chat_mode_fetched_at)
+    WHERE id = ?
+  `).run(
+    metadata.chatMode ?? null,
+    metadata.groupMessageType ?? null,
+    metadata.fetchedAt ?? null,
+    chatId,
+  );
+}
+
 /** 存储消息，返回内部消息 ID。消息 + FTS 索引在同一个事务中 */
 export function storeMessage(
   db: Database.Database,
@@ -1789,6 +1917,7 @@ export function storeMessage(
     replyTo?: number;
     platform: string;
     platformMsgId?: string;
+    threadId?: string;
     platformTs?: string;
     platformRaw?: string;
     agentSeen?: boolean;
@@ -1803,8 +1932,8 @@ export function storeMessage(
 
     try {
       const result = db.prepare(`
-        INSERT INTO messages (chat_id, sender_id, session_key, role, content_text, content_type, reply_to, platform, platform_msg_id, platform_ts, platform_raw, agent_seen, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')))
+        INSERT INTO messages (chat_id, sender_id, session_key, role, content_text, content_type, reply_to, platform, platform_msg_id, thread_id, platform_ts, platform_raw, agent_seen, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')))
       `).run(
         msg.chatId,
         msg.senderId,
@@ -1815,6 +1944,7 @@ export function storeMessage(
         msg.replyTo ?? null,
         msg.platform,
         msg.platformMsgId ?? null,
+        msg.threadId ?? null,
         msg.platformTs ?? null,
         msg.platformRaw ?? null,
         msg.agentSeen ? 1 : 0,
@@ -1884,10 +2014,22 @@ export function getMessageByPlatformId(
   db: Database.Database,
   platform: string,
   platformMsgId: string,
-): { id: number; contentText: string | null; contentType: string | null; senderId: string } | undefined {
+): {
+  id: number;
+  contentText: string | null;
+  contentType: string | null;
+  senderId: string;
+  threadId: string | null;
+} | undefined {
   return db.prepare(
-    "SELECT id, content_text AS contentText, content_type AS contentType, sender_id AS senderId FROM messages WHERE platform = ? AND platform_msg_id = ? LIMIT 1",
-  ).get(platform, platformMsgId) as { id: number; contentText: string | null; contentType: string | null; senderId: string } | undefined;
+    "SELECT id, content_text AS contentText, content_type AS contentType, sender_id AS senderId, thread_id AS threadId FROM messages WHERE platform = ? AND platform_msg_id = ? LIMIT 1",
+  ).get(platform, platformMsgId) as {
+    id: number;
+    contentText: string | null;
+    contentType: string | null;
+    senderId: string;
+    threadId: string | null;
+  } | undefined;
 }
 
 /** Update content_text for an existing message (e.g., after fetching reply context from API) */

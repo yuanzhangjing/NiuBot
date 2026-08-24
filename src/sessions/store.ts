@@ -8,6 +8,7 @@ export interface SessionRow {
   user_id: string | null;
   source: string;
   status: string;
+  thread_id: string | null;
   backend_type: string | null;
   agent_session_id: string | null;
   started_at: string;
@@ -19,7 +20,7 @@ export interface SessionRow {
 }
 
 const SESSION_COLUMNS = `
-  id, chat_id, user_id, source, status, backend_type, agent_session_id,
+  id, chat_id, user_id, source, status, thread_id, backend_type, agent_session_id,
   started_at, ended_at, start_msg_id, end_msg_id, message_count, turn_count
 `;
 

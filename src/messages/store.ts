@@ -9,6 +9,7 @@ export interface MessageRow {
   role: string;
   content_text: string | null;
   content_type: string;
+  thread_id: string | null;
   created_at: string;
   sender_name: string | null;
 }
@@ -45,7 +46,7 @@ export interface MessageFilter {
 }
 
 const MESSAGE_COLUMNS = `
-  m.id, m.chat_id, m.sender_id, m.role, m.content_text, m.content_type, m.created_at,
+  m.id, m.chat_id, m.sender_id, m.role, m.content_text, m.content_type, m.thread_id, m.created_at,
   u.name as sender_name
 `;
 

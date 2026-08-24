@@ -99,6 +99,7 @@ export function cacheHistoryMessages(
         contentType: msg.contentType,
         platform,
         platformMsgId,
+        threadId: msg.threadId,
         platformTs,
         createdAt: platformTs,
         platformRaw: msg.raw ? JSON.stringify(msg.raw) : undefined,
