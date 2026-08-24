@@ -56,7 +56,7 @@ async function messagesList(
   const { flags } = parseArgs(args);
   const targetChatId = flags["chat-id"] ?? currentChatId;
   const allThreads = flags["all-threads"] === "true";
-  const threadId = flags["thread-id"] ?? (!allThreads ? process.env["NIUBOT_THREAD_ID"] : undefined);
+  const threadId = resolveThreadFilter(flags, currentChatId, targetChatId, allThreads);
   if (!targetChatId) {
     console.error("Error: NIUBOT_CHAT_ID not set and --chat-id not provided");
     process.exit(1);
@@ -118,7 +118,7 @@ async function messagesSearch(
   const searchAll = flags["all"] === "true";
   const targetChatId = flags["chat-id"] ?? currentChatId;
   const allThreads = flags["all-threads"] === "true";
-  const threadId = flags["thread-id"] ?? (!allThreads ? process.env["NIUBOT_THREAD_ID"] : undefined);
+  const threadId = resolveThreadFilter(flags, currentChatId, targetChatId, allThreads);
   const contextCount = Number(flags["context"] ?? flags["C"] ?? "0");
   const limit = Number(flags["limit"] ?? flags["n"] ?? "10");
 
@@ -180,6 +180,17 @@ async function messagesSearch(
     for (const line of lines) console.log(line);
     console.log("---");
   }
+}
+
+function resolveThreadFilter(
+  flags: Record<string, string>,
+  currentChatId: string | undefined,
+  targetChatId: string | undefined,
+  allThreads: boolean,
+): string | undefined {
+  if (flags["thread-id"] !== undefined) return flags["thread-id"];
+  if (allThreads || targetChatId !== currentChatId) return undefined;
+  return process.env["NIUBOT_THREAD_ID"] || undefined;
 }
 
 function messagesGet(

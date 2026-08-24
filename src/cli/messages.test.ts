@@ -2,7 +2,7 @@ import Database from "better-sqlite3";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { initDatabase } from "../database/schema.js";
 import { getMessageForAccess, listContinuationMessages, listMessages, searchMessages } from "../messages/store.js";
 import { TZ, userTimeRangeToUtc, utcToLocalDateTime } from "../tz.js";
@@ -12,7 +12,15 @@ import { formatMessagesForList, handleMessages } from "./messages.js";
 const tempDirs: string[] = [];
 const openDatabases: Database.Database[] = [];
 
+beforeEach(() => {
+  // 测试进程可能继承宿主的话题隔离变量；明确清除，避免把查询默认限制到
+  // 一个不存在的 thread_id。
+  vi.stubEnv("NIUBOT_THREAD_ID", "");
+  vi.stubEnv("NIUBOT_SCOPE_KEY", "");
+});
+
 afterEach(() => {
+  vi.unstubAllEnvs();
   for (const db of openDatabases.splice(0)) {
     if (db.open) db.close();
   }
@@ -170,6 +178,22 @@ describe("message access rules", () => {
 });
 
 describe("handleMessages group sync", () => {
+  it("does not inherit the current topic filter when listing another p2p chat", async () => {
+    const db = setupDb();
+    vi.stubEnv("NIUBOT_THREAD_ID", "omt_aaa");
+    const logs: string[] = [];
+    const origLog = console.log;
+    console.log = (...args: unknown[]) => {
+      logs.push(args.map(String).join(" "));
+    };
+    try {
+      await handleMessages(db, ["list", "--chat-id", "c2", "-n", "20"], "c1", "p2p", parseArgs);
+    } finally {
+      console.log = origLog;
+    }
+    expect(logs.join("\n")).toContain("other chat text");
+  });
+
   it("syncs a group chat before listing", async () => {
     const db = setupDb();
     let synced = 0;

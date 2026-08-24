@@ -65,6 +65,20 @@ export function resolveSendFilePaths(
   return [fileFlag === "true" ? (positional[0] ?? "") : fileFlag];
 }
 
+export function resolveSendScope(
+  targetChatId: string | undefined,
+  currentChatId: string | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): { scopeKey?: string; threadId?: string } {
+  // 话题 scope 只在仍发往当前聊天的默认路径上继承；显式切换到另一个聊天时
+  // 不能带着当前话题的 thread_id / scope_key，否则会把另一个聊天的回复锚点串错。
+  if (!currentChatId || targetChatId !== currentChatId) return {};
+  return {
+    scopeKey: env["NIUBOT_SCOPE_KEY"] || undefined,
+    threadId: env["NIUBOT_THREAD_ID"] || undefined,
+  };
+}
+
 export function handleSend(
   args: string[],
   chatId: string | undefined,
@@ -83,6 +97,8 @@ export function handleSend(
     process.exit(1);
   }
 
+  const currentScope = resolveSendScope(targetChatId, chatId);
+
   // Send file
   const filePaths = resolveSendFilePaths(args, positional, flags);
   if (filePaths !== undefined) {
@@ -99,8 +115,8 @@ export function handleSend(
           chat_id: targetChatId,
           file_path: absPath,
           schedule_token: scheduleToken,
-          scope_key: process.env["NIUBOT_SCOPE_KEY"],
-          thread_id: process.env["NIUBOT_THREAD_ID"],
+          scope_key: currentScope.scopeKey || undefined,
+          thread_id: currentScope.threadId || undefined,
         }, 120_000);
       }
       console.log(filePaths.length === 1 ? "File sent." : `${filePaths.length} files sent.`);
@@ -126,8 +142,8 @@ export function handleSend(
       text: content,
       card_header: cardHeader,
       schedule_token: process.env["NIUBOT_SCHEDULE_TOKEN"],
-      scope_key: process.env["NIUBOT_SCOPE_KEY"],
-      thread_id: process.env["NIUBOT_THREAD_ID"],
+      scope_key: currentScope.scopeKey || undefined,
+      thread_id: currentScope.threadId || undefined,
     }, 30_000)
       .then(() => console.log("Card sent."))
       .catch((err) => {
@@ -148,8 +164,8 @@ export function handleSend(
     chat_id: targetChatId,
     text,
     schedule_token: process.env["NIUBOT_SCHEDULE_TOKEN"],
-    scope_key: process.env["NIUBOT_SCOPE_KEY"],
-    thread_id: process.env["NIUBOT_THREAD_ID"],
+    scope_key: currentScope.scopeKey || undefined,
+    thread_id: currentScope.threadId || undefined,
   }, 30_000)
     .then(() => console.log("Message sent."))
     .catch((err) => {

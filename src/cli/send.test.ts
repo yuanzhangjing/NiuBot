@@ -3,7 +3,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { handleSend, resolveSendEndpoint, resolveSendFilePaths } from "./send.js";
+import { handleSend, resolveSendEndpoint, resolveSendFilePaths, resolveSendScope } from "./send.js";
 import { prepareLocalIpcEndpoint, resolveBotEndpoint } from "../platform/ipc.js";
 
 function parseArgs(args: string[]): { positional: string[]; flags: Record<string, string> } {
@@ -76,12 +76,30 @@ describe("resolveSendEndpoint", () => {
   });
 });
 
+describe("resolveSendScope", () => {
+  it("carries topic scope only while sending to the current chat", () => {
+    const env = {
+      NIUBOT_CHAT_ID: "c1",
+      NIUBOT_SCOPE_KEY: "c1#omt_aaa",
+      NIUBOT_THREAD_ID: "omt_aaa",
+    };
+
+    expect(resolveSendScope("c1", "c1", env)).toEqual({
+      scopeKey: "c1#omt_aaa",
+      threadId: "omt_aaa",
+    });
+    expect(resolveSendScope("c2", "c1", env)).toEqual({});
+  });
+});
+
 describe("handleSend", () => {
   it("sends each repeated --file value as a separate file request", async () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-send-"));
     tempDirs.push(tempDir);
     const endpoint = resolveBotEndpoint(tempDir, "TestBot");
     await prepareLocalIpcEndpoint(endpoint);
+    vi.stubEnv("NIUBOT_THREAD_ID", "");
+    vi.stubEnv("NIUBOT_SCOPE_KEY", "");
     const bodies: Array<{ chat_id: string; file_path: string; schedule_token?: string }> = [];
     const server = http.createServer((req, res) => {
       const chunks: Buffer[] = [];
