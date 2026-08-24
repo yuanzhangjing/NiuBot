@@ -1,16 +1,12 @@
 import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
 import type { SessionTranscript, TranscriptEvent } from "../agent/types.js";
-import { assertChatAccess } from "../core/access.js";
 import {
   getSessionArchiveDirectory,
-  type SessionArchiveManifest,
-  type SessionArchiveSource,
 } from "../session-archive/archive.js";
 import {
   findSessionArchive,
   loadArchivedTranscript,
-  loadReferencedTranscript,
   type LocatedSessionArchive,
 } from "../session-archive/reader.js";
 import {
@@ -289,16 +285,10 @@ async function sessionGet(
   );
   let row = getSessionForAccess(db, sessionId, { currentChatId, chatType });
   let transcript: SessionTranscript;
-  if (row) {
-    const archive = locate(niubotHome, botName, row);
-    if (!archive) throw new Error(`Session archive not found: ${sessionId}`);
-    transcript = transcriptFor(db, row, archive);
-  } else {
-    const workerSession = workerSessionForAccess(db, sessionId, currentChatId, chatType, botName);
-    if (!workerSession) throw new Error(`Session not found: ${sessionId}`);
-    row = workerSession.row;
-    transcript = workerSession.transcript;
-  }
+  if (!row) throw new Error(`Session not found: ${sessionId}`);
+  const archive = locate(niubotHome, botName, row);
+  if (!archive) throw new Error(`Session archive not found: ${sessionId}`);
+  transcript = transcriptFor(db, row, archive);
 
   if (flags["format"] === "jsonl"
     && (flags["turn"] || flags["after-turn"] || flags["after-event"]
@@ -342,101 +332,6 @@ async function sessionGet(
     verbose,
     flags,
   });
-}
-
-/**
- * Worker Job 不进入普通 sessions 表；运行时把 backend 的原生只读引用写入 worker_jobs。
- * `nbt sessions get <job-id>` 在相同 chat 权限边界内直接读取正在增长的 transcript。
- */
-function workerSessionForAccess(
-  db: Database.Database,
-  jobId: string,
-  currentChatId: string | undefined,
-  chatType: "p2p" | "group",
-  botName: string,
-): { row: SessionRow; transcript: SessionTranscript } | undefined {
-  if (!jobId.startsWith("job_")) return undefined;
-  const item = db.prepare(`
-    SELECT j.id, j.worker_profile_id, j.status, j.backend_session_id, j.backend_type,
-           j.transcript_sources_json, j.started_at, j.ended_at, j.created_at,
-           j.error, w.source_chat_id, w.owner_user_id
-    FROM worker_jobs j
-    JOIN worker_works w ON w.id = j.work_id
-    WHERE j.id = ? AND w.bot_id = ?
-  `).get(jobId, botName) as {
-    id: string;
-    worker_profile_id: string;
-    status: string;
-    backend_session_id: string | null;
-    backend_type: string | null;
-    transcript_sources_json: string;
-    started_at: string | null;
-    ended_at: string | null;
-    created_at: string;
-    error: string | null;
-    source_chat_id: string;
-    owner_user_id: string;
-  } | undefined;
-  if (!item) return undefined;
-  // Worker transcript 可能包含完整系统提示和工具结果，比普通归档更敏感。
-  // 即使 p2p 的普通 sessions 查询允许管理员跨 chat，也必须限定在 Work 来源 chat。
-  if (!currentChatId) throw new Error("NIUBOT_CHAT_ID not set");
-  if (item.source_chat_id !== currentChatId) {
-    throw new Error("cross-chat query is not allowed for Worker sessions");
-  }
-  assertChatAccess({ currentChatId, chatType, targetChatId: item.source_chat_id });
-  if (!item.backend_session_id || !item.backend_type) {
-    if (item.status === "running" || item.status === "cancelling") {
-      throw new Error(`Worker session 正在启动，暂无日志: ${jobId}`);
-    }
-    const errorDetail = item.error ? `，错误：${item.error}` : "";
-    throw new Error(`Worker session 没有可用日志: ${jobId}（job 状态 ${item.status}${errorDetail}）`);
-  }
-  let sources: SessionArchiveSource[];
-  try {
-    const parsed = JSON.parse(item.transcript_sources_json) as unknown;
-    if (!Array.isArray(parsed) || parsed.length === 0) throw new Error("empty sources");
-    sources = parsed.map((source, index) => {
-      if (!source || typeof source !== "object") throw new Error("invalid source");
-      const item = source as Partial<SessionArchiveSource>;
-      return {
-        path: item.path as string,
-        role: item.role ?? `source-${index + 1}`,
-        format: item.format ?? "native-jsonl",
-      } as SessionArchiveSource;
-    });
-  } catch {
-    throw new Error(`Worker session 日志引用不可用: ${jobId}`);
-  }
-  const startedAt = item.started_at ?? item.created_at;
-  const manifest: SessionArchiveManifest = {
-    schema_version: 1,
-    session_id: item.id,
-    chat_id: item.source_chat_id,
-    source: `worker:${item.worker_profile_id}`,
-    backend: item.backend_type,
-    agent_session_id: item.backend_session_id,
-    started_at: startedAt,
-    archived_at: item.ended_at ?? new Date().toISOString(),
-    timezone: TZ,
-    sources,
-  };
-  const row: SessionRow = {
-    id: item.id,
-    chat_id: item.source_chat_id,
-    user_id: item.owner_user_id,
-    source: manifest.source,
-    status: item.status === "running" || item.status === "cancelling" ? "active" : "archived",
-    backend_type: item.backend_type,
-    agent_session_id: item.backend_session_id,
-    started_at: startedAt,
-    ended_at: item.ended_at,
-    start_msg_id: null,
-    end_msg_id: null,
-    message_count: null,
-    turn_count: null,
-  };
-  return { row, transcript: loadReferencedTranscript(manifest) };
 }
 
 async function printSessionSummary(
@@ -1283,13 +1178,12 @@ export function markdownCodeFence(content: string): string {
 }
 
 function printHelp(): void {
-  console.log(`Query archived sessions and live Worker transcripts.
+  console.log(`Query archived sessions.
 
 Commands:
   list                         List archived sessions with their last user/response preview
   search <query>               Search every execution event in archived sessions
   get <session-id>             Show the execution timeline with event pagination
-  get <job-id>                 Show a running or finished Worker execution timeline
   get <event-id>               Show one complete event returned by search
 
 Options:

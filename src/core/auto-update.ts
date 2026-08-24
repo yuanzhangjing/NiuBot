@@ -1,7 +1,7 @@
 /**
  * 自动升级：安全窗口判定 + 升级锁。
  *
- * 核心抽象：UpgradeSafenessSource——各执行链（主会话/Worker/Cron/Loop/Goal）
+ * 核心抽象：UpgradeSafenessSource——各执行链（主会话/Cron/Loop/Goal）
  * 自己实现「是否空闲」，主流程只做汇总，不感知具体任务类型。
  *
  * 设计见 tasks/niubot-engine/auto-update.md。
@@ -99,29 +99,6 @@ export function mainRunSource(state: MainRunStateQuery): UpgradeSafenessSource {
       const pending = state.pendingMessageCount();
       if (inflight > 0) parts.push(`${inflight} 个 run 进行中`);
       if (pending > 0) parts.push(`${pending} 条消息排队`);
-      return parts.join("；");
-    },
-  };
-}
-
-export interface WorkerStateQuery {
-  /** worker_jobs 非终态（queued/running/cancelling）数量 */
-  nonTerminalJobCount: () => number;
-  /** agent_continuations 非终态（pending/claimed）数量 */
-  nonTerminalContinuationCount: () => number;
-}
-
-/** Worker 链路：无进行中/排队 job，无未完成 continuation。 */
-export function workerSource(state: WorkerStateQuery): UpgradeSafenessSource {
-  return {
-    name: "worker",
-    isIdle: () => state.nonTerminalJobCount() === 0 && state.nonTerminalContinuationCount() === 0,
-    describeBlockers: () => {
-      const parts: string[] = [];
-      const jobs = state.nonTerminalJobCount();
-      const conts = state.nonTerminalContinuationCount();
-      if (jobs > 0) parts.push(`${jobs} 个 job 未完成`);
-      if (conts > 0) parts.push(`${conts} 个 continuation 未交付`);
       return parts.join("；");
     },
   };

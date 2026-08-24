@@ -28,7 +28,6 @@ export async function startBotRuntime(
 
   await bot.pipeline.start();
   // 主会话 resume：恢复 active sessions，重建 backend session（--resume 旧上下文）。
-  // Worker 重启清理（cleanupWorkerJobsAfterRestart）在 pipeline.start() 内执行，两者独立。
   await bot.pipeline.recover();
   await bot.transport.recover();
 

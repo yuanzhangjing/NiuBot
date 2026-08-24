@@ -12,7 +12,6 @@ import {
   prepareLocalIpcEndpoint,
   type LocalIpcEndpoint,
 } from "../platform/ipc.js";
-import type { WorkerAgentCommand, WorkerAgentCommandResult } from "../worker/agent-command.js";
 import type { GoalCommandResult, GoalFinishCommand } from "./goal.js";
 import {
   parseScheduleAgentCommand,
@@ -33,8 +32,6 @@ export interface ApiHandler {
   resolveChatPlatformId(chatIdOrShort: string): string | undefined;
   /** Get the default platform chat ID (from current session context) */
   getDefaultPlatformChatId(sessionId?: string): string | undefined;
-  /** 主 Agent Worker 写操作；由 Pipeline 校验活动回合、权限和状态。token 证明请求来自当前回合。 */
-  executeWorkerCommand?(chatId: string, command: WorkerAgentCommand, token?: string): Promise<WorkerAgentCommandResult>;
   /** 主 Agent 调度写操作；由 Pipeline 使用当前回合身份鉴权。token 证明请求来自当前回合。 */
   executeScheduleCommand?(chatId: string, command: ScheduleAgentCommand, token?: string): Promise<ScheduleAgentCommandResult>;
   /** 主 Agent Goal finish 操作；由 Pipeline 校验 Goal 令牌与活动回合。 */
@@ -147,22 +144,6 @@ export class ApiServer {
       await this.handler.sendFile(platformChatId, filePath, scheduleToken);
       res.writeHead(200);
       res.end(JSON.stringify({ status: "ok" }));
-    } else if (url === "/worker" && req.method === "POST") {
-      if (!this.handler.executeWorkerCommand) {
-        res.writeHead(503);
-        res.end(JSON.stringify({ error: "Worker command API unavailable" }));
-        return;
-      }
-      const chatId = data.chat_id;
-      const command = data.command;
-      if (typeof chatId !== "string" || !command || typeof command !== "object" || typeof command.type !== "string") {
-        res.writeHead(400);
-        res.end(JSON.stringify({ error: "Missing chat_id or command" }));
-        return;
-      }
-      const result = await this.handler.executeWorkerCommand(chatId, command as WorkerAgentCommand, data.schedule_token);
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify(result));
     } else if (url === "/schedule" && req.method === "POST") {
       if (!this.handler.executeScheduleCommand) {
         res.writeHead(503);

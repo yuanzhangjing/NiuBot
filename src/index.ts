@@ -190,7 +190,7 @@ async function main(): Promise<void> {
   }
 
   const backends = new Map<string, AgentBackend>();
-  /** in-flight 去重：并发解析同一类型时共享同一个创建 Promise（Worker 角色并发 Job 场景） */
+  /** in-flight 去重：并发解析同一类型时共享同一个创建 Promise（避免重复启动） */
   const backendInflight = new Map<string, Promise<AgentBackend>>();
 
   async function createBackend(type: string): Promise<AgentBackend> {

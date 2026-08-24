@@ -79,52 +79,6 @@ describe("MessageQueue discard semantics", () => {
   });
 });
 
-describe("MessageQueue worker continuation FIFO", () => {
-  function continuationMsg(ids: string[]): QueuedMessage {
-    return message({
-      text: `[worker continuation: ${ids.join(",")}]`,
-      triggerKind: "worker_continuation",
-      continuationIds: ids,
-    });
-  }
-
-  test("continuation 先到时，后到的用户消息等待 continuation 完成", async () => {
-    const queue = new MessageQueue(0);
-    const seen: string[] = [];
-    let releaseFirst: () => void = () => {};
-    queue.onProcess(async (_chatId, _text, messages) => {
-      seen.push(messages[0]?.triggerKind ?? "user");
-      if (seen.length === 1) await new Promise<void>((resolve) => { releaseFirst = resolve; });
-    });
-
-    queue.push(continuationMsg(["ctn-1"]));
-    queue.push(message({ dbMsgId: 1 }));
-    expect(seen).toEqual(["worker_continuation"]);
-
-    releaseFirst();
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    expect(seen).toEqual(["worker_continuation", "user"]);
-  });
-
-  test("用户消息先到时，后到的 continuation 不跨过用户消息", async () => {
-    const queue = new MessageQueue(10_000);
-    const seen: string[] = [];
-    let releaseFirst: () => void = () => {};
-    queue.onProcess(async (_chatId, _text, messages) => {
-      seen.push(messages[0]?.triggerKind ?? "user");
-      if (seen.length === 1) await new Promise<void>((resolve) => { releaseFirst = resolve; });
-    });
-
-    queue.push(message({ dbMsgId: 1 }));
-    queue.push(continuationMsg(["ctn-2"]));
-    expect(seen).toEqual(["user"]);
-
-    releaseFirst();
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    expect(seen).toEqual(["user", "worker_continuation"]);
-  });
-});
-
 describe("MessageQueue loop continuation FIFO", () => {
   function loopMsg(id: number): QueuedMessage {
     return message({

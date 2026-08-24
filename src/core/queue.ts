@@ -15,9 +15,7 @@ export interface QueuedMessage {
   /** 消息在 DB 中的 ID，用于 runtime 事件关联 */
   dbMsgId?: number;
   /** 触发来源：用户消息（默认）或内部续接事件 */
-  triggerKind?: "user" | "worker_continuation" | "loop_continuation" | "restart_wake";
-  /** triggerKind 为 worker_continuation 时携带的 Continuation ID 列表（内部事件，不写库） */
-  continuationIds?: string[];
+  triggerKind?: "user" | "loop_continuation" | "restart_wake";
   /** triggerKind 为 loop_continuation 时携带的 Loop Job ID（内部事件，不写库） */
   loopJobId?: number;
   /** 原始用户文本是否以 /loop 或 /cron 开头；回复渲染后仍保留调度意图。 */
@@ -109,7 +107,7 @@ export class MessageQueue {
       return true;
     }
 
-    // 用户消息可以在短窗口内合并，但不能跨过 Worker Continuation 合并或重排。
+    // 用户消息可以在短窗口内合并，但不能跨过内部续接事件合并或重排。
     // 遇到不同来源时，立即处理已经先到的 buffer，新消息进入 pending 保持 FIFO。
     if (q.buffer.length > 0 && queueKind(q.buffer[0]!) !== queueKind(msg)) {
       q.pending.push(msg);
@@ -131,7 +129,7 @@ export class MessageQueue {
 
     q.buffer.push(msg);
     this.emitState(msg.chatId, q);
-    if (msg.triggerKind === "worker_continuation" || msg.triggerKind === "loop_continuation"  || msg.triggerKind === "restart_wake" || msg.scheduleCommand) {
+    if (msg.triggerKind === "loop_continuation" || msg.triggerKind === "restart_wake" || msg.scheduleCommand) {
       void this.flush(q, msg.chatId).catch((err) => {
         log.error("flush failed", { chatId: msg.chatId, error: String(err) });
       });
@@ -245,7 +243,7 @@ export class MessageQueue {
     if (q.pending.length > 0) {
       const kind = queueKind(q.pending[0]!);
       let count = 1;
-      // 用户消息仍可合并；同一 Work 的 Worker 结果也可一起验收。
+      // 用户消息仍可合并；内部续接事件保持独立。
       // Loop 每轮必须保持独立，避免多个任务共用一次结算和回复。
       if (kind !== "loop_continuation" && kind !== "schedule_command") {
         while (count < q.pending.length && queueKind(q.pending[count]!) === kind) count++;
@@ -253,7 +251,7 @@ export class MessageQueue {
       const next = q.pending.splice(0, count);
       q.buffer = next;
       this.emitState(chatId, q);
-      if (kind === "worker_continuation" || kind === "loop_continuation"  || kind === "restart_wake" || kind === "schedule_command") {
+      if (kind === "loop_continuation" || kind === "restart_wake" || kind === "schedule_command") {
         void this.flush(q, chatId).catch((err) => {
           log.error("flush failed", { chatId, error: String(err) });
         });
@@ -309,8 +307,7 @@ export class MessageQueue {
 
 }
 
-function queueKind(message: QueuedMessage): "user" | "schedule_command" | "worker_continuation" | "loop_continuation" | "restart_wake" {
-  if (message.triggerKind === "worker_continuation") return "worker_continuation";
+function queueKind(message: QueuedMessage): "user" | "schedule_command" | "loop_continuation" | "restart_wake" {
   if (message.triggerKind === "loop_continuation") return "loop_continuation";
     if (message.triggerKind === "restart_wake") return "restart_wake";
   if (message.scheduleCommand) return "schedule_command";

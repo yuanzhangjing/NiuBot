@@ -7,7 +7,6 @@ import { initDatabase, storeMessage } from "../database/schema.js";
 import { archiveAgentSession } from "../session-archive/archive.js";
 import { readCodexTranscript, wrapInjectedUserMessage } from "../session-archive/native-transcript.js";
 import { TZ, utcToLocalDateTime } from "../tz.js";
-import { SqliteJobService } from "../worker/job-service.js";
 import { parseArgs } from "./args.js";
 import { handleSessions, markdownCodeFence, selectTimelineEvents } from "./session.js";
 
@@ -77,87 +76,6 @@ async function addArchivedCodexSession(
 }
 
 describe("nbt sessions", () => {
-  it("reads a running Worker transcript by Job ID and enforces chat access", async () => {
-    const home = mkdtempSync(join(tmpdir(), "niubot-worker-live-session-"));
-    tempDirs.push(home);
-    const db = initDatabase(join(home, "niubot.db"));
-    db.prepare("INSERT INTO users (id, platform, platform_id, name) VALUES ('u2', 'feishu', 'u2p', 'Zen')").run();
-    db.prepare("INSERT INTO chats (id, platform, platform_id, type, user_id) VALUES ('c1', 'feishu', 'c1p', 'p2p', 'u2')").run();
-    const service = new SqliteJobService(db, "NiuBot");
-    const work = service.createWork({
-      botId: "NiuBot", ownerUserId: "u2", sourceChatId: "c1", visibility: "private", request: "检查进展",
-    });
-    const job = service.createJob({
-      workId: work.id, workerProfileId: "researcher", prompt: "查资料", workdir: home,
-    });
-    expect(service.claimJob({ jobId: job.id, claimToken: "claim" }).ok).toBe(true);
-    const native = join(home, "worker-live.jsonl");
-    writeFileSync(native, [
-      { type: "response_item", timestamp: "2026-08-03T05:00:00Z", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "开始检查" }] } },
-      { type: "response_item", timestamp: "2026-08-03T05:00:01Z", payload: { type: "function_call", name: "read", call_id: "call-1", arguments: "package.json" } },
-    ].map((row) => JSON.stringify(row)).join("\n") + "\n");
-    service.recordJobSession(job.id, {
-      backendSessionId: "agent-worker-1",
-      backendType: "codex",
-      sources: [{ path: native, role: "session" }],
-    });
-
-    const lines: string[] = [];
-    vi.spyOn(console, "log").mockImplementation((...values) => lines.push(values.join(" ")));
-    await handleSessions(db, ["get", job.id], "c1", "p2p", home, "NiuBot", parseArgs);
-    expect(lines.join("\n")).toContain("开始检查");
-    expect(lines.join("\n")).toContain("package.json");
-    await expect(handleSessions(db, ["get", job.id], "other-chat", "group", home, "NiuBot", parseArgs))
-      .rejects.toThrow("cross-chat query is not allowed for Worker sessions");
-    await expect(handleSessions(db, ["get", job.id], "other-chat", "p2p", home, "NiuBot", parseArgs))
-      .rejects.toThrow("cross-chat query is not allowed for Worker sessions");
-    db.close();
-  });
-
-  it("reports that a Worker session log is not ready before backend metadata arrives", async () => {
-    const home = mkdtempSync(join(tmpdir(), "niubot-worker-starting-session-"));
-    tempDirs.push(home);
-    const db = initDatabase(join(home, "niubot.db"));
-    const service = new SqliteJobService(db, "NiuBot");
-    const work = service.createWork({
-      botId: "NiuBot", ownerUserId: "u2", sourceChatId: "c1", visibility: "private", request: "检查进展",
-    });
-    const job = service.createJob({
-      workId: work.id, workerProfileId: "researcher", prompt: "查资料", workdir: home,
-    });
-    expect(service.claimJob({ jobId: job.id, claimToken: "claim" }).ok).toBe(true);
-    await expect(handleSessions(db, ["get", job.id], "c1", "p2p", home, "NiuBot", parseArgs))
-      .rejects.toThrow("正在启动，暂无日志");
-    db.close();
-  });
-
-  it("reports job status and error when a Worker session has no log", async () => {
-    const home = mkdtempSync(join(tmpdir(), "niubot-worker-no-log-"));
-    tempDirs.push(home);
-    const db = initDatabase(join(home, "niubot.db"));
-    const service = new SqliteJobService(db, "NiuBot");
-    const work = service.createWork({
-      botId: "NiuBot", ownerUserId: "u2", sourceChatId: "c1", visibility: "private", request: "失败任务",
-    });
-    const job = service.createJob({
-      workId: work.id, workerProfileId: "researcher", prompt: "查资料", workdir: home,
-    });
-    expect(service.claimJob({ jobId: job.id, claimToken: "claim" }).ok).toBe(true);
-    service.failJob(job.id, {
-      status: "failed",
-      responseText: "",
-      error: "workdir 不可访问: /no/such",
-      changedFiles: [],
-      artifacts: [],
-      startedAt: new Date().toISOString(),
-      endedAt: new Date().toISOString(),
-    });
-    // session 未创建（无 backend_session_id）时，报错信息应携带 job 状态与 error 字段辅助诊断
-    await expect(handleSessions(db, ["get", job.id], "c1", "p2p", home, "NiuBot", parseArgs))
-      .rejects.toThrow(/没有可用日志: .*状态 failed.*workdir 不可访问/);
-    db.close();
-  });
-
   it("chooses a fence without expanding every backtick run as function arguments", () => {
     expect(markdownCodeFence("` ".repeat(200_000))).toBe("```");
     expect(markdownCodeFence("before ```` after")).toBe("`````");

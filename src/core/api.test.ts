@@ -18,34 +18,6 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-test("/worker 把写命令转交给 Pipeline handler", async () => {
-  const root = mkdtempSync(path.join(os.tmpdir(), "niubot-worker-api-"));
-  tempDirs.push(root);
-  const endpoint = resolveBotEndpoint(root, "test-bot");
-  const executeWorkerCommand = vi.fn(async () => ({ output: "wrk_test" }));
-  const handler: ApiHandler = {
-    sendMessage: async () => {},
-    sendCard: async () => {},
-    sendFile: async () => {},
-    resolveChatPlatformId: () => undefined,
-    getDefaultPlatformChatId: () => undefined,
-    executeWorkerCommand,
-  };
-  const server = new ApiServer(endpoint, handler);
-  servers.push(server);
-  await server.start();
-
-  const command = { type: "work.create" as const, request: "检查状态流转" };
-  const response = await localApiRequest(endpoint, "/worker", {
-    method: "POST",
-    body: { chat_id: "chat-1", command, schedule_token: "tok-1" },
-  });
-
-  expect(response.statusCode).toBe(200);
-  expect(JSON.parse(response.body)).toEqual({ output: "wrk_test" });
-  expect(executeWorkerCommand).toHaveBeenCalledWith("chat-1", command, "tok-1");
-});
-
 test("/schedule 把结构化调度命令转交给当前 Pipeline 回合", async () => {
   const root = mkdtempSync(path.join(os.tmpdir(), "niubot-schedule-api-"));
   tempDirs.push(root);

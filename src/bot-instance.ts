@@ -17,9 +17,6 @@ import { FeishuAdapter } from "./im/feishu/adapter.js";
 import { PersistentTransport } from "./transport/persistent-transport.js";
 import { Pipeline, type BotIdentity } from "./core/pipeline.js";
 import type { EngineLifecycle } from "./engine-lifecycle.js";
-import { SqliteJobService } from "./worker/job-service.js";
-import { WorkerProfileRegistry } from "./worker/profiles.js";
-import { TeamConfigStore } from "./worker/team-config.js";
 import { ApiServer, type ApiHandler } from "./core/api.js";
 import { CronScheduler } from "./core/cron.js";
 import { LoopScheduler } from "./core/loop.js";
@@ -55,7 +52,11 @@ export async function createBotInstance(
   getAvailableBackends?: () => string[],
   runtimeConfig?: ResolvedBotRuntimeConfig,
   getBackendCapabilities?: () => BackendCapability[] | Promise<BackendCapability[]>,
-  options: { preflight?: boolean; engineLifecycle?: EngineLifecycle; peerBots?: PeerBotDirectory } = {},
+  options: {
+    preflight?: boolean;
+    engineLifecycle?: EngineLifecycle;
+    peerBots?: PeerBotDirectory;
+  } = {},
 ): Promise<BotInstance> {
   const log = createLogger("bot-instance", botConfig.id);
   if (!options.engineLifecycle) {
@@ -170,12 +171,6 @@ export async function createBotInstance(
     undefined, // legacy Pipeline coordinator slot; Engine now owns auto-update
     undefined, // archiveHome
     getBackendCapabilities,
-    {
-      jobService: new SqliteJobService(db, botConfig.id),
-      registry: new WorkerProfileRegistry(),
-      teamConfigStore: new TeamConfigStore(db, botConfig.id),
-      resolveBackend: backendResolver,
-    },
     undefined, // legacy auto-update config
     undefined, // legacy config path
     undefined, // legacy config observer
@@ -189,7 +184,6 @@ export async function createBotInstance(
     sendMessage: (chatId, text, token) => pipeline.sendToChat(chatId, text, token),
     sendCard: (chatId, header, content, token) => pipeline.sendCardToChat(chatId, header, content, token),
     sendFile: (chatId, filePath, token) => pipeline.sendFileToChat(chatId, filePath, token),
-    executeWorkerCommand: (chatId, command, token) => pipeline.executeWorkerAgentCommand({ chatId, command, scheduleToken: token }),
     executeScheduleCommand: (chatId, command, token) => pipeline.executeScheduleAgentCommand(chatId, command, token),
     executeGoalFinishCommand: (chatId, command, token) => pipeline.executeGoalFinishCommand(chatId, command, token),
     executeGoalStartCommand: (chatId, objective, token) => pipeline.executeGoalStartCommand(chatId, objective, token),

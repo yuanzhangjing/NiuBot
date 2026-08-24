@@ -1,6 +1,6 @@
 ---
 name: nbt-tools
-description: NiuBot 工具手册（nbt CLI）。命令速查：任务、记忆、身份/规则/消息恢复、发送、Loop 定时/循环任务（cron）、Goal 多轮、Worker 派工、引擎重启。
+description: NiuBot 工具手册（nbt CLI）。命令速查：任务、记忆、身份/规则/消息恢复、发送、Loop 定时/循环任务（cron）、Goal 多轮、引擎重启。
 when_to_use: "用户提到任务/进度、记忆、身份/场景、消息或上下文丢失、系统规则，要求定时/循环/提醒/稍后，或英文 loop/goal/cron/定时检查/定期跟进、多轮/分步/持续跟进、拆活派活、重启/更新，或需要发送文件，或提到时区/改时区/timezone 时加载。"
 ---
 
@@ -37,14 +37,6 @@ when_to_use: "用户提到任务/进度、记忆、身份/场景、消息或上�
 - `nbt goal start <目标描述>` 进入（当前回合计入第 1 轮）
 - `nbt goal progress <步骤> [--status <全局状态>]` 记录进展
 - `nbt goal finish --outcome achieved|not_achieved [--conclusion <结论>]`
-
-## Worker 派工
-
-用户要拆长任务给后台 Worker → 派工。
-
-- `nbt worker work create --file <需求.md>`
-- `nbt worker job create --work <id> --worker <general|researcher|reviewer|developer|tester> --file <任务.md> [--workdir <dir>] [--depends-on <job-id>]`
-- `nbt worker list` / `get <id>` / `cancel <id>`
 
 ## 时区
 

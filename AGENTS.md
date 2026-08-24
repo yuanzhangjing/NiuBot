@@ -23,7 +23,6 @@ src/
 ├── memory/         # 用户记忆与上下文注入
 ├── database/       # SQLite schema + migrations
 ├── session-archive/# 原生 transcript 解析与归档
-├── worker/         # 内部 Worker 运行时
 ├── transport/      # 持久化 inbox/outbox
 ├── platform/       # 跨平台进程/路径/IPC/防休眠等
 ├── cli/            # nbt 子命令实现
@@ -44,7 +43,7 @@ CLI 侧工具：`nbt`（消息/记忆/任务/发送/重启/Goal…）。
 3. **Session**：有则 resume，无则新建；stable context 按 backend 能力注入  
 4. **Backend 子进程**跑一轮 → 解析终态 → 取**用户可见回复**  
 5. **出站**：卡片/文本发回 IM；footer 带 session 短 id、token、compact、模型  
-6. **旁路**：watchdog（idle/compact）、`/status`（activity + 最近日志）、归档、Worker/Goal/Loop  
+6. **旁路**：watchdog（idle/compact）、`/status`（activity + 最近日志）、归档、Goal/Loop
 
 ### 关键模块
 
@@ -167,7 +166,7 @@ nbt restart
 - 正式任务用 `nbt task`；进度写在任务 README（目标、状态、入口、决策、下一步），不写聊天流水  
 - 用户记忆用 `nbt user-memory`（人相关偏好）；项目进度不要塞记忆  
 - 发文件 / 卡片：`nbt send`  
-- 多轮交付用 Goal（`nbt goal start/progress/finish`）；长任务可拆 Worker  
+- 多轮交付用 Goal（`nbt goal start/progress/finish`）；长任务直接在会话内处理
 
 不要把个人本机绝对路径、私有未公开资料写进仓库文档。
 

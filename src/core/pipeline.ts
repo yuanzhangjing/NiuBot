@@ -1,9 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync } from "node:fs";
 import path from "node:path";
 import type Database from "better-sqlite3";
 import { escapeYamlContent, renderMessageNodes } from "../im/render.js";
-import { findLatestUserPlatformMsgId } from "../messages/store.js";
 import type { InboundDelivery, NormalizedMessage, TransportClient } from "../transport/types.js";
 import { mentionMarksApp } from "../transport/types.js";
 import { isDeliveryUncertainError } from "../transport/errors.js";
@@ -18,18 +17,6 @@ import {
 } from "../config.js";
 import { ChatManager } from "./chat-manager.js";
 import type { QueuedMessage } from "./queue.js";
-import { WorkerRuntime } from "../worker/runtime.js";
-import { WorkerScheduler } from "../worker/scheduler.js";
-
-import { stripInternalWorkerTags } from "../worker/redact.js";
-import { WorkspaceProvider } from "../worker/workspace.js";
-import type { Job, JobService, Work } from "../worker/types.js";
-import { WorkerProfileRegistry, teamProfileToWorkerProfile, type WorkerProfile } from "../worker/profiles.js";
-import { TeamConfigStore, type TeamConfig } from "../worker/team-config.js";
-import type {
-  WorkerAgentCommandRequest,
-  WorkerAgentCommandResult,
-} from "../worker/agent-command.js";
 import {
   ensureUser, ensureChat, storeMessage, updateChatName,
   getUserShortLabel, getChatShortLabel, getMessageByPlatformId, updateMessageContent, updateMessagePlatformId,
@@ -43,7 +30,7 @@ import {
 } from "../database/schema.js";
 import {
   AUTO_UPDATE_DEFAULTS,
-  mainRunSource, workerSource, goalSource, cronSource, loopSource,
+  mainRunSource, goalSource, cronSource, loopSource,
   type AutoUpdateConfig, type UpgradeSafenessSource,
 } from "./auto-update.js";
 import {
@@ -55,7 +42,6 @@ import {
   buildStableSystemContext,
   COMPACT_RECOVERY_REMINDER,
   NEW_SESSION_SEARCH_REMINDER,
-  WORKER_DISABLED_REMINDER,
   type SceneInfo,
   type SpeakerInfo,
   type StableSystemContextOptions,
@@ -156,14 +142,12 @@ const INTERRUPT_WORDS = new Set([
 const BUILTIN_COMMANDS = new Set([
   "/restart", "/update", "/service", "/new", "/agent", "/model", "/effort", "/autoupdate",
   "/admin", "/help", "/stop", "/clear", "/flush", "/task", "/status", "/history", "/awake",
-  "/worker", "/timezone", "/tz",
+  "/timezone", "/tz",
 ]);
 const HYBRID_SCHEDULE_COMMANDS = new Set(["/loop", "/cron"]);
 const SCHEDULE_BUILTIN_SUBCOMMANDS = new Set([
   "list", "ls", "help", "--help", "cancel", "stop", "del", "delete", "rm",
 ]);
-/** /worker 本地管理子命令；其余参数视为派发任务（翻译转发给 Agent） */
-const WORKER_BUILTIN_SUBCOMMANDS = new Set(["on", "off", "config"]);
 
 /**
  * hybrid 创建命令翻译：用户命令 → 「任务原文 + nbt 命令建议」。
@@ -177,9 +161,6 @@ function rewriteHybridCreationCommand(text: string): string | null {
   switch (cmd) {
     case "/goal":
       return `${rest}（用户要求进入 Goal 模式，请使用 nbt goal start）`;
-    case "/worker":
-      // 派发引导：Work + Job 两步由 Agent 回合内完成；任务与派工不匹配时以 Agent 判断为准
-      return `${rest}（用户要求派发 Worker 任务。请按需拆分并派工：先 nbt worker work create 建需求，再用 nbt worker job create 派工；简单任务可直接自己做，不必强派 Worker）`;
     case "/loop":
       return `${rest}（用户要求创建循环任务，请使用 nbt schedule create --mode current_session）`;
     case "/cron":
@@ -199,8 +180,6 @@ const AGENT_LONG_RUNNING_FIRST_NOTIFY_MS = 3_600_000;  // 1 小时：主会话�
 const AGENT_LONG_RUNNING_REPEAT_NOTIFY_MS = 3_600_000; // 1 小时：主会话长运行重复提醒
 const INDEPENDENT_IDLE_KILL_MS = 3_600_000;    // 1 小时：独立 session 无活动自动 kill
 const INDEPENDENT_LONG_RUNNING_NOTIFY_MS = 3_600_000;  // 1 小时：独立 session 仍活跃时提醒
-const WORKER_DELIVERY_MARKER = "> ⚙️ 本回复基于 Worker 后台任务结果整理";
-const WORKER_DISPATCH_MARKER = "> ⚙️ 已交由 Worker 后台执行";
 const LOOP_TASK_PREVIEW_MAX_CHARS = 80;
 const STARTUP_PLATFORM_TIMEOUT_MS = 5_000;      // 平台启动探测超时后降级继续启动
 
@@ -212,9 +191,19 @@ function withShutdownTimeout<T>(promise: Promise<T>, ms: number): Promise<T | un
   ]);
 }
 
+/** 出站消息保护：剥离历史内部区段和残留裸标签，避免内部内容到达用户。 */
+function stripInternalTags(text: string): string {
+  return text
+    .replace(/<schedule-skill>[\s\S]*?<\/schedule-skill>/g, "")
+    .replace(/<loop-continuation>[\s\S]*?<\/loop-continuation>/g, "")
+    .replace(/<\/?(?:schedule|loop)-[a-z-]+>/g, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 /** Engine 强制添加的 Loop 来源信息，不依赖模型自行说明。 */
 function buildTaskPreview(prompt: string): string {
-  const normalizedPrompt = stripInternalWorkerTags(prompt).replace(/\s+/g, " ").trim();
+  const normalizedPrompt = stripInternalTags(prompt).replace(/\s+/g, " ").trim();
   const promptChars = Array.from(normalizedPrompt);
   return promptChars.length > LOOP_TASK_PREVIEW_MAX_CHARS
     ? `${promptChars.slice(0, LOOP_TASK_PREVIEW_MAX_CHARS).join("")}…`
@@ -312,16 +301,6 @@ interface PendingTransitionMessage {
   reject: (error: unknown) => void;
 }
 
-interface ActiveWorkerAgentCommandContext {
-  runId: string;
-  userId: string;
-  chatType: "p2p" | "group";
-  continuationTurn: boolean;
-  createdWorkIds: string[];
-  /** 主会话能力令牌：请求必须携带同一令牌才能借用本回合身份 */
-  token: string;
-}
-
 interface ActiveScheduleAgentCommandContext {
   runId: string;
   userId: string;
@@ -332,21 +311,6 @@ interface ActiveScheduleAgentCommandContext {
 }
 
 type SessionEndStatus = "archived" | "archive_failed" | "discarded";
-
-export interface WorkerPipelineConfig {
-  jobService: JobService;
-  registry: WorkerProfileRegistry;
-  /** 全局 Worker 并发上限（内部防失控，默认 4） */
-  maxConcurrent?: number;
-  /** Scheduler 扫描周期（默认 5000ms；测试可调小） */
-  tickMs?: number;
-  /** 产物/临时文件根目录（默认 $NIUBOT_HOME/<bot>/tmp） */
-  artifactRoot?: string;
-  /** /worker 配置体系（启用开关、配置版本、草案） */
-  teamConfigStore?: TeamConfigStore;
-  /** 按类型解析专属 backend（角色配置 backend 时使用；未配置则复用主 Agent backend） */
-  resolveBackend?: (type: string) => Promise<AgentBackend> | AgentBackend;
-}
 
 export class Pipeline {
   private db: Database.Database;
@@ -437,9 +401,6 @@ export class Pipeline {
   /** Watchdog 定时器 */
   private watchdogTimer: ReturnType<typeof setInterval> | null = null;
 
-  /** 已加载的 Worker 配置版本（Pipeline 写入后立即刷新，watchdog 负责异常恢复兜底） */
-  private lastTeamConfigVersion?: string;
-
   /** 已发送 compact 通知的 session（避免重复通知） */
   private compactNotifiedSessions = new Set<string>();
 
@@ -455,13 +416,6 @@ export class Pipeline {
   private stableContextOptions: StableSystemContextOptions;
   private archiveHome: string;
 
-  /** Worker 配置（Phase 2；未配置时不启用任何 Worker 行为） */
-  private readonly workerConfig?: WorkerPipelineConfig;
-  private workerRuntime?: WorkerRuntime;
-  private workerScheduler?: WorkerScheduler;
-
-  /** 仅在主 Agent 的 runAgent 调用期间存在；Worker 写命令必须绑定到这里的活动回合。 */
-  private activeWorkerAgentCommands = new Map<string, ActiveWorkerAgentCommandContext>();
   private activeScheduleAgentCommands = new Map<string, ActiveScheduleAgentCommandContext>();
 
   /** chatId → 主会话调度令牌：随主 Agent 环境注入，独立 session 拿不到，防跨进程身份借用。 */
@@ -490,7 +444,6 @@ export class Pipeline {
     _legacyAutoUpdateCoordinator?: boolean,
     archiveHome?: string,
     getBackendCapabilities?: () => BackendCapability[] | Promise<BackendCapability[]>,
-    workerConfig?: WorkerPipelineConfig,
     _legacyAutoUpdateConfig?: unknown,
     _legacyConfigPath?: string,
     _legacyOnAutoUpdateConfigChanged?: () => void,
@@ -502,7 +455,6 @@ export class Pipeline {
     this.backendType = backendType;
     this.backendResolver = backendResolver;
     this.getAvailableBackends = getAvailableBackends ?? (() => [...BUILTIN_BACKEND_LIST]);
-    this.workerConfig = workerConfig;
     this.getBackendCapabilities = getBackendCapabilities ?? (() => this.getAvailableBackends().map((backend) => ({
       backend: backend as BackendCapability["backend"],
       platform: process.platform,
@@ -574,48 +526,6 @@ export class Pipeline {
     // 启动 watchdog 定时器
     this.watchdogTimer = setInterval(() => this.runIdleWatchdogSafely(), AGENT_WATCHDOG_INTERVAL_MS);
 
-    // Worker：启动 Scheduler 并恢复非终态 Job
-    if (this.workerConfig) {
-      const {
-        jobService, registry, maxConcurrent, tickMs, artifactRoot: configuredArtifactRoot, teamConfigStore,
-      } = this.workerConfig;
-      const artifactRoot = configuredArtifactRoot ?? path.join(NIUBOT_HOME, this.botIdentity.name, "tmp");
-      // 配置驱动：有生效配置时用配置的 profiles 与并发上限（无则内置默认）
-      const active = teamConfigStore?.getActiveConfig();
-      if (active && active.config.profiles.length > 0) {
-        registry.setProfiles(active.config.profiles.map(teamProfileToWorkerProfile));
-        this.log.info("worker profiles loaded from team config", {
-          version: active.version ?? null,
-          profileCount: active.config.profiles.length,
-        });
-      }
-      const effectiveMaxConcurrent = active?.config.maxConcurrent ?? maxConcurrent ?? 4;
-      this.workerRuntime = new WorkerRuntime({
-        backend: this.agent,
-        jobService,
-        registry,
-        sessionConfig: {
-          dbPath: this.dbPath,
-          botId: this.botIdentity.platformBotId,
-          botName: this.botIdentity.name,
-          platform: this.botIdentity.platform,
-          botProfilePath: this.stableContextOptions.botProfilePath,
-        },
-        buildPrompt: (job, execDir, artifactDir) => this.buildWorkerPrompt(job, execDir, artifactDir),
-        workspaceProvider: new WorkspaceProvider({ tmpRoot: artifactRoot }),
-        resolveBackend: this.workerConfig.resolveBackend,
-      });
-      this.workerScheduler = new WorkerScheduler({
-        runtime: this.workerRuntime,
-        jobService,
-        maxConcurrent: effectiveMaxConcurrent,
-        tickMs,
-        onContinuations: (chatId, ids) => this.enqueueWorkerContinuations(chatId, ids),
-        isSchedulingEnabled: () => (this.workerConfig?.teamConfigStore?.isEnabled() ?? true),
-      });
-      this.cleanupWorkerJobsAfterRestart();
-      this.workerScheduler.start();
-    }
     this.runStartupPlatformProbes();
 
     this.log.info("pipeline started", {
@@ -675,7 +585,6 @@ export class Pipeline {
       clearInterval(this.watchdogTimer);
       this.watchdogTimer = null;
     }
-    this.workerScheduler?.stop();
     this.queue.stop();
     this.log.info("pipeline stopped");
   }
@@ -710,10 +619,9 @@ export class Pipeline {
     }
   }
 
-  /** 是否有正在处理的主会话、Worker Job 或独立 session（Cron/task）——优雅关闭等待用 */
+  /** 是否有正在处理的主会话或独立 session（Cron/task）——优雅关闭等待用 */
   hasBusyChats(): boolean {
     return this.queue.hasBusyChats()
-      || (this.workerRuntime?.runningCount() ?? 0) > 0
       || this.independentRunCount > 0;
   }
 
@@ -725,179 +633,6 @@ export class Pipeline {
   /** 检查用户是否为 owner */
   isOwner(userId: string): boolean {
     return this.adminRoles.get(userId) === "owner";
-  }
-
-  /**
-   * 主 Agent 的 Worker 写入口。请求只在对应 chat 的活动 Agent 回合内受理；
-   * CLI 不再直接修改 Worker 表。
-   */
-  async executeWorkerAgentCommand(request: WorkerAgentCommandRequest): Promise<WorkerAgentCommandResult> {
-    const context = this.activeWorkerAgentCommands.get(request.chatId);
-    const activeRun = this.runtimeState.getActiveRun(request.chatId);
-    if (!context || !activeRun || activeRun.runId !== context.runId || activeRun.stage !== "agent_running") {
-      throw new Error("Worker 写操作必须在当前主会话的活动 Agent 回合内执行");
-    }
-    if (!request.scheduleToken || request.scheduleToken !== context.token) {
-      throw new Error("Worker 请求缺少或携带错误的能力令牌");
-    }
-    const service = this.workerConfig?.jobService;
-    const teamConfig = this.workerConfig?.teamConfigStore;
-    if (!service || !teamConfig) throw new Error("当前 Bot 未启用 Worker");
-
-    const requireWorkAccess = (workId: string): Work => {
-      const work = service.getWork(workId);
-      if (!work) throw new Error(`Work 不存在: ${workId}`);
-      if (work.sourceChatId !== request.chatId) throw new Error(`Work 不属于当前会话: ${workId}`);
-      if (work.visibility === "private" && work.ownerUserId !== context.userId) {
-        throw new Error(`无权操作 Work: ${workId}`);
-      }
-      return work;
-    };
-    const requireAdmin = () => {
-      if (!this.isAdmin(context.userId)) throw new Error("该 Worker 操作仅管理员可用");
-    };
-
-    switch (request.command.type) {
-      case "work.create": {
-        if (context.continuationTurn) throw new Error("验收回合不能新建 Work；需要继续时请在原 Work 下追加 Job");
-        if (!teamConfig.isEnabled()) throw new Error("Worker 当前已暂停，不能创建 Work");
-        const content = request.command.request.trim();
-        if (!content) throw new Error("Work 需求不能为空");
-        const existing = context.createdWorkIds
-          .map((workId) => service.getWork(workId))
-          .find((work) => work?.status === "active" && work.request === content);
-        if (existing) return { output: existing.id };
-        const work = service.createWork({
-          botId: this.botIdentity.name,
-          ownerUserId: context.userId,
-          sourceChatId: request.chatId,
-          visibility: context.chatType === "group" ? "public" : "private",
-          request: content,
-          triggerMsgPlatformId: activeRun.replyToPlatformMsgId
-            ?? findLatestUserPlatformMsgId(this.db, request.chatId, context.userId),
-        });
-        context.createdWorkIds.push(work.id);
-        return { output: work.id };
-      }
-      case "job.create": {
-        if (!teamConfig.isEnabled()) throw new Error("Worker 当前已暂停，不能创建 Job");
-        requireWorkAccess(request.command.workId);
-        const profile = this.workerConfig.registry.get(request.command.workerProfileId);
-        if (!profile) {
-          throw new Error(`未知 Worker Profile: ${request.command.workerProfileId}（可用: ${this.workerConfig.registry.list().map((item) => item.id).join(", ")}）`);
-        }
-        // 工作区访问方式由 Profile 决定（read_only 只读 / direct 直接修改），Job 不再携带
-        if (profile.access === "direct" && !request.command.workdir) {
-          // direct 写任务必须显式指定目标目录：缺省（workspace 根）等于授权 Worker 直写整个工作区
-          throw new Error("direct 写任务必须显式指定 workdir（目标目录），不能省略");
-        }
-        const requestedWorkdir = path.resolve(request.command.workdir ?? this.workingDirectory);
-        let workspaceRootReal: string;
-        let requestedWorkdirReal: string;
-        try {
-          workspaceRootReal = realpathSync(this.workingDirectory);
-          requestedWorkdirReal = realpathSync(requestedWorkdir);
-        } catch {
-          throw new Error("Worker 工作目录不存在或无法访问");
-        }
-        const relative = path.relative(workspaceRootReal, requestedWorkdirReal);
-        if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
-          throw new Error("Worker 工作目录必须位于当前 workspace 内");
-        }
-        const prompt = request.command.prompt.trim();
-        if (!prompt) throw new Error("Job 内容不能为空");
-        if (typeof request.command.idempotencyKey !== "string" || !request.command.idempotencyKey.trim()) {
-          throw new Error("Job 幂等键不能为空");
-        }
-        const job = service.createJob({
-          workId: request.command.workId,
-          workerProfileId: profile.id,
-          prompt,
-          workdir: requestedWorkdirReal,
-          dependsOn: request.command.dependsOn,
-        }, request.command.idempotencyKey);
-        this.workerScheduler?.kick();
-        return { output: job.id };
-      }
-      case "cancel": {
-        const id = request.command.id;
-        const reason = request.command.reason?.trim() ? `用户取消：${request.command.reason.trim()}` : undefined;
-        const affectedJobs: Job[] = [];
-        if (id.startsWith("wrk_")) {
-          requireWorkAccess(id);
-          const work = service.cancelWork(id, reason);
-          if (!work) throw new Error(`Work 不存在: ${id}`);
-          affectedJobs.push(...service.listJobs(id).filter((job) => job.status === "cancelling"));
-        } else if (id.startsWith("job_")) {
-          const before = service.getJob(id);
-          if (!before) throw new Error(`Job 不存在: ${id}`);
-          requireWorkAccess(before.workId);
-          const job = service.requestCancel(id, reason);
-          if (!job) throw new Error(`Job 不可取消: ${id}`);
-          affectedJobs.push(job);
-        } else {
-          throw new Error(`无法识别的 ID: ${id}`);
-        }
-        for (const job of affectedJobs) {
-          if (this.workerRuntime?.inspect(job.id)) {
-            void this.workerRuntime.cancel(job.id, "agent_cancel").catch((error) => {
-              this.log.error("worker cancel request failed", { jobId: job.id, error: String(error) });
-            });
-          } else if (this.workerRuntime?.hasInFlight(job.id)) {
-            // 准备阶段：abort 准备流程，runJob 在检查点收敛为 cancelled。
-            // 不能直接确认终态——否则 runJob 检查点看不到 cancelling，Worker 会完整执行（幽灵执行）。
-            void this.workerRuntime.cancel(job.id, "agent_cancel").catch((error) => {
-              this.log.error("worker cancel request failed", { jobId: job.id, error: String(error) });
-            });
-          } else if (!job.startedAt) {
-            service.confirmCancelled(job.id, {
-              status: "cancelled",
-              responseText: "",
-              error: "cancelled before execution",
-              changedFiles: [],
-              artifacts: [],
-              startedAt: new Date().toISOString(),
-              endedAt: new Date().toISOString(),
-            });
-          }
-        }
-        const currentWork = id.startsWith("wrk_") ? service.getWork(id) : undefined;
-        return { output: currentWork?.status === "cancelled" ? `${id} 已取消` : `${id} 已请求取消` };
-      }
-      case "work.complete_recovery": {
-        requireAdmin();
-        if (request.command.force !== true) throw new Error("人工完成 Work 必须显式确认 force=true");
-        requireWorkAccess(request.command.workId);
-        const work = service.completeWork(request.command.workId, { conclusion: request.command.conclusion.trim() });
-        if (!work) throw new Error(`Work 不可完成: ${request.command.workId}`);
-        return { output: `Work ${request.command.workId} 已完成` };
-      }
-      case "config.draft": {
-        requireAdmin();
-        const result = teamConfig.createDraft(
-          request.command.yamlText,
-          context.userId,
-          request.command.baseVersion ?? teamConfig.getActiveConfig().version,
-        );
-        if (!result.ok) throw new Error(result.error);
-        return { output: result.draftId };
-      }
-      case "config.apply": {
-        requireAdmin();
-        const result = teamConfig.applyDraft(request.command.draftId, context.userId);
-        if (!result.ok) throw new Error(result.error);
-        this.reloadTeamConfigIfChanged();
-        return { output: `applied: ${result.version}` };
-      }
-      case "config.rollback": {
-        requireAdmin();
-        const result = teamConfig.rollback(request.command.version, context.userId);
-        if (!result.ok) throw new Error(result.error);
-        this.reloadTeamConfigIfChanged();
-        return { output: `rolled back to ${request.command.version}; active: ${result.version}` };
-      }
-    }
-    throw new Error(`未知 Worker 操作: ${String((request.command as { type?: unknown }).type)}`);
   }
 
   /** 调度写入口。身份取当前 Agent 回合，不信任 Session 创建时固定的环境变量。 */
@@ -1869,14 +1604,6 @@ export class Pipeline {
         this.startSessionTransition(chatId, () => this.resetSession(chatId, platformChatId, msgId));
         return true;
       }
-      case "/worker": {
-        if (!isAdmin) {
-          this.replyText(chatId, platformChatId, msgId, "/worker 仅管理员可用。");
-          return true;
-        }
-        this.handleWorkerCommand(parts.slice(1), chatId, platformChatId, msgId);
-        return true;
-      }
       case "/goal": {
         this.handleGoalCommand(parts.slice(1), userId, chatId, platformChatId, msgId);
         return true;
@@ -2083,11 +1810,6 @@ export class Pipeline {
     // /goal：无参 = 查询（本地）；带参 = 创建（放行，由 hybrid 翻译层转发给 Agent）
     if (firstToken === "/goal") {
       return text.trim().split(/\s+/).length <= 1;
-    }
-    // /worker：on/off/config/无参 = 本地管理；其余参数 = 派发任务（放行，翻译转发）
-    if (firstToken === "/worker") {
-      const subcommand = text.trim().split(/\s+/)[1]?.toLowerCase();
-      return subcommand === undefined || WORKER_BUILTIN_SUBCOMMANDS.has(subcommand);
     }
     // /tz：能认出的时区本地切换；认不出的放行给 Agent 做语义解析
     if (firstToken === "/tz" || firstToken === "/timezone") {
@@ -2315,13 +2037,6 @@ export class Pipeline {
       }
     }
 
-    // Worker：只显示当前 chat 关联的非终态 Job 和待验收结果，避免跨会话泄露。
-    const workerStatus = this.buildWorkerStatusSection(chatId);
-    if (workerStatus) {
-      count += workerStatus.runningCount;
-      sections.push(workerStatus.content);
-    }
-
     const loopStatus = this.buildLoopStatusSection(chatId);
     if (loopStatus) {
       count += loopStatus.runningCount;
@@ -2333,12 +2048,7 @@ export class Pipeline {
       return;
     }
 
-    const latestAgentOutputAt = this.getLatestAgentOutputAt(chatId);
-    const latestDataAt = latestAgentOutputAt === undefined
-      ? workerStatus?.latestUpdatedAt
-      : workerStatus?.latestUpdatedAt === undefined
-        ? latestAgentOutputAt
-        : Math.max(latestAgentOutputAt, workerStatus.latestUpdatedAt);
+    const latestDataAt = this.getLatestAgentOutputAt(chatId);
     const latestDataAge = latestDataAt !== undefined
       ? formatRelativeAgeMs(latestDataAt)
       : "无";
@@ -2350,95 +2060,6 @@ export class Pipeline {
     this.transport.sendCard(platformChatId, header, content, undefined, msgId)
       .then((pmid) => { this.storeBotResponse(chatId, content, pmid); })
       .catch((err) => this.log.error("running list card send failed", { chatId, error: String(err) }));
-  }
-
-  /** 构建当前 chat 的 Worker 状态；查询失败时静默跳过，不影响 /status 主体。 */
-  private buildWorkerStatusSection(chatId: string): {
-    content: string;
-    runningCount: number;
-    latestUpdatedAt?: number;
-  } | undefined {
-    try {
-      const jobs = this.db.prepare(
-        `SELECT j.worker_profile_id, j.prompt, j.status, j.created_at, j.started_at, j.updated_at
-         FROM worker_jobs j
-         JOIN worker_works w ON w.id = j.work_id
-         WHERE w.bot_id = ? AND w.source_chat_id = ?
-           AND w.status IN ('active', 'cancelling')
-           AND j.status IN ('queued', 'running', 'cancelling')
-         ORDER BY CASE j.status WHEN 'running' THEN 0 WHEN 'cancelling' THEN 1 ELSE 2 END,
-                  j.created_at ASC`,
-      ).all(this.botIdentity.name, chatId) as Array<{
-        worker_profile_id: string;
-        prompt: string;
-        status: "queued" | "running" | "cancelling";
-        created_at: string;
-        started_at: string | null;
-        updated_at: string;
-      }>;
-      const continuations = this.db.prepare(
-        `SELECT c.work_id, c.status, c.created_at, c.claimed_at
-         FROM agent_continuations c
-         JOIN worker_works w ON w.id = c.work_id AND w.bot_id = c.bot_id
-         WHERE c.bot_id = ? AND w.bot_id = ? AND c.chat_id = ?
-           AND w.source_chat_id = c.chat_id
-           AND c.status IN ('pending', 'claimed')`,
-      ).all(this.botIdentity.name, this.botIdentity.name, chatId) as Array<{
-        work_id: string;
-        status: "pending" | "claimed";
-        created_at: string;
-        claimed_at: string | null;
-      }>;
-
-      const running = jobs.filter((job) => job.status === "running").length;
-      const queued = jobs.filter((job) => job.status === "queued").length;
-      const cancelling = jobs.filter((job) => job.status === "cancelling").length;
-      const continuationWorkStates = new Map<string, "pending" | "claimed">();
-      for (const continuation of continuations) {
-        const current = continuationWorkStates.get(continuation.work_id);
-        if (current !== "claimed") continuationWorkStates.set(continuation.work_id, continuation.status);
-      }
-      const waitingCount = [...continuationWorkStates.values()].filter((status) => status === "pending").length;
-      const reviewingCount = [...continuationWorkStates.values()].filter((status) => status === "claimed").length;
-      if (jobs.length === 0 && waitingCount === 0 && reviewingCount === 0) return undefined;
-
-      let latestUpdatedAt: number | undefined;
-      const considerLatest = (value: string | null) => {
-        if (!value) return;
-        const timestamp = parseSqlUtcDatetime(value);
-        if (timestamp !== undefined) latestUpdatedAt = latestUpdatedAt === undefined ? timestamp : Math.max(latestUpdatedAt, timestamp);
-      };
-      for (const job of jobs) considerLatest(job.updated_at);
-      for (const continuation of continuations) considerLatest(continuation.claimed_at ?? continuation.created_at);
-
-      const lines = [
-        "**⚙️ Worker**",
-        `运行中: **${running}** · 排队: **${queued}** · 取消中: **${cancelling}** · 等待验收: **${waitingCount}** · 验收中: **${reviewingCount}**`,
-      ];
-      const shownJobs = jobs.slice(0, 5);
-      for (const job of shownJobs) {
-        const statusLabel = job.status === "running" ? "运行中" : job.status === "cancelling" ? "取消中" : "排队";
-        const since = parseSqlUtcDatetime(job.started_at ?? job.created_at);
-        const elapsed = since === undefined ? "" : ` · ${formatUptime(Math.max(0, Date.now() - since))}`;
-        const promptText = stripInternalWorkerTags(job.prompt).replace(/\s+/g, " ").trim().slice(0, 80) || "(无任务描述)";
-        const profileId = escapeLarkMarkdownText(job.worker_profile_id.slice(0, 40));
-        const prompt = escapeLarkMarkdownText(promptText);
-        lines.push(`· ${profileId} · ${statusLabel}${elapsed} — ${prompt}`);
-      }
-      if (jobs.length > shownJobs.length) {
-        lines.push(`· 另有 ${jobs.length - shownJobs.length} 个 Worker Job`);
-      }
-      if (waitingCount > 0) {
-        lines.push(`· ${waitingCount} 个需求已产出结果，等待主会话验收`);
-      }
-      if (reviewingCount > 0) {
-        lines.push(`· ${reviewingCount} 个需求正在由主会话验收`);
-      }
-      return { content: lines.join("\n"), runningCount: running + cancelling, latestUpdatedAt };
-    } catch (err) {
-      this.log.warn("failed to build worker status", { chatId, error: String(err) });
-      return undefined;
-    }
   }
 
   private buildLoopStatusSection(chatId: string): {
@@ -2550,31 +2171,6 @@ export class Pipeline {
   }
 
   // ── 独立 Cron 执行 ────────────────────────────────────────────
-
-  /** 检测配置版本变化并热更新 registry（只影响新 Job）。Watchdog 轮询调用；CLI 侧 apply/rollback 后自动生效。 */
-  reloadTeamConfigIfChanged(): void {
-    if (!this.workerConfig?.teamConfigStore) return;
-    const active = this.workerConfig.teamConfigStore.getActiveConfig();
-    const version = active.version;
-    if (version === this.lastTeamConfigVersion) return;
-    this.lastTeamConfigVersion = version;
-    if (active.config.profiles.length > 0) {
-      this.workerConfig.registry.setProfiles(active.config.profiles.map(teamProfileToWorkerProfile));
-      // 校验配置的 backend 类型在可用列表内（尽早暴露拼写错误，避免每个 Job 执行时才失败）
-      const available = new Set(this.getAvailableBackends());
-      for (const profile of active.config.profiles) {
-        if (profile.backend && !available.has(profile.backend)) {
-          this.log.warn("team config profile references unavailable backend", {
-            version: version ?? null,
-            profileId: profile.id,
-            backend: profile.backend,
-            available: [...available],
-          });
-        }
-      }
-      this.log.info("team config reloaded from db", { version: version ?? null });
-    }
-  }
 
   /** /goal：创建或查询 Goal（纯内存，重启即断）。 */
   /** /goal 内置命令：只处理查询（无参）。带参创建由 hybrid 翻译层转发给 Agent（nbt goal start）。 */
@@ -2855,24 +2451,7 @@ export class Pipeline {
 
   /** Goal 结束清理：状态与 Run 收尾（队列释放由 process 返回后 queue 接管）。 */
   private cleanupGoal(chatId: string, goal: ActiveGoal, runId: string | undefined): void {
-    // Goal 从 Worker 验收回合接管时消费的 Continuation：标记完成（不释放，防重复投递）
-    if (goal.adoptedContinuationIds?.length && this.workerConfig) {
-      try {
-        this.workerConfig.jobService.completeDeliveredContinuations({
-          continuationIds: goal.adoptedContinuationIds,
-          agentTurnId: runId ?? "",
-          conclusion: goal.conclusion ?? "",
-        });
-        this.log.info("goal adopted continuations settled", {
-          chatId,
-          continuationIds: goal.adoptedContinuationIds,
-        });
-      } catch (err) {
-        this.log.error("goal adopted continuations settle failed", { chatId, error: String(err) });
-      }
-    }
     this.activeGoals.delete(chatId);
-    this.activeWorkerAgentCommands.delete(chatId);
     this.activeScheduleAgentCommands.delete(chatId);
     if (runId) {
       if (goal.outcome === "failed") {
@@ -2908,7 +2487,7 @@ export class Pipeline {
     replyToMsgId: string | undefined,
     signal?: AbortSignal,
   ): Promise<boolean> {
-    const text = stripInternalWorkerTags(response.text);
+    const text = stripInternalTags(response.text);
     const elapsedMs = Date.now() - goal.startedAt;
     // footer 与常规交付一致：session 短 ID + session 累计轮次 + context + model
     // （goal 自身轮次在 header 中展示，不参与 footer 的 #N）
@@ -2933,70 +2512,6 @@ export class Pipeline {
       this.log.warn("goal final response delivery failed", { error: result.error, methodsTried: result.methodsTried });
     }
     return result.ok;
-  }
-
-  /** /worker：Worker 开关与配置管理（管理员）。 */
-  private handleWorkerCommand(args: string[], chatId: string, platformChatId: string, msgId?: string): void {
-    const store = this.workerConfig?.teamConfigStore;
-    if (!store) {
-      this.replyText(chatId, platformChatId, msgId, "当前 Bot 未启用 Worker。");
-      return;
-    }
-    const sub = args[0];
-    const jobService = this.workerConfig?.jobService;
-
-    switch (sub) {
-      case "on": {
-        store.setEnabled(true);
-        this.replyText(chatId, platformChatId, msgId, "✅ Worker 已开启。直接提需求即可，我会把长任务拆给 Worker 后台执行，完成后自动汇报。");
-        return;
-      }
-      case "off": {
-        store.setEnabled(false);
-        this.replyText(chatId, platformChatId, msgId, "Worker 已暂停。之后的新需求不会再派给 Worker；正在执行的任务会继续完成。");
-        return;
-      }
-      default: {
-        // 直接显示状态（无子命令）；配置调整走对话（由我执行 nbt worker config）
-        if (sub === "config") {
-          this.replyText(chatId, platformChatId, msgId, "配置不用命令改，直接说要调整什么（并发、角色、目录权限等），我来生成并应用。");
-          return;
-        }
-        const enabled = store.isEnabled();
-        const active = store.getActiveConfig();
-        const running = jobService?.listJobsByStatus("running").length ?? 0;
-        const queued = jobService?.listJobsByStatus("queued").length ?? 0;
-        const profiles = this.workerConfig?.registry.list() ?? [];
-        const accessNames: Record<string, string> = {
-          read_only: "只读",
-          direct: "直接修改",
-        };
-        const profileLines = profiles.map((p) => {
-          const parts = [`**${p.displayName}**`];
-          if (p.description) parts.push(p.description);
-          parts.push(`${accessNames[p.access] ?? p.access}${p.maxConcurrent ? ` · 并发 ${p.maxConcurrent}` : ""}`);
-          return `· ${parts.join(" — ")}`;
-        });
-        const content = [
-          `**Worker**：${enabled ? "✅ 开启" : "⛔ 暂停"}`,
-          `· 任务执行：**${running}** 个进行中，**${queued}** 个排队`,
-          `· 并发上限：同时最多执行 **${active.config.maxConcurrent}** 个任务`,
-          `· 单个需求最多拆 **${active.config.maxJobsPerWork}** 个子任务`,
-          `· 配置：${active.version ? `版本 **${active.version}**` : "默认（未自定义）"}`,
-          ...(profileLines.length > 0 ? ["", "**可用角色**", ...profileLines] : []),
-          "",
-          "配置调整直接说需求，我来改 · `/worker on|off` 开关",
-        ].join("\n");
-        this.sendWorkerCard(chatId, platformChatId, msgId, "Worker · 状态|blue", content);
-      }
-    }
-  }
-
-  /** /worker 卡片发送：与其他内置命令卡片一致的样式。 */
-  private sendWorkerCard(chatId: string, platformChatId: string, msgId: string | undefined, header: string, content: string): void {
-    this.transport.sendCard(platformChatId, header, content, undefined, msgId)
-      .then((pmid) => { this.storeBotResponse(chatId, content, pmid); })
-      .catch((err) => this.log.error("teams card send failed", { chatId, error: String(err) }));
   }
 
   // ── Cron job execution（独立 session） ──
@@ -3031,7 +2546,7 @@ export class Pipeline {
       platformChatId = row?.platform_id;
     }
     if (!platformChatId) return;
-    const detail = stripInternalWorkerTags(error).trim().slice(0, ERROR_DISPLAY_MAX_LEN);
+    const detail = stripInternalTags(error).trim().slice(0, ERROR_DISPLAY_MAX_LEN);
     const content = paused
       ? `定时任务连续失败 ${CRON_FAILURE_LIMIT} 次，已暂停。\n\n${detail || "未知错误"}`
       : `定时任务执行失败，后续会按计划重试。\n\n${detail || "未知错误"}`;
@@ -3055,95 +2570,6 @@ export class Pipeline {
     }
     this.queue.enqueueLoop(job.chatId, job.id);
     this.log.info("loop job dispatched", { chatId: job.chatId, loopJobId: job.id });
-  }
-
-  /** Continuation 投递：认领（pending→claimed）后入队主 Agent 队列（同 chat 串行），内存去重防重复投递。 */
-  private enqueueWorkerContinuations(chatId: string, continuationIds: string[]): void {
-    const jobService = this.workerConfig?.jobService;
-    if (!jobService) return;
-    // 确保 platformChatIds 已注册（与 injectPrompt 一致：Worker 场景 chat 一定来自真实会话）
-    if (!this.platformChatIds.has(chatId)) {
-      const row = this.db.prepare("SELECT platform_id FROM chats WHERE id = ?").get(chatId) as
-        | { platform_id: string }
-        | undefined;
-      if (row) this.platformChatIds.set(chatId, row.platform_id);
-    }
-    // 认领：markContinuationCompleted 只接受 claimed 状态，投递时必须是 pending→claimed。
-    // 重复投递由 DB 状态保证（claimed 不会被扫描到；attempt 上限兜底），
-    // 不使用内存集合——内存集合会在 stale 重置后与 DB 脱节导致永久卡死。
-    const claimed: string[] = [];
-    for (const id of continuationIds) {
-      if (jobService.claimContinuation(id, `dispatch-${Date.now()}`)) {
-        claimed.push(id);
-      }
-    }
-    if (claimed.length === 0) return;
-    this.queue.enqueueContinuation(chatId, claimed);
-    this.log.info("worker continuations dispatched", { chatId, continuationIds: claimed });
-  }
-
-  /** Worker 事件游标；用来识别 Agent 回合内真正创建的 Job。 */
-  private getWorkerEventCursor(): number | undefined {
-    if (!this.workerConfig) return undefined;
-    try {
-      const row = this.db.prepare(
-        "SELECT COALESCE(MAX(id), 0) AS cursor FROM worker_events",
-      ).get() as { cursor: number };
-      return row.cursor;
-    } catch {
-      // fail-closed：游标读取失败时不做派工标识判断，避免把历史事件误算成本回合创建。
-      return undefined;
-    }
-  }
-
-  /** 游标之后，该 chat 是否创建了新 Job（空 Work 不算已经派工）。 */
-  private hasWorkerJobCreatedSince(chatId: string, cursor: number | undefined): boolean {
-    if (!this.workerConfig || cursor === undefined) return false;
-    try {
-      const row = this.db.prepare(
-        `SELECT 1
-         FROM worker_events e
-         JOIN worker_works w ON w.id = e.work_id AND w.bot_id = e.bot_id
-         WHERE e.id > ? AND e.event = 'job_created' AND w.source_chat_id = ?
-         LIMIT 1`,
-      ).get(cursor, chatId);
-      return !!row;
-    } catch {
-      return false;
-    }
-  }
-
-  /** 重启清理（重启重置）：进行中的 Worker 状态全部终止，不恢复、不重投。
-   * 原因写入 error/conclusion（Agent 按需查询 nbt worker get/list 可见）；
-   * 未交付的 Continuation 一并失效（不向主 Agent 投递旧结果）。 */
-  private cleanupWorkerJobsAfterRestart(): void {
-    if (!this.workerConfig) return;
-    try {
-      const jobResult = this.db.prepare(`
-        UPDATE worker_jobs
-        SET status = 'failed', error = 'Engine 重启，任务已终止', ended_at = datetime('now')
-        WHERE status IN ('queued', 'running', 'cancelling')
-      `).run();
-      const workResult = this.db.prepare(`
-        UPDATE worker_works
-        SET status = 'failed', final_conclusion = 'Engine 重启，未完成任务已终止', updated_at = datetime('now')
-        WHERE status IN ('active', 'cancelling')
-      `).run();
-      const contResult = this.db.prepare(`
-        UPDATE agent_continuations
-        SET status = 'failed', error = 'Engine 重启，Worker 结果未交付', completed_at = datetime('now')
-        WHERE status IN ('pending', 'claimed')
-      `).run();
-      if (jobResult.changes > 0 || workResult.changes > 0 || contResult.changes > 0) {
-        this.log.warn("worker state cleaned up after restart", {
-          jobs: jobResult.changes,
-          works: workResult.changes,
-          continuations: contResult.changes,
-        });
-      }
-    } catch (err) {
-      this.log.error("failed to clean up worker state after restart", { error: String(err) });
-    }
   }
 
   /** 进程恢复：从 DB 恢复 active 用户会话，重建 backend session（--resume 旧上下文）。
@@ -3276,137 +2702,6 @@ export class Pipeline {
         });
       }
     }
-  }
-
-  /**
-   * 组装 Worker 的上下文：稳定系统规则 + Profile 角色说明 + Job 目标。
-   * 第一版不注入主会话 transcript 和用户记忆。
-   * direct Job 的 execDir 即目标仓库本身，git 操作由 Worker 按指引自行执行。
-   */
-  private buildWorkerPrompt(job: Job, execDir: string, artifactDir?: string): string {
-    // 角色内容（定义/原则/工作流）已在 system prompt 注入；这里只组装任务详情
-    const stable = this.buildStableSystemContext();
-    const work = this.workerConfig?.jobService.getWork(job.workId);
-    const parts: string[] = [];
-    if (stable) parts.push(stable);
-    const profile = this.workerConfig?.registry.get(job.workerProfileId);
-    let writeRule: string;
-    if (profile?.access === "direct") {
-      // 写任务：直接在目标目录（目标仓库）修改，git 操作由 Worker 自行执行。
-      // base 提交/分支由任务内容（job.prompt）指定。
-      writeRule = `当前目录就是目标仓库（${job.workdir}）本身，直接在仓库内修改。git 操作由你自行执行：按任务要求 checkout 目标提交、创建独立分支、修改、提交；不 push、不发布。`;
-    } else if (artifactDir) {
-      // 只读 + 产物目录：工作目录只读，落盘内容（报告/生成文件）写产物目录
-      writeRule = `工作目录（${execDir}）是只读的：不要修改其中的任何文件。如需落盘（报告、生成的文件等），写到产物目录：${artifactDir}。不要提交、不要发布、不要对用户直接发送消息。`;
-    } else {
-      writeRule = `不要修改代码、不要提交、不要发布、不要对用户直接发送消息。`;
-    }
-    // 用户内容（work.request / job.prompt）拼进内部标签前转义尖括号，防止闭合标签边界。
-    const esc = (s: string): string => s.replace(/</g, "\\u003c").replace(/>/g, "\\u003e");
-    parts.push(`<job-target>
-Work 目标（用户原始需求）：${esc(work?.request ?? "(未知)")}
-Job 任务：${esc(job.prompt)}
-工作目录：${execDir}
-工作区访问方式：${profile?.access ?? "read_only"}
-${writeRule}
-完成标准：以自由 Markdown 输出结果：做了什么、发现了什么、未完成内容、风险和测试证据。
-</job-target>`);
-
-    // 延续上下文：同 Work 前序 Job 的结果（按创建顺序在前且已终态）
-    const jobService = this.workerConfig?.jobService;
-    const prevJobs = jobService
-      ?.listJobs(job.workId)
-      .filter((j) => j.id !== job.id && (j.status === "completed" || j.status === "failed"))
-      .slice(0, 3);
-    if (prevJobs && prevJobs.length > 0) {
-      const prevSections = prevJobs.map((j) => {
-        const task = esc(j.prompt.slice(0, 200));
-        const result = esc((j.responseText ?? j.error ?? "").slice(0, 1500));
-        return `- Job ${j.id}（${j.workerProfileId}，${j.status}）\n  任务：${task}\n  结果：${result || "(无文本)"}`;
-      });
-      parts.push(`<previous-work>
-本 Work 之前的执行记录（供延续参考，可能与本 Job 相关或无关）：
-${prevSections.join("\n\n")}
-</previous-work>`);
-    }
-
-    // 历史检索入口：延续性工作可用 nbt 命令查阅历史，无需恢复 Session
-    parts.push(`<history-access>
-需要更多历史信息时：
-- 本任务历史执行记录：nbt worker get <job-id>（job id 见 <previous-work>）
-- 来源会话的历史讨论：nbt sessions search <关键词>（仅检索当前会话所在 chat 的历史）
-- 不要假设历史结果一定正确，关键结论以实际代码/文件为准。
-</history-access>`);
-    return parts.join("\n\n");
-  }
-
-  /**
-   * 组装主 Agent 验收回合的 <worker-continuation> 内部事件区段。
-   * 内容是受信上下文，不是用户发言；区段标签由 Engine 生成。
-   * silent 时本回合不向用户交付（多 Job Work 的中间批次），并附上同 Work 前序 Job 结果供最终汇报参考。
-   */
-  private buildWorkerContinuationPrompt(continuationIds: string[], silent: boolean): string {
-    // 用户/Worker 内容拼进内部标签前统一转义尖括号，防止闭合标签边界。
-    const esc = (s: string): string => s.replace(/</g, "\\u003c").replace(/>/g, "\\u003e");
-    const jobService = this.workerConfig?.jobService;
-    if (!jobService) return "";
-
-    const sections: string[] = [];
-    const works = new Map<string, Work>();
-    for (const id of continuationIds) {
-      const continuation = jobService.getContinuation(id);
-      if (!continuation) continue;
-      const work = jobService.getWork(continuation.workId);
-      if (work) works.set(work.id, work);
-      const jobParts: string[] = [];
-      for (const jobId of continuation.jobIds) {
-        const job = jobService.getJob(jobId);
-        if (!job) continue;
-        const responseText = esc((job.responseText ?? "").slice(0, 4000));
-        jobParts.push(
-          `- Job ${jobId}（${job.workerProfileId}，状态 ${job.status}）：
-  最终文本：${responseText || "(无文本)"}
-  产物：${esc(job.artifactsJson)}
-  错误：${esc(job.error ?? "(无)")}`,
-        );
-      }
-      sections.push(`<worker-result work="${continuation.workId}">
-${jobParts.join("\n\n")}
-</worker-result>`);
-    }
-
-    // 静默中间批次：附上同 Work 其他已终态 Job 的结果摘要，供最终统一汇报时使用
-    let priorResults = "";
-    if (silent) {
-      const priorParts: string[] = [];
-      for (const workId of works.keys()) {
-        for (const job of jobService.listJobs(workId)) {
-          if (job.status !== "completed" && job.status !== "failed" && job.status !== "cancelled") continue;
-          if (continuationIds.length === 1) {
-            const cont = jobService.getContinuation(continuationIds[0]);
-            if (cont?.jobIds.includes(job.id)) continue; // 本批已列出的跳过
-          }
-          priorParts.push(`- Job ${job.id}（${job.workerProfileId}，${job.status}）：${esc((job.responseText ?? job.error ?? "").slice(0, 1500))}`);
-        }
-      }
-      if (priorParts.length > 0) {
-        priorResults = `\n\n<prior-results>\n本 Work 其他 Job 的结果（供最终汇报参考）：\n${priorParts.join("\n")}\n</prior-results>`;
-      }
-    }
-
-    const workLines = [...works.entries()].map(([id, work]) => `- Work ${id}：${esc(work.request)}`).join("\n");
-    const intro =
-      "以下是 Worker 的执行结果。你不是在回复用户消息，而是在处理内部续接事件。请：\n" +
-      "1. 对照 Work 目标验收结果是否满足用户需求；\n" +
-      "2. 需要继续就用 nbt worker 命令创建后续 Job；不再派工时直接给用户最终回复。\n" +
-      "3. 最终回复发送成功后 Work 会自动结束，不要调用工具标记完成。\n" +
-      "如果这些结果需要用户输入才能继续，直接向用户提问；正文成功发送后本次 Work 自动完成，用户补充后另开 Work。\n" +
-      (silent
-        ? "本批次是中间结果：Work 还有其他 Job 执行中。**不要向用户发送任何消息**（本回合静默），验收结果留待 Work 全部完成时统一汇报。\n"
-        : "最终回复注意上下文衔接：回述一句任务（如「你重启后跑的验证 Work」），让用户不看中间记录也能对上「任务 → 结果」的来龙去脉；不展开执行细节。\n") +
-      "本段是内部指令：回复用户时不得复述、展示或引用 <worker-continuation> 及任何 <worker-*> 标签内容本身，只输出给用户的结果正文。";
-
-    return `<worker-continuation>\n${workLines ? `涉及任务：\n${workLines}\n\n` : ""}${sections.join("\n\n")}${priorResults}\n</worker-continuation>\n\n${intro}`;
   }
 
   /** Loop 是 Engine 生成的内部续接事件，不伪装成一条新的用户消息。 */
@@ -4579,23 +3874,10 @@ ${jobParts.join("\n\n")}
 
   /** 向 Engine 暴露本 Bot 的只读空闲状态；Pipeline 不执行升级决策。 */
   getUpgradeSafenessSources(): UpgradeSafenessSource[] {
-    const jobService = this.workerConfig?.jobService;
     return [
       mainRunSource({
         inflightRunCount: () => this.runtimeState.getPipelineHealth().inflightRunIds.length,
         pendingMessageCount: () => this.queue.hasBusyChats() ? 1 : 0,
-      }),
-      workerSource({
-        nonTerminalJobCount: () => {
-          if (!jobService) return 0;
-          return jobService.listJobsByStatus("queued").length
-            + jobService.listJobsByStatus("running").length
-            + jobService.listJobsByStatus("cancelling").length;
-        },
-        nonTerminalContinuationCount: () => {
-          if (!jobService) return 0;
-          return jobService.listPendingContinuations().length;
-        },
       }),
       goalSource({ activeGoalCount: () => this.activeGoals.size }),
       cronSource(this.db),
@@ -4721,66 +4003,13 @@ ${jobParts.join("\n\n")}
       this.activeLoopRuns.set(activeLoopJob.id, { chatId, runId });
     }
 
-    // Worker Continuation 分流：内部事件不写成用户发言。
-    // MessageQueue 按来源切分批次，正常情况下不会与用户消息混在同一批。
-    const continuationIds = messages
-      .filter((m) => m.triggerKind === "worker_continuation")
-      .flatMap((m) => m.continuationIds ?? []);
-    const isContinuationTurn = continuationIds.length > 0 && messages.every((m) => m.triggerKind === "worker_continuation");
-    const releaseContinuationClaims = () => {
-      if (!isContinuationTurn) return;
-      for (const id of continuationIds) {
-        this.workerConfig?.jobService.releaseContinuationClaim(id);
-      }
-    };
-    if (continuationIds.length > 0 && !isContinuationTurn) {
-      this.queue.enqueueContinuation(chatId, continuationIds);
-      this.log.info("worker continuation deferred behind user messages", { chatId, continuationIds });
-    }
-    // 静默中间回合：多 Job Work 还有未终态 Job 时，本验收回合不向用户交付，
-    // 只在 Work 全部完成时统一汇报（单 Job Work 完成即交付）。
-    let silentContinuationTurn = false;
-    if (isContinuationTurn && this.workerConfig) {
-      const jobService = this.workerConfig.jobService;
-      const workIds = new Set<string>();
-      for (const id of continuationIds) {
-        const cont = jobService.getContinuation(id);
-        if (cont) workIds.add(cont.workId);
-      }
-      // 只有本批所有 Work 都还有未终态 Job 时才整体静默。若混有已完成的 Work，
-      // 必须正常交付这一批；出站收尾会逐个决定完成或继续。
-      silentContinuationTurn = workIds.size > 0 && [...workIds].every((workId) =>
-        jobService.listJobs(workId).some((j) => j.status === "queued" || j.status === "running" || j.status === "cancelling"));
-    }
-
     const platformChatId = this.chatSessions.get(chatId)?.platformChatId
       ?? this.platformChatIds.get(chatId);
 
     // 从消息列表中取最后一条的 platformMsgId 作为 reply 目标。
-    // Worker Continuation 回合：优先引用触发消息（创建 Work 的那条用户消息，链路传递），
-    // 而不是 triggerMsgIds（最近用户消息，回合开始时消费删除，可能为空或已被后续消息覆盖）。
-    // 合并验收多个不同 Work（触发消息不同）时不引用——避免结果错挂到其中一个 Work 的消息下。
     const lastMsg = messages.length > 0 ? messages[messages.length - 1] : undefined;
     let triggerMsgId = lastMsg?.platformMsgId ?? this.triggerMsgIds.get(chatId);
-    let continuationDisallowFallback = false;
-    if (isContinuationTurn && this.workerConfig) {
-      const continuationTriggerIds = continuationIds
-        .map((id) => this.workerConfig?.jobService.getContinuation(id)?.triggerMsgPlatformId)
-        .filter((id): id is string => !!id);
-      const unique = new Set(continuationTriggerIds);
-      if (unique.size === 1) {
-        triggerMsgId = continuationTriggerIds[0];
-      } else if (unique.size > 1) {
-        triggerMsgId = undefined;
-        continuationDisallowFallback = true;
-      }
-    }
     this.triggerMsgIds.delete(chatId);
-    // 兜底（仅 Worker 验收回合链路断裂时，如旧数据）：引用本 chat 最近一条用户消息。
-    // 普通回合/合成回合不做兜底——避免回复引用无关消息。
-    if (!triggerMsgId && isContinuationTurn && this.workerConfig && !continuationDisallowFallback) {
-      triggerMsgId = findLatestUserPlatformMsgId(this.db, chatId);
-    }
     // Loop / 重启唤醒没有对应的当前用户消息，不引用历史消息，避免挂错位置。
     if (isLoopTurn || isWakeTurn) triggerMsgId = undefined;
 
@@ -4801,7 +4030,6 @@ ${jobParts.join("\n\n")}
     try {
       if (signal?.aborted) {
         this.log.info("process cancelled before session creation", { chatId });
-        releaseContinuationClaims();
         settleLoop({ success: false, cancelled: true });
         this.markRuntimeRun(runId, "stopped");
         return;
@@ -4813,107 +4041,87 @@ ${jobParts.join("\n\n")}
       const chatTypeRow = this.db.prepare("SELECT type FROM chats WHERE id = ?").get(chatId) as { type: string } | undefined;
       const processChatType = (chatTypeRow?.type ?? "p2p") as "p2p" | "group";
 
-      // 内部续接回合不写成用户发言；普通消息才包 user-message 标记。
-      let messageToSend = mergedText;
-      if (isContinuationTurn) {
-        messageToSend = this.buildWorkerContinuationPrompt(continuationIds, silentContinuationTurn);
-        if (!messageToSend) {
-          this.log.warn("worker continuation content unavailable, skipping turn", { chatId, continuationIds });
-          releaseContinuationClaims();
-          this.markRuntimeRun(runId, "failed");
-          return;
+      const baseMessage = isLoopTurn
+        ? this.buildLoopContinuationPrompt(activeLoopJob!)
+        : isWakeTurn
+          ? `【重启完成】\n${mergedText}`
+          : mergedText;
+      let messageToSend = baseMessage;
+      const stableCtx = this.pendingStableContext.get(chatId);
+      const messageCtx = this.pendingMessageContext.get(chatId);
+      const compactRecovery = this.pendingCompactRecovery.has(chatId);
+      const isNewSessionPrompt = this.pendingNewSessionReminder.has(chatId);
+      if (stableCtx || messageCtx || compactRecovery || isNewSessionPrompt) {
+        const parts: string[] = [];
+        if (stableCtx) {
+          parts.push(stableCtx);
         }
-      } else {
-        const baseMessage = isLoopTurn
-          ? this.buildLoopContinuationPrompt(activeLoopJob!)
-          : isWakeTurn
-            ? `【重启完成】\n${mergedText}`
-            : mergedText;
-        messageToSend = baseMessage;
-        const stableCtx = this.pendingStableContext.get(chatId);
-        const messageCtx = this.pendingMessageContext.get(chatId);
-        const compactRecovery = this.pendingCompactRecovery.has(chatId);
-        const isNewSessionPrompt = this.pendingNewSessionReminder.has(chatId);
-        if (stableCtx || messageCtx || compactRecovery || isNewSessionPrompt) {
-          const parts: string[] = [];
-          if (stableCtx) {
-            parts.push(stableCtx);
-          }
-          if (messageCtx) {
-            parts.push(messageCtx);
-          }
-          if (compactRecovery) {
-            const recoveryParts: string[] = [];
-            if (this.agent.needsCompactRecoveryReminder()) {
-              recoveryParts.push(COMPACT_RECOVERY_REMINDER);
-            }
-            if (this.agent.needsStableUserPrefix()) {
-              recoveryParts.push(this.buildStableSystemContext());
-            }
-            const recoveryUserId = processChatType === "group" ? undefined : chatSession.userId;
-            recoveryParts.push(this.buildSessionProfile(chatId, processChatType, recoveryUserId));
-            recoveryParts.push(buildSessionArchiveContext(
-              getSessionArchiveDirectory(this.archiveHome, this.botIdentity.name, chatId),
-            ));
-            const taskContext = buildActiveTaskContext(this.workingDirectory, processChatType, recoveryUserId);
-            if (taskContext) {
-              recoveryParts.push(`<session-state>\n${taskContext}\n</session-state>`);
-            }
-            parts.push(recoveryParts.join("\n\n"));
-          }
-          if (isNewSessionPrompt) {
-            parts.push(NEW_SESSION_SEARCH_REMINDER);
-          }
-          this.pendingStableContext.delete(chatId);
-          this.pendingMessageContext.delete(chatId);
-          this.pendingCompactRecovery.delete(chatId);
-          this.pendingNewSessionReminder.delete(chatId);
-          messageToSend = `${parts.join("\n\n")}\n\n${baseMessage}`;
+        if (messageCtx) {
+          parts.push(messageCtx);
         }
+        if (compactRecovery) {
+          const recoveryParts: string[] = [];
+          if (this.agent.needsCompactRecoveryReminder()) {
+            recoveryParts.push(COMPACT_RECOVERY_REMINDER);
+          }
+          if (this.agent.needsStableUserPrefix()) {
+            recoveryParts.push(this.buildStableSystemContext());
+          }
+          const recoveryUserId = processChatType === "group" ? undefined : chatSession.userId;
+          recoveryParts.push(this.buildSessionProfile(chatId, processChatType, recoveryUserId));
+          recoveryParts.push(buildSessionArchiveContext(
+            getSessionArchiveDirectory(this.archiveHome, this.botIdentity.name, chatId),
+          ));
+          const taskContext = buildActiveTaskContext(this.workingDirectory, processChatType, recoveryUserId);
+          if (taskContext) {
+            recoveryParts.push(`<session-state>\n${taskContext}\n</session-state>`);
+          }
+          parts.push(recoveryParts.join("\n\n"));
+        }
+        if (isNewSessionPrompt) {
+          parts.push(NEW_SESSION_SEARCH_REMINDER);
+        }
+        this.pendingStableContext.delete(chatId);
+        this.pendingMessageContext.delete(chatId);
+        this.pendingCompactRecovery.delete(chatId);
+        this.pendingNewSessionReminder.delete(chatId);
+        messageToSend = `${parts.join("\n\n")}\n\n${baseMessage}`;
+      }
 
-        // 群聊：消息级 speaker 注入；内部 Loop 回合没有当前发言者。
-        if (!isLoopTurn && processChatType === "group" && messages.length > 0) {
-          const senderIds = [...new Set(messages.map((m) => m.senderId).filter((id): id is string => !!id))];
-          if (senderIds.length > 0) {
-            const speakers: SpeakerInfo[] = senderIds.map((id) => {
-              const row = this.db.prepare("SELECT name, is_bot FROM users WHERE id = ?").get(id) as { name: string | null; is_bot: number } | undefined;
-              return {
-                userId: id,
-                userName: row?.name ?? undefined,
-                isAdmin: this.adminRoles.has(id),
-                isBot: row?.is_bot === 1,
-              };
-            });
-            const speakerCtx = buildSpeakerContext(this.db, speakers);
-            if (speakerCtx) {
-              messageToSend = `${speakerCtx}\n\n${messageToSend}`;
-            }
+      // 群聊：消息级 speaker 注入；内部 Loop 回合没有当前发言者。
+      if (!isLoopTurn && processChatType === "group" && messages.length > 0) {
+        const senderIds = [...new Set(messages.map((m) => m.senderId).filter((id): id is string => !!id))];
+        if (senderIds.length > 0) {
+          const speakers: SpeakerInfo[] = senderIds.map((id) => {
+            const row = this.db.prepare("SELECT name, is_bot FROM users WHERE id = ?").get(id) as { name: string | null; is_bot: number } | undefined;
+            return {
+              userId: id,
+              userName: row?.name ?? undefined,
+              isAdmin: this.adminRoles.has(id),
+              isBot: row?.is_bot === 1,
+            };
+          });
+          const speakerCtx = buildSpeakerContext(this.db, speakers);
+          if (speakerCtx) {
+            messageToSend = `${speakerCtx}\n\n${messageToSend}`;
           }
-        }
-
-        if (!isLoopTurn) {
-          if (messageToSend === baseMessage) {
-            messageToSend = wrapInjectedUserMessage(baseMessage);
-          } else if (messageToSend.endsWith(baseMessage)) {
-            messageToSend = `${messageToSend.slice(0, messageToSend.length - baseMessage.length)}${wrapInjectedUserMessage(baseMessage)}`;
-          }
-        }
-        markMessagesAgentSeen(this.db, msgIds);
-        // 特殊场景提醒：/worker off 时强制告知模型停止派工（技能会继续被发现，
-        // 不能用按需加载兜底，必须显式注入）。其余工具说明（调度/Worker）已 skill 化，
-        // 由 agent CLI 按需加载 skills/nbt-tools/SKILL.md，不再注入。
-        // 只影响用户消息回合；Continuation 验收回合自带指导。
-        if (this.workerConfig && !this.workerConfig.teamConfigStore?.isEnabled()) {
-          messageToSend = `${WORKER_DISABLED_REMINDER}\n\n${messageToSend}`;
         }
       }
+
+      if (!isLoopTurn) {
+        if (messageToSend === baseMessage) {
+          messageToSend = wrapInjectedUserMessage(baseMessage);
+        } else if (messageToSend.endsWith(baseMessage)) {
+          messageToSend = `${messageToSend.slice(0, messageToSend.length - baseMessage.length)}${wrapInjectedUserMessage(baseMessage)}`;
+        }
+      }
+      markMessagesAgentSeen(this.db, msgIds);
 
       if (signal?.aborted) {
         this.log.info("process cancelled before sending to agent", { chatId });
         if (!isLoopTurn && !this.globalSessionTransition && !this.sessionTransitionLocks.has(chatId)) {
           await this.archiveSession(chatId);
         }
-        releaseContinuationClaims();
         settleLoop({ success: false, cancelled: true });
         this.markRuntimeRun(runId, "stopped");
         return;
@@ -4938,36 +4146,19 @@ ${jobParts.join("\n\n")}
         textLength: messageToSend.length,
       });
 
-      // 普通用户回合在调用 Agent 前记住 Worker 事件游标；Agent 可能通过
-      // nbt worker CLI 创建 Job。只认 job_created，不会把空 Work 或已有后台任务误算成派工。
-      const workerEventCursorBeforeAgent = this.getWorkerEventCursor();
       const latestSenderId = [...messages].reverse().find((message) => !!message.senderId)?.senderId;
       const uniqueSenderIds = [...new Set(messages
         .map((message) => message.senderId)
         .filter((senderId): senderId is string => !!senderId))];
-      const continuationOwnerId = continuationIds
-        .map((id) => this.workerConfig?.jobService.getContinuation(id))
-        .map((continuation) => continuation ? this.workerConfig?.jobService.getWork(continuation.workId)?.ownerUserId : undefined)
-        .find((userId): userId is string => !!userId);
-      const commandUserId = latestSenderId ?? continuationOwnerId ?? activeLoopJob?.creatorUserId ?? chatSession.userId;
+      const commandUserId = latestSenderId ?? activeLoopJob?.creatorUserId ?? chatSession.userId;
       const agentResult = await (async () => {
         this.activeScheduleAgentCommands.set(chatId, {
           runId: runId!,
           userId: uniqueSenderIds.length === 1 ? uniqueSenderIds[0]! : commandUserId,
           chatType: processChatType,
-          userTurn: !isContinuationTurn && (isLoopTurn || uniqueSenderIds.length === 1),
+          userTurn: isLoopTurn || uniqueSenderIds.length === 1,
           token: this.chatScheduleTokens.get(chatId) ?? "",
         });
-        if (this.workerConfig) {
-          this.activeWorkerAgentCommands.set(chatId, {
-            runId: runId!,
-            userId: commandUserId,
-            chatType: processChatType,
-            continuationTurn: isContinuationTurn,
-            createdWorkIds: [],
-            token: this.chatScheduleTokens.get(chatId) ?? "",
-          });
-        }
         try {
           return await this.runManager.runAgent({
             runId: runId!,
@@ -4977,17 +4168,6 @@ ${jobParts.join("\n\n")}
             signal,
           });
         } finally {
-          const commandContext = this.activeWorkerAgentCommands.get(chatId);
-          if (commandContext && commandContext.runId === runId) {
-            for (const workId of commandContext.createdWorkIds) {
-              const work = this.workerConfig?.jobService.getWork(workId);
-              if (work?.status === "active" && this.workerConfig?.jobService.listJobs(workId).length === 0) {
-                this.workerConfig.jobService.failWork(workId, "主会话未创建任何 Worker Job，已自动结束空 Work");
-                this.log.warn("empty worker work closed after agent turn", { chatId, runId, workId });
-              }
-            }
-            this.activeWorkerAgentCommands.delete(chatId);
-          }
           const scheduleContext = this.activeScheduleAgentCommands.get(chatId);
           if (scheduleContext?.runId === runId) this.activeScheduleAgentCommands.delete(chatId);
         }
@@ -5001,8 +4181,6 @@ ${jobParts.join("\n\n")}
           this.finishGoal(chatId, orphanGoal, "stopped", "回合被取消");
           this.cleanupGoal(chatId, orphanGoal, runId);
         }
-        // 验收回合被取消：释放认领，允许后续重新投递（否则卡死 claimed）
-        releaseContinuationClaims();
         settleLoop({ success: false, cancelled: true });
         this.markRuntimeRun(runId, "stopped");
         return;
@@ -5014,11 +4192,6 @@ ${jobParts.join("\n\n")}
       const startedGoal = this.activeGoals.get(chatId);
       if (startedGoal && !startedGoal.endedAt && startedGoal.startRunId === runId) {
         this.log.info("goal start turn detected, adopting as round 1", { chatId, runId });
-        // Loop/Worker 回合内 start：先结算本轮 loop/continuation，避免 job 永久卡 running/claimed。
-        // Worker 结果已被 Goal 第 1 轮消费：登记到 Goal，结算时标记完成（释放会导致重复投递）。
-        if (isContinuationTurn && continuationIds.length > 0) {
-          startedGoal.adoptedContinuationIds = continuationIds;
-        }
         if (isLoopTurn && activeLoopJob && !loopSettled) {
           settleLoop({ success: true, cancelled: true });
         }
@@ -5072,23 +4245,13 @@ ${jobParts.join("\n\n")}
         model: response.model,
       });
 
-      // 静默中间回合：不向 IM 发送，直接标记 Continuation 完成（结果已进上下文）
-      if (silentContinuationTurn) {
-        this.log.info("worker continuation silent turn (work still running)", { chatId, continuationIds });
-        for (const id of continuationIds) {
-          this.workerConfig?.jobService.markContinuationCompleted(id, runId ?? "");
-        }
-        this.markRuntimeRun(runId, "done");
-        return;
-      }
-
       // 合并消息提示头；出站前强制剥离内部标签（保护：不依赖 LLM 自觉）
       const loopCardHeader = isLoopTurn && activeLoopJob ? buildLoopCardHeader(activeLoopJob) : "";
       const loopTaskQuote = isLoopTurn && activeLoopJob ? buildLoopTaskQuote(activeLoopJob) : undefined;
       const loopFullMarker = isLoopTurn && activeLoopJob ? buildLoopDeliveryMarker(activeLoopJob) : undefined;
       const addLoopTaskQuote = (text: string): string => loopTaskQuote ? `${loopTaskQuote}\n\n${text}` : text;
       const addLoopFullMarker = (text: string): string => loopFullMarker ? `${loopFullMarker}\n\n${text}` : text;
-      let displayText = stripInternalWorkerTags(response.text);
+      let displayText = stripInternalTags(response.text);
       let deliveredText = displayText;
       displayText = addLoopTaskQuote(displayText);
       if (isMerged) {
@@ -5099,16 +4262,6 @@ ${jobParts.join("\n\n")}
         displayText = `> 📌 回复 ${messages.length} 条消息：\n${lines.map((l) => `> ${l}`).join("\n")}\n\n${displayText}`;
       }
 
-      // Worker 结果交付强制标识：只按本回合是否由 Continuation 触发判断。
-      // Work 会在正文成功发送后自动完成，因此此处不依赖 Work 状态。
-      if (isContinuationTurn && !displayText.trimEnd().endsWith(WORKER_DELIVERY_MARKER)) {
-        displayText = `${displayText}\n\n${WORKER_DELIVERY_MARKER}`;
-      } else if (!isContinuationTurn) {
-        const dispatchedWorker = this.hasWorkerJobCreatedSince(chatId, workerEventCursorBeforeAgent);
-        if (dispatchedWorker && !displayText.trimEnd().endsWith(WORKER_DISPATCH_MARKER)) {
-          displayText = `${displayText}\n\n${WORKER_DISPATCH_MARKER}`;
-        }
-      }
       deliveredText = displayText;
 
       // 统一最终交付：卡片（reply 优先，footer 带 session 信息）→ 文本（带失败提示）→ 文件
@@ -5153,28 +4306,6 @@ ${jobParts.join("\n\n")}
         updateMessagePlatformId(this.db, replyMsgId, sentPlatformMsgId);
       }
 
-      // 只有 Worker 正文真实发送成功才完成 Continuation；错误提示不算交付。
-      if (isContinuationTurn && this.workerConfig) {
-        if (sentPlatformMsgId && deliveredResponseBody) {
-          const conclusion = stripInternalWorkerTags(response.text).trim() || "Worker 结果已交付。";
-          const settled = this.workerConfig.jobService.completeDeliveredContinuations({
-            continuationIds,
-            agentTurnId: runId ?? "",
-            conclusion,
-            workerEventCursor: workerEventCursorBeforeAgent,
-          });
-          this.log.info("worker continuation delivery settled", {
-            continuationIds,
-            completedWorkIds: settled.completedWorkIds,
-            continuedWorkIds: settled.continuedWorkIds,
-            runId,
-          });
-        } else {
-          releaseContinuationClaims();
-          this.log.warn("worker continuation result not delivered, released for retry", { chatId, continuationIds });
-        }
-      }
-
       if (isLoopTurn) {
         if (sentPlatformMsgId && deliveredResponseBody) {
           settleLoop({ success: true });
@@ -5212,15 +4343,13 @@ ${jobParts.join("\n\n")}
         this.markRuntimeRun(runId, "stopped");
         return;
       }
-      // Worker Continuation 回合失败：释放认领，允许重新投递
-      releaseContinuationClaims();
       settleLoop({ success: false, error: String(err) });
       this.markRuntimeRun(runId, signal?.aborted ? "stopped" : "failed", String(err));
 
       if (platformChatId) {
         // 异常终态会附带最后一段 assistant 文本；出站前仍要剥离内部标签，
-        // 避免 Worker/Loop 注入内容经错误提示旁路泄漏。
-        const detail = stripInternalWorkerTags(extractAgentErrorDetail(err) ?? "").trim();
+        // 避免 Loop 注入内容经错误提示旁路泄漏。
+        const detail = stripInternalTags(extractAgentErrorDetail(err) ?? "").trim();
         const baseErrorText = detail
           ? `处理出错了：\n\`\`\`\n${detail.replace(/`{3,}/g, "``")}\n\`\`\``
           : "处理出错了，请稍后再试。";
@@ -5567,7 +4696,6 @@ ${jobParts.join("\n\n")}
   }
 
   private runIdleWatchdog(): void {
-    this.reloadTeamConfigIfChanged();
     const cliAgent = this.agent instanceof CliAgentBackend ? this.agent : undefined;
 
     const now = Date.now();

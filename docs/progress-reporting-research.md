@@ -6,7 +6,7 @@
 
 ## 1. 需求
 
-长任务（主 Agent 多轮 subagent 循环 / Worker Job 执行）执行期间，用户希望看到
+长任务（主 Agent 多轮 subagent 循环）执行期间，用户希望看到
 中间进展汇报，而不是干等最终结果。
 
 用户期望的形态：**在任务进行中、某个 turn 时，检测到进度慢 → 往该次模型调用
@@ -17,7 +17,6 @@
 | 场景 | 用户感知 | 机制 |
 |---|---|---|
 | 主 Agent 长任务 | ✅ 有粗粒度 | watchdog：每小时「任务还在运行」卡片、10/30 分钟无输出提醒、活动恢复提醒 |
-| Worker Job 执行中 | ❌ 空白 | 只有取消超时（idle 30min / wall 2h），无运行中提醒 |
 | subagent 中间输出 | ❌ 不送达 | Auto Delivery 回合结束才发最终回复 |
 | 主 Agent 回合内 | ✅ 可主动 | `nbt send` CLI（回合内显式调用是唯一主动发送路径） |
 
@@ -67,12 +66,11 @@ hooks 完整事件列表（官方文档）：
 
 1. **hooks 注入（推荐方向）**：PreToolUse hook 检测会话运行时长超阈值 →
    JSON 注入 `additionalContext`（"任务已运行 X 分钟，请用 nbt send 简短汇报进展"）
-   → 下一次模型请求 agent 收到并汇报。**主 Agent + Worker 通用**（都是 CLI 会话）。
+   → 下一次模型请求 agent 收到并汇报。
    - 覆盖 backend：claude ✅、codex ⚠️（待实测）、其余降级
 2. **UserPromptSubmit 注入**：回合开始时注入规则（整回合生效）——效果接近常驻规则，
    非"运行中按需"
-3. **机制卡片兜底**：scheduler 检测 Job 超时 → 发「⏳ 仍在执行」卡片
-   ——watchdog 已有同类能力（主 Agent 侧），非核心价值
+3. **机制卡片兜底**：watchdog 检测主 Agent 运行超时 → 发「⏳ 仍在执行」卡片
 4. **架构级**：backend 分段执行（turn-based 交互，NiuBot 控制轮次）——
    任意 turn 边界注入，但改动架构级，暂不立项
 

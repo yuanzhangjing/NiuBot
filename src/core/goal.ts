@@ -32,8 +32,6 @@ export interface ActiveGoal {
   progressSteps: string[];
   /** 全局进展状态（nbt goal progress --status 覆盖更新：任务整体进行到哪、还剩什么） */
   progressStatus: string;
-  /** Goal 从 Worker 验收回合接管时消费的 Continuation ID 列表（结算时标记完成，防重复投递） */
-  adoptedContinuationIds?: string[];
 }
 
 /**

@@ -4416,105 +4416,6 @@ bots:
     expect(sentCards.some((card) => card.content.includes("最近失败") && card.content.includes("agent failed"))).toBe(true);
   });
 
-  test("/status shows current chat Worker state without leaking other chats", async () => {
-    const now = vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-06-09T04:03:20Z"));
-    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
-    tempDirs.push(dir);
-
-    const db = initDatabase(path.join(dir, "niubot.db"));
-    db.prepare(`
-      INSERT INTO worker_works (id, bot_id, owner_user_id, source_chat_id, visibility, request)
-      VALUES
-        ('work-current', 'NiuBot', 'u2', 'c1', 'private', '当前会话任务'),
-        ('work-waiting', 'NiuBot', 'u2', 'c1', 'private', '等待验收任务'),
-        ('work-other', 'NiuBot', 'u3', 'c2', 'private', '其他会话任务'),
-        ('work-other-bot', 'OtherBot', 'u2', 'c1', 'private', '其他 Bot 同名会话任务'),
-        ('work-terminal', 'NiuBot', 'u2', 'c1', 'private', '已终态任务')
-    `).run();
-    db.prepare("UPDATE worker_works SET status = 'completed' WHERE id = 'work-terminal'").run();
-    const insertJob = db.prepare(`
-      INSERT INTO worker_jobs (id, work_id, worker_profile_id, prompt, workdir, status, created_at, started_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-    insertJob.run("job-running", "work-current", "researcher*", "检查 **当前** [链接](https://example.com) <at id=x></at>", dir, "running", "2026-06-09 04:00:20", "2026-06-09 04:01:20", "2026-06-09 04:03:05");
-    insertJob.run("job-queued", "work-current", "tester", "运行当前会话测试", dir, "queued", "2026-06-09 03:59:20", null, "2026-06-09 04:02:50");
-    insertJob.run("job-cancelling", "work-current", "general", "取消当前会话任务", dir, "cancelling", "2026-06-09 04:00:20", "2026-06-09 04:02:20", "2026-06-09 04:02:55");
-    insertJob.run("job-other", "work-other", "reviewer", "不应泄露的其他会话任务", dir, "running", "2026-06-09 04:00:20", "2026-06-09 04:01:20", "2026-06-09 04:03:19");
-    insertJob.run("job-other-bot", "work-other-bot", "reviewer", "不应泄露的其他 Bot 任务", dir, "running", "2026-06-09 04:00:20", "2026-06-09 04:01:20", "2026-06-09 04:03:19");
-    db.prepare(`
-      INSERT INTO agent_continuations (id, bot_id, chat_id, dedupe_key, work_id, status, created_at, claimed_at)
-      VALUES
-        ('ctn-current', 'NiuBot', 'c1', 'work:current:terminal:1', 'work-current', 'pending', '2026-06-09 04:02:40', NULL),
-        ('ctn-current-claimed', 'NiuBot', 'c1', 'work:current:terminal:2', 'work-current', 'claimed', '2026-06-09 04:02:30', '2026-06-09 04:03:10'),
-        ('ctn-waiting', 'NiuBot', 'c1', 'work:waiting:terminal', 'work-waiting', 'pending', '2026-06-09 04:03:00', NULL),
-        ('ctn-current-done', 'NiuBot', 'c1', 'work:current:terminal:3', 'work-current', 'completed', '2026-06-09 04:00:00', NULL),
-        ('ctn-misbound-chat', 'NiuBot', 'c1', 'work:other:misbound', 'work-other', 'pending', '2026-06-09 04:03:19', NULL),
-        ('ctn-other-bot', 'OtherBot', 'c1', 'work:other-bot:terminal', 'work-other-bot', 'pending', '2026-06-09 04:03:19', NULL),
-        ('ctn-terminal-work', 'NiuBot', 'c1', 'work:terminal:terminal', 'work-terminal', 'claimed', '2026-06-09 04:03:19', '2026-06-09 04:03:19')
-    `).run();
-
-    const { im, sentCards } = createRecordingImStub();
-    const pipeline = new Pipeline(
-      db,
-      im,
-      new RecordingAgent(),
-      createBotIdentity(),
-      dir,
-      path.join(dir, "niubot.db"),
-      0,
-      "codex",
-    );
-    await pipeline.start();
-
-    const handled = (pipeline as any).handleBuiltinCommand("/status", "u2", "c1", "chat-open-id", "p2p", "status-msg");
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    expect(handled).toBe(true);
-    const card = sentCards.at(-1)!;
-    expect(card.header).toBe("运行中 · 2 个任务|orange");
-    expect(card.content).toContain("**最新数据:** 刚刚");
-    expect(card.content).toContain("**⚙️ Worker**");
-    expect(card.content).toContain("运行中: **1** · 排队: **1** · 取消中: **1** · 等待验收: **1** · 验收中: **2**");
-    expect(card.content).toContain("researcher\\* · 运行中 · 2m 0s — 检查 \\*\\*当前\\*\\* \\[链接\\]\\(https://example.com\\) ＜at id=x＞＜/at＞");
-    expect(card.content).toContain("tester · 排队 · 4m 0s — 运行当前会话测试");
-    expect(card.content).toContain("general · 取消中 · 1m 0s — 取消当前会话任务");
-    expect(card.content).toContain("1 个需求已产出结果，等待主会话验收");
-    expect(card.content).toContain("2 个需求正在由主会话验收");
-    expect(card.content).not.toContain("不应泄露的其他会话任务");
-    expect(card.content).not.toContain("不应泄露的其他 Bot 任务");
-    now.mockRestore();
-  });
-
-  test("/status uses Status header when Worker jobs are only queued or waiting acceptance", async () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
-    tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
-    db.prepare(`
-      INSERT INTO worker_works (id, bot_id, owner_user_id, source_chat_id, visibility, request)
-      VALUES ('work-queued', 'NiuBot', 'u2', 'c1', 'private', '排队任务')
-    `).run();
-    db.prepare(`
-      INSERT INTO worker_jobs (id, work_id, worker_profile_id, prompt, workdir, status)
-      VALUES ('job-queued-only', 'work-queued', 'tester', '等待执行', ?, 'queued')
-    `).run(dir);
-    db.prepare(`
-      INSERT INTO agent_continuations (id, bot_id, chat_id, dedupe_key, work_id, status)
-      VALUES ('ctn-queued', 'NiuBot', 'c1', 'work:queued:terminal', 'work-queued', 'pending')
-    `).run();
-
-    const { im, sentCards } = createRecordingImStub();
-    const pipeline = new Pipeline(
-      db, im, new RecordingAgent(), createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex",
-    );
-    await pipeline.start();
-
-    (pipeline as any).handleBuiltinCommand("/status", "u2", "c1", "chat-open-id", "p2p", "status-msg");
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    expect(sentCards.at(-1)?.header).toBe("Status|blue");
-    expect(sentCards.at(-1)?.content).toContain("运行中: **0** · 排队: **1** · 取消中: **0** · 等待验收: **1** · 验收中: **0**");
-  });
-
   test("/status hides failure after a successful run in the same chat", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
@@ -5011,7 +4912,7 @@ bots:
     const err = new Error([
       "pi 回合异常结束：未收到 agent_end",
       "最后一条消息：",
-      "<worker-continuation>内部验收内容</worker-continuation>",
+      "<loop-continuation>内部验收内容</loop-continuation>",
       "开始继续修复",
     ].join("\n"));
 
@@ -5036,7 +4937,7 @@ bots:
 
     const errorText = sentTexts.find((text) => text.includes("回合异常结束"));
     expect(errorText).toContain("开始继续修复");
-    expect(errorText).not.toContain("worker-continuation");
+    expect(errorText).not.toContain("loop-continuation");
     expect(errorText).not.toContain("内部验收内容");
   });
 
@@ -5742,33 +5643,6 @@ describe("Pipeline Goal mode", () => {
     // 结算卡片不带进展轨迹块（直接看结论）
     expect(sentCards[0]?.content).not.toContain("📊 进展轨迹");
     await vi.waitFor(() => expect((pipeline as any).activeGoals.has("c1")).toBe(false));
-  });
-
-  test("/worker 带任务参数翻译转发（派工引导），管理子命令仍本地", async () => {
-    const { agent, pipeline, sentTexts } = createGoalPipeline();
-    await pipeline.start();
-
-    // 管理子命令本地处理（不转发给 Agent；测试桩无 Worker 配置，回复「未启用」提示）
-    (pipeline as any).handleMessage(createMessage({
-      contentText: "/worker on",
-      platformMsgId: "worker-msg-0",
-    }));
-    await vi.waitFor(() => expect(sentTexts.some((t) => t.includes("Worker"))).toBe(true));
-    expect(agent.sendMessageCalls).toHaveLength(0);
-
-    // 任务参数 → 翻译转发
-    (pipeline as any).handleMessage(createMessage({
-      contentText: "/worker 分析 niubot 仓库代码结构",
-      platformMsgId: "worker-msg-1",
-    }));
-    await vi.waitFor(() => expect(agent.sendMessageCalls.length).toBeGreaterThanOrEqual(1));
-    expect(agent.sendMessageCalls[0]).toContain("分析 niubot 仓库代码结构");
-    expect(agent.sendMessageCalls[0]).toContain("nbt worker work create");
-    expect(agent.sendMessageCalls[0]).toContain("nbt worker job create");
-    expect(agent.sendMessageCalls[0]).not.toContain("/worker 分析 niubot 仓库代码结构");
-
-    agent.resolveNext();
-    await new Promise((resolve) => setTimeout(resolve, 0));
   });
 
   test("restart wake 注入主会话回合（原上下文干活，不写用户消息）", async () => {

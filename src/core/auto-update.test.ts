@@ -11,7 +11,6 @@ import {
   loopSource,
   mainRunSource,
   minutesUntilUpgradeWindowEnd,
-  workerSource,
   type AutoUpdateConfig,
 } from "./auto-update.js";
 
@@ -27,7 +26,6 @@ describe("isSafeForUpgrade", () => {
   it("safe when all sources idle", () => {
     const result = isSafeForUpgrade([
       mainRunSource({ inflightRunCount: () => 0, pendingMessageCount: () => 0 }),
-      workerSource({ nonTerminalJobCount: () => 0, nonTerminalContinuationCount: () => 0 }),
       goalSource({ activeGoalCount: () => 0 }),
     ], now, 30 * 60_000);
     expect(result.safe).toBe(true);
@@ -37,12 +35,10 @@ describe("isSafeForUpgrade", () => {
   it("blocked when any source is busy, with reasons", () => {
     const result = isSafeForUpgrade([
       mainRunSource({ inflightRunCount: () => 1, pendingMessageCount: () => 0 }),
-      workerSource({ nonTerminalJobCount: () => 2, nonTerminalContinuationCount: () => 0 }),
       goalSource({ activeGoalCount: () => 0 }),
     ], now, 30 * 60_000);
     expect(result.safe).toBe(false);
     expect(result.blockers[0]).toContain("1 个 run 进行中");
-    expect(result.blockers[1]).toContain("2 个 job 未完成");
   });
 
   it("main session blocks on pending messages", () => {

@@ -62,7 +62,7 @@ export function loadArchivedTranscript(manifestFile: string): {
   return { manifest, transcript: loadReferencedTranscript(manifest) };
 }
 
-/** 读取已验证的原生 transcript 引用，可用于尚在增长的 Worker session 日志。 */
+/** 读取已验证的原生 transcript 引用，可用于尚在增长的 session 日志。 */
 export function loadReferencedTranscript(manifest: SessionArchiveManifest): SessionTranscript {
   validateSessionManifest(manifest, manifest.session_id);
   const opencodeDb = manifest.sources.find((source) => source.format === "opencode-db");

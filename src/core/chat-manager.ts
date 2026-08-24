@@ -77,29 +77,6 @@ export class ChatManager {
     return this.enqueue(msg);
   }
 
-  /**
-   * 入队 Worker Continuation（内部事件，不是用户发言）。
-   * 与用户消息走同一队列，保证单 chat 串行；Continuation 只携带 ID，
-   * 具体结果由 Pipeline 处理时从 JobService 查询。
-   */
-  enqueueContinuation(chatId: string, continuationIds: string[]): boolean {
-    const msg: QueuedMessage = {
-      chatId,
-      text: `[worker continuation: ${continuationIds.join(",")}]`,
-      timestamp: Date.now(),
-      triggerKind: "worker_continuation",
-      continuationIds,
-    };
-    const pending = this.queue.push(msg);
-    log.info("worker continuation enqueued", {
-      chatId,
-      continuationIds,
-      pending,
-      queueState: this.runtimeState.getChatState(chatId).state,
-    });
-    return pending;
-  }
-
   /** 队列是否已停止（关闭期间不再接受新任务）。 */
   isStopped(): boolean {
     return this.queue.isStopped();
