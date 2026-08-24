@@ -7,6 +7,7 @@ import {
   ensureChat,
   ensureUser,
   getChatHistoryCursor,
+  getThreadHistoryCursor,
   getMessageByPlatformId,
   storeMessage,
 } from "../database/schema.js";
@@ -225,5 +226,42 @@ describe("group history sync", () => {
       nowMs: 20_000,
     });
     expect(limits).toEqual([GROUP_HISTORY_LIST_LIMIT, GROUP_HISTORY_INCREMENTAL_LIMIT]);
+  });
+
+  test("thread sync writes thread cursor and does not move chat cursor", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "group-history-thread-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "t.db"));
+    const chatId = ensureChat(db, "feishu", "oc-group", "group", "bots");
+    const listed = [historyMsg({
+      platformMsgId: "om-thread-reply",
+      threadId: "omt_aaa",
+      rootId: "om-root",
+      platformTs: 1_500,
+    })];
+    const seenOptions: Array<{ threadId?: string }> = [];
+
+    await syncGroupHistory({
+      db,
+      transport: {
+        listChatMessages: async (_id, options) => {
+          seenOptions.push({ threadId: options?.threadId });
+          return listed;
+        },
+      },
+      chatId,
+      platformChatId: "oc-group",
+      platform: "feishu",
+      threadId: "omt_aaa",
+      nowMs: 12_000,
+    });
+
+    expect(seenOptions).toEqual([{ threadId: "omt_aaa" }]);
+    expect(getChatHistoryCursor(db, chatId).fetchedAt).toBeNull();
+    expect(getThreadHistoryCursor(db, chatId, "omt_aaa")).toMatchObject({
+      syncTs: 1_500,
+      fetchedAt: 12_000,
+    });
+    expect(getMessageByPlatformId(db, "feishu", "om-thread-reply")?.threadId).toBe("omt_aaa");
   });
 });

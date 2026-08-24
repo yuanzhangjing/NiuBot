@@ -936,6 +936,8 @@ export function buildNiubotEnv(config: SessionConfig): Record<string, string> {
   env["NIUBOT_HOME"] = NIUBOT_HOME;
   if (config.userId) env["NIUBOT_USER_ID"] = config.userId;
   if (config.chatId) env["NIUBOT_CHAT_ID"] = config.chatId;
+  if (config.scopeKey) env["NIUBOT_SCOPE_KEY"] = config.scopeKey;
+  if (config.threadId) env["NIUBOT_THREAD_ID"] = config.threadId;
   if (config.chatType) env["NIUBOT_CHAT_TYPE"] = config.chatType;
   if (config.dbPath) env["NIUBOT_DB_PATH"] = config.dbPath;
   if (config.botId) env["NIUBOT_BOT_ID"] = config.botId;

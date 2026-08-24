@@ -159,6 +159,8 @@ export const CRON_FAILURE_LIMIT = 3;
 export interface CronJob {
   id: number;
   chatId: string;
+  threadId: string | null;
+  replyToMsgId: string | null;
   creatorUserId: string;
   cronExpr: string | null;
   runAt: string | null;
@@ -179,6 +181,8 @@ export interface CronJob {
 interface RawCronRow {
   id: number;
   chat_id: string;
+  thread_id: string | null;
+  reply_to_msg_id: string | null;
   creator_user_id: string;
   cron_expr: string | null;
   run_at: string | null;
@@ -201,6 +205,8 @@ function toJob(r: RawCronRow): CronJob {
   return {
     id: r.id,
     chatId: r.chat_id,
+    threadId: r.thread_id,
+    replyToMsgId: r.reply_to_msg_id,
     creatorUserId: r.creator_user_id,
     cronExpr: r.cron_expr,
     runAt: r.run_at,
@@ -226,12 +232,14 @@ export type CronExecutor = (
   description: string,
   cronJobId: number,
   claimToken: string,
+  threadId?: string,
 ) => Promise<void>;
 export type CronFailureReporter = (
   chatId: string,
   description: string,
   error: string,
   paused: boolean,
+  threadId?: string,
 ) => Promise<void> | void;
 
 export interface CronSchedulerOptions {
@@ -308,7 +316,15 @@ export class CronScheduler {
     log.info("executing cron job", { id: job.id, desc: job.description });
     try {
       if (!job.claimToken) throw new Error(`Cron ${job.id} 缺少运行令牌`);
-      await this.executor(job.chatId, job.creatorUserId, job.prompt, job.description, job.id, job.claimToken);
+      await this.executor(
+        job.chatId,
+        job.creatorUserId,
+        job.prompt,
+        job.description,
+        job.id,
+        job.claimToken,
+        job.threadId ?? undefined,
+      );
       const nextCount = job.runCount + 1;
       const completed = !!job.runAt || (job.maxTimes !== null && nextCount >= job.maxTimes);
       this.db.prepare(`
@@ -329,7 +345,15 @@ export class CronScheduler {
       `).run(paused ? "paused" : "active", job.lastRunAt, error, failures, job.id, job.claimToken).changes;
       log.error("cron job execution failed", { id: job.id, error, failures, paused });
       if (changed === 1) {
-        await Promise.resolve(this.reportFailure?.(job.chatId, job.description || job.prompt.slice(0, 40), error, paused))
+        await Promise.resolve(
+          this.reportFailure?.(
+            job.chatId,
+            job.description || job.prompt.slice(0, 40),
+            error,
+            paused,
+            job.threadId ?? undefined,
+          ),
+        )
           .catch((reportError) => log.warn("failed to report cron failure", { id: job.id, error: String(reportError) }));
       }
     }
@@ -402,6 +426,8 @@ export function addCronJob(
   db: Database.Database,
   opts: {
     chatId: string;
+    threadId?: string;
+    replyToMsgId?: string;
     creatorUserId: string;
     cronExpr?: string;
     runAt?: string;
@@ -459,11 +485,13 @@ export function addCronJob(
     }
     const result = db.prepare(`
       INSERT INTO cron_jobs (
-        chat_id, creator_user_id, cron_expr, run_at, prompt, description, max_times, until_time, timezone
+        chat_id, thread_id, reply_to_msg_id, creator_user_id, cron_expr, run_at, prompt, description, max_times, until_time, timezone
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       opts.chatId,
+      opts.threadId ?? null,
+      opts.replyToMsgId ?? null,
       opts.creatorUserId,
       opts.cronExpr ?? null,
       runAt,
@@ -516,6 +544,7 @@ export function validateCronExpression(expression: string): void {
 export function listCronJobs(
   db: Database.Database,
   chatId?: string,
+  threadId?: string,
 ): Array<CronJob & { createdAt: string }> {
   migrateLegacyCronTimezones(db);
   let sql = "SELECT * FROM cron_jobs WHERE status IN ('active', 'running', 'paused')";
@@ -523,6 +552,10 @@ export function listCronJobs(
   if (chatId) {
     sql += " AND chat_id = ?";
     params.push(chatId);
+  }
+  if (threadId) {
+    sql += " AND thread_id = ?";
+    params.push(threadId);
   }
   sql += " ORDER BY id";
   const rows = db.prepare(sql).all(...params) as RawCronRow[];

@@ -269,7 +269,7 @@ describe("topic schema v32", () => {
     });
   });
 
-  test("migrates a v31 database with duplicate active sessions without adding unique session indexes", () => {
+  test("migrates a v31 database with duplicate active sessions and archives extras before adding unique indexes", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-topic-migrate-"));
     tempDirs.push(dir);
     const dbPath = path.join(dir, "niubot.db");
@@ -277,13 +277,9 @@ describe("topic schema v32", () => {
     const userId = ensureUser(legacy, "feishu", "ou-zen", "Zen");
     const chatId = ensureChat(legacy, "feishu", "oc-group", "group", "Group");
     legacy.exec(`
-      INSERT INTO sessions (id, chat_id, user_id, source, status, started_at, last_active_at)
-      VALUES ('s-old', '${chatId}', '${userId}', 'user', 'active', datetime('now'), datetime('now', '-1 hour'));
-      INSERT INTO sessions (id, chat_id, user_id, source, status, started_at, last_active_at)
-      VALUES ('s-new', '${chatId}', '${userId}', 'user', 'active', datetime('now'), datetime('now'));
-    `);
-    legacy.exec(`
       DROP TABLE thread_history_cursors;
+      DROP INDEX IF EXISTS idx_sessions_active_thread;
+      DROP INDEX IF EXISTS idx_sessions_active_chat;
       DROP INDEX IF EXISTS idx_messages_chat_thread_time;
       DROP INDEX IF EXISTS idx_sessions_chat_thread;
       ALTER TABLE messages DROP COLUMN thread_id;
@@ -297,6 +293,12 @@ describe("topic schema v32", () => {
       ALTER TABLE cron_jobs DROP COLUMN thread_id;
       ALTER TABLE runtime_events DROP COLUMN thread_id;
     `);
+    legacy.exec(`
+      INSERT INTO sessions (id, chat_id, user_id, source, status, started_at, last_active_at)
+      VALUES ('s-old', '${chatId}', '${userId}', 'user', 'active', datetime('now'), datetime('now', '-1 hour'));
+      INSERT INTO sessions (id, chat_id, user_id, source, status, started_at, last_active_at)
+      VALUES ('s-new', '${chatId}', '${userId}', 'user', 'active', datetime('now'), datetime('now'));
+    `);
     legacy.prepare(
       "UPDATE niubot_component_schema_versions SET version = 31 WHERE component = 'core'",
     ).run();
@@ -307,10 +309,10 @@ describe("topic schema v32", () => {
     expect(migrated.pragma("user_version", { simple: true })).toBe(LATEST_SCHEMA_VERSION);
     expect(migrated.prepare(
       "SELECT COUNT(*) AS count FROM sessions WHERE chat_id = ? AND status = 'active' AND source = 'user'",
-    ).get(chatId)).toEqual({ count: 2 });
+    ).get(chatId)).toEqual({ count: 1 });
     const sessionIndexes = migrated.prepare("PRAGMA index_list(sessions)").all() as Array<{ name: string }>;
-    expect(sessionIndexes.map((index) => index.name)).not.toContain("idx_sessions_active_thread");
-    expect(sessionIndexes.map((index) => index.name)).not.toContain("idx_sessions_active_chat");
+    expect(sessionIndexes.map((index) => index.name)).toContain("idx_sessions_active_thread");
+    expect(sessionIndexes.map((index) => index.name)).toContain("idx_sessions_active_chat");
     expect((migrated.prepare("PRAGMA table_info(chats)").all() as Array<{ name: string }>)
       .map((column) => column.name)).toEqual(expect.arrayContaining(["chat_mode", "group_message_type"]));
     migrated.close();

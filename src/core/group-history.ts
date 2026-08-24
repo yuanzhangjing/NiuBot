@@ -7,9 +7,11 @@ import type Database from "better-sqlite3";
 import {
   ensureUser,
   getChatHistoryCursor,
+  getThreadHistoryCursor,
   getMessageByPlatformId,
   getUserIdentityByPlatformId,
   setChatHistoryCursor,
+  setThreadHistoryCursor,
   setUserIsBot,
   storeMessage,
 } from "../database/schema.js";
@@ -119,6 +121,7 @@ export async function syncGroupHistory(options: {
   platformChatId: string;
   platform: string;
   selfUserId?: string | null;
+  threadId?: string;
   nowMs?: number;
 }): Promise<GroupHistorySyncResult> {
   const empty: GroupHistorySyncResult = {
@@ -128,7 +131,9 @@ export async function syncGroupHistory(options: {
   };
 
   const nowMs = options.nowMs ?? Date.now();
-  const cursor = getChatHistoryCursor(options.db, options.chatId);
+  const cursor = options.threadId
+    ? getThreadHistoryCursor(options.db, options.chatId, options.threadId)
+    : getChatHistoryCursor(options.db, options.chatId);
   const skipFetch = shouldSkipHistoryFetch(cursor.fetchedAt, nowMs);
   if (skipFetch) {
     return { ...empty, skippedFetch: true };
@@ -140,6 +145,7 @@ export async function syncGroupHistory(options: {
     sinceUnixSec: incremental ? Math.max(0, cursor.syncTs! - 1) : undefined,
     // 首次只要最新一页；增量翻页把 cursor 之后的新消息都拿到。
     limit: incremental ? GROUP_HISTORY_INCREMENTAL_LIMIT : GROUP_HISTORY_LIST_LIMIT,
+    threadId: options.threadId,
   });
   const cached = cacheHistoryMessages(
     options.db,
@@ -155,10 +161,12 @@ export async function syncGroupHistory(options: {
     })
     .filter((n): n is number => n !== undefined)
     .reduce((max, n) => Math.max(max, n), cursor.syncTs ?? 0);
-  setChatHistoryCursor(options.db, options.chatId, {
-    syncTs: newestSec || cursor.syncTs,
-    fetchedAt: nowMs,
-  });
+  const nextCursor = { syncTs: newestSec || cursor.syncTs, fetchedAt: nowMs };
+  if (options.threadId) {
+    setThreadHistoryCursor(options.db, options.chatId, options.threadId, nextCursor);
+  } else {
+    setChatHistoryCursor(options.db, options.chatId, nextCursor);
+  }
   return {
     fetched: fetched.length,
     inserted: cached.inserted,
@@ -172,6 +180,7 @@ export async function syncGroupChatToDb(
   options: {
     transport: GroupHistoryTransport;
     selfUserId?: string | null;
+    threadId?: string;
     nowMs?: number;
   },
 ): Promise<GroupHistorySyncResult | null> {
@@ -184,6 +193,7 @@ export async function syncGroupChatToDb(
     platformChatId: target.platformChatId,
     platform: target.platform,
     selfUserId: options.selfUserId,
+    threadId: options.threadId,
     nowMs: options.nowMs,
   });
 }

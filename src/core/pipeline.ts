@@ -18,6 +18,14 @@ import {
 import { ChatManager } from "./chat-manager.js";
 import type { QueuedMessage } from "./queue.js";
 import {
+  buildScopeKey,
+  parseScopeKey,
+  resolveSessionScope,
+  shouldIsolateChat,
+  CHAT_MODE_TTL_MS,
+  type SessionScope,
+} from "./session-scope.js";
+import {
   ensureUser, ensureChat, storeMessage, updateChatName,
   getUserShortLabel, getChatShortLabel, getMessageByPlatformId, updateMessageContent, updateMessagePlatformId,
   markMessagesAgentSeen,
@@ -25,6 +33,8 @@ import {
   setUserAdminRole, getAdminUserIds, getUserAdminRole, type AdminRole,
   getBotBackendModelState, setBotBackendModelState, setBotRuntimeState, clearBotRuntimeModels,
   getRecentRuntimeEvents,
+  getChatMetadata as getStoredChatMetadata,
+  updateChatMetadata,
   markUnfinishedRuntimeRunsFailedByRestart,
   recordRuntimeEvent,
 } from "../database/schema.js";
@@ -274,6 +284,8 @@ interface ChatSession {
   sessionId: string;
   platformChatId: string;
   userId: string;
+  threadId?: string;
+  isolated: boolean;
   /** 触发消息的 platform msg ID（用于首条回复时引用） */
   triggerPlatformMsgId?: string;
   /** 是否已发送过回复（首条用 reply，后续用普通 send） */
@@ -285,6 +297,7 @@ interface RunningTask {
   backend: AgentBackend;
   backendType: AgentBackendType;
   chatId: string;
+  scopeKey: string;
   description: string;
   startedAt: number;
   source: "cron" | "task";
@@ -421,8 +434,11 @@ export class Pipeline {
   /** chatId → 主会话调度令牌：随主 Agent 环境注入，独立 session 拿不到，防跨进程身份借用。 */
   private chatScheduleTokens = new Map<string, string>();
 
+  /** token → scopeKey：IPC 反查，避免平台 chat_id 串话题。 */
+  private tokenToScope = new Map<string, string>();
+
   /** 正在占用主聊天队列的 Loop 回合；取消命令用它精确中止对应 run。 */
-  private activeLoopRuns = new Map<number, { chatId: string; runId?: string; selfCancelled?: boolean }>();
+  private activeLoopRuns = new Map<number, { chatId: string; scopeKey?: string; runId?: string; selfCancelled?: boolean }>();
 
   /** chatId → 未结束的 Goal（纯内存；重启即断）。 */
   private activeGoals = new Map<string, ActiveGoal>();
@@ -484,9 +500,12 @@ export class Pipeline {
       effort: botIdentity.effort,
     });
 
-    this.queue.onProcess((runId, chatId, mergedText, messages, signal) => (
-      this.process(chatId, mergedText, messages, signal, runId)
+    this.queue.onProcess((runId, chatId, mergedText, messages, signal, scopeKey) => (
+      this.process(scopeKey ?? chatId, mergedText, messages, signal, runId)
     ));
+    this.queue.onIdle((scopeKey) => {
+      void this.maybeUnloadScope(scopeKey);
+    });
     this.queue.onDiscard((messages) => {
       this.transport.discardInboundMessages?.(
         messages.map((message) => message.dbMsgId).filter((id): id is number => id != null),
@@ -505,6 +524,22 @@ export class Pipeline {
     } catch (err) {
       this.log.warn("failed to refresh agent context files", { error: String(err) });
     }
+    const writerThreshold = Number(process.env["NIUBOT_CWD_WRITER_WARN"] ?? 6);
+    const activeWriters = this.chatSessions.size + this.independentRunCount + 1;
+    if (Number.isFinite(writerThreshold) && activeWriters >= Math.max(1, writerThreshold)) {
+      this.log.warn("cwd writer soft cap reached", {
+        cwd: config.workingDirectory,
+        activeWriters,
+        threshold: writerThreshold,
+      });
+    }
+    this.log.info("agent session start", {
+      cwd: config.workingDirectory,
+      scopeKey: config.scopeKey ?? config.chatId,
+      threadId: config.threadId,
+      source: "user",
+      isolated: Boolean(config.threadId),
+    });
     return backend.createSession(config);
   }
 
@@ -640,10 +675,14 @@ export class Pipeline {
     chatId: string,
     command: ScheduleAgentCommand,
     token?: string,
+    scope?: { scopeKey?: string; threadId?: string; replyToMsgId?: string },
   ): Promise<ScheduleAgentCommandResult> {
     command = parseScheduleAgentCommand(command);
-    const context = this.activeScheduleAgentCommands.get(chatId);
-    const activeRun = this.runtimeState.getActiveRun(chatId);
+    const scopeKey = scope?.scopeKey ?? chatId;
+    const threadId = scope?.threadId;
+    const context = this.activeScheduleAgentCommands.get(scopeKey);
+    const activeRun = this.runtimeState.getActiveRunForScope(scopeKey);
+    const replyToMsgId = activeRun?.replyToPlatformMsgId;
     if (!context || !activeRun || activeRun.runId !== context.runId || activeRun.stage !== "agent_running") {
       throw new Error("调度写操作必须在当前主会话的活动 Agent 回合内执行");
     }
@@ -660,6 +699,8 @@ export class Pipeline {
           if (command.trigger === "every") {
             id = addLoopJob(this.db, {
               chatId,
+              threadId,
+              replyToMsgId,
               creatorUserId: context.userId,
               intervalSeconds: command.intervalSeconds!,
               prompt: command.prompt,
@@ -671,6 +712,8 @@ export class Pipeline {
             // 日历表达式也走主会话：分钟粒度匹配触发，复用主会话上下文
             id = addLoopJob(this.db, {
               chatId,
+              threadId,
+              replyToMsgId,
               creatorUserId: context.userId,
               intervalSeconds: 60, // cron 型检查点粒度
               prompt: command.prompt,
@@ -688,6 +731,8 @@ export class Pipeline {
               : utcDateTimeForSql(new Date(Date.now() + command.afterSeconds! * 1_000));
             id = addLoopJob(this.db, {
               chatId,
+              threadId,
+              replyToMsgId,
               creatorUserId: context.userId,
               intervalSeconds: 60, // 调度器轮询粒度兜底；实际触发由 next_run_at 决定
               prompt: command.prompt,
@@ -731,6 +776,8 @@ export class Pipeline {
         }
         const id = addCronJob(this.db, {
           chatId,
+          threadId,
+          replyToMsgId,
           creatorUserId: context.userId,
           cronExpr: cronExpr ?? undefined,
           runAt: runAt ?? undefined,
@@ -760,11 +807,11 @@ export class Pipeline {
           });
           if (!job) throw new Error(`loop:${id} 不存在或已经结束`);
           const active = this.activeLoopRuns.get(id);
-          if (active?.chatId === chatId) {
+          if (active?.scopeKey === scopeKey) {
             // 当前这轮自己退出：别杀掉 Agent，让它把结论发完。
             active.selfCancelled = true;
           } else if (job.status === "running") {
-            this.cancelActiveLoopRun(id, chatId);
+            this.cancelActiveLoopRun(id, scopeKey);
           }
           return { output: `Cancelled loop:${id}` };
         }
@@ -786,14 +833,28 @@ export class Pipeline {
     return this.botUserId;
   }
 
-  /** IPC 发送：仅主 Agent 当前回合（schedule token 匹配）才挂到用户消息下 */
-  private currentTurnReplyTarget(platformChatId: string, scheduleToken?: string): string | undefined {
-    if (!scheduleToken) return undefined;
+  private platformChatIdToScopeKey(platformChatId: string): string | undefined {
     const chatRow = this.db.prepare("SELECT id FROM chats WHERE platform_id = ?")
       .get(platformChatId) as { id: string } | undefined;
     if (!chatRow) return undefined;
-    if (this.chatScheduleTokens.get(chatRow.id) !== scheduleToken) return undefined;
-    return this.runtimeState.getActiveRun(chatRow.id)?.replyToPlatformMsgId;
+    for (const scopeKey of this.chatScheduleTokens.keys()) {
+      if (parseScopeKey(scopeKey).chatId === chatRow.id) return scopeKey;
+    }
+    return chatRow.id;
+  }
+
+  /** IPC 发送：仅主 Agent 当前回合（schedule token 匹配）才挂到用户消息下 */
+  private currentTurnReplyTarget(
+    platformChatId: string,
+    scheduleToken?: string,
+    scopeKey?: string,
+  ): string | undefined {
+    if (!scheduleToken) return undefined;
+    const resolvedScopeKey = scopeKey ?? this.platformChatIdToScopeKey(platformChatId);
+    if (!resolvedScopeKey) return undefined;
+    if (this.tokenToScope.get(scheduleToken) !== resolvedScopeKey
+      && this.chatScheduleTokens.get(resolvedScopeKey) !== scheduleToken) return undefined;
+    return this.runtimeState.getActiveRunForScope(resolvedScopeKey)?.replyToPlatformMsgId;
   }
 
   private async sendPreferringReply(
@@ -802,8 +863,13 @@ export class Pipeline {
     sendReply: (replyToMsgId: string) => Promise<string>,
     sendChat: () => Promise<string>,
     replyToMsgId?: string,
+    options: { allowChatFallback?: boolean; replyInThread?: boolean } = {},
   ): Promise<string> {
-    if (!replyToMsgId) return sendChat();
+    const allowChatFallback = options.allowChatFallback !== false;
+    if (!replyToMsgId) {
+      if (!allowChatFallback) throw new Error("No reply anchor available; create fallback is disabled");
+      return sendChat();
+    }
     try {
       return await sendReply(replyToMsgId);
     } catch (err) {
@@ -813,41 +879,67 @@ export class Pipeline {
         replyToMsgId,
         error: String(err),
       });
+      if (!allowChatFallback) throw err;
       return sendChat();
     }
   }
 
   /** 通过 IPC 发送消息到指定 chat */
-  async sendToChat(platformChatId: string, text: string, scheduleToken?: string): Promise<void> {
+  async sendToChat(
+    platformChatId: string,
+    text: string,
+    scheduleToken?: string,
+    scope?: { scopeKey?: string; threadId?: string; replyToMsgId?: string },
+  ): Promise<void> {
+    const scopeKey = scope?.scopeKey ?? this.platformChatIdToScopeKey(platformChatId) ?? platformChatId;
+    const threadId = scope?.threadId;
+    const isolated = Boolean(threadId);
     const prepared = this.prepareOutboundText(platformChatId, text);
     const platformMsgId = await this.sendPreferringReply(
       platformChatId,
       "sendToChat",
-      (replyToMsgId) => this.transport.sendReply(platformChatId, prepared.text, replyToMsgId),
+      (replyToMsgId) => this.transport.sendReply(
+        platformChatId,
+        prepared.text,
+        replyToMsgId,
+        { replyInThread: isolated },
+      ),
       () => this.transport.sendText(platformChatId, prepared.text),
-      this.currentTurnReplyTarget(platformChatId, scheduleToken),
+      this.currentTurnReplyTarget(platformChatId, scheduleToken, scopeKey),
+      { allowChatFallback: !isolated, replyInThread: isolated },
     );
     const chatRow = this.db.prepare("SELECT id FROM chats WHERE platform_id = ?")
       .get(platformChatId) as { id: string } | undefined;
     if (chatRow) {
-      this.storeBotResponse(chatRow.id, prepared.historyText, platformMsgId);
+      this.storeBotResponse(chatRow.id, prepared.historyText, platformMsgId, "text", threadId);
     }
   }
 
   /** 通过 IPC 发送卡片到指定 chat */
-  async sendCardToChat(platformChatId: string, header: string, content: string, scheduleToken?: string): Promise<void> {
+  async sendCardToChat(
+    platformChatId: string,
+    header: string,
+    content: string,
+    scheduleToken?: string,
+    scope?: { scopeKey?: string; threadId?: string },
+  ): Promise<void> {
+    const scopeKey = scope?.scopeKey ?? this.platformChatIdToScopeKey(platformChatId) ?? platformChatId;
+    const threadId = scope?.threadId;
+    const isolated = Boolean(threadId);
     const prepared = this.prepareOutboundText(platformChatId, content);
     const platformMsgId = await this.sendCardKeepingAt(
       platformChatId,
       "sendCardToChat",
       header,
       prepared.text,
-      this.currentTurnReplyTarget(platformChatId, scheduleToken),
+      this.currentTurnReplyTarget(platformChatId, scheduleToken, scopeKey),
+      true,
+      { allowChatFallback: !isolated, replyInThread: isolated },
     );
     const chatRow = this.db.prepare("SELECT id FROM chats WHERE platform_id = ?")
       .get(platformChatId) as { id: string } | undefined;
     if (chatRow) {
-      this.storeBotResponse(chatRow.id, prepared.historyText, platformMsgId);
+      this.storeBotResponse(chatRow.id, prepared.historyText, platformMsgId, "text", threadId);
     }
   }
 
@@ -859,12 +951,27 @@ export class Pipeline {
     text: string,
     replyToMsgId?: string,
     preferReply = true,
+    options: { allowChatFallback?: boolean; replyInThread?: boolean } = {},
   ): Promise<string> {
     const sendCard = () => this.transport.sendCard(platformChatId, header, text);
-    const sendCardReply = (id: string) => this.transport.sendCard(platformChatId, header, text, undefined, id);
+    const sendCardReply = (id: string) => this.transport.sendCard(
+      platformChatId,
+      header,
+      text,
+      undefined,
+      id,
+      { replyInThread: options.replyInThread },
+    );
     try {
       if (!preferReply) return await sendCard();
-      return await this.sendPreferringReply(platformChatId, logLabel, sendCardReply, sendCard, replyToMsgId);
+      return await this.sendPreferringReply(
+        platformChatId,
+        logLabel,
+        sendCardReply,
+        sendCard,
+        replyToMsgId,
+        options,
+      );
     } catch (err) {
       if (isDeliveryUncertainError(err) || !hasFeishuAtTag(text)) throw err;
       this.log.warn(`${logLabel}: card failed, fallback to at text`, {
@@ -877,6 +984,7 @@ export class Pipeline {
         (id) => this.transport.sendReply(platformChatId, text, id),
         () => this.transport.sendText(platformChatId, text),
         preferReply ? replyToMsgId : undefined,
+        options,
       );
     }
   }
@@ -928,6 +1036,8 @@ export class Pipeline {
       content: string;
       footer?: string;
       replyToMsgId?: string;
+      replyInThread?: boolean;
+      allowChatFallback?: boolean;
       signal?: AbortSignal;
       textFallback?: string | ((error: unknown) => string);
     },
@@ -939,6 +1049,8 @@ export class Pipeline {
       content: prepared.text,
       footer: options.footer,
       replyToMsgId: options.replyToMsgId,
+      replyInThread: options.replyInThread,
+      allowChatFallback: options.allowChatFallback,
       signal: options.signal,
       textFallback: options.textFallback,
     });
@@ -968,18 +1080,32 @@ export class Pipeline {
   }
 
   /** 通过 IPC 发送文件到指定 chat */
-  async sendFileToChat(platformChatId: string, filePath: string, scheduleToken?: string): Promise<void> {
+  async sendFileToChat(
+    platformChatId: string,
+    filePath: string,
+    scheduleToken?: string,
+    scope?: { scopeKey?: string; threadId?: string },
+  ): Promise<void> {
+    const scopeKey = scope?.scopeKey ?? this.platformChatIdToScopeKey(platformChatId) ?? platformChatId;
+    const threadId = scope?.threadId;
+    const isolated = Boolean(threadId);
     const platformMsgId = await this.sendPreferringReply(
       platformChatId,
       "sendFileToChat",
-      (replyToMsgId) => this.transport.sendFile(platformChatId, filePath, undefined, { replyToMsgId }),
+      (replyToMsgId) => this.transport.sendFile(
+        platformChatId,
+        filePath,
+        undefined,
+        { replyToMsgId, replyInThread: isolated },
+      ),
       () => this.transport.sendFile(platformChatId, filePath),
-      this.currentTurnReplyTarget(platformChatId, scheduleToken),
+      this.currentTurnReplyTarget(platformChatId, scheduleToken, scopeKey),
+      { allowChatFallback: !isolated, replyInThread: isolated },
     );
     const chatRow = this.db.prepare("SELECT id FROM chats WHERE platform_id = ?")
       .get(platformChatId) as { id: string } | undefined;
     if (chatRow) {
-      this.storeBotResponse(chatRow.id, `[文件] ${filePath}`, platformMsgId, "file");
+      this.storeBotResponse(chatRow.id, `[文件] ${filePath}`, platformMsgId, "file", threadId);
     }
   }
 
@@ -1037,6 +1163,7 @@ export class Pipeline {
       const eventId = recordRuntimeEvent(this.db, {
         botId: this.botIdentity.name,
         chatId: event.chatId,
+        threadId: event.threadId,
         runId: event.runId,
         messageIds: event.messageIds,
         stage: event.stage,
@@ -1099,8 +1226,83 @@ export class Pipeline {
     }
   }
 
+  private async ensureChatMetadata(
+    chatId: string,
+    platformChatId: string,
+  ): Promise<{ chatMode?: string; groupMessageType?: string }> {
+    const stored = getStoredChatMetadata(this.db, chatId);
+    if (stored?.fetchedAt && Date.now() - stored.fetchedAt < CHAT_MODE_TTL_MS) {
+      return stored;
+    }
+    const fetched = await this.transport.getChatMetadata?.(platformChatId);
+    if (fetched) {
+      updateChatMetadata(this.db, chatId, fetched);
+      return fetched;
+    }
+    return stored ?? {};
+  }
+
+  private resolveMessageScope(
+    chatId: string,
+    platformChatId: string,
+    msg: NormalizedMessage,
+  ): SessionScope {
+    const metadata = getStoredChatMetadata(this.db, chatId) ?? {};
+    if (msg.chatType === "group"
+      && (!metadata.fetchedAt || Date.now() - metadata.fetchedAt >= CHAT_MODE_TTL_MS)) {
+      void this.transport.getChatMetadata?.(platformChatId).then(async (fetched) => {
+        if (fetched) {
+          updateChatMetadata(this.db, chatId, fetched);
+        }
+      }).catch(() => {});
+    }
+    return resolveSessionScope({
+      chatId,
+      platformChatId,
+      chatType: msg.chatType,
+      chatMode: metadata.chatMode,
+      groupMessageType: metadata.groupMessageType,
+      threadId: msg.threadId,
+    });
+  }
+
   /** Standard Transport entrypoint. Platform events are persisted before reaching this method. */
-  handleInbound(delivery: InboundDelivery): void | Promise<void> {
+  async handleInbound(delivery: InboundDelivery): Promise<void> {
+    if (delivery.message.chatType === "group") {
+      const chatId = ensureChat(
+        this.db,
+        this.botIdentity.platform,
+        delivery.message.chatPlatformId,
+        delivery.message.chatType,
+        delivery.message.chatName,
+      );
+      const stored = getStoredChatMetadata(this.db, chatId);
+      if (!stored?.fetchedAt || Date.now() - stored.fetchedAt >= CHAT_MODE_TTL_MS) {
+        const fetched = await this.transport.getChatMetadata?.(delivery.message.chatPlatformId);
+        if (fetched) updateChatMetadata(this.db, chatId, fetched);
+      }
+      const metadata = getStoredChatMetadata(this.db, chatId);
+      const shouldIsolate = shouldIsolateChat({
+        chatMode: metadata?.chatMode,
+        groupMessageType: metadata?.groupMessageType,
+      });
+      if (shouldIsolate && !delivery.message.threadId && delivery.message.platformMsgId) {
+        const probed = await this.transport.getMessageThreadId?.(delivery.message.platformMsgId);
+        if (probed) {
+          delivery.message.threadId = probed;
+          this.log.info("topic thread id probed from message.get", {
+            chatId,
+            platformMsgId: delivery.message.platformMsgId,
+            threadId: probed,
+          });
+        } else {
+          this.log.debug("topic thread id probe returned none", {
+            chatId,
+            platformMsgId: delivery.message.platformMsgId,
+          });
+        }
+      }
+    }
     try {
       const result = this.handleMessage(
         delivery.message,
@@ -1110,12 +1312,13 @@ export class Pipeline {
         delivery.messageId,
       );
       if (result) {
-        return result.catch((error) => {
+        await result.catch((error) => {
           if (delivery.message.platformMsgId) {
             this.processedMsgIds.delete(delivery.message.platformMsgId);
           }
           throw error;
         });
+        return;
       }
     } catch (error) {
       if (delivery.message.platformMsgId) {
@@ -1214,15 +1417,17 @@ export class Pipeline {
     // For p2p chats, link user_id
     const chatUserId = msg.chatType === "p2p" ? msg.senderPlatformId : undefined;
     const chatId = ensureChat(this.db, platform, msg.chatPlatformId, msg.chatType, msg.chatName, chatUserId);
+    const scope = this.resolveMessageScope(chatId, msg.chatPlatformId, msg);
     this.noteHumanInbound(chatId, msg.senderIsBot);
 
-    if (this.globalSessionTransition || this.sessionTransitionLocks.has(chatId)) {
+    if (this.globalSessionTransition || this.sessionTransitionLocks.has(scope.scopeKey)) {
       this.log.info("message deferred during session transition", {
         chatId,
+        scopeKey: scope.scopeKey,
         msgId: msg.platformMsgId,
         type: msg.contentType,
       });
-      return this.enqueuePendingTransitionMessage(chatId, msg, inboxId, claimToken, recoveredMessageId);
+      return this.enqueuePendingTransitionMessage(scope.scopeKey, msg, inboxId, claimToken, recoveredMessageId);
     }
 
     // Fetch group chat name if not known
@@ -1246,7 +1451,7 @@ export class Pipeline {
       ? utcDateTimeForSql(new Date(msg.platformTs))
       : undefined;
 
-    const sessionId = this.chatSessions.get(chatId)?.sessionId;
+    const sessionId = this.chatSessions.get(scope.scopeKey)?.sessionId;
     const persistIncomingMessage = (state: "queued" | "processing"): number => this.persistInboundMessage({
       inboxId,
       claimToken,
@@ -1269,6 +1474,8 @@ export class Pipeline {
 
     this.log.info("message received", {
       chatId, userId,
+      scopeKey: scope.scopeKey,
+      threadId: scope.threadId,
       type: msg.contentType,
       textLength: msg.contentText.length,
       mentions: msg.mentions?.length ?? 0,
@@ -1304,35 +1511,41 @@ export class Pipeline {
 
     // Save trigger msg ID for reply-to-message（process() 会快照并清除）
     if (msg.platformMsgId) {
-      this.triggerMsgIds.set(chatId, msg.platformMsgId);
+      this.triggerMsgIds.set(scope.scopeKey, msg.platformMsgId);
     }
 
     // 短词打断检测（不清空队列，只 kill 当前进程，与 /stop 行为一致）
     const trimmedText = msg.contentText.trim().toLowerCase();
-    if (INTERRUPT_WORDS.has(trimmedText) && this.chatSessions.has(chatId)) {
+    if (INTERRUPT_WORDS.has(trimmedText) && this.chatSessions.has(scope.scopeKey)) {
       persistIncomingMessage("processing");
-      this.log.info("interrupt word detected", { chatId, word: trimmedText });
-      const activeRun = this.runtimeState.getActiveRun(chatId);
+      this.log.info("interrupt word detected", { chatId, scopeKey: scope.scopeKey, word: trimmedText });
+      const activeRun = this.runtimeState.getActiveRunForScope(scope.scopeKey);
       const hasActiveRun = !!activeRun;
       if (activeRun) {
         this.markRuntimeRun(activeRun.runId, "stopped");
       }
-      if (hasActiveRun && this.chatSessions.has(chatId)) {
-        this.cancelChat(chatId).catch(() => {});
+      if (hasActiveRun && this.chatSessions.has(scope.scopeKey)) {
+        this.cancelChat(scope.scopeKey, chatId).catch(() => {});
       }
       // 与 /stop 一致：abort 队列信号，保证 agent 进程杀不掉时 run 也能退出、busy 恢复
-      if (hasActiveRun || this.queue.isBusy(chatId)) {
-        this.queue.cancel(chatId);
+      if (hasActiveRun || this.queue.isBusy(scope.scopeKey)) {
+        this.queue.cancel(scope.scopeKey);
       }
       const interruptText = "好的，已停止。";
       this.sendPreferringReply(
         msg.chatPlatformId,
         "interrupt",
-        (replyToMsgId) => this.transport.sendReply(msg.chatPlatformId, interruptText, replyToMsgId),
+        (replyToMsgId) => this.transport.sendReply(
+          msg.chatPlatformId,
+          interruptText,
+          replyToMsgId,
+          { replyInThread: scope.isolated },
+        ),
         () => this.transport.sendText(msg.chatPlatformId, interruptText),
         msg.platformMsgId,
+        { allowChatFallback: !scope.isolated, replyInThread: scope.isolated },
       ).then((pmid) => {
-        this.storeBotResponse(chatId, interruptText, pmid);
+        this.storeBotResponse(chatId, interruptText, pmid, "text", scope.threadId);
       }).catch(() => {});
       if (inboxId != null && claimToken) {
         this.transport.markInboundTerminal?.(inboxId, claimToken, "completed");
@@ -1345,7 +1558,16 @@ export class Pipeline {
     const commandText = extractBuiltinCommandText(msg.contentText.trim());
     if (this.isBuiltinCommand(commandText, userId)) {
       persistIncomingMessage("processing");
-      this.handleBuiltinCommand(commandText, userId, chatId, msg.chatPlatformId, msg.chatType, msg.platformMsgId);
+      this.handleBuiltinCommand(
+        commandText,
+        userId,
+        chatId,
+        msg.chatPlatformId,
+        msg.chatType,
+        msg.platformMsgId,
+        scope.threadId,
+        scope.scopeKey,
+      );
       if (inboxId != null && claimToken) {
         this.transport.markInboundTerminal?.(inboxId, claimToken, "completed");
       }
@@ -1357,6 +1579,8 @@ export class Pipeline {
     // Reaction 策略：收到即二选一；pending 先 Pin，非 pending 先 Get；pending 开始处理后再补 Get
     const isPending = this.queue.push({
       chatId,
+      scopeKey: scope.scopeKey,
+      threadId: scope.threadId,
       text: agentText,
       senderLabel: label,
       senderId: userId,
@@ -1367,6 +1591,7 @@ export class Pipeline {
     });
     this.log.info("reaction decision", {
       chatId,
+      scopeKey: scope.scopeKey,
       msgId: msg.platformMsgId,
       isPending,
       initialEmoji: isPending ? MERGED_EMOJI : PROCESSING_EMOJI,
@@ -1379,7 +1604,13 @@ export class Pipeline {
   }
 
   /** Store a bot-sent message in DB */
-  private storeBotResponse(chatId: string, text: string, platformMsgId?: string, contentType?: string): void {
+  private storeBotResponse(
+    chatId: string,
+    text: string,
+    platformMsgId?: string,
+    contentType?: string,
+    threadId?: string,
+  ): void {
     if (!this.botUserId) return;
     storeMessage(this.db, {
       chatId,
@@ -1390,6 +1621,7 @@ export class Pipeline {
       contentType,
       platform: this.botIdentity.platform,
       platformMsgId,
+      threadId,
       agentSeen: true,
     });
   }
@@ -1543,8 +1775,18 @@ export class Pipeline {
    *   2. 管理员 shell 命令（tryShellCommand）
    *   3. return false → 转发给 agent
    */
-  private handleBuiltinCommand(text: string, userId: string, chatId: string, platformChatId: string, chatType: string, msgId?: string): boolean {
+  private handleBuiltinCommand(
+    text: string,
+    userId: string,
+    chatId: string,
+    platformChatId: string,
+    chatType: string,
+    msgId?: string,
+    threadId?: string,
+    scopeKey?: string,
+  ): boolean {
     if (!this.isBuiltinCommand(text, userId)) return false;
+    const effectiveScopeKey = scopeKey ?? chatId;
 
     const parts = text.split(/\s+/);
     const cmd = parts[0].toLowerCase();
@@ -1603,11 +1845,11 @@ export class Pipeline {
       }
       case "/new": {
         this.log.info("builtin command: reset-session", { userId, cmd, chatId });
-        this.startSessionTransition(chatId, () => this.resetSession(chatId, platformChatId, msgId));
+        this.startSessionTransition(effectiveScopeKey, () => this.resetSession(effectiveScopeKey, chatId, platformChatId, msgId, threadId));
         return true;
       }
       case "/goal": {
-        this.handleGoalCommand(parts.slice(1), userId, chatId, platformChatId, msgId);
+        this.handleGoalCommand(parts.slice(1), userId, chatId, effectiveScopeKey, platformChatId, msgId);
         return true;
       }
       case "/loop":
@@ -1620,6 +1862,8 @@ export class Pipeline {
           chatType === "group" ? "group" : "p2p",
           platformChatId,
           msgId,
+          threadId,
+          effectiveScopeKey,
         );
         return true;
       }
@@ -1678,27 +1922,28 @@ export class Pipeline {
       }
       case "/help": {
         this.log.info("builtin command: help", { userId });
-        this.sendHelpCard(chatId, platformChatId, msgId, isAdmin);
+        this.sendHelpCard(chatId, platformChatId, msgId, isAdmin, threadId);
         return true;
       }
       case "/stop": {
         this.log.info("builtin command: stop", { userId, chatId });
-        const activeRun = this.runtimeState.getActiveRun(chatId);
+        const activeRun = this.runtimeState.getActiveRunForScope(effectiveScopeKey);
         const hasActiveRun = !!activeRun;
-        const pendingBefore = this.queue.pendingCount(chatId);
+        const pendingBefore = this.queue.pendingCount(effectiveScopeKey);
         if (activeRun) {
           this.markRuntimeRun(activeRun.runId, "stopped");
         }
-        if (hasActiveRun && this.chatSessions.has(chatId)) {
-          this.cancelChat(chatId).catch(() => {});
+        if (hasActiveRun && this.chatSessions.has(effectiveScopeKey)) {
+          this.cancelChat(effectiveScopeKey, chatId).catch(() => {});
         }
-        if (hasActiveRun || this.queue.isBusy(chatId)) {
-          this.queue.cancel(chatId);
+        if (hasActiveRun || this.queue.isBusy(effectiveScopeKey)) {
+          this.queue.cancel(effectiveScopeKey);
         }
-        const dropped = this.queue.drain(chatId);
+        const dropped = this.queue.drain(effectiveScopeKey);
         this.log.info("stop command applied", {
           userId,
           chatId,
+          scopeKey: effectiveScopeKey,
           activeRunId: activeRun?.runId ?? null,
           activeRunStage: activeRun?.stage ?? null,
           pendingBefore,
@@ -1721,7 +1966,7 @@ export class Pipeline {
       }
       case "/clear": {
         this.log.info("builtin command: clear", { userId, chatId });
-        const dropped = this.queue.drain(chatId);
+        const dropped = this.queue.drain(effectiveScopeKey);
         if (dropped > 0) {
           this.replyText(chatId, platformChatId, msgId, `已清空 ${dropped} 条排队消息。`);
         } else {
@@ -1731,16 +1976,16 @@ export class Pipeline {
       }
       case "/flush": {
         this.log.info("builtin command: flush", { userId, chatId });
-        const pending = this.queue.pendingCount(chatId);
-        const activeRun = this.runtimeState.getActiveRun(chatId);
+        const pending = this.queue.pendingCount(effectiveScopeKey);
+        const activeRun = this.runtimeState.getActiveRunForScope(effectiveScopeKey);
         if (pending === 0) {
           this.replyText(chatId, platformChatId, msgId, "队列是空的，没有需要 flush 的消息。");
         } else if (activeRun) {
           this.markRuntimeRun(activeRun.runId, "stopped");
-          if (this.chatSessions.has(chatId)) {
-            this.cancelChat(chatId).catch(() => {});
+          if (this.chatSessions.has(effectiveScopeKey)) {
+            this.cancelChat(effectiveScopeKey, chatId).catch(() => {});
           }
-          this.queue.cancel(chatId);
+          this.queue.cancel(effectiveScopeKey);
           this.replyText(chatId, platformChatId, msgId, `中断当前回复，合并处理队列中的 ${pending} 条消息。`);
         } else {
           this.replyText(chatId, platformChatId, msgId, `队列中有 ${pending} 条消息，即将处理。`);
@@ -1748,6 +1993,7 @@ export class Pipeline {
         this.log.info("flush command applied", {
           userId,
           chatId,
+          scopeKey: effectiveScopeKey,
           activeRunId: activeRun?.runId ?? null,
           activeRunStage: activeRun?.stage ?? null,
           pending,
@@ -1762,7 +2008,7 @@ export class Pipeline {
         }
         const taskSub = parts[1]?.toLowerCase();
         if (taskSub === "stop") {
-          this.stopAllTasks(chatId, platformChatId, msgId);
+          this.stopAllTasks(chatId, platformChatId, msgId, threadId, effectiveScopeKey);
           return true;
         }
         const taskPrompt = parts.slice(1).join(" ").trim();
@@ -1772,14 +2018,22 @@ export class Pipeline {
         }
         this.log.info("builtin command: task", { userId, chatId, promptLength: taskPrompt.length });
         this.replyText(chatId, platformChatId, msgId, "任务已提交，完成后会发送结果。");
-        this.processIndependentSession(chatId, userId, taskPrompt, taskPrompt.slice(0, 40), "task").catch((err) => {
+        this.processIndependentSession(
+          chatId,
+          userId,
+          taskPrompt,
+          taskPrompt.slice(0, 40),
+          "task",
+          undefined,
+          { scopeKey: effectiveScopeKey, threadId, replyToMsgId: msgId },
+        ).catch((err) => {
           this.log.error("task execution failed", { chatId, error: String(err) });
         });
         return true;
       }
       case "/status": {
         this.log.info("builtin command: status", { userId, chatId });
-        this.sendRunningList(chatId, platformChatId, msgId);
+        this.sendRunningList(chatId, effectiveScopeKey, platformChatId, msgId, threadId);
         return true;
       }
       case "/history": {
@@ -1831,10 +2085,12 @@ export class Pipeline {
     chatType: "p2p" | "group",
     platformChatId: string,
     msgId?: string,
+    threadId?: string,
+    scopeKey?: string,
   ): void {
     const subcommand = args[0]?.toLowerCase() ?? "list";
     if (subcommand === "list" || subcommand === "ls") {
-      this.sendScheduleBuiltinList(mode, chatId, platformChatId, msgId);
+      this.sendScheduleBuiltinList(mode, chatId, platformChatId, msgId, scopeKey);
       return;
     }
     if (subcommand === "help" || subcommand === "--help") {
@@ -1867,7 +2123,7 @@ export class Pipeline {
           this.replyText(chatId, platformChatId, msgId, `loop:${id} 不存在或已经结束。`);
           return;
         }
-        if (job.status === "running") this.cancelActiveLoopRun(id, chatId);
+        if (job.status === "running") this.cancelActiveLoopRun(id, scopeKey ?? chatId);
       } else {
         const job = deleteCronJobForAccess(this.db, id, {
           currentChatId: chatId,
@@ -1893,16 +2149,18 @@ export class Pipeline {
     chatId: string,
     platformChatId: string,
     msgId?: string,
+    scopeKey?: string,
   ): void {
+    const threadId = scopeKey ? parseScopeKey(scopeKey).threadId : undefined;
     const lines: string[] = [];
     if (mode === "loop") {
-      for (const job of listLoopJobs(this.db, chatId)) {
+      for (const job of listLoopJobs(this.db, chatId, threadId)) {
         const progress = job.maxTimes ? `${job.runCount}/${job.maxTimes}` : `${job.runCount} 次`;
         lines.push(`· loop:${job.id} · ${job.status} · 每 ${formatLoopInterval(job.intervalSeconds)} · ${progress}`);
         lines.push(`  ${escapeLarkMarkdownText(job.prompt.replace(/\s+/g, " ").slice(0, 120))}`);
       }
     } else {
-      for (const job of listCronJobs(this.db, chatId)) {
+      for (const job of listCronJobs(this.db, chatId, threadId)) {
         const schedule = job.cronExpr
           ? describeCronSchedule(job.cronExpr, null, job.timezone)
           : formatLocalDateTimeWithTZ(job.runAt!);
@@ -1928,16 +2186,16 @@ export class Pipeline {
     })));
   }
 
-  private cancelActiveLoopRun(id: number, chatId: string): void {
+  private cancelActiveLoopRun(id: number, scopeKey: string): void {
     const active = this.activeLoopRuns.get(id);
-    if (!active || active.chatId !== chatId) return;
+    if (!active || active.scopeKey !== scopeKey) return;
     if (active.runId) this.markRuntimeRun(active.runId, "stopped");
     // 先 abort 当前 queue run，RunManager 会立即结束等待，聊天随后继续处理 pending。
-    this.queue.cancel(chatId);
-    const session = this.chatSessions.get(chatId);
+    this.queue.cancel(scopeKey);
+    const session = this.chatSessions.get(scopeKey);
     if (session) {
       void this.agent.cancelSession(session.agentSession).catch((err) => {
-        this.log.warn("failed to stop cancelled Loop session", { id, chatId, error: String(err) });
+        this.log.warn("failed to stop cancelled Loop session", { id, scopeKey, error: String(err) });
       });
     }
   }
@@ -1948,29 +2206,42 @@ export class Pipeline {
   }
 
   /** 回复文本：有 msgId 时引用回复，否则直接发送，并存入 DB */
-  private replyText(chatId: string, platformChatId: string, msgId: string | undefined, text: string): void {
+  private replyText(
+    chatId: string,
+    platformChatId: string,
+    msgId: string | undefined,
+    text: string,
+    threadId?: string,
+    replyInThread = false,
+  ): void {
     const sendPromise = msgId
-      ? this.transport.sendReply(platformChatId, text, msgId)
+      ? this.transport.sendReply(platformChatId, text, msgId, { replyInThread })
       : this.transport.sendText(platformChatId, text);
     sendPromise.then((pmid) => {
-      this.storeBotResponse(chatId, text, pmid);
+      this.storeBotResponse(chatId, text, pmid, "text", threadId);
     }).catch(() => {});
   }
 
   /**
    * /list：列出所有运行中的会话（主 session + 独立 task），含最近日志。
    */
-  private sendRunningList(chatId: string, platformChatId: string, msgId?: string): void {
+  private sendRunningList(
+    chatId: string,
+    scopeKey: string,
+    platformChatId: string,
+    msgId?: string,
+    threadId?: string,
+  ): void {
     const cliAgent = this.agent as CliAgentBackend<any>;
     const sections: string[] = [];
     let count = 0;
 
     // 主会话 Runtime State
-    const activeRun = this.runtimeState.getActiveRun(chatId);
+    const activeRun = this.runtimeState.getActiveRunForScope(scopeKey);
     if (activeRun) {
       count++;
       const elapsed = formatUptime(Date.now() - activeRun.startedAt);
-      const session = this.chatSessions.get(chatId);
+      const session = this.chatSessions.get(scopeKey);
       const agentSid = (session && typeof cliAgent.getAgentSessionId === "function")
         ? cliAgent.getAgentSessionId(session.agentSession.id)
         : undefined;
@@ -1985,7 +2256,7 @@ export class Pipeline {
       if (agentSid) {
         mainLines.push(`Session: ${agentSid}`);
       }
-      mainLines.push(`本轮: ${activeRun.triggerMessageIds.length} 条消息 · 队列: ${this.queue.pendingCount(chatId)}`);
+      mainLines.push(`本轮: ${activeRun.triggerMessageIds.length} 条消息 · 队列: ${this.queue.pendingCount(scopeKey)}`);
       sections.push(mainLines.join("\n"));
 
       const a = typeof cliAgent.getActivity === "function"
@@ -1996,7 +2267,7 @@ export class Pipeline {
         sections.push(`\`\`\`\n${logBlock}\n\`\`\``);
       }
     } else {
-      const latestRun = this.runtimeState.getRunsForChat(chatId).at(-1);
+      const latestRun = this.runtimeState.getRunsForScope(scopeKey).at(-1);
       if (latestRun?.stage === "failed") {
         sections.push("**最近失败**");
         sections.push([
@@ -2009,6 +2280,7 @@ export class Pipeline {
           botId: this.botIdentity.name,
           chatId,
           limit: 20,
+          threadId,
         });
         const latestDoneEvent = recentEvents.find((event) => event.event === "done");
         const latestFailedEvent = recentEvents.find((event) => event.event === "failed" || event.event === "failed_by_restart");
@@ -2025,7 +2297,7 @@ export class Pipeline {
     }
 
     // 独立 task
-    const tasks = [...this.runningTasks.entries()].filter(([, t]) => t.chatId === chatId);
+    const tasks = [...this.runningTasks.entries()].filter(([, t]) => (t.scopeKey ?? t.chatId) === scopeKey);
     for (const [sessionId, t] of tasks) {
       count++;
       const elapsed = formatUptime(Date.now() - t.startedAt);
@@ -2039,18 +2311,18 @@ export class Pipeline {
       }
     }
 
-    const loopStatus = this.buildLoopStatusSection(chatId);
+    const loopStatus = this.buildLoopStatusSection(chatId, scopeKey);
     if (loopStatus) {
       count += loopStatus.runningCount;
       sections.push(loopStatus.content);
     }
 
     if (count === 0 && sections.length === 0) {
-      this.replyText(chatId, platformChatId, msgId, "当前没有正在执行的任务。");
+      this.replyText(chatId, platformChatId, msgId, "当前没有正在执行的任务。", threadId);
       return;
     }
 
-    const latestDataAt = this.getLatestAgentOutputAt(chatId);
+    const latestDataAt = this.getLatestAgentOutputAt(scopeKey, chatId);
     const latestDataAge = latestDataAt !== undefined
       ? formatRelativeAgeMs(latestDataAt)
       : "无";
@@ -2060,15 +2332,15 @@ export class Pipeline {
     ].join("\n\n");
     const header = count > 0 ? `运行中 · ${count} 个任务|orange` : "Status|blue";
     this.transport.sendCard(platformChatId, header, content, undefined, msgId)
-      .then((pmid) => { this.storeBotResponse(chatId, content, pmid); })
-      .catch((err) => this.log.error("running list card send failed", { chatId, error: String(err) }));
+      .then((pmid) => { this.storeBotResponse(chatId, content, pmid, "text", threadId); })
+      .catch((err) => this.log.error("running list card send failed", { chatId, scopeKey, error: String(err) }));
   }
 
-  private buildLoopStatusSection(chatId: string): {
+  private buildLoopStatusSection(chatId: string, scopeKey: string): {
     content: string;
     runningCount: number;
   } | undefined {
-    const jobs = listLoopJobs(this.db, chatId);
+    const jobs = listLoopJobs(this.db, chatId, parseScopeKey(scopeKey).threadId);
     if (jobs.length === 0) return undefined;
     const lines = ["**🔁 持续跟进**"];
     for (const job of jobs.slice(0, 5)) {
@@ -2094,16 +2366,24 @@ export class Pipeline {
     };
   }
 
-  private stopAllTasks(chatId: string, platformChatId: string, msgId?: string): void {
-    const tasks = [...this.runningTasks.entries()].filter(([, t]) => t.chatId === chatId && t.source === "task");
+  private stopAllTasks(
+    chatId: string,
+    platformChatId: string,
+    msgId?: string,
+    threadId?: string,
+    scopeKey?: string,
+  ): void {
+    const effectiveScopeKey = scopeKey ?? chatId;
+    const tasks = [...this.runningTasks.entries()].filter(([, t]) =>
+      (t.scopeKey ?? t.chatId) === effectiveScopeKey && t.source === "task");
     if (tasks.length === 0) {
-      this.replyText(chatId, platformChatId, msgId, "当前没有运行中的 task。");
+      this.replyText(chatId, platformChatId, msgId, "当前没有运行中的 task。", threadId);
       return;
     }
     for (const [, t] of tasks) {
       t.backend.cancelSession(t.agentSession).catch(() => {});
     }
-    this.replyText(chatId, platformChatId, msgId, `正在停止 ${tasks.length} 个 task。`);
+    this.replyText(chatId, platformChatId, msgId, `正在停止 ${tasks.length} 个 task。`, threadId);
   }
 
   private sendStatus(chatId: string, platformChatId: string, msgId?: string): void {
@@ -2147,7 +2427,7 @@ export class Pipeline {
   }
 
   /** /status：与 watchdog 一致，取 agent activity.lastActiveAt */
-  private getLatestAgentOutputAt(chatId: string): number | undefined {
+  private getLatestAgentOutputAt(scopeKey: string, chatId: string): number | undefined {
     let latest: number | undefined;
     const considerSession = (backend: AgentBackend, agentSessionId: string) => {
       if (!(backend instanceof CliAgentBackend)) return;
@@ -2159,12 +2439,12 @@ export class Pipeline {
       }
     };
 
-    const chatSession = this.chatSessions.get(chatId);
+    const chatSession = this.chatSessions.get(scopeKey);
     if (chatSession) {
       considerSession(this.agent, chatSession.agentSession.id);
     }
     for (const [sessionId, task] of this.runningTasks) {
-      if (task.chatId === chatId) {
+      if ((task.scopeKey ?? task.chatId) === scopeKey) {
         considerSession(task.backend, sessionId);
       }
     }
@@ -2180,10 +2460,11 @@ export class Pipeline {
     args: string[],
     userId: string,
     chatId: string,
+    scopeKey: string,
     platformChatId: string,
     msgId?: string,
   ): void {
-    const existing = this.activeGoals.get(chatId);
+    const existing = this.activeGoals.get(scopeKey);
     if (!existing) {
       this.replyText(chatId, platformChatId, msgId, "当前没有进行中的 Goal。");
       return;
@@ -2194,11 +2475,17 @@ export class Pipeline {
   }
 
   /** nbt goal finish：Agent 显式结束请求（令牌 + Run 一致性校验；三条件结算在回合收尾时做）。 */
-  async executeGoalFinishCommand(chatId: string, command: GoalFinishCommand, scheduleToken?: string): Promise<{ output: string }> {
-    const goal = this.activeGoals.get(chatId);
+  async executeGoalFinishCommand(
+    chatId: string,
+    command: GoalFinishCommand,
+    scheduleToken?: string,
+    scope?: { scopeKey?: string; threadId?: string },
+  ): Promise<{ output: string }> {
+    const scopeKey = scope?.scopeKey ?? chatId;
+    const goal = this.activeGoals.get(scopeKey);
     if (!goal) throw new Error("当前没有进行中的 Goal");
     if (goal.endedAt) throw new Error("Goal 已结束");
-    const activeRun = this.runtimeState.getActiveRun(chatId);
+    const activeRun = this.runtimeState.getActiveRunForScope(scopeKey);
     if (!activeRun || activeRun.stage !== "agent_running") {
       throw new Error("Goal finish 必须在当前 Goal 的活动回合内执行");
     }
@@ -2206,7 +2493,7 @@ export class Pipeline {
     if (goal.startRunId && activeRun.runId !== goal.startRunId) {
       throw new Error("Goal finish 必须来自该 Goal 的回合");
     }
-    if (scheduleToken && scheduleToken !== this.chatScheduleTokens.get(chatId)) {
+    if (scheduleToken && scheduleToken !== this.chatScheduleTokens.get(scopeKey)) {
       throw new Error("Goal finish 请求缺少或携带错误的会话令牌");
     }
     goal.finishRequested = true;
@@ -2218,22 +2505,28 @@ export class Pipeline {
   }
 
   /** nbt goal start：Agent 主动进入 Goal 模式。当前回合计入第 1 轮（process 检测 startRunId 后由 runGoalLoop 接管）。 */
-  async executeGoalStartCommand(chatId: string, objective: string, scheduleToken?: string): Promise<{ output: string }> {
+  async executeGoalStartCommand(
+    chatId: string,
+    objective: string,
+    scheduleToken?: string,
+    scope?: { scopeKey?: string; threadId?: string },
+  ): Promise<{ output: string }> {
+    const scopeKey = scope?.scopeKey ?? chatId;
     if (objective.length > GOAL_DEFAULTS.maxObjectiveLength) {
       throw new Error(`目标过长（上限 ${GOAL_DEFAULTS.maxObjectiveLength} 字符）`);
     }
-    const existing = this.activeGoals.get(chatId);
+    const existing = this.activeGoals.get(scopeKey);
     if (existing && !existing.endedAt) {
       throw new Error("已有进行中的 Goal");
     }
     if ([...this.activeGoals.values()].length >= GOAL_DEFAULTS.maxConcurrentGoals) {
       throw new Error("全局并发 Goal 已达上限");
     }
-    const activeRun = this.runtimeState.getActiveRun(chatId);
+    const activeRun = this.runtimeState.getActiveRunForScope(scopeKey);
     if (!activeRun || activeRun.stage !== "agent_running") {
       throw new Error("nbt goal start 必须在当前 Agent 回合内调用");
     }
-    if (scheduleToken && scheduleToken !== this.chatScheduleTokens.get(chatId)) {
+    if (scheduleToken && scheduleToken !== this.chatScheduleTokens.get(scopeKey)) {
       throw new Error("nbt goal start 请求缺少或携带错误的会话令牌");
     }
     const goal: ActiveGoal = {
@@ -2244,8 +2537,8 @@ export class Pipeline {
       progressSteps: [],
       progressStatus: "",
     };
-    this.activeGoals.set(chatId, goal);
-    this.log.info("goal started by agent", { chatId, objectiveLength: objective.length, runId: activeRun.runId });
+    this.activeGoals.set(scopeKey, goal);
+    this.log.info("goal started by agent", { chatId, scopeKey, objectiveLength: objective.length, runId: activeRun.runId });
     return { output: `goal started: ${objective.slice(0, 100)}` };
   }
 
@@ -2253,12 +2546,18 @@ export class Pipeline {
    * nbt goal progress：中间轮静默记录进展（不发送 IM）。
    * content = 本次步骤（一两句话，保留最近 N 条）；status = 全局进展状态（覆盖式：任务整体进行到哪、还剩什么）。
    */
-  async executeGoalProgressCommand(chatId: string, content: string, status?: string): Promise<{ output: string }> {
-    const goal = this.activeGoals.get(chatId);
+  async executeGoalProgressCommand(
+    chatId: string,
+    content: string,
+    status?: string,
+    scope?: { scopeKey?: string; threadId?: string },
+  ): Promise<{ output: string }> {
+    const scopeKey = scope?.scopeKey ?? chatId;
+    const goal = this.activeGoals.get(scopeKey);
     if (!goal) throw new Error("当前没有进行中的 Goal");
     if (goal.endedAt) throw new Error("Goal 已结束");
     // 与 start/finish 同级：必须在当前 Goal 的活动回合内调用
-    const activeRun = this.runtimeState.getActiveRun(chatId);
+    const activeRun = this.runtimeState.getActiveRunForScope(scopeKey);
     if (!activeRun || activeRun.stage !== "agent_running") {
       throw new Error("nbt goal progress 必须在当前 Goal 的活动回合内执行");
     }
@@ -2283,9 +2582,17 @@ export class Pipeline {
   }
 
   /** nbt restart --wake：重启完成后注入主会话任务（在原上下文触发 Agent 回合）。 */
-  async executeWakeCommand(chatId: string, prompt: string): Promise<{ output: string }> {
+  async executeWakeCommand(
+    chatId: string,
+    prompt: string,
+    scope?: { scopeKey?: string; threadId?: string; replyToMsgId?: string },
+  ): Promise<{ output: string }> {
+    const scopeKey = scope?.scopeKey ?? chatId;
     this.queue.push({
       chatId,
+      scopeKey,
+      threadId: scope?.threadId,
+      replyToMsgId: scope?.replyToMsgId,
       text: prompt,
       timestamp: Date.now(),
       triggerKind: "restart_wake",
@@ -2314,25 +2621,27 @@ export class Pipeline {
   /** Goal 主循环：同一个 Run 内连续多轮执行，直到 Agent 调用 finish 或保护触发。 */
   private async runGoalLoop(
     chatId: string,
+    scopeKey: string,
     goal: ActiveGoal,
     runId: string | undefined,
     signal?: AbortSignal,
     initialTurn?: RunAgentResult,
   ): Promise<void> {
-    const chatSession = await this.getOrCreateSession(chatId, undefined, signal);
+    const threadId = parseScopeKey(scopeKey).threadId;
+    const chatSession = await this.getOrCreateSession(scopeKey, chatId, threadId, undefined, signal);
     if (!chatSession) {
       this.log.error("goal run without active session", { chatId, runId: runId ?? null });
       this.finishGoal(chatId, goal, "failed", "会话不可用");
-      this.cleanupGoal(chatId, goal, runId);
+      this.cleanupGoal(chatId, scopeKey, goal, runId);
       return;
     }
     let consecutiveFailures = 0;
 
     // 初始回合（Agent 通过 nbt goal start 主动进入）：本轮已执行（turnCount 在 start 时置 1），直接处理其结果
     if (initialTurn) {
-      const settled = await this.consumeGoalTurn(chatSession, chatId, goal, runId, initialTurn, signal);
+      const settled = await this.consumeGoalTurn(chatSession, chatId, scopeKey, goal, runId, initialTurn, signal);
       if (settled) {
-        this.cleanupGoal(chatId, goal, runId);
+        this.cleanupGoal(chatId, scopeKey, goal, runId);
         return;
       }
     }
@@ -2377,17 +2686,18 @@ export class Pipeline {
       }
       consecutiveFailures = 0;
 
-      const settled = await this.consumeGoalTurn(chatSession, chatId, goal, runId, agentResult, signal);
+      const settled = await this.consumeGoalTurn(chatSession, chatId, scopeKey, goal, runId, agentResult, signal);
       if (settled) break;
     }
 
-    this.cleanupGoal(chatId, goal, runId);
+    this.cleanupGoal(chatId, scopeKey, goal, runId);
   }
 
   /** 处理一轮 Goal 回合结果：停止/结算（交付）/未结束时落库统计。返回 true = Goal 已结束。 */
   private async consumeGoalTurn(
     chatSession: ChatSession,
     chatId: string,
+    scopeKey: string,
     goal: ActiveGoal,
     runId: string | undefined,
     agentResult: RunAgentResult,
@@ -2406,7 +2716,7 @@ export class Pipeline {
       const outcome = goal.outcome === "achieved" ? "achieved" : "not_achieved";
       const conclusion = goal.conclusion ?? response.text.trim().slice(0, 500);
       // 引用触发消息（/goal 那条）；只发一次最终正文，发送成功后结算
-      const activeRun = this.runtimeState.getActiveRun(chatId);
+      const activeRun = this.runtimeState.getActiveRunForScope(scopeKey);
       const replyToMsgId = activeRun?.replyToPlatformMsgId ?? undefined;
       const delivered = await this.deliverGoalFinalResponse(chatSession, goal, response, replyToMsgId, signal);
       this.finishGoal(chatId, goal, outcome, conclusion, delivered);
@@ -2427,6 +2737,7 @@ export class Pipeline {
       role: "assistant",
       contentText: response.text,
       platform: this.botIdentity.platform,
+      threadId: chatSession.threadId,
     });
     const cumulativeBytes = this.agent.getCumulativeBytes?.(chatSession.agentSession.id) ?? 0;
     const agentSessionId = this.agent.getAgentSessionId?.(chatSession.agentSession.id);
@@ -2452,9 +2763,14 @@ export class Pipeline {
   }
 
   /** Goal 结束清理：状态与 Run 收尾（队列释放由 process 返回后 queue 接管）。 */
-  private cleanupGoal(chatId: string, goal: ActiveGoal, runId: string | undefined): void {
-    this.activeGoals.delete(chatId);
-    this.activeScheduleAgentCommands.delete(chatId);
+  private cleanupGoal(
+    chatId: string,
+    scopeKey: string,
+    goal: ActiveGoal,
+    runId: string | undefined,
+  ): void {
+    this.activeGoals.delete(scopeKey);
+    this.activeScheduleAgentCommands.delete(scopeKey);
     if (runId) {
       if (goal.outcome === "failed") {
         this.markRuntimeRun(runId, "failed", goal.conclusion ?? "goal failed");
@@ -2508,6 +2824,8 @@ export class Pipeline {
         model: response.model,
       }),
       replyToMsgId,
+      replyInThread: Boolean(chatSession.threadId),
+      allowChatFallback: !chatSession.threadId,
       signal,
     });
     if (!result.ok) {
@@ -2529,9 +2847,23 @@ export class Pipeline {
     description: string,
     cronJobId?: number,
     claimToken?: string,
+    threadId?: string,
   ): Promise<void> {
     const cronRun = cronJobId !== undefined && claimToken !== undefined ? { cronJobId, claimToken } : undefined;
-    return this.processIndependentSession(chatId, userId, prompt, description, "cron", cronRun);
+    const cronJob = cronJobId !== undefined ? getCronJob(this.db, cronJobId) : undefined;
+    return this.processIndependentSession(
+      chatId,
+      userId,
+      prompt,
+      description,
+      "cron",
+      cronRun,
+      {
+        scopeKey: threadId ? buildScopeKey(chatId, threadId) : chatId,
+        threadId,
+        replyToMsgId: cronJob?.replyToMsgId ?? undefined,
+      },
+    );
   }
 
   async reportCronJobFailure(
@@ -2539,6 +2871,7 @@ export class Pipeline {
     description: string,
     error: string,
     paused: boolean,
+    threadId?: string,
   ): Promise<void> {
     let platformChatId = this.platformChatIds.get(chatId);
     if (!platformChatId) {
@@ -2556,8 +2889,11 @@ export class Pipeline {
       platformChatId,
       `⏰ ${description || "定时任务"}|${paused ? "red" : "orange"}`,
       content,
+      undefined,
+      undefined,
+      { replyInThread: Boolean(threadId) },
     );
-    this.storeBotResponse(chatId, content, platformMsgId);
+    this.storeBotResponse(chatId, content, platformMsgId, "text", threadId);
   }
 
   /** Loop Scheduler 只投递 ID；任务内容在真正轮到该 chat 时重新从 DB 读取。 */
@@ -2570,16 +2906,34 @@ export class Pipeline {
         | undefined;
       if (row) this.platformChatIds.set(job.chatId, row.platform_id);
     }
-    this.queue.enqueueLoop(job.chatId, job.id);
-    this.log.info("loop job dispatched", { chatId: job.chatId, loopJobId: job.id });
+    this.queue.enqueueLoop(
+      job.chatId,
+      job.id,
+      job.threadId ?? undefined,
+      job.replyToMsgId ?? undefined,
+    );
+    this.log.info("loop job dispatched", {
+      chatId: job.chatId,
+      scopeKey: job.threadId ? buildScopeKey(job.chatId, job.threadId) : job.chatId,
+      loopJobId: job.id,
+    });
   }
 
   /** 进程恢复：从 DB 恢复 active 用户会话，重建 backend session（--resume 旧上下文）。
    * 只恢复 source='user' 的会话——cron/task 独立会话不占用 chat 槽位，
    * 避免重启后用户消息 resume 进定时任务会话导致主会话失忆。 */
   async recover(): Promise<void> {
+    const activeCount = this.db.prepare(
+      "SELECT COUNT(*) AS count FROM sessions WHERE status = 'active' AND source = 'user'",
+    ).get() as { count: number } | undefined;
+    this.log.info("lazy session recovery: active user sessions kept unattached", {
+      count: activeCount?.count ?? 0,
+      eagerAttach: false,
+    });
+    return;
+
     const rows = this.db.prepare(`
-      SELECT s.id, s.chat_id, s.user_id, s.agent_session_id, s.backend_type, c.platform_id, c.type
+      SELECT s.id, s.chat_id, s.thread_id, s.user_id, s.agent_session_id, s.backend_type, c.platform_id, c.type
       FROM sessions s
       JOIN chats c ON s.chat_id = c.id
       WHERE s.status = 'active' AND s.source = 'user'
@@ -2587,6 +2941,7 @@ export class Pipeline {
     `).all() as Array<{
       id: string;
       chat_id: string;
+      thread_id: string | null;
       user_id: string | null;
       agent_session_id: string | null;
       backend_type: AgentBackendType | null;
@@ -2596,17 +2951,20 @@ export class Pipeline {
 
     if (rows.length === 0) return;
 
-    // 每个 chat 只恢复最近的一个 session，跳过重复
+    // 每个 scope 只恢复最近的一个 session，跳过重复
     const seen = new Set<string>();
     const uniqueRows = rows.filter((r) => {
-      if (seen.has(r.chat_id)) return false;
-      seen.add(r.chat_id);
+      const key = buildScopeKey(r.chat_id, r.thread_id ?? undefined);
+      if (seen.has(key)) return false;
+      seen.add(key);
       return true;
     });
 
     this.log.info("recovering active sessions", { count: uniqueRows.length });
 
     for (const row of uniqueRows) {
+      const scopeKey = buildScopeKey(row.chat_id, row.thread_id ?? undefined);
+      const threadId = row.thread_id ?? undefined;
       const chatType = (row.type ?? "p2p") as "p2p" | "group";
       const storedBackendType = normalizeBackend(row.backend_type ?? undefined);
       const canResumeRecoveredSession = storedBackendType !== undefined && storedBackendType === this.backendType;
@@ -2634,10 +2992,10 @@ export class Pipeline {
       const userRow = (!isGroup && row.user_id)
         ? this.db.prepare("SELECT name FROM users WHERE id = ?").get(row.user_id) as { name: string | null } | undefined
         : undefined;
-      const isAdmin = row.user_id ? this.adminRoles.has(row.user_id) : false;
+      const isAdmin = row.user_id ? this.adminRoles.has(row.user_id!) : false;
       const sessionProfile = buildImportantContext(this.db, {
         botName: this.botIdentity.name,
-        botLabel: this.botUserId ? getUserShortLabel(this.db, this.botUserId) : undefined,
+        botLabel: this.botUserId ? getUserShortLabel(this.db, this.botUserId!) : undefined,
         platform: this.botIdentity.platform,
         userName: userRow?.name ?? undefined,
         userId: isGroup ? undefined : (row.user_id ?? undefined),
@@ -2649,7 +3007,8 @@ export class Pipeline {
       });
       const stableContext = this.buildStableSystemContext();
       const scheduleToken = randomUUID();
-      this.chatScheduleTokens.set(row.chat_id, scheduleToken);
+      this.chatScheduleTokens.set(scopeKey, scheduleToken);
+      this.tokenToScope.set(scheduleToken, scopeKey);
 
       try {
         const agentSession = await this.createAgentSession({
@@ -2673,21 +3032,23 @@ export class Pipeline {
         // fallback 模式下：仅新建 session 时需要注入（resume 的 session 已有上下文）
         const isResuming = canResumeRecoveredSession && !!row.agent_session_id;
         if (!isResuming) {
-          this.pendingMessageContext.set(row.chat_id, sessionProfile);
+          this.pendingMessageContext.set(scopeKey, sessionProfile);
         }
         if (this.agent.needsStableUserPrefix() && stableContext && !isResuming) {
-          this.pendingStableContext.set(row.chat_id, stableContext);
+          this.pendingStableContext.set(scopeKey, stableContext);
         }
 
-        this.chatSessions.set(row.chat_id, {
+        this.chatSessions.set(scopeKey, {
           agentSession,
           sessionId: row.id,
           platformChatId: row.platform_id,
           userId: row.user_id ?? "",
+          threadId,
+          isolated: Boolean(threadId),
           hasReplied: true, // recovered sessions skip reply-to
         });
         this.platformChatIds.set(row.chat_id, row.platform_id);
-        if (row.user_id) this.chatUserIds.set(row.chat_id, row.user_id);
+        if (row.user_id) this.chatUserIds.set(row.chat_id, row.user_id!);
 
         this.log.info("session recovered", {
           chatId: row.chat_id,
@@ -2724,7 +3085,10 @@ export class Pipeline {
     chatId: string, userId: string, prompt: string, description: string,
     source: "cron" | "task",
     cronRun?: { cronJobId: number; claimToken: string },
+    scope?: { scopeKey?: string; threadId?: string; replyToMsgId?: string },
   ): Promise<void> {
+    const threadId = scope?.threadId;
+    const scopeKey = scope?.scopeKey ?? chatId;
     // 从入口开始跟踪完整生命周期（含清理），优雅关闭只有在全部收尾后才放行 DB。
     this.independentRunCount += 1;
     try {
@@ -2787,6 +3151,8 @@ export class Pipeline {
       importantContext: stableContext || undefined,
       userId: sessionUserId,
       chatId,
+      scopeKey,
+      threadId,
       chatType,
       dbPath: this.dbPath,
       botId: this.botIdentity.platformBotId,
@@ -2800,9 +3166,9 @@ export class Pipeline {
     // Create session record
     const sessionId = randomUUID().slice(0, 8);
     this.db.prepare(`
-      INSERT INTO sessions (id, chat_id, user_id, source, status, started_at, last_active_at, backend_type)
-      VALUES (?, ?, ?, ?, 'active', datetime('now'), datetime('now'), ?)
-    `).run(sessionId, chatId, userId, source, sessionBackendType);
+      INSERT INTO sessions (id, chat_id, user_id, source, status, thread_id, started_at, last_active_at, backend_type)
+      VALUES (?, ?, ?, ?, 'active', ?, datetime('now'), datetime('now'), ?)
+    `).run(sessionId, chatId, userId, source, threadId ?? null, sessionBackendType);
 
     // 独立任务的 prompt 只属于 session transcript，不是平台收到的用户消息。
     storeMessage(this.db, {
@@ -2813,6 +3179,7 @@ export class Pipeline {
       contentText: prompt,
       contentType: "internal_prompt",
       platform: this.botIdentity.platform,
+      threadId,
     });
 
     // Inject context prefix
@@ -2834,7 +3201,7 @@ export class Pipeline {
 
     this.runningTasks.set(agentSession.id, {
       agentSession, backend: sessionBackend, backendType: sessionBackendType,
-      chatId, description, startedAt: Date.now(), source,
+      chatId, scopeKey, description, startedAt: Date.now(), source,
       cronJobId: cronRun?.cronJobId,
       cronClaimToken: cronRun?.claimToken,
     });
@@ -2886,6 +3253,9 @@ export class Pipeline {
         header,
         content,
         footer,
+        replyToMsgId: scope?.replyToMsgId,
+        replyInThread: Boolean(threadId),
+        allowChatFallback: !threadId,
       });
       if (!sendResult.ok) {
         this.log.warn(`${source} final response delivery failed`, {
@@ -2972,36 +3342,42 @@ export class Pipeline {
   }
 
   /** /new：归档当前 session，让下一条消息自然创建新 session。 */
-  private async resetSession(chatId: string, platformChatId: string, msgId?: string): Promise<void> {
-    await this.stopActiveRunForSessionTransition(chatId);
-    await this.waitForSessionCreation(chatId);
-    await this.archiveSession(chatId)
+  private async resetSession(
+    scopeKey: string,
+    chatId: string,
+    platformChatId: string,
+    msgId?: string,
+    threadId?: string,
+  ): Promise<void> {
+    await this.stopActiveRunForSessionTransition(scopeKey, chatId);
+    await this.waitForSessionCreation(scopeKey);
+    await this.archiveSession(scopeKey, chatId)
       .then((status) => {
         const text = status === false
           ? "当前没有进行中的会话；下一条消息会新建会话。"
           : status === "archive_failed"
             ? "已开始新会话，当前上下文已清空；旧会话记录归档失败。"
             : "已开始新会话，当前上下文已清空。";
-        this.replyText(chatId, platformChatId, msgId, text);
+        this.replyText(chatId, platformChatId, msgId, text, threadId);
       })
       .catch((err) => {
         this.log.error("reset session failed", { chatId, error: String(err) });
-        this.replyText(chatId, platformChatId, msgId, `新建会话失败: ${String(err)}`);
+        this.replyText(chatId, platformChatId, msgId, `新建会话失败: ${String(err)}`, threadId);
       });
   }
 
-  private startSessionTransition(chatId: string, task: () => Promise<void>): void {
-    if (this.sessionTransitionLocks.has(chatId)) return;
+  private startSessionTransition(scopeKey: string, task: () => Promise<void>): void {
+    if (this.sessionTransitionLocks.has(scopeKey)) return;
 
     const transitionPromise = task()
       .finally(() => {
-        if (this.sessionTransitionLocks.get(chatId) === transitionPromise) {
-          this.sessionTransitionLocks.delete(chatId);
+        if (this.sessionTransitionLocks.get(scopeKey) === transitionPromise) {
+          this.sessionTransitionLocks.delete(scopeKey);
         }
-        if (!this.globalSessionTransition) this.drainPendingTransitionMessages(chatId);
+        if (!this.globalSessionTransition) this.drainPendingTransitionMessages(scopeKey);
       });
 
-    this.sessionTransitionLocks.set(chatId, transitionPromise);
+    this.sessionTransitionLocks.set(scopeKey, transitionPromise);
   }
 
   private startGlobalSessionTransition(_triggerChatId: string, task: () => Promise<void>): void {
@@ -3018,44 +3394,44 @@ export class Pipeline {
     this.globalSessionTransition = transitionPromise;
   }
 
-  private async stopActiveRunForSessionTransition(chatId: string): Promise<void> {
-    const activeRun = this.runtimeState.getActiveRun(chatId);
+  private async stopActiveRunForSessionTransition(scopeKey: string, chatId?: string): Promise<void> {
+    const activeRun = this.runtimeState.getActiveRunForScope(scopeKey);
     const shouldCancelAgent = !!activeRun && !isTerminalRunStage(activeRun.stage);
     if (shouldCancelAgent) this.markRuntimeRun(activeRun.runId, "stopped");
-    if (activeRun || this.queue.isBusy(chatId)) this.queue.cancel(chatId);
-    const session = this.chatSessions.get(chatId);
+    if (activeRun || this.queue.isBusy(scopeKey)) this.queue.cancel(scopeKey);
+    const session = this.chatSessions.get(scopeKey);
     if (session && shouldCancelAgent) await this.agent.cancelSession(session.agentSession).catch((err) => {
-      this.log.warn("failed to cancel session before transition", { chatId, error: String(err) });
+      this.log.warn("failed to cancel session before transition", { chatId, scopeKey, error: String(err) });
     });
   }
 
-  private async waitForSessionCreation(chatId: string): Promise<void> {
-    const creation = this.sessionCreations.get(chatId);
+  private async waitForSessionCreation(scopeKey: string): Promise<void> {
+    const creation = this.sessionCreations.get(scopeKey);
     if (creation) await creation.catch((err) => {
-      this.log.warn("session creation failed during transition", { chatId, error: String(err) });
+      this.log.warn("session creation failed during transition", { scopeKey, error: String(err) });
     });
   }
 
   private enqueuePendingTransitionMessage(
-    chatId: string,
+    scopeKey: string,
     msg: NormalizedMessage,
     inboxId?: number,
     claimToken?: string,
     recoveredMessageId?: number,
   ): Promise<void> {
     return new Promise<void>((resolve, reject) => {
-      const pending = this.pendingTransitionMessages.get(chatId) ?? [];
+      const pending = this.pendingTransitionMessages.get(scopeKey) ?? [];
       pending.push({ msg, inboxId, claimToken, recoveredMessageId, resolve, reject });
-      this.pendingTransitionMessages.set(chatId, pending);
+      this.pendingTransitionMessages.set(scopeKey, pending);
       this.markQueuedMessage(msg.chatPlatformId, msg.platformMsgId);
     });
   }
 
-  private drainPendingTransitionMessages(chatId: string): void {
-    const pending = this.pendingTransitionMessages.get(chatId);
+  private drainPendingTransitionMessages(scopeKey: string): void {
+    const pending = this.pendingTransitionMessages.get(scopeKey);
     if (!pending || pending.length === 0) return;
 
-    this.pendingTransitionMessages.delete(chatId);
+    this.pendingTransitionMessages.delete(scopeKey);
     for (const entry of pending) {
       if (entry.msg.platformMsgId) {
         this.processedMsgIds.delete(entry.msg.platformMsgId);
@@ -3217,15 +3593,17 @@ export class Pipeline {
       // A missing CLI or unsupported platform must leave the current backend untouched.
       const newBackend = await this.backendResolver!(target);
       const transitioningChats = new Set(this.chatSessions.keys());
-      for (const cid of this.platformChatIds.keys()) {
-        if (this.queue.isBusy(cid) || this.runtimeState.getActiveRun(cid)) transitioningChats.add(cid);
+      for (const scopeKey of this.queue.getScopeKeys()) {
+        if (this.queue.isBusy(scopeKey) || this.runtimeState.getActiveRunForScope(scopeKey)) {
+          transitioningChats.add(scopeKey);
+        }
       }
-      for (const cid of transitioningChats) {
-        await this.stopActiveRunForSessionTransition(cid);
+      for (const scopeKey of transitioningChats) {
+        await this.stopActiveRunForSessionTransition(scopeKey);
       }
       await Promise.allSettled([...this.sessionCreations.values()]);
-      for (const cid of [...this.chatSessions.keys()]) {
-        await this.archiveSession(cid);
+      for (const scopeKey of [...this.chatSessions.keys()]) {
+        await this.archiveSession(scopeKey);
       }
 
       // 保存当前 backend 的模型配置
@@ -3660,7 +4038,13 @@ export class Pipeline {
   }
 
   /** 发送 /help 卡片 */
-  private sendHelpCard(chatId: string, platformChatId: string, msgId: string | undefined, isAdmin: boolean): void {
+  private sendHelpCard(
+    chatId: string,
+    platformChatId: string,
+    msgId: string | undefined,
+    isAdmin: boolean,
+    threadId?: string,
+  ): void {
     const lines = [
       "⚡ **常用命令**",
       "`/new`　　新会话（清空当前上下文）",
@@ -3690,8 +4074,23 @@ export class Pipeline {
         "`/<cmd>`　　执行 shell 命令",
       );
     }
+    if (threadId) {
+      lines.push(
+        "",
+        "ℹ️ **话题作用域**",
+        "`/stop`、`/flush`、`/clear`、`/new`、`/status` 只作用于当前话题。",
+        "工作目录仍由同群所有话题共享；长任务请用 `/task`。",
+      );
+    }
     const content = lines.join("\n");
-    const send = this.transport.sendCard(platformChatId, "帮助|blue", content, undefined, msgId);
+    const send = this.transport.sendCard(
+      platformChatId,
+      "帮助|blue",
+      content,
+      undefined,
+      msgId,
+      { replyInThread: Boolean(threadId) },
+    );
     send
       .then((pmid) => { this.storeBotResponse(chatId, content, pmid); })
       .catch(() => {});
@@ -3942,8 +4341,18 @@ export class Pipeline {
     }
   }
 
-  private async process(chatId: string, mergedText: string, messages: QueuedMessage[] = [], signal?: AbortSignal, runId?: string): Promise<void> {
-    const transition = this.globalSessionTransition ?? this.sessionTransitionLocks.get(chatId);
+  private async process(
+    scopeKey: string,
+    mergedText: string,
+    messages: QueuedMessage[] = [],
+    signal?: AbortSignal,
+    runId?: string,
+  ): Promise<void> {
+    const parsedScope = parseScopeKey(scopeKey);
+    const chatId = parsedScope.chatId;
+    const threadId = parsedScope.threadId;
+    const isolated = Boolean(threadId);
+    const transition = this.globalSessionTransition ?? this.sessionTransitionLocks.get(scopeKey);
     if (transition) {
       this.log.info("queued run waiting for session transition", { chatId, runId: runId ?? null });
       await transition;
@@ -3967,11 +4376,11 @@ export class Pipeline {
 
     // Goal 回合：该 chat 已有未结束 Goal 且本轮是它的续轮。
     // 一个 Goal 从开始到结束始终是同一个 Run；队列保持 busy，后续消息自然 pending。
-    const existingGoal = this.activeGoals.get(chatId);
+    const existingGoal = this.activeGoals.get(scopeKey);
     if (existingGoal && !existingGoal.endedAt && (existingGoal.finishRunId === runId || existingGoal.turnCount > 0)) {
       const goalChatType = (this.db.prepare("SELECT type FROM chats WHERE id = ?").get(chatId) as { type: string } | undefined)?.type;
       this.noteBotCollabTurn(chatId, goalChatType === "group" ? "group" : "p2p", messages);
-      await this.runGoalLoop(chatId, existingGoal, runId, signal);
+      await this.runGoalLoop(chatId, scopeKey, existingGoal, runId, signal);
       return;
     }
 
@@ -3980,7 +4389,7 @@ export class Pipeline {
     const clearActiveLoopRun = () => {
       if (!activeLoopJob) return;
       const active = this.activeLoopRuns.get(activeLoopJob.id);
-      if (active?.chatId === chatId && active.runId === runId) {
+      if (active?.scopeKey === scopeKey && active.runId === runId) {
         this.activeLoopRuns.delete(activeLoopJob.id);
       }
     };
@@ -4002,18 +4411,18 @@ export class Pipeline {
         this.markRuntimeRun(runId, "done");
         return;
       }
-      this.activeLoopRuns.set(activeLoopJob.id, { chatId, runId });
+      this.activeLoopRuns.set(activeLoopJob.id, { chatId, scopeKey, runId });
     }
 
-    const platformChatId = this.chatSessions.get(chatId)?.platformChatId
+    const platformChatId = this.chatSessions.get(scopeKey)?.platformChatId
       ?? this.platformChatIds.get(chatId);
 
     // 从消息列表中取最后一条的 platformMsgId 作为 reply 目标。
     const lastMsg = messages.length > 0 ? messages[messages.length - 1] : undefined;
-    let triggerMsgId = lastMsg?.platformMsgId ?? this.triggerMsgIds.get(chatId);
-    this.triggerMsgIds.delete(chatId);
+    let triggerMsgId = lastMsg?.replyToMsgId ?? lastMsg?.platformMsgId ?? this.triggerMsgIds.get(scopeKey);
+    this.triggerMsgIds.delete(scopeKey);
     // Loop / 重启唤醒没有对应的当前用户消息，不引用历史消息，避免挂错位置。
-    if (isLoopTurn || isWakeTurn) triggerMsgId = undefined;
+    if (isWakeTurn) triggerMsgId = lastMsg?.replyToMsgId ?? undefined;
 
     const isMerged = messages.length > 1;
     const reactionMsgIds = messages
@@ -4039,7 +4448,7 @@ export class Pipeline {
 
       const msgIds = messages.map((m) => m.dbMsgId).filter((id): id is number => id != null);
       const firstMsgId = msgIds.length > 0 ? Math.min(...msgIds) : undefined;
-      const chatSession = await this.getOrCreateSession(chatId, firstMsgId, signal);
+      const chatSession = await this.getOrCreateSession(scopeKey, chatId, threadId, firstMsgId, signal);
       const chatTypeRow = this.db.prepare("SELECT type FROM chats WHERE id = ?").get(chatId) as { type: string } | undefined;
       const processChatType = (chatTypeRow?.type ?? "p2p") as "p2p" | "group";
 
@@ -4049,16 +4458,16 @@ export class Pipeline {
           ? `【重启完成】\n${mergedText}`
           : mergedText;
       let messageToSend = baseMessage;
-      const stableCtx = this.pendingStableContext.get(chatId);
-      const messageCtx = this.pendingMessageContext.get(chatId);
-      const compactRecovery = this.pendingCompactRecovery.has(chatId);
-      const isNewSessionPrompt = this.pendingNewSessionReminder.has(chatId);
+      const stableCtx = this.pendingStableContext.get(scopeKey);
+      const messageCtx = this.pendingMessageContext.get(scopeKey);
+      const compactRecovery = this.pendingCompactRecovery.has(scopeKey);
+      const isNewSessionPrompt = this.pendingNewSessionReminder.has(scopeKey);
       if (stableCtx || messageCtx || compactRecovery || isNewSessionPrompt) {
         const parts: string[] = [];
         if (stableCtx) {
           parts.push(stableCtx);
         }
-        if (messageCtx) {
+        if (messageCtx && !compactRecovery) {
           parts.push(messageCtx);
         }
         if (compactRecovery) {
@@ -4083,10 +4492,10 @@ export class Pipeline {
         if (isNewSessionPrompt) {
           parts.push(NEW_SESSION_SEARCH_REMINDER);
         }
-        this.pendingStableContext.delete(chatId);
-        this.pendingMessageContext.delete(chatId);
-        this.pendingCompactRecovery.delete(chatId);
-        this.pendingNewSessionReminder.delete(chatId);
+        this.pendingStableContext.delete(scopeKey);
+        this.pendingMessageContext.delete(scopeKey);
+        this.pendingCompactRecovery.delete(scopeKey);
+        this.pendingNewSessionReminder.delete(scopeKey);
         messageToSend = `${parts.join("\n\n")}\n\n${baseMessage}`;
       }
 
@@ -4121,8 +4530,8 @@ export class Pipeline {
 
       if (signal?.aborted) {
         this.log.info("process cancelled before sending to agent", { chatId });
-        if (!isLoopTurn && !this.globalSessionTransition && !this.sessionTransitionLocks.has(chatId)) {
-          await this.archiveSession(chatId);
+        if (!isLoopTurn && !this.globalSessionTransition && !this.sessionTransitionLocks.has(scopeKey)) {
+          await this.archiveSession(scopeKey, chatId);
         }
         settleLoop({ success: false, cancelled: true });
         this.markRuntimeRun(runId, "stopped");
@@ -4140,7 +4549,7 @@ export class Pipeline {
         assignMessages(msgIds);
       }
 
-      this.noteBotCollabTurn(chatId, processChatType, messages);
+      this.noteBotCollabTurn(scopeKey, processChatType, messages);
 
       this.log.info("sending to agent", {
         chatId,
@@ -4154,12 +4563,12 @@ export class Pipeline {
         .filter((senderId): senderId is string => !!senderId))];
       const commandUserId = latestSenderId ?? activeLoopJob?.creatorUserId ?? chatSession.userId;
       const agentResult = await (async () => {
-        this.activeScheduleAgentCommands.set(chatId, {
+        this.activeScheduleAgentCommands.set(scopeKey, {
           runId: runId!,
           userId: uniqueSenderIds.length === 1 ? uniqueSenderIds[0]! : commandUserId,
           chatType: processChatType,
           userTurn: isLoopTurn || uniqueSenderIds.length === 1,
-          token: this.chatScheduleTokens.get(chatId) ?? "",
+          token: this.chatScheduleTokens.get(scopeKey) ?? "",
         });
         try {
           return await this.runManager.runAgent({
@@ -4170,18 +4579,18 @@ export class Pipeline {
             signal,
           });
         } finally {
-          const scheduleContext = this.activeScheduleAgentCommands.get(chatId);
-          if (scheduleContext?.runId === runId) this.activeScheduleAgentCommands.delete(chatId);
+          const scheduleContext = this.activeScheduleAgentCommands.get(scopeKey);
+          if (scheduleContext?.runId === runId) this.activeScheduleAgentCommands.delete(scopeKey);
         }
       })();
       if (agentResult.status === "stopped") {
         this.log.info("prompt cancelled, no response to send", { chatId });
         // 本回合若刚通过 nbt goal start 创建了 Goal：以 stopped 结算并清理，避免孤儿 Goal 吞后续消息
-        const orphanGoal = this.activeGoals.get(chatId);
+        const orphanGoal = this.activeGoals.get(scopeKey);
         if (orphanGoal && !orphanGoal.endedAt && orphanGoal.startRunId === runId) {
           this.log.info("goal start turn cancelled, settling goal as stopped", { chatId, runId });
           this.finishGoal(chatId, orphanGoal, "stopped", "回合被取消");
-          this.cleanupGoal(chatId, orphanGoal, runId);
+          this.cleanupGoal(scopeKey, chatId, orphanGoal, runId);
         }
         settleLoop({ success: false, cancelled: true });
         this.markRuntimeRun(runId, "stopped");
@@ -4191,13 +4600,13 @@ export class Pipeline {
 
       // Goal 主动进入：本回合 Agent 调用了 nbt goal start → 本回合计入第 1 轮，runGoalLoop 接管
       // （本轮不再按普通回合交付，由 Goal 流程处理：finish 则结算，否则静默继续下一轮）
-      const startedGoal = this.activeGoals.get(chatId);
+      const startedGoal = this.activeGoals.get(scopeKey);
       if (startedGoal && !startedGoal.endedAt && startedGoal.startRunId === runId) {
         this.log.info("goal start turn detected, adopting as round 1", { chatId, runId });
         if (isLoopTurn && activeLoopJob && !loopSettled) {
           settleLoop({ success: true, cancelled: true });
         }
-        await this.runGoalLoop(chatId, startedGoal, runId, signal, agentResult);
+        await this.runGoalLoop(chatId, scopeKey, startedGoal, runId, signal, agentResult);
         return;
       }
 
@@ -4214,7 +4623,7 @@ export class Pipeline {
         }
         this.log.info("loop self-cancelled, delivering final result", { chatId, loopJobId: activeLoopJob.id });
       }
-      const compactedThisTurn = this.updateCompactRecoveryState(chatId, response.compactCount);
+      const compactedThisTurn = this.updateCompactRecoveryState(scopeKey, response.compactCount);
 
       // cancelled：有内容就发（中间结果），没内容就静默（用户已收到"已停止"）
       if (response.cancelled) {
@@ -4277,6 +4686,8 @@ export class Pipeline {
         content: displayText,
         footer,
         replyToMsgId: triggerMsgId,
+        replyInThread: isolated,
+        allowChatFallback: !isolated,
         signal,
         textFallback: (sendErr) => addLoopFullMarker(`发送失败：${extractPlatformErrorDetail(sendErr)}`),
       });
@@ -4333,10 +4744,10 @@ export class Pipeline {
     } catch (err) {
       this.log.error("pipeline error", { chatId, error: String(err) });
       // 本回合刚创建的 Goal 异常退出：结算为 failed 并清理，避免孤儿 Goal 吞后续消息
-      const failedGoal = this.activeGoals.get(chatId);
+      const failedGoal = this.activeGoals.get(scopeKey);
       if (failedGoal && !failedGoal.endedAt && failedGoal.startRunId === runId) {
         this.finishGoal(chatId, failedGoal, "failed", `回合异常：${String(err).slice(0, 200)}`);
-        this.cleanupGoal(chatId, failedGoal, runId);
+        this.cleanupGoal(scopeKey, chatId, failedGoal, runId);
       }
       if (isLoopTurn && activeLoopJob && getLoopJob(this.db, activeLoopJob.id)?.status === "cancelled") {
         loopSettled = true;
@@ -4365,32 +4776,58 @@ export class Pipeline {
             (replyToMsgId) => this.transport.sendReply(platformChatId, errorText, replyToMsgId),
             () => this.transport.sendText(platformChatId, errorText),
             triggerMsgId,
+            { allowChatFallback: !isolated, replyInThread: isolated },
           );
-          this.storeBotResponse(chatId, errorText, pmid);
+          this.storeBotResponse(chatId, errorText, pmid, "text", threadId);
         } catch { /* give up */ }
       }
     }
   }
 
-  private async getOrCreateSession(chatId: string, beforeMsgId?: number, signal?: AbortSignal): Promise<ChatSession> {
-    const existing = this.chatSessions.get(chatId);
+  private async getOrCreateSession(
+    scopeKey: string,
+    chatId?: string,
+    threadId?: string,
+    beforeMsgId?: number,
+    signal?: AbortSignal,
+  ): Promise<ChatSession> {
+    const resolvedChatId = chatId ?? parseScopeKey(scopeKey).chatId;
+    const existing = this.chatSessions.get(scopeKey);
     if (existing) return existing;
-    const pending = this.sessionCreations.get(chatId);
+    const pending = this.sessionCreations.get(scopeKey);
     if (pending) return pending;
 
-    const creation = this.createChatSession(chatId, beforeMsgId, signal).finally(() => {
-      if (this.sessionCreations.get(chatId) === creation) this.sessionCreations.delete(chatId);
+    const creation = this.createChatSession(
+      scopeKey,
+      resolvedChatId,
+      threadId,
+      beforeMsgId,
+      signal,
+    ).finally(() => {
+      if (this.sessionCreations.get(scopeKey) === creation) this.sessionCreations.delete(scopeKey);
     });
-    this.sessionCreations.set(chatId, creation);
+    this.sessionCreations.set(scopeKey, creation);
     return creation;
   }
 
-  private async createChatSession(chatId: string, beforeMsgId?: number, signal?: AbortSignal): Promise<ChatSession> {
-
-    const platformChatId = this.platformChatIds.get(chatId);
+  private async createChatSession(
+    scopeKey: string,
+    chatId: string,
+    threadId?: string,
+    beforeMsgId?: number,
+    signal?: AbortSignal,
+  ): Promise<ChatSession> {
+    const isolated = Boolean(threadId);
+    let platformChatId = this.platformChatIds.get(chatId);
+    if (!platformChatId) {
+      const platformRow = this.db.prepare("SELECT platform_id FROM chats WHERE id = ?")
+        .get(chatId) as { platform_id: string } | undefined;
+      platformChatId = platformRow?.platform_id;
+    }
     if (!platformChatId) {
       throw new Error(`No platform chat ID for internal chat ${chatId}`);
     }
+    this.platformChatIds.set(chatId, platformChatId);
 
     const userId = this.chatUserIds.get(chatId);
 
@@ -4420,28 +4857,113 @@ export class Pipeline {
     const stableContext = this.buildStableSystemContext();
 
     // 新主会话生成能力令牌；独立 session（Cron/task）不生成，无法借主会话身份。
-    if (!this.chatScheduleTokens.has(chatId)) {
-      this.chatScheduleTokens.set(chatId, randomUUID());
+    if (!this.chatScheduleTokens.has(scopeKey)) {
+      const token = randomUUID();
+      this.chatScheduleTokens.set(scopeKey, token);
+      this.tokenToScope.set(token, scopeKey);
     }
 
     // 构建 task/conversation context（任务索引 + 归档目录 + 最近消息）
     const normalContext = buildNormalContext(
       this.db, chatId, this.workingDirectory, beforeMsgId, chatType, userId,
       getSessionArchiveDirectory(this.archiveHome, this.botIdentity.name, chatId),
+      threadId,
     );
     const messageContextParts = [sessionProfile];
+    if (threadId) {
+      messageContextParts.push(`<topic-isolation>
+当前是话题群中的一个独立话题 session，与同群其他话题并行。
+工作目录是共享的。长写入前先 git status；不要默认独占仓库。
+会改同一批文件的长任务：用 nbt task。
+cap=4 只限制本群同时跑的主 session，不含 /task。
+/stop 只停本话题。
+</topic-isolation>`);
+    }
     if (normalContext) {
       messageContextParts.push(`<session-state>\n${normalContext}\n</session-state>`);
     }
-    this.pendingMessageContext.set(chatId, messageContextParts.join("\n\n"));
+    this.pendingMessageContext.set(scopeKey, messageContextParts.join("\n\n"));
+
+    const activeSession = this.db.prepare(`
+      SELECT id, agent_session_id, backend_type
+      FROM sessions
+      WHERE chat_id = ? AND status = 'active' AND source = 'user'
+        AND (
+          (? IS NULL AND thread_id IS NULL)
+          OR thread_id = ?
+        )
+      ORDER BY last_active_at DESC, started_at DESC
+      LIMIT 1
+    `).get(chatId, threadId ?? null, threadId ?? null) as {
+      id: string;
+      agent_session_id: string | null;
+      backend_type: string | null;
+    } | undefined;
+
+    if (activeSession) {
+      const canResume = normalizeBackend(activeSession.backend_type ?? undefined) === this.backendType
+        && Boolean(activeSession.agent_session_id);
+      const agentSession = await this.createAgentSession({
+        workingDirectory: this.workingDirectory,
+        reasoningEffort: this.botIdentity.effort,
+        importantContext: stableContext || undefined,
+        userId: userId ?? undefined,
+        chatId,
+        scopeKey,
+        threadId,
+        chatType,
+        dbPath: this.dbPath,
+        botId: this.botIdentity.platformBotId,
+        botName: this.botIdentity.name,
+        platform: this.botIdentity.platform,
+        model: this.botIdentity.model,
+        isAdmin,
+        botProfilePath: this.stableContextOptions.botProfilePath,
+        agentSessionId: canResume ? activeSession.agent_session_id ?? undefined : undefined,
+        scheduleToken: this.chatScheduleTokens.get(scopeKey),
+      });
+      this.db.prepare(`
+        UPDATE sessions
+        SET agent_session_id = COALESCE(agent_session_id, ?),
+            backend_type = ?,
+            last_active_at = datetime('now')
+        WHERE id = ?
+      `).run(
+        agentSession.id,
+        this.backendType,
+        activeSession.id,
+      );
+      const resumedSession: ChatSession = {
+        agentSession,
+        sessionId: activeSession.id,
+        platformChatId,
+        userId: userId ?? "",
+        triggerPlatformMsgId: this.triggerMsgIds.get(scopeKey),
+        threadId,
+        isolated,
+        hasReplied: false,
+      };
+      this.chatSessions.set(scopeKey, resumedSession);
+      this.log.info("session attached", {
+        chatId,
+        scopeKey,
+        sessionId: activeSession.id,
+        resumed: canResume,
+        userId,
+        agentSessionId: agentSession.id,
+      });
+      return resumedSession;
+    }
 
     const agentSession = await this.createAgentSession({
       workingDirectory: this.workingDirectory,
       reasoningEffort: this.botIdentity.effort,
-      importantContext: stableContext || undefined,
-      userId: userId ?? undefined,
-      chatId,
-      chatType,
+        importantContext: stableContext || undefined,
+        userId: userId ?? undefined,
+        chatId,
+        scopeKey,
+        threadId,
+        chatType,
       dbPath: this.dbPath,
       botId: this.botIdentity.platformBotId,
       botName: this.botIdentity.name,
@@ -4449,46 +4971,80 @@ export class Pipeline {
       model: this.botIdentity.model,
       isAdmin,
       botProfilePath: this.stableContextOptions.botProfilePath,
-      scheduleToken: this.chatScheduleTokens.get(chatId),
+      scheduleToken: this.chatScheduleTokens.get(scopeKey),
     });
 
     if (this.agent.needsStableUserPrefix() && stableContext) {
-      this.pendingStableContext.set(chatId, stableContext);
+      this.pendingStableContext.set(scopeKey, stableContext);
     }
-    this.pendingNewSessionReminder.add(chatId);
 
     const sessionId = randomUUID().slice(0, 8);
 
     try {
-      const orphan = this.db.prepare(
-        "SELECT MIN(id) as startId FROM messages WHERE chat_id = ? AND session_key IS NULL",
-      ).get(chatId) as { startId: number | null } | undefined;
+      if (isolated) {
+        this.db.prepare(`
+          UPDATE sessions
+          SET status = 'archived',
+              ended_at = datetime('now'),
+              last_active_at = datetime('now')
+          WHERE chat_id = ? AND status = 'active' AND source = 'user' AND thread_id IS NULL
+        `).run(chatId);
+      }
+      const orphan = this.db.prepare(`
+        SELECT MIN(id) as startId
+        FROM messages
+        WHERE chat_id = ? AND session_key IS NULL
+          AND (? IS NULL OR thread_id = ?)
+      `).get(chatId, threadId ?? null, threadId ?? null) as { startId: number | null } | undefined;
       const startMsgId = orphan?.startId ?? null;
 
       this.db.prepare(`
-        INSERT INTO sessions (id, chat_id, user_id, status, start_msg_id, started_at, last_active_at, backend_type)
-        VALUES (?, ?, ?, 'active', ?, datetime('now'), datetime('now'), ?)
-      `).run(sessionId, chatId, userId ?? null, startMsgId, this.backendType);
+        INSERT INTO sessions (
+          id, chat_id, user_id, status, start_msg_id, thread_id, started_at,
+          last_active_at, backend_type, agent_session_id
+        )
+        VALUES (?, ?, ?, 'active', ?, ?, datetime('now'), datetime('now'), ?, ?)
+      `).run(
+        sessionId,
+        chatId,
+        userId ?? null,
+        startMsgId,
+        threadId ?? null,
+        this.backendType,
+        agentSession.id,
+      );
 
-      this.db.prepare(
-        "UPDATE messages SET session_key = ? WHERE chat_id = ? AND session_key IS NULL",
-      ).run(sessionId, chatId);
+      this.db.prepare(`
+        UPDATE messages SET session_key = ?
+        WHERE chat_id = ? AND session_key IS NULL
+          AND (? IS NULL OR thread_id = ?)
+      `).run(sessionId, chatId, threadId ?? null, threadId ?? null);
     } catch (dbErr) {
       await this.agent.closeSession(agentSession).catch(() => {});
       throw dbErr;
     }
 
+    this.pendingNewSessionReminder.add(scopeKey);
     const chatSession: ChatSession = {
       agentSession,
       sessionId,
       platformChatId,
       userId: userId ?? "",
-      triggerPlatformMsgId: this.triggerMsgIds.get(chatId),
+      triggerPlatformMsgId: this.triggerMsgIds.get(scopeKey),
+      threadId,
+      isolated,
       hasReplied: false,
     };
-    this.chatSessions.set(chatId, chatSession);
+    this.chatSessions.set(scopeKey, chatSession);
 
-    this.log.info("session created", { chatId, sessionId, userId, agentSessionId: agentSession.id });
+    this.log.info("session created", {
+      chatId,
+      scopeKey,
+      threadId,
+      sessionId,
+      userId,
+      agentSessionId: agentSession.id,
+    });
     return chatSession;
   }
 
@@ -4538,17 +5094,19 @@ export class Pipeline {
     });
   }
 
-  private updateCompactRecoveryState(chatId: string, compactCount: number | undefined): boolean {
+  private updateCompactRecoveryState(scopeKey: string, compactCount: number | undefined): boolean {
     if (compactCount === undefined || compactCount <= 0) return false;
-    const previous = this.lastCompactCounts.get(chatId) ?? 0;
+    const previous = this.lastCompactCounts.get(scopeKey) ?? 0;
     if (compactCount <= previous) return false;
-    this.lastCompactCounts.set(chatId, compactCount);
-    this.pendingCompactRecovery.add(chatId);
+    this.lastCompactCounts.set(scopeKey, compactCount);
+    this.pendingCompactRecovery.add(scopeKey);
     return true;
   }
 
-  private async archiveSession(chatId: string): Promise<SessionEndStatus | false> {
-    const session = this.chatSessions.get(chatId);
+  private async archiveSession(scopeKey: string, chatId?: string): Promise<SessionEndStatus | false> {
+    const resolvedChatId = chatId ?? parseScopeKey(scopeKey).chatId;
+    const resolvedThreadId = parseScopeKey(scopeKey).threadId;
+    const session = this.chatSessions.get(scopeKey);
     if (!session) {
       const result = this.db.prepare(`
         UPDATE sessions
@@ -4558,12 +5116,13 @@ export class Pipeline {
         WHERE id = (
           SELECT id FROM sessions
           WHERE chat_id = ? AND status = 'active' AND source = 'user'
+            AND (? IS NULL OR thread_id = ?)
           ORDER BY last_active_at DESC, started_at DESC
           LIMIT 1
         )
-      `).run(chatId);
+      `).run(resolvedChatId, resolvedThreadId ?? null, resolvedThreadId ?? null);
 
-      this.clearChatRuntimeState(chatId);
+      this.clearChatRuntimeState(scopeKey);
       return result.changes > 0 ? "archive_failed" : false;
     }
 
@@ -4571,7 +5130,7 @@ export class Pipeline {
     const archivedAt = utcDateTimeForSql(new Date());
     let archiveStatus: SessionEndStatus = "archived";
     try {
-      await this.archiveTranscript(chatId, sessionId, agentSession, this.agent, archivedAt);
+      await this.archiveTranscript(resolvedChatId, sessionId, agentSession, this.agent, archivedAt);
     } catch (err) {
       if (err instanceof AgentSessionNotStartedError) {
         archiveStatus = "discarded";
@@ -4591,8 +5150,8 @@ export class Pipeline {
       WHERE id = ?
     `).run(archiveStatus, archivedAt, sessionId);
 
-    this.chatSessions.delete(chatId);
-    this.clearChatRuntimeState(chatId);
+    this.chatSessions.delete(scopeKey);
+    this.clearChatRuntimeState(scopeKey);
 
     await this.agent.closeSession(agentSession).catch((err) => {
       this.log.warn("failed to close backend session during archive", { chatId, sessionId, error: String(err) });
@@ -4632,16 +5191,37 @@ export class Pipeline {
     this.log.info("session transcript archived", { chatId, sessionId, file });
   }
 
-  private async cancelChat(chatId: string): Promise<void> {
-    const session = this.chatSessions.get(chatId);
+  private async cancelChat(scopeKey: string, chatId?: string): Promise<void> {
+    const session = this.chatSessions.get(scopeKey);
     if (!session) return;
 
     // 先 abort 队列 signal：让 runAgent 的 abortable 立即 reject，run 退出、busy 恢复。
     // 不依赖进程能否被 kill——进程挂起（不在 activeProcesses 或杀不掉）时也能解卡。
-    if (this.queue.isBusy(chatId)) {
-      this.queue.cancel(chatId);
+    if (this.queue.isBusy(scopeKey)) {
+      this.queue.cancel(scopeKey);
     }
     await this.agent.cancelSession(session.agentSession);
+  }
+
+  private async maybeUnloadScope(scopeKey: string): Promise<void> {
+    if (this.queue.isBusy(scopeKey) || this.queue.pendingCount(scopeKey) > 0) return;
+    if (this.runtimeState.getActiveRunForScope(scopeKey)) return;
+    const session = this.chatSessions.get(scopeKey);
+    if (!session) return;
+    await this.agent.closeSession(session.agentSession).catch((err) => {
+      this.log.warn("failed to close session during unload", { scopeKey, error: String(err) });
+      return;
+    });
+    this.chatSessions.delete(scopeKey);
+    this.sessionCreations.delete(scopeKey);
+    this.triggerMsgIds.delete(scopeKey);
+    this.pendingMessageContext.delete(scopeKey);
+    this.pendingStableContext.delete(scopeKey);
+    this.pendingNewSessionReminder.delete(scopeKey);
+    const token = this.chatScheduleTokens.get(scopeKey);
+    if (token) this.tokenToScope.delete(token);
+    this.chatScheduleTokens.delete(scopeKey);
+    this.log.info("session unloaded; database row remains active", { scopeKey });
   }
 
   // ── Watchdog ─────────────────────────────────────────────

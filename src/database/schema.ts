@@ -805,9 +805,11 @@ const migrations: Migration[] = [
       }
       if (hasTable("loop_jobs")) {
         addColumnIfMissing(db, "loop_jobs", "thread_id", "TEXT");
+        addColumnIfMissing(db, "loop_jobs", "reply_to_msg_id", "TEXT");
       }
       if (hasTable("cron_jobs")) {
         addColumnIfMissing(db, "cron_jobs", "thread_id", "TEXT");
+        addColumnIfMissing(db, "cron_jobs", "reply_to_msg_id", "TEXT");
       }
       if (hasTable("runtime_events")) {
         addColumnIfMissing(db, "runtime_events", "thread_id", "TEXT");
@@ -821,6 +823,48 @@ const migrations: Migration[] = [
           fetched_at INTEGER,
           PRIMARY KEY (chat_id, thread_id)
         )
+      `);
+    },
+  },
+  {
+    version: 33,
+    description: "Archive duplicate active user sessions and add scope unique indexes",
+    up: (db) => {
+      const hasSessions = !!db.prepare(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sessions'",
+      ).get();
+      if (!hasSessions) return;
+      const rows = db.prepare(`
+        SELECT id, chat_id, thread_id
+        FROM sessions
+        WHERE status = 'active' AND source = 'user'
+        ORDER BY chat_id, COALESCE(thread_id, ''), last_active_at DESC, started_at DESC, id DESC
+      `).all() as Array<{ id: string; chat_id: string; thread_id: string | null }>;
+      const seen = new Set<string>();
+      const archive = db.prepare(`
+        UPDATE sessions
+        SET status = 'archived', ended_at = datetime('now'), last_active_at = datetime('now')
+        WHERE id = ?
+      `);
+      const archiveDuplicates = db.transaction((items: typeof rows) => {
+        for (const row of items) {
+          const key = `${row.chat_id}\0${row.thread_id ?? ""}`;
+          if (seen.has(key)) {
+            archive.run(row.id);
+          } else {
+            seen.add(key);
+          }
+        }
+      });
+      archiveDuplicates(rows);
+
+      db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_active_thread
+          ON sessions(chat_id, thread_id)
+          WHERE status = 'active' AND source = 'user' AND thread_id IS NOT NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_active_chat
+          ON sessions(chat_id)
+          WHERE status = 'active' AND source = 'user' AND thread_id IS NULL;
       `);
     },
   },
@@ -1995,6 +2039,32 @@ export function setChatHistoryCursor(
   db.prepare(
     "UPDATE chats SET history_sync_ts = COALESCE(?, history_sync_ts), history_fetched_at = COALESCE(?, history_fetched_at) WHERE id = ?",
   ).run(cursor.syncTs ?? null, cursor.fetchedAt ?? null, chatId);
+}
+
+export function getThreadHistoryCursor(
+  db: Database.Database,
+  chatId: string,
+  threadId: string,
+): ChatHistoryCursor {
+  const row = db.prepare(
+    "SELECT sync_ts AS syncTs, fetched_at AS fetchedAt FROM thread_history_cursors WHERE chat_id = ? AND thread_id = ?",
+  ).get(chatId, threadId) as { syncTs: number | null; fetchedAt: number | null } | undefined;
+  return { syncTs: row?.syncTs ?? null, fetchedAt: row?.fetchedAt ?? null };
+}
+
+export function setThreadHistoryCursor(
+  db: Database.Database,
+  chatId: string,
+  threadId: string,
+  cursor: { syncTs?: number | null; fetchedAt?: number | null },
+): void {
+  db.prepare(`
+    INSERT INTO thread_history_cursors (chat_id, thread_id, sync_ts, fetched_at)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(chat_id, thread_id) DO UPDATE SET
+      sync_ts = COALESCE(excluded.sync_ts, sync_ts),
+      fetched_at = COALESCE(excluded.fetched_at, fetched_at)
+  `).run(chatId, threadId, cursor.syncTs ?? null, cursor.fetchedAt ?? null);
 }
 
 export function markMessagesAgentSeen(

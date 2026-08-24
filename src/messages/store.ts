@@ -43,6 +43,7 @@ export interface MessageFilter {
   role?: string;
   userId?: string;
   contentType?: string;
+  threadId?: string;
 }
 
 const MESSAGE_COLUMNS = `
@@ -183,6 +184,7 @@ export function listContinuationMessages(
   db: Database.Database,
   options: {
     chatId: string;
+    threadId?: string;
     beforeMsgId?: number;
     limit: number;
   },
@@ -190,13 +192,15 @@ export function listContinuationMessages(
   const cutoff = options.beforeMsgId != null ? "AND m.id < ?" : "";
   const params: (string | number)[] = [options.chatId];
   if (options.beforeMsgId != null) params.push(options.beforeMsgId);
+  const threadFilter = options.threadId ? "AND m.thread_id = ?" : "";
+  if (options.threadId) params.push(options.threadId);
   params.push(options.limit);
 
   const rows = db.prepare(`
     SELECT m.sender_id, m.role, u.name AS sender_name, m.content_text
     FROM messages m
     LEFT JOIN users u ON m.sender_id = u.id
-    WHERE m.chat_id = ? AND m.content_text IS NOT NULL ${cutoff}
+    WHERE m.chat_id = ? AND m.content_text IS NOT NULL ${threadFilter} ${cutoff}
     ${EXCLUDE_INTERNAL_SESSION_PROMPTS}
     ORDER BY COALESCE(m.platform_ts, m.created_at) DESC, m.id DESC
     LIMIT ?
@@ -303,6 +307,10 @@ function appendMessageFilters(sql: string, params: unknown[], filters: MessageFi
   if (filters.contentType) {
     sql += " AND m.content_type = ?";
     params.push(filters.contentType);
+  }
+  if (filters.threadId) {
+    sql += " AND m.thread_id = ?";
+    params.push(filters.threadId);
   }
   return sql;
 }

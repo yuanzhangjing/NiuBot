@@ -19,6 +19,7 @@ export async function syncGroupChatFromConfig(
   db: Database.Database,
   chatId: string,
   env: GroupSyncEnv,
+  threadId?: string,
 ): Promise<void> {
   const target = getGroupChatSyncTarget(db, chatId);
   if (!target || target.platform !== "feishu") return;
@@ -31,5 +32,6 @@ export async function syncGroupChatFromConfig(
   await syncGroupChatToDb(db, chatId, {
     transport: { listChatMessages: (id, options) => adapter.listChatMessages(id, options) },
     selfUserId,
+    threadId,
   });
 }

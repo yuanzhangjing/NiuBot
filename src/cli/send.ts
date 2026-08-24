@@ -99,6 +99,8 @@ export function handleSend(
           chat_id: targetChatId,
           file_path: absPath,
           schedule_token: scheduleToken,
+          scope_key: process.env["NIUBOT_SCOPE_KEY"],
+          thread_id: process.env["NIUBOT_THREAD_ID"],
         }, 120_000);
       }
       console.log(filePaths.length === 1 ? "File sent." : `${filePaths.length} files sent.`);
@@ -124,6 +126,8 @@ export function handleSend(
       text: content,
       card_header: cardHeader,
       schedule_token: process.env["NIUBOT_SCHEDULE_TOKEN"],
+      scope_key: process.env["NIUBOT_SCOPE_KEY"],
+      thread_id: process.env["NIUBOT_THREAD_ID"],
     }, 30_000)
       .then(() => console.log("Card sent."))
       .catch((err) => {
@@ -144,6 +148,8 @@ export function handleSend(
     chat_id: targetChatId,
     text,
     schedule_token: process.env["NIUBOT_SCHEDULE_TOKEN"],
+    scope_key: process.env["NIUBOT_SCOPE_KEY"],
+    thread_id: process.env["NIUBOT_THREAD_ID"],
   }, 30_000)
     .then(() => console.log("Message sent."))
     .catch((err) => {

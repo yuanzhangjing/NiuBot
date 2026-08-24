@@ -69,6 +69,56 @@ function createAdapter(overrides: Partial<PlatformAdapter> = {}) {
 }
 
 describe("ResponseSender", () => {
+  test("block create fallback when allowChatFallback is false", async () => {
+    const methods: string[] = [];
+    const { im } = createAdapter({
+      async sendCard() { methods.push("card"); throw new Error("reply unavailable"); },
+      async sendReply() { methods.push("text-reply"); throw new Error("reply unavailable"); },
+      async sendFile() { methods.push("file-reply"); throw new Error("reply unavailable"); },
+    });
+    const sender = new ResponseSender(im, { timeoutMs: 100 });
+
+    const result = await sender.sendFinalResponse({
+      chatId: "chat-1",
+      header: "Reply",
+      content: "hello",
+      replyToMsgId: "msg-1",
+      allowChatFallback: false,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(methods).toEqual(["card", "text-reply", "file-reply"]);
+  });
+
+  test("passes replyInThread through to reply delivery", async () => {
+    const seen: Array<Record<string, unknown>> = [];
+    const { im } = createAdapter({
+      async sendCard(_chatId, _header, _content, _footer, _replyToMsgId, options) {
+        seen.push({ method: "card", ...(options as any) });
+        return "card-msg";
+      },
+      async sendReply(_chatId, _text, _replyToMsgId, options) {
+        seen.push({ method: "reply", ...(options as any) });
+        return "reply-msg";
+      },
+      async sendFile(_chatId, _filePath, _fileName, options) {
+        seen.push({ method: "file", ...(options as any) });
+        return "file-msg";
+      },
+    });
+    const sender = new ResponseSender(im, { timeoutMs: 100 });
+
+    await sender.sendFinalResponse({
+      chatId: "chat-1",
+      header: "Reply",
+      content: "hello",
+      replyToMsgId: "msg-1",
+      replyInThread: true,
+    });
+
+    expect(seen[0]).toMatchObject({ method: "card", replyInThread: true });
+  });
+
   test("logs direct send duration without response content", async () => {
     const logs = captureStdout();
     const { im } = createAdapter();

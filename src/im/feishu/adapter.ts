@@ -42,6 +42,13 @@ function describeDownloadError(code: number | undefined, status: number | string
   return null;
 }
 
+function isTopicReplyUnsupported(err: unknown): boolean {
+  const candidate = err as { code?: number | string; message?: string };
+  if (Number(candidate?.code) === 230071) return true;
+  const message = String(candidate?.message ?? err ?? "");
+  return /230071|不支持以话题形式回复/.test(message);
+}
+
 export class FeishuAdapter implements PlatformAdapter {
   private client: lark.Client;
   private wsClient: lark.WSClient | null = null;
@@ -247,15 +254,20 @@ export class FeishuAdapter implements PlatformAdapter {
       log.info("sendReply: content exceeds threshold, sending as file", { chatId, bytes: Buffer.byteLength(text, "utf-8") });
       return this.sendContentAsFile(chatId, text, replyToMsgId, options);
     }
-    const resp = await this.client.im.message.reply({
-      path: { message_id: replyToMsgId },
-      data: {
-        msg_type: "text",
-        content: JSON.stringify({ text }),
-        ...(options?.replyInThread ? { reply_in_thread: true } : {}),
-      },
-    });
-    return resp?.data?.message_id ?? "";
+    try {
+      const resp = await this.client.im.message.reply({
+        path: { message_id: replyToMsgId },
+        data: {
+          msg_type: "text",
+          content: JSON.stringify({ text }),
+          ...(options?.replyInThread ? { reply_in_thread: true } : {}),
+        },
+      });
+      return resp?.data?.message_id ?? "";
+    } catch (err) {
+      if (isTopicReplyUnsupported(err) && options?.replyInThread) throw err;
+      throw err;
+    }
   }
 
   async sendMarkdownCard(chatId: string, markdown: string, options?: DeliveryOptions): Promise<string> {
@@ -299,6 +311,7 @@ export class FeishuAdapter implements PlatformAdapter {
       });
       return resp?.data?.message_id ?? "";
     } catch (err) {
+      if (isTopicReplyUnsupported(err) && options?.replyInThread) throw err;
       if (hasAt) throw err;
       log.warn("sendCard: card API failed, fallback to file", { chatId, error: String(err) });
       const fileContent = footer ? `${content}\n\n---\n${footer}` : content;
@@ -439,15 +452,20 @@ export class FeishuAdapter implements PlatformAdapter {
     options?: DeliveryOptions,
   ): Promise<string> {
     if (replyToMsgId) {
-      const resp = await this.client.im.message.reply({
-        path: { message_id: replyToMsgId },
-        data: {
-          msg_type: msgType,
-          content,
-          ...(options?.replyInThread ? { reply_in_thread: true } : {}),
-        },
-      });
-      return resp?.data?.message_id ?? "";
+      try {
+        const resp = await this.client.im.message.reply({
+          path: { message_id: replyToMsgId },
+          data: {
+            msg_type: msgType,
+            content,
+            ...(options?.replyInThread ? { reply_in_thread: true } : {}),
+          },
+        });
+        return resp?.data?.message_id ?? "";
+      } catch (err) {
+        if (isTopicReplyUnsupported(err) && options?.replyInThread) throw err;
+        throw err;
+      }
     }
     const resp = await this.client.im.message.create({
       params: { receive_id_type: "chat_id" },
@@ -489,7 +507,7 @@ export class FeishuAdapter implements PlatformAdapter {
       const resp = await this.client.im.chat.get({
         path: { chat_id: chatId },
       });
-      const data = resp?.data;
+      const data = resp?.data as any;
       return {
         chatMode: typeof data?.chat_mode === "string" ? data.chat_mode : undefined,
         groupMessageType: typeof data?.group_message_type === "string"
@@ -499,6 +517,22 @@ export class FeishuAdapter implements PlatformAdapter {
       };
     } catch (err) {
       log.warn("getChatMetadata failed", { chatId, error: String(err) });
+      return undefined;
+    }
+  }
+
+  async getMessageThreadId(messageId: string): Promise<string | undefined> {
+    try {
+      const resp = await this.client.im.message.get({
+        path: { message_id: messageId },
+      });
+      const data = resp?.data as any;
+      const item = data?.items?.[0] ?? data?.message;
+      if (typeof item?.thread_id === "string" && item.thread_id) return item.thread_id;
+      if (typeof data?.thread_id === "string" && data.thread_id) return data.thread_id;
+      return undefined;
+    } catch (err) {
+      log.warn("getMessageThreadId failed", { messageId, error: String(err) });
       return undefined;
     }
   }

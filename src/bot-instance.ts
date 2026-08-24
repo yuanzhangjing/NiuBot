@@ -181,14 +181,14 @@ export async function createBotInstance(
   // 6. 创建 API Server
   const endpoint = resolveBotEndpoint(NIUBOT_HOME, botConfig.id, { unixSocketDirectory: path.dirname(botConfig.dbPath) });
   const apiHandler: ApiHandler = {
-    sendMessage: (chatId, text, token) => pipeline.sendToChat(chatId, text, token),
-    sendCard: (chatId, header, content, token) => pipeline.sendCardToChat(chatId, header, content, token),
-    sendFile: (chatId, filePath, token) => pipeline.sendFileToChat(chatId, filePath, token),
-    executeScheduleCommand: (chatId, command, token) => pipeline.executeScheduleAgentCommand(chatId, command, token),
-    executeGoalFinishCommand: (chatId, command, token) => pipeline.executeGoalFinishCommand(chatId, command, token),
-    executeGoalStartCommand: (chatId, objective, token) => pipeline.executeGoalStartCommand(chatId, objective, token),
-    executeGoalProgressCommand: (chatId, content, status) => pipeline.executeGoalProgressCommand(chatId, content, status),
-    executeWakeCommand: (chatId, prompt) => pipeline.executeWakeCommand(chatId, prompt),
+    sendMessage: (chatId, text, token, scope) => pipeline.sendToChat(chatId, text, token, scope),
+    sendCard: (chatId, header, content, token, scope) => pipeline.sendCardToChat(chatId, header, content, token, scope),
+    sendFile: (chatId, filePath, token, scope) => pipeline.sendFileToChat(chatId, filePath, token, scope),
+    executeScheduleCommand: (chatId, command, token, scope) => pipeline.executeScheduleAgentCommand(chatId, command, token, scope),
+    executeGoalFinishCommand: (chatId, command, token, scope) => pipeline.executeGoalFinishCommand(chatId, command, token, scope),
+    executeGoalStartCommand: (chatId, objective, token, scope) => pipeline.executeGoalStartCommand(chatId, objective, token, scope),
+    executeGoalProgressCommand: (chatId, content, status, scope) => pipeline.executeGoalProgressCommand(chatId, content, status, scope),
+    executeWakeCommand: (chatId, prompt, scope) => pipeline.executeWakeCommand(chatId, prompt, scope),
     getTimezone: () => TZ,
     setTimezone: (raw) => pipeline.setEngineTimezone(raw),
     resolveChatPlatformId: (input: string) => {
@@ -209,12 +209,12 @@ export async function createBotInstance(
   // 7. 创建 Cron Scheduler（独立 session，不走用户消息队列）
   const cronScheduler = new CronScheduler(
     db,
-    async (chatId, userId, prompt, description, cronJobId, claimToken) => {
-      await pipeline.processCronJob(chatId, userId, prompt, description, cronJobId, claimToken);
+    async (chatId, userId, prompt, description, cronJobId, claimToken, threadId) => {
+      await pipeline.processCronJob(chatId, userId, prompt, description, cronJobId, claimToken, threadId);
     },
     {
-      reportFailure: (chatId, description, error, paused) =>
-        pipeline.reportCronJobFailure(chatId, description, error, paused),
+      reportFailure: (chatId, description, error, paused, threadId) =>
+        pipeline.reportCronJobFailure(chatId, description, error, paused, threadId),
     },
   );
   const loopScheduler = new LoopScheduler(db, (job) => {

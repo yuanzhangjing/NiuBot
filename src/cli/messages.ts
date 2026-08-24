@@ -19,7 +19,7 @@ interface MessageListItem {
   prefix?: string;
 }
 
-export type MessagesGroupSync = (db: Database.Database, chatId: string) => Promise<void>;
+export type MessagesGroupSync = (db: Database.Database, chatId: string, threadId?: string) => Promise<void>;
 
 export async function handleMessages(
   db: Database.Database,
@@ -55,6 +55,8 @@ async function messagesList(
 ): Promise<void> {
   const { flags } = parseArgs(args);
   const targetChatId = flags["chat-id"] ?? currentChatId;
+  const allThreads = flags["all-threads"] === "true";
+  const threadId = flags["thread-id"] ?? (!allThreads ? process.env["NIUBOT_THREAD_ID"] : undefined);
   if (!targetChatId) {
     console.error("Error: NIUBOT_CHAT_ID not set and --chat-id not provided");
     process.exit(1);
@@ -68,7 +70,7 @@ async function messagesList(
     console.error(`Error: ${(err as Error).message}`);
     process.exit(1);
   }
-  await syncGroupMessagesIfNeeded(db, targetChatId, syncGroupChat);
+  await syncGroupMessagesIfNeeded(db, targetChatId, syncGroupChat, threadId);
 
   let rows: MessageRow[];
   try {
@@ -83,6 +85,7 @@ async function messagesList(
       role: flags["role"],
       userId: flags["user-id"],
       contentType: flags["content-type"],
+      threadId,
     });
   } catch (err) {
     console.error(`Error: ${(err as Error).message}`);
@@ -114,6 +117,8 @@ async function messagesSearch(
 
   const searchAll = flags["all"] === "true";
   const targetChatId = flags["chat-id"] ?? currentChatId;
+  const allThreads = flags["all-threads"] === "true";
+  const threadId = flags["thread-id"] ?? (!allThreads ? process.env["NIUBOT_THREAD_ID"] : undefined);
   const contextCount = Number(flags["context"] ?? flags["C"] ?? "0");
   const limit = Number(flags["limit"] ?? flags["n"] ?? "10");
 
@@ -128,7 +133,7 @@ async function messagesSearch(
       console.error(`Error: ${(err as Error).message}`);
       process.exit(1);
     }
-    await syncGroupMessagesIfNeeded(db, targetChatId, syncGroupChat);
+    await syncGroupMessagesIfNeeded(db, targetChatId, syncGroupChat, threadId);
   }
   let rows: MessageRow[];
   try {
@@ -144,6 +149,7 @@ async function messagesSearch(
       before: flags["before"],
       role: flags["role"],
       userId: flags["user-id"],
+      threadId,
     });
   } catch (err) {
     console.error(`Error: ${(err as Error).message}`);
@@ -270,10 +276,11 @@ async function syncGroupMessagesIfNeeded(
   db: Database.Database,
   chatId: string,
   syncGroupChat?: MessagesGroupSync,
+  threadId?: string,
 ): Promise<void> {
   if (!syncGroupChat || !getGroupChatSyncTarget(db, chatId)) return;
   try {
-    await syncGroupChat(db, chatId);
+    await syncGroupChat(db, chatId, threadId);
   } catch (err) {
     // 本地库仍可查；sync 失败不挡住 list/search。
     console.error(`Warning: group history sync failed: ${(err as Error).message}`);

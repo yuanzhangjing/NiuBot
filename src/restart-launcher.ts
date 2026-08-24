@@ -16,6 +16,9 @@ export interface RestartWorkerLaunchOptions {
   /** 本次重启是否自动升级触发；worker 写入 restart/state.json 的 autoUpdate 标记 */
   autoUpdate?: boolean;
   notifyChatId?: string;
+  notifyScopeKey?: string;
+  notifyThreadId?: string;
+  wakeReplyTo?: string;
   updateVersion?: string;
   recommendedArtifactId?: string;
   recommendedGeneration?: number;
@@ -47,6 +50,9 @@ export function buildRestartWorkerEnvironment(
     NIUBOT_SOURCE_DIR: path.resolve(options.sourceDirectory),
     NIUBOT_ENV: options.environment ?? "",
     NIUBOT_RESTART_NOTIFY_CHAT_ID: options.notifyChatId ?? "",
+    NIUBOT_RESTART_SCOPE_KEY: options.notifyScopeKey ?? "",
+    NIUBOT_RESTART_THREAD_ID: options.notifyThreadId ?? "",
+    NIUBOT_WAKE_REPLY_TO: options.wakeReplyTo ?? "",
     NIUBOT_RESTART_ID: options.restartId ?? "",
     NIUBOT_RESTART_STARTED_AT: options.restartStartedAt ?? "",
     NIUBOT_RESTART_WAKE_PROMPT: options.wakePrompt ?? "",

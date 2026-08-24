@@ -1,6 +1,8 @@
 import { MessageQueue, type QueuedMessage, type QueueSnapshot } from "./queue.js";
 import { createLogger } from "../logger.js";
 import { RuntimeStateStore } from "./runtime-state.js";
+import { parseScopeKey } from "./session-scope.js";
+import { TopicConcurrencyLimiter } from "./topic-concurrency.js";
 
 const log = createLogger("chat-manager");
 
@@ -10,21 +12,37 @@ type ChatProcessFn = (
   mergedText: string,
   messages: QueuedMessage[],
   signal: AbortSignal,
+  scopeKey?: string,
 ) => Promise<void>;
 
 export class ChatManager {
   private readonly queue: MessageQueue;
   private readonly runtimeState: RuntimeStateStore;
+  private readonly limiter: TopicConcurrencyLimiter;
   private processFn: ChatProcessFn | null = null;
 
   constructor(bufferMs: number, runtimeState: RuntimeStateStore) {
     this.runtimeState = runtimeState;
+    this.limiter = new TopicConcurrencyLimiter();
     this.queue = new MessageQueue(bufferMs);
+    this.queue.onStart((scopeKey) => {
+      const parsed = parseScopeKey(scopeKey);
+      if (scopeKey === parsed.chatId) return true;
+      return this.limiter.tryAcquire(parsed.chatId, scopeKey);
+    });
+    this.queue.onFinish((scopeKey) => {
+      const parsed = parseScopeKey(scopeKey);
+      if (scopeKey === parsed.chatId) return [];
+      return this.limiter.release(parsed.chatId, scopeKey);
+    });
     this.queue.onStateChange((chatId, snapshot) => this.syncRuntimeQueueState(chatId, snapshot));
-    this.queue.onProcess((chatId, mergedText, messages, signal) => {
+    this.queue.onProcess((scopeKey, mergedText, messages, signal) => {
+      const chatId = messages[0]?.chatId ?? scopeKey;
       const userMessages = messages.filter((m) => !m.triggerKind || m.triggerKind === "user");
       const run = this.runtimeState.createRun({
         chatId,
+        scopeKey,
+        threadId: messages.at(-1)?.threadId,
         triggerMessageIds: userMessages.map((m) => m.dbMsgId).filter((id): id is number => id != null),
         triggerPlatformMsgIds: userMessages.map((m) => m.platformMsgId).filter((id): id is string => !!id),
         replyToPlatformMsgId: userMessages.at(-1)?.platformMsgId,
@@ -33,6 +51,7 @@ export class ChatManager {
       log.info("run created", {
         runId: run.runId,
         chatId,
+        scopeKey,
         messageCount: messages.length,
         messageIds: run.triggerMessageIds,
         platformMsgIds: run.triggerPlatformMsgIds,
@@ -40,7 +59,7 @@ export class ChatManager {
         mergedTextLength: mergedText.length,
         pendingCount: this.queue.pendingCount(chatId),
       });
-      return this.processFn?.(run.runId, chatId, mergedText, messages, signal) ?? Promise.resolve();
+      return this.processFn?.(run.runId, chatId, mergedText, messages, signal, scopeKey) ?? Promise.resolve();
     });
   }
 
@@ -56,11 +75,17 @@ export class ChatManager {
     this.queue.onDiscard(fn);
   }
 
+  onIdle(fn: (scopeKey: string) => void): void {
+    this.queue.onIdle(fn);
+  }
+
   enqueue(msg: QueuedMessage): boolean {
     const pending = this.queue.push(msg);
-    const state = this.runtimeState.getChatState(msg.chatId);
+    const scopeKey = msg.scopeKey ?? msg.chatId;
+    const state = this.runtimeState.getScopeState(scopeKey);
     log.info("message enqueued", {
       chatId: msg.chatId,
+      scopeKey,
       dbMsgId: msg.dbMsgId ?? null,
       platformMsgId: msg.platformMsgId ?? null,
       textLength: msg.text.length,
@@ -68,7 +93,7 @@ export class ChatManager {
       state: state.state,
       activeRunId: state.activeRunId,
       bufferCount: state.bufferMessageIds.length,
-      pendingCount: this.queue.pendingCount(msg.chatId),
+      pendingCount: this.queue.pendingCount(scopeKey),
     });
     return pending;
   }
@@ -83,12 +108,16 @@ export class ChatManager {
   }
 
   /** 入队一个 Session 续接 Loop；任务内容由 Pipeline 处理时从 DB 读取。 */
-  enqueueLoop(chatId: string, loopJobId: number): boolean {
+  enqueueLoop(chatId: string, loopJobId: number, threadId?: string, replyToMsgId?: string): boolean {
     if (this.queue.isStopped()) {
       throw new Error("message queue is stopped");
     }
+    const scopeKey = threadId ? `${chatId}#${threadId}` : chatId;
     const msg: QueuedMessage = {
       chatId,
+      scopeKey,
+      threadId,
+      replyToMsgId,
       text: `[loop continuation: ${loopJobId}]`,
       timestamp: Date.now(),
       triggerKind: "loop_continuation",
@@ -97,9 +126,10 @@ export class ChatManager {
     const pending = this.queue.push(msg);
     log.info("loop continuation enqueued", {
       chatId,
+      scopeKey,
       loopJobId,
       pending,
-      queueState: this.runtimeState.getChatState(chatId).state,
+      queueState: this.runtimeState.getScopeState(scopeKey).state,
     });
     return pending;
   }
@@ -109,7 +139,7 @@ export class ChatManager {
   }
 
   stopChat(chatId: string): number {
-    const activeRun = this.runtimeState.getActiveRun(chatId);
+    const activeRun = this.runtimeState.getActiveRunForScope(chatId);
     const pendingBefore = this.pendingCount(chatId);
     if (activeRun) {
       this.markActiveRunStopped(activeRun.runId);
@@ -127,7 +157,7 @@ export class ChatManager {
 
   flushChat(chatId: string): number {
     const pending = this.pendingCount(chatId);
-    const activeRun = this.runtimeState.getActiveRun(chatId);
+    const activeRun = this.runtimeState.getActiveRunForScope(chatId);
     if (pending > 0 && activeRun) {
       this.markActiveRunStopped(activeRun.runId);
       this.queue.cancel(chatId);
@@ -174,13 +204,21 @@ export class ChatManager {
     return this.runtimeState.getChatState(chatId);
   }
 
-  private syncRuntimeQueueState(chatId: string, snapshot: QueueSnapshot): void {
-    this.runtimeState.updateChatBuffer(
-      chatId,
+  getLimiter(): TopicConcurrencyLimiter {
+    return this.limiter;
+  }
+
+  getScopeKeys(): string[] {
+    return this.queue.scopeKeys();
+  }
+
+  private syncRuntimeQueueState(scopeKey: string, snapshot: QueueSnapshot): void {
+    this.runtimeState.updateScopeBuffer(
+      scopeKey,
       snapshot.buffer.map((message) => message.dbMsgId).filter((id): id is number => id != null),
     );
     log.debug("queue state synced", {
-      chatId,
+      chatId: scopeKey,
       bufferCount: snapshot.buffer.length,
       pendingCount: snapshot.pending.length,
       busy: snapshot.busy,

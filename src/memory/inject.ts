@@ -282,6 +282,7 @@ export function buildNormalContext(
   chatType: "p2p" | "group" = "p2p",
   userId?: string,
   sessionArchiveDirectory?: string,
+  threadId?: string,
 ): string {
   const parts: string[] = [];
 
@@ -293,7 +294,7 @@ export function buildNormalContext(
   if (sessionArchiveDirectory) parts.push(buildSessionArchiveContext(sessionArchiveDirectory));
 
   // 3. 续接上下文：最近对话尾部消息 — 最微观，紧接用户新消息
-  const continuation = buildContinuationContext(db, chatId, beforeMsgId);
+  const continuation = buildContinuationContext(db, chatId, beforeMsgId, threadId);
   if (continuation) {
     parts.push(continuation);
   }
@@ -325,12 +326,13 @@ function buildContinuationContext(
   db: Database.Database,
   chatId: string,
   beforeMsgId?: number,
+  threadId?: string,
 ): string | null {
   // 确认该 chat 存在已归档的 session（没有历史 session 则不需要续接）
   if (!hasEndedUserSession(db, chatId)) return null;
 
   // 捞该 chat 最近 N 条消息（截止到当前消息之前，避免把用户刚发的消息当历史注入）
-  const rows = listContinuationMessages(db, { chatId, beforeMsgId, limit: CONTINUATION_TAIL_COUNT });
+  const rows = listContinuationMessages(db, { chatId, threadId, beforeMsgId, limit: CONTINUATION_TAIL_COUNT });
 
   if (rows.length === 0) return null;
 

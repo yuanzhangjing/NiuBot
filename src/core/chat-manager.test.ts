@@ -146,7 +146,7 @@ describe("ChatManager", () => {
     await waitMicrotask();
 
     const output = logs.join("");
-    expect(output).toContain("[chat-manager] run created runId=run-1 chatId=c1 messageCount=1");
+    expect(output).toContain("[chat-manager] run created runId=run-1 chatId=c1 scopeKey=c1 messageCount=1");
     expect(output).toContain("messageIds=[1]");
     expect(output).toContain("[chat-manager] stop chat requested chatId=c1 activeRunId=run-1 pendingBefore=1 dropped=1");
     expect(output).not.toContain("secret first");

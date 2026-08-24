@@ -5,6 +5,12 @@ const log = createLogger("queue");
 
 export interface QueuedMessage {
   chatId: string;
+  /** 队列键：非隔离时 === chatId；隔离时 c5#omt_aaa。 */
+  scopeKey?: string;
+  /** 飞书话题 ID（仅隔离时使用）。 */
+  threadId?: string;
+  /** 本轮要回复的 platform message ID（Loop/Cron/wake 等无当前用户消息时使用）。 */
+  replyToMsgId?: string;
   text: string;
   timestamp: number;
   platformMsgId?: string;
@@ -35,7 +41,7 @@ interface ChatQueue {
   abortController: AbortController | null;
 }
 
-type ProcessFn = (chatId: string, mergedText: string, messages: QueuedMessage[], signal: AbortSignal) => Promise<void>;
+type ProcessFn = (scopeKey: string, mergedText: string, messages: QueuedMessage[], signal: AbortSignal) => Promise<void>;
 
 export interface QueueSnapshot {
   buffer: QueuedMessage[];
@@ -46,6 +52,9 @@ export interface QueueSnapshot {
 export class MessageQueue {
   private queues = new Map<string, ChatQueue>();
   private processFn: ProcessFn | null = null;
+  private startFn: ((scopeKey: string) => boolean) | null = null;
+  private finishFn: ((scopeKey: string) => string[]) | null = null;
+  private idleFn: ((scopeKey: string) => void) | null = null;
   private bufferMs: number;
   private pendingFn: ((msg: QueuedMessage) => void) | null = null;
   private stateFn: ((chatId: string, snapshot: QueueSnapshot) => void) | null = null;
@@ -59,6 +68,20 @@ export class MessageQueue {
   /** 注册消息处理函数 */
   onProcess(fn: ProcessFn): void {
     this.processFn = fn;
+  }
+
+  /** 注册启动门禁；返回 false 时保持 buffer，不进入 busy。 */
+  onStart(fn: (scopeKey: string) => boolean): void {
+    this.startFn = fn;
+  }
+
+  /** 注册 process 结束回调；返回的 sibling scopeKey 将由队列立即尝试启动。 */
+  onFinish(fn: (scopeKey: string) => string[]): void {
+    this.finishFn = fn;
+  }
+
+  onIdle(fn: (scopeKey: string) => void): void {
+    this.idleFn = fn;
   }
 
   /** 注册 pending 通知函数（消息进入等待队列时立即回调） */
@@ -80,17 +103,18 @@ export class MessageQueue {
   push(msg: QueuedMessage): boolean {
     if (this.stopped) return false;
 
-    const q = this.getQueue(msg.chatId);
+    const key = keyOf(msg);
+    const q = this.getQueue(key);
 
     if (q.busy) {
-      log.info("message queued", { chatId: msg.chatId, pending: q.pending.length + 1 });
+      log.info("message queued", { chatId: key, pending: q.pending.length + 1 });
       q.pending.push(msg);
       try {
         this.pendingFn?.(msg);
       } catch (err) {
-        log.warn("pending callback failed", { chatId: msg.chatId, error: String(err) });
+        log.warn("pending callback failed", { chatId: key, error: String(err) });
       }
-      this.emitState(msg.chatId, q);
+      this.emitState(key, q);
       return true;
     }
 
@@ -101,9 +125,9 @@ export class MessageQueue {
       try {
         this.pendingFn?.(msg);
       } catch (err) {
-        log.warn("pending callback failed", { chatId: msg.chatId, error: String(err) });
+        log.warn("pending callback failed", { chatId: key, error: String(err) });
       }
-      this.emitState(msg.chatId, q);
+      this.emitState(key, q);
       return true;
     }
 
@@ -120,21 +144,21 @@ export class MessageQueue {
         clearTimeout(q.bufferTimer);
         q.bufferTimer = null;
       }
-      this.emitState(msg.chatId, q);
-      void this.flush(q, msg.chatId).catch((err) => {
-        log.error("flush failed", { chatId: msg.chatId, error: String(err) });
+      this.emitState(key, q);
+      void this.flush(q, key).catch((err) => {
+        log.error("flush failed", { chatId: key, error: String(err) });
       });
       return true;
     }
 
     q.buffer.push(msg);
-    this.emitState(msg.chatId, q);
+    this.emitState(key, q);
     if (msg.triggerKind === "loop_continuation" || msg.triggerKind === "restart_wake" || msg.scheduleCommand) {
-      void this.flush(q, msg.chatId).catch((err) => {
-        log.error("flush failed", { chatId: msg.chatId, error: String(err) });
+      void this.flush(q, key).catch((err) => {
+        log.error("flush failed", { chatId: key, error: String(err) });
       });
     } else {
-      this.resetBufferTimer(q, msg.chatId);
+      this.resetBufferTimer(q, key);
     }
     return false;
   }
@@ -142,16 +166,16 @@ export class MessageQueue {
   /** 停止队列，清除所有计时器 */
   stop(): void {
     this.stopped = true;
-    for (const [chatId, q] of this.queues) {
+    for (const [scopeKey, q] of this.queues) {
       if (q.bufferTimer) {
         clearTimeout(q.bufferTimer);
         q.bufferTimer = null;
       }
       const dropped = q.buffer.length + q.pending.length;
       if (dropped > 0) {
-        log.warn("dropping buffered messages on stop", { chatId, count: dropped });
+        log.warn("dropping buffered messages on stop", { chatId: scopeKey, count: dropped });
       }
-      this.emitState(chatId, q);
+      this.emitState(scopeKey, q);
     }
   }
 
@@ -160,8 +184,8 @@ export class MessageQueue {
   }
 
   /** 清空指定 chat 的等待队列（buffer + pending），返回丢弃的消息数 */
-  drain(chatId: string): number {
-    const q = this.queues.get(chatId);
+  drain(scopeKey: string): number {
+    const q = this.queues.get(scopeKey);
     if (!q) return 0;
     const discarded = [...q.buffer, ...q.pending];
     const dropped = discarded.length;
@@ -172,20 +196,20 @@ export class MessageQueue {
       q.bufferTimer = null;
     }
     if (dropped > 0) {
-      log.info("drain", { chatId, dropped });
+      log.info("drain", { chatId: scopeKey, dropped });
       try {
         this.discardFn?.(discarded);
       } catch (err) {
-        log.warn("discard callback failed", { chatId, error: String(err) });
+        log.warn("discard callback failed", { chatId: scopeKey, error: String(err) });
       }
     }
-    this.emitState(chatId, q);
+    this.emitState(scopeKey, q);
     return dropped;
   }
 
   /** 获取指定 chat 的待处理消息数（buffer + pending） */
-  pendingCount(chatId: string): number {
-    const q = this.queues.get(chatId);
+  pendingCount(scopeKey: string): number {
+    const q = this.queues.get(scopeKey);
     if (!q) return 0;
     return q.buffer.length + q.pending.length;
   }
@@ -199,43 +223,53 @@ export class MessageQueue {
   }
 
   /** 指定 chat 是否正在处理 */
-  isBusy(chatId: string): boolean {
-    return this.queues.get(chatId)?.busy ?? false;
+  isBusy(scopeKey: string): boolean {
+    return this.queues.get(scopeKey)?.busy ?? false;
   }
 
   /** 取消指定 chat 正在进行的 process 调用 */
-  cancel(chatId: string): boolean {
-    const q = this.queues.get(chatId);
+  cancel(scopeKey: string): boolean {
+    const q = this.queues.get(scopeKey);
     if (!q?.busy || !q.abortController) return false;
     q.abortController.abort();
     return true;
   }
 
-  private getQueue(chatId: string): ChatQueue {
-    let q = this.queues.get(chatId);
+  scopeKeys(): string[] {
+    return [...this.queues.keys()];
+  }
+
+  async flushScope(scopeKey: string): Promise<void> {
+    const q = this.getQueue(scopeKey);
+    if (q.busy || q.buffer.length === 0) return;
+    await this.flush(q, scopeKey);
+  }
+
+  private getQueue(scopeKey: string): ChatQueue {
+    let q = this.queues.get(scopeKey);
     if (!q) {
       q = {
         buffer: [], bufferTimer: null, pending: [],
         busy: false, abortController: null,
       };
-      this.queues.set(chatId, q);
+      this.queues.set(scopeKey, q);
     }
     return q;
   }
 
-  private resetBufferTimer(q: ChatQueue, chatId: string): void {
+  private resetBufferTimer(q: ChatQueue, scopeKey: string): void {
     if (q.bufferTimer) clearTimeout(q.bufferTimer);
     q.bufferTimer = setTimeout(() => {
-      void this.flush(q, chatId).catch((err) => {
-        log.error("flush failed", { chatId, error: String(err) });
+      void this.flush(q, scopeKey).catch((err) => {
+        log.error("flush failed", { chatId: scopeKey, error: String(err) });
       });
     }, this.bufferMs);
   }
 
   /** 标记某 chat 处理完成，检查后续队列 */
-  private processNext(q: ChatQueue, chatId: string): void {
+  private processNext(q: ChatQueue, scopeKey: string): void {
     q.busy = false;
-    this.emitState(chatId, q);
+    this.emitState(scopeKey, q);
 
     // 已停止，不再启动新的处理
     if (this.stopped) return;
@@ -250,26 +284,30 @@ export class MessageQueue {
       }
       const next = q.pending.splice(0, count);
       q.buffer = next;
-      this.emitState(chatId, q);
+      this.emitState(scopeKey, q);
       if (kind === "loop_continuation" || kind === "restart_wake" || kind === "schedule_command") {
-        void this.flush(q, chatId).catch((err) => {
-          log.error("flush failed", { chatId, error: String(err) });
+        void this.flush(q, scopeKey).catch((err) => {
+          log.error("flush failed", { chatId: scopeKey, error: String(err) });
         });
       } else {
-        this.resetBufferTimer(q, chatId);
+        this.resetBufferTimer(q, scopeKey);
       }
     }
   }
 
-  private async flush(q: ChatQueue, chatId: string): Promise<void> {
+  private async flush(q: ChatQueue, scopeKey: string): Promise<void> {
     if (q.buffer.length === 0) return;
+    if (this.startFn && !this.startFn(scopeKey)) {
+      this.logDeferred(scopeKey);
+      return;
+    }
 
     const messages = q.buffer;
     q.buffer = [];
     q.bufferTimer = null;
     q.busy = true;
     q.abortController = new AbortController();
-    this.emitState(chatId, q);
+    this.emitState(scopeKey, q);
     try {
       const { signal } = q.abortController;
 
@@ -283,28 +321,48 @@ export class MessageQueue {
             return `- msg: "${escapeYamlContent(label)}: ${escapeYamlContent(m.text)}"`;
           }).join("\n");
 
-      log.info("flush", { chatId, messageCount: messages.length, textLength: mergedText.length });
-      await this.processFn?.(chatId, mergedText, messages, signal);
+      log.info("flush", { chatId: scopeKey, messageCount: messages.length, textLength: mergedText.length });
+      await this.processFn?.(scopeKey, mergedText, messages, signal);
+      q.busy = false;
+      this.emitState(scopeKey, q);
     } catch (err) {
-      log.error("process error", { chatId, error: String(err) });
+      log.error("process error", { chatId: scopeKey, error: String(err) });
     } finally {
       q.abortController = null;
-      this.processNext(q, chatId);
+      const siblings = this.finishFn?.(scopeKey) ?? [];
+      this.processNext(q, scopeKey);
+      for (const sibling of [...new Set(siblings)]) {
+        if (sibling === scopeKey) continue;
+        void this.flushScope(sibling).catch((err) => {
+          log.error("woken scope flush failed", { chatId: sibling, error: String(err) });
+        });
+      }
+      if (q.buffer.length === 0 && q.pending.length === 0) {
+        this.idleFn?.(scopeKey);
+      }
     }
   }
 
-  private emitState(chatId: string, q: ChatQueue): void {
+  private logDeferred(scopeKey: string): void {
+    log.info("topic concurrency deferred", { chatId: scopeKey });
+  }
+
+  private emitState(scopeKey: string, q: ChatQueue): void {
     try {
-      this.stateFn?.(chatId, {
+      this.stateFn?.(scopeKey, {
         buffer: [...q.buffer],
         pending: [...q.pending],
         busy: q.busy,
       });
     } catch (err) {
-      log.warn("state callback failed", { chatId, error: String(err) });
+      log.warn("state callback failed", { chatId: scopeKey, error: String(err) });
     }
   }
 
+}
+
+function keyOf(message: QueuedMessage): string {
+  return message.scopeKey ?? message.chatId;
 }
 
 function queueKind(message: QueuedMessage): "user" | "schedule_command" | "loop_continuation" | "restart_wake" {

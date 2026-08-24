@@ -524,7 +524,8 @@ describe("Pipeline Loop integration", () => {
     expect(await scheduler.tick(new Date())).toBe(1);
 
     await vi.waitFor(() => expect(getLoopJob(db, id)?.status).toBe("completed"));
-    expect(agent.createSessionCalls).toHaveLength(1);
+    expect(agent.createSessionCalls).toHaveLength(2);
+    expect(agent.createSessionCalls[1]?.agentSessionId).toBe("agent_1");
     expect(agent.sendMessageCalls).toHaveLength(2);
     expect(agent.sendMessageCalls[1]).toContain("<loop-continuation>");
     expect(agent.sendMessageCalls[1]).toContain("check the remembered context");
@@ -987,6 +988,44 @@ describe("Pipeline.start", () => {
 });
 
 describe("Pipeline runtime", () => {
+  test("isolates topic thread messages into a scope queue and thread session columns", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-topic-test-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare(`
+      INSERT INTO chats (id, type, platform, platform_id, chat_mode, group_message_type, chat_mode_fetched_at)
+      VALUES ('c1', 'group', 'feishu', 'oc-group', 'topic', 'thread', ?)
+    `).run(Date.now());
+    const agent = new RecordingAgent();
+    const pipeline = new Pipeline(
+      db,
+      createImStub(),
+      agent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+
+    (pipeline as any).handleMessage(createMessage({
+      chatType: "group",
+      chatPlatformId: "oc-group",
+      botMentioned: true,
+      threadId: "omt_aaa",
+      rootId: "om-root",
+      platformTs: Date.now(),
+      platformMsgId: "om-topic-message",
+      contentText: "hello topic",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect((pipeline as any).queue.getScopeKeys()).toContain("c1#omt_aaa");
+    const row = db.prepare("SELECT chat_id, thread_id FROM messages WHERE platform_msg_id = ?")
+      .get("om-topic-message") as { chat_id: string; thread_id: string } | undefined;
+    expect(row).toEqual({ chat_id: "c1", thread_id: "omt_aaa" });
+  });
+
   test("idle watchdog does not throw when backend session mtime probing fails", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
@@ -1481,6 +1520,7 @@ describe("Pipeline runtime", () => {
       0,
       "claude",
     );
+    (pipeline as any).platformChatIds.set("c1", "chat-open-id");
 
     await pipeline.recover();
 
@@ -1490,7 +1530,7 @@ describe("Pipeline runtime", () => {
 
     expect(agent.createSessionCalls).toHaveLength(0);
     expect(row).toEqual({
-      status: "archive_failed",
+      status: "active",
       agent_session_id: "legacy-session-id",
       backend_type: null,
     });
@@ -1525,6 +1565,7 @@ describe("Pipeline runtime", () => {
       0,
       "claude",
     );
+    (pipeline as any).platformChatIds.set("c1", "chat-open-id");
 
     await pipeline.recover();
 
@@ -1534,7 +1575,7 @@ describe("Pipeline runtime", () => {
 
     expect(agent.createSessionCalls).toHaveLength(0);
     expect(row).toEqual({
-      status: "archive_failed",
+      status: "active",
       agent_session_id: "codex-thread-id",
       backend_type: "codex",
     });
@@ -1572,7 +1613,9 @@ describe("Pipeline runtime", () => {
 
     await pipeline.recover();
 
-    expect(agent.createSessionCalls).toHaveLength(1);
+    expect(agent.createSessionCalls).toHaveLength(0);
+    const attached = await (pipeline as any).getOrCreateSession("c1", "c1", undefined, undefined);
+    expect(attached.sessionId).toBe("s1");
     expect(agent.createSessionCalls[0]?.agentSessionId).toBe("claude-session-id");
   });
 
@@ -1657,7 +1700,9 @@ describe("Pipeline runtime", () => {
     await pipeline.recover();
 
     // 只恢复 user 会话；cron 会话不占用 chat 槽位
-    expect(agent.createSessionCalls).toHaveLength(1);
+    expect(agent.createSessionCalls).toHaveLength(0);
+    const attached = await (pipeline as any).getOrCreateSession("c1", "c1", undefined, undefined);
+    expect(attached.sessionId).toBe("s-user");
     expect(agent.createSessionCalls[0]?.agentSessionId).toBe("user-session-id");
   });
 
@@ -3328,7 +3373,7 @@ bots:
     await (pipeline as any).sessionTransitionLocks.get("c1");
 
     expect(agent.sendMessageCalls).toHaveLength(0);
-    expect(agent.closeSessionCalls).toEqual(["deferred-agent-session"]);
+    expect(agent.closeSessionCalls).toEqual(["deferred-agent-session", "deferred-agent-session"]);
     expect((db.prepare("SELECT status FROM sessions ORDER BY started_at DESC LIMIT 1").get() as { status: string }).status).toBe("archived");
     expect(sentTexts).toContain("已开始新会话，当前上下文已清空。");
   });
@@ -3373,8 +3418,9 @@ bots:
     }));
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(events).toEqual(["refresh", "create"]);
-    expect(agent.createSessionCalls).toHaveLength(1);
+    expect(events).toEqual(["refresh", "create", "refresh", "create"]);
+    expect(agent.createSessionCalls).toHaveLength(2);
+    expect(agent.createSessionCalls[1]?.agentSessionId).toBe("agent_1");
   });
 
   test("does not retry an uncertain card timeout and still releases the queue", async () => {
@@ -5237,7 +5283,7 @@ bots:
 
     expect(sentCards).toHaveLength(1);
     expect(sentCards.some((card) => card.content.includes("cancel while running"))).toBe(false);
-    expect(agent.cancelSessionCalls).toContain("agent_1");
+    expect(agent.cancelSessionCalls).toContain("agent_2");
     const assistantMessages = db.prepare(
       "SELECT content_text FROM messages WHERE role = 'assistant' ORDER BY id",
     ).all() as Array<{ content_text: string }>;

@@ -23,25 +23,65 @@ const log = createLogger("api");
 
 export interface ApiHandler {
   /** Send text message to a chat */
-  sendMessage(chatId: string, text: string, scheduleToken?: string): Promise<void>;
+  sendMessage(
+    chatId: string,
+    text: string,
+    scheduleToken?: string,
+    scope?: { scopeKey?: string; threadId?: string; replyToMsgId?: string },
+  ): Promise<void>;
   /** Send card message to a chat */
-  sendCard(chatId: string, header: string, content: string, scheduleToken?: string): Promise<void>;
+  sendCard(
+    chatId: string,
+    header: string,
+    content: string,
+    scheduleToken?: string,
+    scope?: { scopeKey?: string; threadId?: string; replyToMsgId?: string },
+  ): Promise<void>;
   /** Send file to a chat */
-  sendFile(chatId: string, filePath: string, scheduleToken?: string): Promise<void>;
+  sendFile(
+    chatId: string,
+    filePath: string,
+    scheduleToken?: string,
+    scope?: { scopeKey?: string; threadId?: string; replyToMsgId?: string },
+  ): Promise<void>;
   /** Resolve chat platform_id from short ID or platform ID */
   resolveChatPlatformId(chatIdOrShort: string): string | undefined;
   /** Get the default platform chat ID (from current session context) */
   getDefaultPlatformChatId(sessionId?: string): string | undefined;
   /** 主 Agent 调度写操作；由 Pipeline 使用当前回合身份鉴权。token 证明请求来自当前回合。 */
-  executeScheduleCommand?(chatId: string, command: ScheduleAgentCommand, token?: string): Promise<ScheduleAgentCommandResult>;
+  executeScheduleCommand?(
+    chatId: string,
+    command: ScheduleAgentCommand,
+    token?: string,
+    scope?: { scopeKey?: string; threadId?: string; replyToMsgId?: string },
+  ): Promise<ScheduleAgentCommandResult>;
   /** 主 Agent Goal finish 操作；由 Pipeline 校验 Goal 令牌与活动回合。 */
-  executeGoalFinishCommand?(chatId: string, command: GoalFinishCommand, token?: string): Promise<GoalCommandResult>;
+  executeGoalFinishCommand?(
+    chatId: string,
+    command: GoalFinishCommand,
+    token?: string,
+    scope?: { scopeKey?: string; threadId?: string; replyToMsgId?: string },
+  ): Promise<GoalCommandResult>;
   /** 主 Agent Goal start 操作；由 Pipeline 校验活动回合。 */
-  executeGoalStartCommand?(chatId: string, objective: string, token?: string): Promise<GoalCommandResult>;
+  executeGoalStartCommand?(
+    chatId: string,
+    objective: string,
+    token?: string,
+    scope?: { scopeKey?: string; threadId?: string; replyToMsgId?: string },
+  ): Promise<GoalCommandResult>;
   /** 主 Agent Goal progress 操作：中间轮静默记录进展。 */
-  executeGoalProgressCommand?(chatId: string, content: string, status?: string): Promise<GoalCommandResult>;
+  executeGoalProgressCommand?(
+    chatId: string,
+    content: string,
+    status?: string,
+    scope?: { scopeKey?: string; threadId?: string; replyToMsgId?: string },
+  ): Promise<GoalCommandResult>;
   /** 重启唤醒：注入主会话任务（nbt restart --wake 完成后调用）。 */
-  executeWakeCommand?(chatId: string, prompt: string): Promise<GoalCommandResult>;
+  executeWakeCommand?(
+    chatId: string,
+    prompt: string,
+    scope?: { scopeKey?: string; threadId?: string; replyToMsgId?: string },
+  ): Promise<GoalCommandResult>;
   getTimezone?(): string;
   setTimezone?(raw: string): string;
 }
@@ -114,10 +154,15 @@ export class ApiServer {
         return;
       }
       const scheduleToken = typeof data.schedule_token === "string" ? data.schedule_token : undefined;
+      const scope = {
+        scopeKey: typeof data.scope_key === "string" ? data.scope_key : undefined,
+        threadId: typeof data.thread_id === "string" ? data.thread_id : undefined,
+        replyToMsgId: typeof data.reply_to_msg_id === "string" ? data.reply_to_msg_id : undefined,
+      };
       if (cardHeader != null) {
-        await this.handler.sendCard(platformChatId, String(cardHeader), text, scheduleToken);
+        await this.handler.sendCard(platformChatId, String(cardHeader), text, scheduleToken, scope);
       } else {
-        await this.handler.sendMessage(platformChatId, text, scheduleToken);
+        await this.handler.sendMessage(platformChatId, text, scheduleToken, scope);
       }
       res.writeHead(200);
       res.end(JSON.stringify({ status: "ok" }));
@@ -141,7 +186,11 @@ export class ApiServer {
         return;
       }
       const scheduleToken = typeof data.schedule_token === "string" ? data.schedule_token : undefined;
-      await this.handler.sendFile(platformChatId, filePath, scheduleToken);
+      await this.handler.sendFile(platformChatId, filePath, scheduleToken, {
+        scopeKey: typeof data.scope_key === "string" ? data.scope_key : undefined,
+        threadId: typeof data.thread_id === "string" ? data.thread_id : undefined,
+        replyToMsgId: typeof data.reply_to_msg_id === "string" ? data.reply_to_msg_id : undefined,
+      });
       res.writeHead(200);
       res.end(JSON.stringify({ status: "ok" }));
     } else if (url === "/schedule" && req.method === "POST") {
@@ -164,7 +213,11 @@ export class ApiServer {
         res.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }));
         return;
       }
-      const result = await this.handler.executeScheduleCommand(chatId, command, data.schedule_token);
+      const result = await this.handler.executeScheduleCommand(chatId, command, data.schedule_token, {
+        scopeKey: typeof data.scope_key === "string" ? data.scope_key : undefined,
+        threadId: typeof data.thread_id === "string" ? data.thread_id : undefined,
+        replyToMsgId: typeof data.reply_to_msg_id === "string" ? data.reply_to_msg_id : undefined,
+      });
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(result));
     } else if (url === "/goal" && req.method === "POST") {
@@ -180,7 +233,11 @@ export class ApiServer {
         res.end(JSON.stringify({ error: "Missing chat_id or command" }));
         return;
       }
-      const result = await this.handler.executeGoalFinishCommand(chatId, command as GoalFinishCommand, data.schedule_token);
+      const result = await this.handler.executeGoalFinishCommand(chatId, command as GoalFinishCommand, data.schedule_token, {
+        scopeKey: typeof data.scope_key === "string" ? data.scope_key : undefined,
+        threadId: typeof data.thread_id === "string" ? data.thread_id : undefined,
+        replyToMsgId: typeof data.reply_to_msg_id === "string" ? data.reply_to_msg_id : undefined,
+      });
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(result));
     } else if (url === "/goal/start" && req.method === "POST") {
@@ -196,7 +253,11 @@ export class ApiServer {
         res.end(JSON.stringify({ error: "Missing chat_id or objective" }));
         return;
       }
-      const result = await this.handler.executeGoalStartCommand(chatId, objective.trim(), data.schedule_token);
+      const result = await this.handler.executeGoalStartCommand(chatId, objective.trim(), data.schedule_token, {
+        scopeKey: typeof data.scope_key === "string" ? data.scope_key : undefined,
+        threadId: typeof data.thread_id === "string" ? data.thread_id : undefined,
+        replyToMsgId: typeof data.reply_to_msg_id === "string" ? data.reply_to_msg_id : undefined,
+      });
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(result));
     } else if (url === "/goal/progress" && req.method === "POST") {
@@ -217,6 +278,11 @@ export class ApiServer {
         chatId,
         content.trim(),
         typeof status === "string" ? status.trim() : undefined,
+        {
+          scopeKey: typeof data.scope_key === "string" ? data.scope_key : undefined,
+          threadId: typeof data.thread_id === "string" ? data.thread_id : undefined,
+          replyToMsgId: typeof data.reply_to_msg_id === "string" ? data.reply_to_msg_id : undefined,
+        },
       );
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(result));
@@ -233,7 +299,11 @@ export class ApiServer {
         res.end(JSON.stringify({ error: "Missing chat_id or prompt" }));
         return;
       }
-      const result = await this.handler.executeWakeCommand(chatId, prompt.trim());
+      const result = await this.handler.executeWakeCommand(chatId, prompt.trim(), {
+        scopeKey: typeof data.scope_key === "string" ? data.scope_key : undefined,
+        threadId: typeof data.thread_id === "string" ? data.thread_id : undefined,
+        replyToMsgId: typeof data.reply_to_msg_id === "string" ? data.reply_to_msg_id : undefined,
+      });
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(result));
     } else if (url === "/timezone" && req.method === "GET") {

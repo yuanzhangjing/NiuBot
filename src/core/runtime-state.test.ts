@@ -33,6 +33,7 @@ describe("RuntimeStateStore", () => {
     expect(run).toEqual({
       runId: "run-1",
       chatId: "c1",
+      scopeKey: "c1",
       triggerMessageIds: [1, 2],
       triggerPlatformMsgIds: ["m1", "m2"],
       replyToPlatformMsgId: "m2",
@@ -153,6 +154,7 @@ describe("RuntimeStateStore", () => {
     expect(events).toEqual([
       {
         chatId: "c1",
+        scopeKey: "c1",
         runId: "run-1",
         messageIds: [1, 2],
         stage: "queued",
@@ -161,6 +163,7 @@ describe("RuntimeStateStore", () => {
       },
       {
         chatId: "c1",
+        scopeKey: "c1",
         runId: "run-1",
         messageIds: [1, 2],
         stage: "agent_running",
@@ -169,6 +172,7 @@ describe("RuntimeStateStore", () => {
       },
       {
         chatId: "c1",
+        scopeKey: "c1",
         runId: "run-1",
         messageIds: [1, 2],
         stage: "sending_response",
@@ -177,6 +181,7 @@ describe("RuntimeStateStore", () => {
       },
       {
         chatId: "c1",
+        scopeKey: "c1",
         runId: "run-1",
         messageIds: [1, 2],
         stage: "done",

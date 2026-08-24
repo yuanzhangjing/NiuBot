@@ -58,6 +58,9 @@ const ONE_SHOT_ENVIRONMENT_NAMES = [
   "NIUBOT_LAUNCH_CANDIDATE_ARTIFACT_ID",
   "NIUBOT_RESTART_STOP_AFTER_COMPLETION",
   "NIUBOT_RESTART_NOTIFY_CHAT_ID",
+  "NIUBOT_RESTART_SCOPE_KEY",
+  "NIUBOT_RESTART_THREAD_ID",
+  "NIUBOT_WAKE_REPLY_TO",
   "NIUBOT_CHAT_ID",
   "NIUBOT_API_SOCKET",
   "NIUBOT_INSTANCE_ID",
@@ -84,6 +87,9 @@ interface RestartContext {
   recommendedGeneration?: number;
   candidateArtifactId?: string;
   notifyChatId?: string;
+  notifyScopeKey?: string;
+  notifyThreadId?: string;
+  wakeReplyTo?: string;
   legacyNotifyEndpoint?: string;
   /** 重启完成后注入主会话的任务提示（nbt restart --wake 传入） */
   wakePrompt?: string;
@@ -146,6 +152,9 @@ export async function runRestartWorker(
     recommendedGeneration: parsePositiveInteger(env["NIUBOT_RECOMMENDED_GENERATION"]),
     candidateArtifactId: env["NIUBOT_CANDIDATE_ARTIFACT_ID"],
     notifyChatId: env["NIUBOT_RESTART_NOTIFY_CHAT_ID"] || env["NIUBOT_CHAT_ID"],
+    notifyScopeKey: env["NIUBOT_RESTART_SCOPE_KEY"] || undefined,
+    notifyThreadId: env["NIUBOT_RESTART_THREAD_ID"] || undefined,
+    wakeReplyTo: env["NIUBOT_WAKE_REPLY_TO"] || undefined,
     legacyNotifyEndpoint: env["NIUBOT_API_SOCKET"],
     wakePrompt: env["NIUBOT_RESTART_WAKE_PROMPT"] || undefined,
     logFile: path.join(logDirectory, `niubot-${localDate()}.log`),
@@ -1008,7 +1017,12 @@ async function postToBot(
     : resolveBotEndpoint(context.niubotHome, bot.id, { unixSocketDirectory: path.dirname(bot.dbPath) });
   const response = await localApiRequest(endpoint, endpointPath, {
     method: "POST",
-    body: { chat_id: context.notifyChatId, ...body },
+    body: {
+      chat_id: context.notifyChatId,
+      scope_key: context.notifyScopeKey,
+      thread_id: context.notifyThreadId,
+      ...body,
+    },
     timeoutMs: 3_000,
   });
   if (response.statusCode < 200 || response.statusCode >= 300) {
@@ -1020,13 +1034,22 @@ async function wakeMainSession(context: RestartContext): Promise<void> {
   const prompt = context.wakePrompt;
   if (!prompt || !context.notifyChatId) return;
   try {
-    await postToBot(context, "/wake", { prompt });
+    await postToBot(context, "/wake", {
+      prompt,
+      scope_key: context.notifyScopeKey,
+      thread_id: context.notifyThreadId,
+      reply_to_msg_id: context.wakeReplyTo,
+    });
     log(context, `main session wake queued: ${prompt.slice(0, 60)}`);
     // 唤醒投递成功后，追加一条用户可见确认：明确「重启后已唤醒」及唤醒内容，
     // 让用户知道重启后 Agent 被拉起要干什么，不只是一句模糊的「已唤醒」。
     try {
       const text = `✅ 重启完成，主会话已唤醒。\n**唤醒任务：** ${prompt}`;
-      await postToBot(context, "/send", { text });
+      await postToBot(context, "/send", {
+        text,
+        scope_key: context.notifyScopeKey,
+        thread_id: context.notifyThreadId,
+      });
     } catch (err) {
       log(context, `wake confirmation send failed: ${errorMessage(err)}`);
     }

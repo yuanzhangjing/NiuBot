@@ -30,6 +30,8 @@ export type RuntimeStateEventName =
 
 export type RuntimeStateEvent = {
   chatId: string;
+  scopeKey: string;
+  threadId?: string;
   runId: string;
   messageIds: number[];
   stage: RunStage;
@@ -41,6 +43,8 @@ export type RuntimeStateEvent = {
 export type RunState = {
   runId: string;
   chatId: string;
+  scopeKey: string;
+  threadId?: string;
   triggerMessageIds: number[];
   triggerPlatformMsgIds: string[];
   replyToPlatformMsgId?: string;
@@ -59,6 +63,8 @@ type RuntimeStateStoreOptions = {
 
 type CreateRunInput = {
   chatId: string;
+  scopeKey?: string;
+  threadId?: string;
   triggerMessageIds: number[];
   triggerPlatformMsgIds: string[];
   replyToPlatformMsgId?: string;
@@ -107,6 +113,11 @@ export class RuntimeStateStore {
     return cloneChatState(state);
   }
 
+  getScopeState(scopeKey: string): ChatQueueState {
+    const state = this.ensureChatState(scopeKey);
+    return cloneChatState(state);
+  }
+
   getRun(runId: string): RunState | undefined {
     const run = this.runs.get(runId);
     return run ? cloneRunState(run) : undefined;
@@ -118,8 +129,21 @@ export class RuntimeStateStore {
       .map((run) => cloneRunState(run));
   }
 
+  getRunsForScope(scopeKey: string): RunState[] {
+    return [...this.runs.values()]
+      .filter((run) => run.scopeKey === scopeKey)
+      .map((run) => cloneRunState(run));
+  }
+
   getActiveRun(chatId: string): RunState | null {
     const runId = this.ensureChatState(chatId).activeRunId;
+    if (!runId) return null;
+    const run = this.runs.get(runId);
+    return run ? cloneRunState(run) : null;
+  }
+
+  getActiveRunForScope(scopeKey: string): RunState | null {
+    const runId = this.ensureChatState(scopeKey).activeRunId;
     if (!runId) return null;
     const run = this.runs.get(runId);
     return run ? cloneRunState(run) : null;
@@ -130,6 +154,8 @@ export class RuntimeStateStore {
     const run: RunState = {
       runId: this.createRunId(),
       chatId: input.chatId,
+      scopeKey: input.scopeKey ?? input.chatId,
+      threadId: input.threadId,
       triggerMessageIds: [...input.triggerMessageIds],
       triggerPlatformMsgIds: [...input.triggerPlatformMsgIds],
       replyToPlatformMsgId: input.replyToPlatformMsgId,
@@ -141,11 +167,14 @@ export class RuntimeStateStore {
     if (!run.replyToPlatformMsgId) {
       delete run.replyToPlatformMsgId;
     }
+    if (!run.threadId) {
+      delete run.threadId;
+    }
 
     this.runs.set(run.runId, run);
     this.setInflight(run.runId, true);
 
-    const chat = this.ensureChatState(input.chatId);
+    const chat = this.ensureChatState(run.scopeKey);
     chat.state = "busy";
     chat.activeRunId = run.runId;
     chat.updatedAt = timestamp;
@@ -176,7 +205,7 @@ export class RuntimeStateStore {
       delete run.lastError;
     }
 
-    const chat = this.ensureChatState(run.chatId);
+    const chat = this.ensureChatState(run.scopeKey);
     chat.updatedAt = timestamp;
     if (lastError) {
       chat.lastError = lastError;
@@ -217,6 +246,10 @@ export class RuntimeStateStore {
     return cloneChatState(chat);
   }
 
+  updateScopeBuffer(scopeKey: string, bufferMessageIds: number[]): ChatQueueState {
+    return this.updateChatBuffer(scopeKey, bufferMessageIds);
+  }
+
   markChatStopped(chatId: string, lastError?: string): ChatQueueState {
     const chat = this.ensureChatState(chatId);
     chat.state = "stopped";
@@ -226,6 +259,10 @@ export class RuntimeStateStore {
       this.pipelineHealth.lastError = lastError;
     }
     return cloneChatState(chat);
+  }
+
+  markScopeStopped(scopeKey: string, lastError?: string): ChatQueueState {
+    return this.markChatStopped(scopeKey, lastError);
   }
 
   private ensureChatState(chatId: string): ChatQueueState {
@@ -265,21 +302,24 @@ export class RuntimeStateStore {
 
   private emitRunEvent(
     run: RunState,
-    event: RuntimeStateEventName,
+    eventName: RuntimeStateEventName,
     timestamp: number,
     error?: string,
   ): void {
     if (!this.onEvent) return;
     try {
-      this.onEvent({
+      const event: RuntimeStateEvent = {
         chatId: run.chatId,
+        scopeKey: run.scopeKey,
         runId: run.runId,
         messageIds: [...run.triggerMessageIds],
         stage: run.stage,
-        event,
-        error,
+        event: eventName,
         elapsedMs: Math.max(0, timestamp - run.startedAt),
-      });
+      };
+      if (run.threadId) event.threadId = run.threadId;
+      if (error) event.error = error;
+      this.onEvent(event);
     } catch {
       // Runtime event persistence is diagnostic only; it must not block message handling.
     }

@@ -101,6 +101,7 @@ export interface TransportClient {
   getBotName(): Promise<string | undefined>;
   getChatName(chatId: string): Promise<string | undefined>;
   getChatMetadata?(chatId: string): Promise<ChatMetadata | undefined>;
+  getMessageThreadId?(messageId: string): Promise<string | undefined>;
   getMessageContent(msgId: string): Promise<string | undefined>;
   getAppCreatorId(): Promise<string | undefined>;
   /**

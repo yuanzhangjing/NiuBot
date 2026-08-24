@@ -16,7 +16,8 @@ const log = createLogger("loop");
 export const MIN_LOOP_INTERVAL_SECONDS = 60;
 export const DEFAULT_LOOP_DURATION_SECONDS = 24 * 60 * 60;
 export const MAX_LOOP_DURATION_SECONDS = 7 * 24 * 60 * 60;
-export const MAX_ACTIVE_LOOPS_PER_CHAT = 3;
+export const MAX_ACTIVE_LOOPS_PER_CHAT = 8;
+export const MAX_ACTIVE_LOOPS_PER_SCOPE = 3;
 export const LOOP_FAILURE_LIMIT = 3;
 const CHECK_INTERVAL_MS = 1_000;
 
@@ -25,6 +26,8 @@ export type LoopStatus = "active" | "queued" | "running" | "paused" | "completed
 export interface LoopJob {
   id: number;
   chatId: string;
+  threadId: string | null;
+  replyToMsgId: string | null;
   creatorUserId: string;
   intervalSeconds: number;
   prompt: string;
@@ -48,6 +51,8 @@ export interface LoopJob {
 interface RawLoopRow {
   id: number;
   chat_id: string;
+  thread_id: string | null;
+  reply_to_msg_id: string | null;
   creator_user_id: string;
   interval_seconds: number;
   prompt: string;
@@ -71,6 +76,8 @@ function toLoopJob(row: RawLoopRow): LoopJob {
   return {
     id: row.id,
     chatId: row.chat_id,
+    threadId: row.thread_id,
+    replyToMsgId: row.reply_to_msg_id,
     creatorUserId: row.creator_user_id,
     intervalSeconds: row.interval_seconds,
     prompt: row.prompt,
@@ -116,6 +123,8 @@ export function addLoopJob(
   db: Database.Database,
   options: {
     chatId: string;
+    threadId?: string;
+    replyToMsgId?: string;
     creatorUserId: string;
     intervalSeconds: number;
     prompt: string;
@@ -154,21 +163,31 @@ export function addLoopJob(
     }
   }
 
-  const activeCount = db.prepare(`
+  const scopeActiveCount = db.prepare(`
+    SELECT COUNT(*) AS count FROM loop_jobs
+    WHERE chat_id = ? AND (? IS NULL OR thread_id = ?)
+      AND status IN ('active', 'queued', 'running', 'paused')
+  `).get(options.chatId, options.threadId ?? null, options.threadId ?? null) as { count: number };
+  if (scopeActiveCount.count >= MAX_ACTIVE_LOOPS_PER_SCOPE) {
+    throw new Error(`每个话题最多保留 ${MAX_ACTIVE_LOOPS_PER_SCOPE} 个 Loop`);
+  }
+  const chatActiveCount = db.prepare(`
     SELECT COUNT(*) AS count FROM loop_jobs
     WHERE chat_id = ? AND status IN ('active', 'queued', 'running', 'paused')
   `).get(options.chatId) as { count: number };
-  if (activeCount.count >= MAX_ACTIVE_LOOPS_PER_CHAT) {
-    throw new Error(`每个聊天最多保留 ${MAX_ACTIVE_LOOPS_PER_CHAT} 个 Loop`);
+  if (chatActiveCount.count >= MAX_ACTIVE_LOOPS_PER_CHAT) {
+    throw new Error(`每个群最多保留 ${MAX_ACTIVE_LOOPS_PER_CHAT} 个 Loop`);
   }
 
   const result = db.prepare(`
     INSERT INTO loop_jobs (
-      chat_id, creator_user_id, interval_seconds, prompt,
+      chat_id, thread_id, reply_to_msg_id, creator_user_id, interval_seconds, prompt,
       max_times, until_time, next_run_at, cron_expr, timezone, description
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     options.chatId,
+    options.threadId ?? null,
+    options.replyToMsgId ?? null,
     options.creatorUserId,
     options.intervalSeconds,
     prompt,
@@ -188,12 +207,13 @@ export function getLoopJob(db: Database.Database, id: number): LoopJob | undefin
   return row ? toLoopJob(row) : undefined;
 }
 
-export function listLoopJobs(db: Database.Database, chatId: string): LoopJob[] {
+export function listLoopJobs(db: Database.Database, chatId: string, threadId?: string): LoopJob[] {
   const rows = db.prepare(`
     SELECT * FROM loop_jobs
-    WHERE chat_id = ? AND status IN ('active', 'queued', 'running', 'paused')
+    WHERE chat_id = ? AND (? IS NULL OR thread_id = ?)
+      AND status IN ('active', 'queued', 'running', 'paused')
     ORDER BY id
-  `).all(chatId) as RawLoopRow[];
+  `).all(chatId, threadId ?? null, threadId ?? null) as RawLoopRow[];
   return rows.map(toLoopJob);
 }
 

@@ -156,13 +156,13 @@ async function main(): Promise<void> {
       handleUserMemory(args.slice(1));
       break;
     case "messages":
-      await handleMessages(openDb(), args.slice(1), CHAT_ID, CHAT_TYPE, parseArgs, (db, chatId) =>
+      await handleMessages(openDb(), args.slice(1), CHAT_ID, CHAT_TYPE, parseArgs, (db, chatId, threadId) =>
         syncGroupChatFromConfig(db, chatId, {
           botName: BOT_NAME,
           botProfilePath: BOT_PROFILE_PATH,
           dbPath: DB_PATH,
           platformBotId: BOT_ID,
-        }),
+        }, threadId),
       );
       break;
     case "sessions":
@@ -280,6 +280,9 @@ Usage: nbt restart [--update <version>] [--wake [<提示>]]
       environment: process.env["NIUBOT_ENV"] ?? "",
       restartMode: process.env["NIUBOT_LEGACY_SOURCE_MIGRATION"] === "1" ? "source" : undefined,
       notifyChatId: CHAT_ID,
+      notifyScopeKey: process.env["NIUBOT_SCOPE_KEY"],
+      notifyThreadId: process.env["NIUBOT_THREAD_ID"],
+      wakeReplyTo: process.env["NIUBOT_WAKE_REPLY_TO"],
       updateVersion,
       wakePrompt,
     });

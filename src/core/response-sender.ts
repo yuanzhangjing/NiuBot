@@ -24,6 +24,9 @@ type SendFinalResponseOptions = {
   content: string;
   footer?: string;
   replyToMsgId?: string;
+  replyInThread?: boolean;
+  /** false 时禁止 create，只处理 reply；必须有 replyToMsgId。 */
+  allowChatFallback?: boolean;
   signal?: AbortSignal;
   /** 跳过卡片，直接走文本。 */
   preferText?: boolean;
@@ -47,12 +50,21 @@ export class ResponseSender {
       this.transport.sendText(chatId, text, deliveryOptions)));
   }
 
-  sendReply(chatId: string, text: string, replyToMsgId: string, signal?: AbortSignal): Promise<string> {
+  sendReply(
+    chatId: string,
+    text: string,
+    replyToMsgId: string,
+    signal?: AbortSignal,
+    replyInThread?: boolean,
+  ): Promise<string> {
     return this.sendWithTelemetry("im.sendReply", chatId, {
       hasReply: true,
       contentLength: text.length,
     }, () => this.runDelivery("im.sendReply", signal, (deliveryOptions) =>
-      this.transport.sendReply(chatId, text, replyToMsgId, deliveryOptions)));
+      this.transport.sendReply(chatId, text, replyToMsgId, {
+        ...deliveryOptions,
+        replyInThread,
+      })));
   }
 
   sendCard(
@@ -62,15 +74,26 @@ export class ResponseSender {
     footer?: string,
     replyToMsgId?: string,
     signal?: AbortSignal,
+    replyInThread?: boolean,
   ): Promise<string> {
     return this.sendWithTelemetry("im.sendCard", chatId, {
       hasReply: !!replyToMsgId,
       contentLength: content.length,
     }, () => this.runDelivery("im.sendCard", signal, (deliveryOptions) =>
-      this.transport.sendCard(chatId, header, content, footer, replyToMsgId, deliveryOptions)));
+      this.transport.sendCard(chatId, header, content, footer, replyToMsgId, {
+        ...deliveryOptions,
+        replyInThread,
+      })));
   }
 
-  sendFile(chatId: string, filePath: string, fileName?: string, signal?: AbortSignal, replyToMsgId?: string): Promise<string> {
+  sendFile(
+    chatId: string,
+    filePath: string,
+    fileName?: string,
+    signal?: AbortSignal,
+    replyToMsgId?: string,
+    replyInThread?: boolean,
+  ): Promise<string> {
     return this.sendWithTelemetry("im.sendFile", chatId, {
       fileName: fileName ?? path.basename(filePath),
       hasReply: !!replyToMsgId,
@@ -78,6 +101,7 @@ export class ResponseSender {
       this.transport.sendFile(chatId, filePath, fileName, {
         ...deliveryOptions,
         replyToMsgId,
+        replyInThread,
       })));
   }
 
@@ -103,6 +127,14 @@ export class ResponseSender {
     const methodsTried: string[] = [];
     let lastError: unknown;
     let uncertain = false;
+    const allowChatFallback = options.allowChatFallback !== false;
+    if (!allowChatFallback && !options.replyToMsgId) {
+      return {
+        ok: false,
+        error: "No reply anchor available; create fallback is disabled",
+        methodsTried,
+      };
+    }
 
     const trySend = async (
       methodLabel: string,
@@ -154,17 +186,27 @@ export class ResponseSender {
     if (!options.preferText) {
       if (options.replyToMsgId) {
         const replyCard = await trySend("card:reply", "card", () =>
-          this.sendCard(options.chatId, options.header, options.content, options.footer, options.replyToMsgId, options.signal),
+          this.sendCard(
+            options.chatId,
+            options.header,
+            options.content,
+            options.footer,
+            options.replyToMsgId,
+            options.signal,
+            options.replyInThread,
+          ),
           options.content);
         if (replyCard) return replyCard;
         if (uncertain) return uncertainResult();
       }
 
-      const createCard = await trySend("card:create", "card", () =>
-        this.sendCard(options.chatId, options.header, options.content, options.footer, undefined, options.signal),
-        options.content);
-      if (createCard) return createCard;
-      if (uncertain) return uncertainResult();
+      if (allowChatFallback) {
+        const createCard = await trySend("card:create", "card", () =>
+          this.sendCard(options.chatId, options.header, options.content, options.footer, undefined, options.signal),
+          options.content);
+        if (createCard) return createCard;
+        if (uncertain) return uncertainResult();
+      }
     }
 
     // 带飞书 at 时正文必须原样走文本降级，不能换成「发送失败」提示，否则对方 Bot 收不到。
@@ -173,17 +215,25 @@ export class ResponseSender {
 
     if (options.replyToMsgId) {
       const replyText = await trySend("text:reply", "text", () =>
-        this.sendReply(options.chatId, textBody, options.replyToMsgId!, options.signal),
+        this.sendReply(
+          options.chatId,
+          textBody,
+          options.replyToMsgId!,
+          options.signal,
+          options.replyInThread,
+        ),
         textBody);
       if (replyText) return replyText;
       if (uncertain) return uncertainResult();
     }
 
-    const createText = await trySend("text:create", "text", () =>
-      this.sendText(options.chatId, textBody, options.signal),
-      textBody);
-    if (createText) return createText;
-    if (uncertain) return uncertainResult();
+    if (allowChatFallback) {
+      const createText = await trySend("text:create", "text", () =>
+        this.sendText(options.chatId, textBody, options.signal),
+        textBody);
+      if (createText) return createText;
+      if (uncertain) return uncertainResult();
+    }
 
     // 带 at 或主动要求纯文本时不要再降成文件（文件里的 at 叫不醒对方）。
     if (keepAtPayload) {
@@ -196,17 +246,26 @@ export class ResponseSender {
 
     if (options.replyToMsgId) {
       const replyFile = await trySend("file:reply", "file", () =>
-        this.sendResponseFile(options.chatId, options.content, options.footer, options.signal, options.replyToMsgId),
+        this.sendResponseFile(
+          options.chatId,
+          options.content,
+          options.footer,
+          options.signal,
+          options.replyToMsgId,
+          options.replyInThread,
+        ),
         options.content);
       if (replyFile) return replyFile;
       if (uncertain) return uncertainResult();
     }
-    const createFile = await trySend("file:create", "file", () =>
-      this.sendResponseFile(options.chatId, options.content, options.footer, options.signal),
-      // deliveredContent 只回写正文（不带 footer 拼装产物，避免污染历史/FTS）
-      options.content);
-    if (createFile) return createFile;
-    if (uncertain) return uncertainResult();
+    if (allowChatFallback) {
+      const createFile = await trySend("file:create", "file", () =>
+        this.sendResponseFile(options.chatId, options.content, options.footer, options.signal),
+        // deliveredContent 只回写正文（不带 footer 拼装产物，避免污染历史/FTS）
+        options.content);
+      if (createFile) return createFile;
+      if (uncertain) return uncertainResult();
+    }
 
     return {
       ok: false,
@@ -221,13 +280,14 @@ export class ResponseSender {
     footer?: string,
     signal?: AbortSignal,
     replyToMsgId?: string,
+    replyInThread?: boolean,
   ): Promise<string> {
     const dir = mkdtempSync(path.join(this.tempDir, "niubot-response-"));
     const filePath = path.join(dir, "reply.md");
     const fileContent = footer ? `${content}\n\n---\n${footer}` : content;
     writeFileSync(filePath, fileContent, "utf-8");
     try {
-      return await this.sendFile(chatId, filePath, "reply.md", signal, replyToMsgId);
+      return await this.sendFile(chatId, filePath, "reply.md", signal, replyToMsgId, replyInThread);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

@@ -63,7 +63,7 @@ test("/schedule 把结构化调度命令转交给当前 Pipeline 回合", async 
     untilTime: undefined,
     // 默认时区与实现同源（NIUBOT_TZ 或系统时区），不绑定具体值，保证 CI（UTC）可移植
     timeZone: TZ,
-  }, "tok-2");
+  }, "tok-2", { scopeKey: undefined, threadId: undefined });
 });
 
 test("/schedule 在 API 边界拒绝未知操作和非法字段", async () => {
