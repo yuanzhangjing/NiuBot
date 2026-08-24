@@ -20,6 +20,7 @@ import {
 } from "../database/schema.js";
 import type { NormalizedMessage, PlatformAdapter } from "../im/types.js";
 import { DeliveryUncertainError } from "../transport/errors.js";
+import type { DeliveryOptions } from "../transport/types.js";
 import { COMPACT_RECOVERY_REMINDER } from "../memory/inject.js";
 import { loadConfig } from "../config.js";
 import { SYSTEM_RULES } from "../system-rules.js";
@@ -1007,6 +1008,7 @@ describe("Pipeline runtime", () => {
       0,
       "codex",
     );
+    await pipeline.start();
 
     (pipeline as any).handleMessage(createMessage({
       chatType: "group",
@@ -1024,6 +1026,82 @@ describe("Pipeline runtime", () => {
     const row = db.prepare("SELECT chat_id, thread_id FROM messages WHERE platform_msg_id = ?")
       .get("om-topic-message") as { chat_id: string; thread_id: string } | undefined;
     expect(row).toEqual({ chat_id: "c1", thread_id: "omt_aaa" });
+  });
+
+  test("runs two topic threads in parallel and blocks create fallback on reply failure", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-topic-parallel-test-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare(`
+      INSERT INTO chats (id, type, platform, platform_id, chat_mode, group_message_type, chat_mode_fetched_at)
+      VALUES ('c1', 'group', 'feishu', 'oc-group', 'topic', 'thread', ?)
+    `).run(Date.now());
+    const agent = new ReplyAgent("topic reply");
+    const recorder = createRecordingImStub();
+    const sentTexts: string[] = [];
+    const sendCalls: Array<{ replyToMsgId?: string; options?: DeliveryOptions }> = [];
+    const im: PlatformAdapter = {
+      ...recorder.im,
+      async sendText(_chatId, text) {
+        sentTexts.push(text);
+        return "pmid-text";
+      },
+      async sendReply(_chatId, _text, replyToMsgId, options) {
+        sendCalls.push({ replyToMsgId, options });
+        throw new Error("reply unavailable");
+      },
+      async sendCard(_chatId, _header, _content, _footer, replyToMsgId, options) {
+        sendCalls.push({ replyToMsgId, options });
+        throw new Error("reply unavailable");
+      },
+      async sendFile(_chatId, _filePath, _fileName, options) {
+        sendCalls.push({ replyToMsgId: options?.replyToMsgId, options });
+        throw new Error("reply unavailable");
+      },
+    };
+    const pipeline = new Pipeline(
+      db,
+      im,
+      agent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+    await pipeline.start();
+
+    (pipeline as any).handleMessage(createMessage({
+      chatType: "group",
+      chatPlatformId: "oc-group",
+      botMentioned: true,
+      threadId: "omt_aaa",
+      platformTs: Date.now(),
+      platformMsgId: "om-topic-a",
+      contentText: "topic A",
+    }));
+    (pipeline as any).handleMessage(createMessage({
+      chatType: "group",
+      chatPlatformId: "oc-group",
+      botMentioned: true,
+      threadId: "omt_bbb",
+      platformTs: Date.now(),
+      platformMsgId: "om-topic-b",
+      contentText: "topic B",
+    }));
+    await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(2));
+
+    expect((pipeline as any).queue.getScopeKeys()).toEqual(
+      expect.arrayContaining(["c1#omt_aaa", "c1#omt_bbb"]),
+    );
+    expect(agent.createSessionCalls).toHaveLength(2);
+    const rows = db.prepare(
+      "SELECT thread_id FROM sessions WHERE chat_id = ? AND source = 'user' AND status = 'active' ORDER BY thread_id",
+    ).all("c1") as Array<{ thread_id: string | null }>;
+    expect(rows.map((row) => row.thread_id).sort()).toEqual(["omt_aaa", "omt_bbb"]);
+    expect(sentTexts).toHaveLength(0);
+    expect(sendCalls.every((call) => call.replyToMsgId !== undefined)).toBe(true);
+    expect(sendCalls.some((call) => call.options?.replyInThread === true)).toBe(true);
   });
 
   test("idle watchdog does not throw when backend session mtime probing fails", async () => {
