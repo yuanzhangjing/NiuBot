@@ -23,6 +23,8 @@ export interface SessionConfig {
   scopeKey?: string;
   /** 飞书话题 ID（仅隔离话题） */
   threadId?: string;
+  /** 当前回合的回复锚点；随 Agent 子进程透传给 nbt restart 等跨进程工具 */
+  replyToMsgId?: string;
   /** 当前会话类型（传递给 agent 环境变量） */
   chatType?: "p2p" | "group";
   /** 数据库路径（传递给 agent 环境变量，确保 CLI 工具访问正确的数据库） */

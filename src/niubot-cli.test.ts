@@ -135,6 +135,19 @@ describe("niubot CLI path helpers", () => {
     expect(userEnv["NIUBOT_BOT_PROFILE_PATH"]).toBeUndefined();
   });
 
+  it("passes topic scope and restart reply anchor to agent subprocesses", () => {
+    const env = buildNiubotEnv({
+      chatId: "c1",
+      scopeKey: "c1#omt_aaa",
+      threadId: "omt_aaa",
+      replyToMsgId: "om-root",
+    });
+
+    expect(env["NIUBOT_SCOPE_KEY"]).toBe("c1#omt_aaa");
+    expect(env["NIUBOT_THREAD_ID"]).toBe("omt_aaa");
+    expect(env["NIUBOT_WAKE_REPLY_TO"]).toBe("om-root");
+  });
+
   it("injects the current display timezone for agent CLI processes", () => {
     const env = buildNiubotEnv({ workingDirectory: "/tmp/project" });
     expect(env["NIUBOT_TZ"]).toBe(TZ);

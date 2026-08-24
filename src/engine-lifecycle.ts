@@ -34,6 +34,9 @@ export interface EngineUpdateStatus {
 export interface EngineRestartRequest {
   botName: string;
   chatId?: string;
+  scopeKey?: string;
+  threadId?: string;
+  wakeReplyTo?: string;
   updateVersion?: string;
   autoUpdate?: boolean;
 }
@@ -284,12 +287,17 @@ export class EngineLifecycleService implements EngineLifecycle {
       restartMode: this.legacySourceMode && !request.updateVersion ? "source" : undefined,
       autoUpdate: request.autoUpdate,
       notifyChatId: request.chatId,
+      notifyScopeKey: request.scopeKey,
+      notifyThreadId: request.threadId,
+      wakeReplyTo: request.wakeReplyTo,
       updateVersion: request.updateVersion,
     });
     this.log.info("restart worker launched", {
       pid: launch.pid,
       botName: request.botName,
       chatId: request.chatId,
+      scopeKey: request.scopeKey,
+      threadId: request.threadId,
       sourceDirectory,
       updateVersion: request.updateVersion,
       autoUpdate: request.autoUpdate === true,

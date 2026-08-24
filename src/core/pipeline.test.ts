@@ -1026,6 +1026,7 @@ describe("Pipeline runtime", () => {
     const row = db.prepare("SELECT chat_id, thread_id FROM messages WHERE platform_msg_id = ?")
       .get("om-topic-message") as { chat_id: string; thread_id: string } | undefined;
     expect(row).toEqual({ chat_id: "c1", thread_id: "omt_aaa" });
+    expect(agent.createSessionCalls[0]?.replyToMsgId).toBe("om-topic-message");
   });
 
   test("runs two topic threads in parallel and blocks create fallback on reply failure", async () => {
@@ -1102,6 +1103,53 @@ describe("Pipeline runtime", () => {
     expect(sentTexts).toHaveLength(0);
     expect(sendCalls.every((call) => call.replyToMsgId !== undefined)).toBe(true);
     expect(sendCalls.some((call) => call.options?.replyInThread === true)).toBe(true);
+  });
+
+  test("isolated restart wake falls back to the latest thread anchor without creating a topic", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-topic-wake-test-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare(`
+      INSERT INTO chats (id, type, platform, platform_id, chat_mode, group_message_type, chat_mode_fetched_at)
+      VALUES ('c1', 'group', 'feishu', 'oc-group', 'topic', 'thread', ?)
+    `).run(Date.now());
+    const agent = new RecordingAgent();
+    const calls: Array<{ method: string; replyToMsgId?: string; options?: boolean }> = [];
+    const im = createImStub();
+    im.sendText = async () => {
+      calls.push({ method: "create" });
+      return "text-id";
+    };
+    im.sendCard = async (_chatId, _header, _content, _footer, replyToMsgId, options) => {
+      calls.push({ method: "card", replyToMsgId, options: options?.replyInThread });
+      return "card-id";
+    };
+    const pipeline = new Pipeline(db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");
+    await pipeline.start();
+
+    (pipeline as any).handleMessage(createMessage({
+      chatType: "group",
+      chatPlatformId: "oc-group",
+      botMentioned: true,
+      threadId: "omt_aaa",
+      platformTs: Date.now(),
+      platformMsgId: "om-user",
+      contentText: "hello",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    calls.length = 0;
+
+    await (pipeline as any).executeWakeCommand("c1", "continue", {
+      scopeKey: "c1#omt_aaa",
+      threadId: "omt_aaa",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(calls).toEqual([{
+      method: "card",
+      replyToMsgId: "card-id",
+      options: true,
+    }]);
   });
 
   test("idle watchdog does not throw when backend session mtime probing fails", async () => {
@@ -2039,7 +2087,10 @@ bots:
 
     expect(checkForUpdate).toHaveBeenCalledOnce();
     expect(restartOptions).toEqual({
+      chatId: "c1",
       platformChatId: "chat-open-id",
+      scopeKey: "c1",
+      threadId: undefined,
       updateVersion: "9.9.9",
       replyToMsgId: undefined,
       silent: true,
@@ -2136,7 +2187,14 @@ bots:
     pipeline.triggerRestart({ platformChatId: "chat-open-id", replyToMsgId: "om-restart" });
     await Promise.resolve();
 
-    expect(restart).toHaveBeenCalledWith({ botName: "NiuBot", chatId: "c1", updateVersion: undefined });
+    expect(restart).toHaveBeenCalledWith({
+      botName: "NiuBot",
+      chatId: "c1",
+      scopeKey: "c1",
+      threadId: undefined,
+      wakeReplyTo: "om-restart",
+      updateVersion: undefined,
+    });
     expect(sentTexts).toContain("正在重启...");
     expect(sentReplies).toContainEqual({ text: "正在重启...", replyToMsgId: "om-restart" });
   });
@@ -6439,5 +6497,36 @@ describe("nbt send prefers the active-run reply target", () => {
     ]);
     agent.resolveNext();
     await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
+  test("IPC sends use an explicit reply anchor even without a schedule token", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-send-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const agent = new DeferredAgent();
+    const calls: Array<{ method: string; replyToMsgId?: string; options?: DeliveryOptions }> = [];
+    const im = createImStub();
+    im.sendReply = async (_chatId, _text, replyToMsgId, options) => {
+      calls.push({ method: "reply", replyToMsgId, options });
+      return "reply-id";
+    };
+    im.sendText = async () => {
+      calls.push({ method: "text" });
+      return "text-id";
+    };
+    const pipeline = new Pipeline(db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");
+    await pipeline.start();
+
+    await pipeline.sendToChat("oc-group", "restart notice", undefined, {
+      scopeKey: "c1#omt_aaa",
+      threadId: "omt_aaa",
+      replyToMsgId: "om-root",
+    });
+
+    expect(calls).toEqual([{
+      method: "reply",
+      replyToMsgId: "om-root",
+      options: { replyInThread: true },
+    }]);
   });
 });

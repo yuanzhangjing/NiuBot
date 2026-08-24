@@ -270,11 +270,20 @@ describe("EngineLifecycleService", () => {
       dependencies: { launchRestartWorker },
     });
 
-    expect(lifecycle.restart({ botName: "ConanBot", chatId: "c1" }).sourceDirectory).toBe(sourceDirectory);
+    expect(lifecycle.restart({
+      botName: "ConanBot",
+      chatId: "c1",
+      scopeKey: "c1#omt_aaa",
+      threadId: "omt_aaa",
+      wakeReplyTo: "om-root",
+    }).sourceDirectory).toBe(sourceDirectory);
     expect(() => lifecycle.restart({ botName: "ConanBot", updateVersion: "1.3.0" })).toThrow("DEV 运行环境");
     expect(launchRestartWorker.mock.calls[0]?.[0]).toMatchObject({
       botName: "ConanBot",
       notifyChatId: "c1",
+      notifyScopeKey: "c1#omt_aaa",
+      notifyThreadId: "omt_aaa",
+      wakeReplyTo: "om-root",
       sourceDirectory,
     });
     expect(launchRestartWorker).toHaveBeenCalledOnce();

@@ -857,6 +857,19 @@ export class Pipeline {
     return this.runtimeState.getActiveRunForScope(resolvedScopeKey)?.replyToPlatformMsgId;
   }
 
+  /** 话题内最后一次平台消息 ID；跨进程 IPC 没有 schedule token 时作为回复锚点。 */
+  private latestThreadPlatformMsgId(chatId: string, threadId?: string): string | undefined {
+    const row = this.db.prepare(`
+      SELECT platform_msg_id AS platformMsgId
+      FROM messages
+      WHERE chat_id = ? AND (? IS NULL OR thread_id = ?)
+        AND platform_msg_id IS NOT NULL AND platform_msg_id != ''
+      ORDER BY id DESC
+      LIMIT 1
+    `).get(chatId, threadId ?? null, threadId ?? null) as { platformMsgId: string } | undefined;
+    return row?.platformMsgId;
+  }
+
   private async sendPreferringReply(
     platformChatId: string,
     logLabel: string,
@@ -894,6 +907,9 @@ export class Pipeline {
     const scopeKey = scope?.scopeKey ?? this.platformChatIdToScopeKey(platformChatId) ?? platformChatId;
     const threadId = scope?.threadId;
     const isolated = Boolean(threadId);
+    const replyToMsgId = scope?.replyToMsgId
+      ?? this.currentTurnReplyTarget(platformChatId, scheduleToken, scopeKey)
+      ?? (threadId ? this.latestThreadPlatformMsgId(parseScopeKey(scopeKey).chatId, threadId) : undefined);
     const prepared = this.prepareOutboundText(platformChatId, text);
     const platformMsgId = await this.sendPreferringReply(
       platformChatId,
@@ -905,7 +921,7 @@ export class Pipeline {
         { replyInThread: isolated },
       ),
       () => this.transport.sendText(platformChatId, prepared.text),
-      this.currentTurnReplyTarget(platformChatId, scheduleToken, scopeKey),
+      replyToMsgId,
       { allowChatFallback: !isolated, replyInThread: isolated },
     );
     const chatRow = this.db.prepare("SELECT id FROM chats WHERE platform_id = ?")
@@ -921,18 +937,21 @@ export class Pipeline {
     header: string,
     content: string,
     scheduleToken?: string,
-    scope?: { scopeKey?: string; threadId?: string },
+    scope?: { scopeKey?: string; threadId?: string; replyToMsgId?: string },
   ): Promise<void> {
     const scopeKey = scope?.scopeKey ?? this.platformChatIdToScopeKey(platformChatId) ?? platformChatId;
     const threadId = scope?.threadId;
     const isolated = Boolean(threadId);
+    const replyToMsgId = scope?.replyToMsgId
+      ?? this.currentTurnReplyTarget(platformChatId, scheduleToken, scopeKey)
+      ?? (threadId ? this.latestThreadPlatformMsgId(parseScopeKey(scopeKey).chatId, threadId) : undefined);
     const prepared = this.prepareOutboundText(platformChatId, content);
     const platformMsgId = await this.sendCardKeepingAt(
       platformChatId,
       "sendCardToChat",
       header,
       prepared.text,
-      this.currentTurnReplyTarget(platformChatId, scheduleToken, scopeKey),
+      replyToMsgId,
       true,
       { allowChatFallback: !isolated, replyInThread: isolated },
     );
@@ -1084,11 +1103,14 @@ export class Pipeline {
     platformChatId: string,
     filePath: string,
     scheduleToken?: string,
-    scope?: { scopeKey?: string; threadId?: string },
+    scope?: { scopeKey?: string; threadId?: string; replyToMsgId?: string },
   ): Promise<void> {
     const scopeKey = scope?.scopeKey ?? this.platformChatIdToScopeKey(platformChatId) ?? platformChatId;
     const threadId = scope?.threadId;
     const isolated = Boolean(threadId);
+    const replyToMsgId = scope?.replyToMsgId
+      ?? this.currentTurnReplyTarget(platformChatId, scheduleToken, scopeKey)
+      ?? (threadId ? this.latestThreadPlatformMsgId(parseScopeKey(scopeKey).chatId, threadId) : undefined);
     const platformMsgId = await this.sendPreferringReply(
       platformChatId,
       "sendFileToChat",
@@ -1099,7 +1121,7 @@ export class Pipeline {
         { replyToMsgId, replyInThread: isolated },
       ),
       () => this.transport.sendFile(platformChatId, filePath),
-      this.currentTurnReplyTarget(platformChatId, scheduleToken, scopeKey),
+      replyToMsgId,
       { allowChatFallback: !isolated, replyInThread: isolated },
     );
     const chatRow = this.db.prepare("SELECT id FROM chats WHERE platform_id = ?")
@@ -1809,7 +1831,13 @@ export class Pipeline {
           return true;
         }
         this.log.info("builtin command: restart", { userId });
-        this.triggerRestart({ platformChatId, replyToMsgId: msgId });
+        this.triggerRestart({
+          chatId,
+          platformChatId,
+          scopeKey: effectiveScopeKey,
+          threadId,
+          replyToMsgId: msgId,
+        });
         return true;
       }
       case "/update": {
@@ -1824,10 +1852,10 @@ export class Pipeline {
         }
         if (parts.length === 1 || !parts[1]) {
           // /update 不带参数：版本卡片里附带自动升级状态/帮助，单卡片展示
-          this.handleUpdate(chatId, platformChatId, msgId, false, true);
+          this.handleUpdate(chatId, platformChatId, msgId, false, true, threadId, effectiveScopeKey);
           return true;
         }
-        this.handleUpdate(chatId, platformChatId, msgId, isUpdateConfirmedArg(parts[1]));
+        this.handleUpdate(chatId, platformChatId, msgId, isUpdateConfirmedArg(parts[1]), false, threadId, effectiveScopeKey);
         return true;
       }
       case "/service": {
@@ -2046,7 +2074,16 @@ export class Pipeline {
     // 2. 管理员 shell 命令。Windows PowerShell cmdlet/alias 不是 PATH 中的独立文件，
     // 因此 Windows 上直接交给 PowerShell；//xxx 仍强制透传给 Agent。
     if (shouldHandleAdminShellCommand(text, isAdmin, { commandExists: commandExistsSync })) {
-      this.tryShellCommand(text.slice(1), userId, chatId, chatType, platformChatId, msgId);
+      this.tryShellCommand(
+        text.slice(1),
+        userId,
+        chatId,
+        chatType,
+        platformChatId,
+        msgId,
+        threadId,
+        effectiveScopeKey,
+      );
       return true;
     }
 
@@ -2588,11 +2625,14 @@ export class Pipeline {
     scope?: { scopeKey?: string; threadId?: string; replyToMsgId?: string },
   ): Promise<{ output: string }> {
     const scopeKey = scope?.scopeKey ?? chatId;
+    const threadId = scope?.threadId;
+    const replyToMsgId = scope?.replyToMsgId
+      ?? (threadId ? this.latestThreadPlatformMsgId(chatId, threadId) : undefined);
     this.queue.push({
       chatId,
       scopeKey,
-      threadId: scope?.threadId,
-      replyToMsgId: scope?.replyToMsgId,
+      threadId,
+      replyToMsgId,
       text: prompt,
       timestamp: Date.now(),
       triggerKind: "restart_wake",
@@ -4142,11 +4182,30 @@ export class Pipeline {
   }
 
   /** 管理员命令：Windows 优先 pwsh、回退 powershell.exe，Unix 保持平台默认 shell。 */
-  private tryShellCommand(cmd: string, userId: string, chatId: string, chatType: string, platformChatId: string, msgId?: string): void {
+  private tryShellCommand(
+    cmd: string,
+    userId: string,
+    chatId: string,
+    chatType: string,
+    platformChatId: string,
+    msgId?: string,
+    threadId?: string,
+    scopeKey?: string,
+  ): void {
     this.log.info("shell command", { cmd });
+    const effectiveScopeKey = scopeKey ?? chatId;
+    const activeRun = this.runtimeState.getActiveRunForScope(effectiveScopeKey);
+    const replyToMsgId = activeRun?.replyToPlatformMsgId;
 
     const sendResult = (content: string, header = "Shell|blue") => {
-      const sendPromise = this.transport.sendCard(platformChatId, header, content, undefined, msgId);
+      const sendPromise = this.transport.sendCard(
+        platformChatId,
+        header,
+        content,
+        undefined,
+        msgId,
+        { replyInThread: Boolean(threadId) },
+      );
       sendPromise.then((pmid) => {
         this.storeBotResponse(chatId, content, pmid);
       }).catch(() => {});
@@ -4156,6 +4215,9 @@ export class Pipeline {
       workingDirectory: this.workingDirectory,
       userId,
       chatId,
+      scopeKey: effectiveScopeKey,
+      threadId,
+      replyToMsgId,
       chatType: chatType as "p2p" | "group",
       dbPath: this.dbPath,
       botId: this.botIdentity.platformBotId,
@@ -4228,9 +4290,19 @@ export class Pipeline {
       .catch(() => {});
   }
 
-  private async handleUpdate(chatId: string, platformChatId: string, msgId?: string, confirmed = false, showAutoInfo = false): Promise<void> {
+  private async handleUpdate(
+    chatId: string,
+    platformChatId: string,
+    msgId?: string,
+    confirmed = false,
+    showAutoInfo = false,
+    threadId?: string,
+    scopeKey?: string,
+  ): Promise<void> {
     // /update 不带参数时附带自动升级状态/帮助，单卡片展示
     const autoInfo = showAutoInfo ? this.buildAutoUpdateStatusLines() : null;
+    const effectiveScopeKey = scopeKey ?? chatId;
+    const replyOptions = { replyInThread: Boolean(threadId) };
 
     try {
       if (!this.engineLifecycle) throw new Error("Engine 生命周期服务不可用。");
@@ -4243,7 +4315,7 @@ export class Pipeline {
           `Env: ${env}`,
           ...(autoInfo ? ["", ...autoInfo] : []),
         ].join("\n");
-        const send = this.transport.sendCard(platformChatId, "更新|green", text, undefined, msgId);
+        const send = this.transport.sendCard(platformChatId, "更新|green", text, undefined, msgId, replyOptions);
         send.then((pmid) => { this.storeBotResponse(chatId, text, pmid); }).catch((err) => this.log.warn("update card send failed", { error: String(err) }));
         return;
       }
@@ -4255,13 +4327,21 @@ export class Pipeline {
           `发送 \`${UPDATE_CONFIRM_COMMAND}\` 升级并重启。`,
           ...(autoInfo ? ["", ...autoInfo] : []),
         ].join("\n");
-        const send = this.transport.sendCard(platformChatId, "更新|orange", text, undefined, msgId);
+        const send = this.transport.sendCard(platformChatId, "更新|orange", text, undefined, msgId, replyOptions);
         send.then((pmid) => { this.storeBotResponse(chatId, text, pmid); }).catch((err) => this.log.warn("update card send failed", { error: String(err) }));
         return;
       }
 
-      this.replyText(chatId, platformChatId, msgId, `正在准备 ${latestVersion} 的独立 release；旧服务会保留到新版本预检通过。`);
-      this.triggerRestart({ platformChatId, updateVersion: latestVersion, replyToMsgId: msgId, silent: true });
+      this.replyText(chatId, platformChatId, msgId, `正在准备 ${latestVersion} 的独立 release；旧服务会保留到新版本预检通过。`, threadId, Boolean(threadId));
+      this.triggerRestart({
+        chatId,
+        platformChatId,
+        scopeKey: effectiveScopeKey,
+        threadId,
+        updateVersion: latestVersion,
+        replyToMsgId: msgId,
+        silent: true,
+      });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       this.replyText(chatId, platformChatId, msgId, `更新失败：${msg.slice(0, 500)}`);
@@ -4299,6 +4379,8 @@ export class Pipeline {
   triggerRestart(opts?: {
     platformChatId?: string;
     chatId?: string;
+    scopeKey?: string;
+    threadId?: string;
     updateVersion?: string;
     silent?: boolean;
     replyToMsgId?: string;
@@ -4313,15 +4395,22 @@ export class Pipeline {
     } else if (chatId && !platformChatId) {
       platformChatId = this.platformChatIds.get(chatId);
     }
+    const scopeKey = opts?.scopeKey ?? chatId ?? "";
+    const threadId = opts?.threadId ?? parseScopeKey(scopeKey).threadId;
+    const activeRun = this.runtimeState.getActiveRunForScope(scopeKey);
+    const replyToMsgId = opts?.replyToMsgId
+      ?? activeRun?.replyToPlatformMsgId
+      ?? (threadId ? this.latestThreadPlatformMsgId(parseScopeKey(scopeKey).chatId, threadId) : undefined);
 
     const sendRestartNotice = (text: string): void => {
       if (!platformChatId) return;
       this.sendPreferringReply(
         platformChatId,
         "restart",
-        (replyToMsgId) => this.transport.sendReply(platformChatId, text, replyToMsgId),
+        (anchor) => this.transport.sendReply(platformChatId, text, anchor, { replyInThread: Boolean(threadId) }),
         () => this.transport.sendText(platformChatId, text),
-        opts?.replyToMsgId,
+        replyToMsgId,
+        { allowChatFallback: !threadId, replyInThread: Boolean(threadId) },
       ).catch(() => {});
     };
 
@@ -4335,11 +4424,16 @@ export class Pipeline {
       const worker = this.engineLifecycle.restart({
         botName: this.botIdentity.name,
         chatId,
+        scopeKey,
+        threadId,
+        wakeReplyTo: replyToMsgId,
         updateVersion: opts?.updateVersion,
       });
       this.log.info("restart worker launched", {
         pid: worker.pid,
         chatId,
+        scopeKey,
+        threadId,
         sourceDirectory: worker.sourceDirectory,
         logFile: worker.logFile,
       });
@@ -4908,6 +5002,7 @@ cap=4 只限制本群同时跑的主 session，不含 /task。
       agent_session_id: string | null;
       backend_type: string | null;
     } | undefined;
+    const activeRun = this.runtimeState.getActiveRunForScope(scopeKey);
 
     if (activeSession) {
       const canResume = normalizeBackend(activeSession.backend_type ?? undefined) === this.backendType
@@ -4920,6 +5015,7 @@ cap=4 只限制本群同时跑的主 session，不含 /task。
         chatId,
         scopeKey,
         threadId,
+        replyToMsgId: activeRun?.replyToPlatformMsgId,
         chatType,
         dbPath: this.dbPath,
         botId: this.botIdentity.platformBotId,
@@ -4972,6 +5068,7 @@ cap=4 只限制本群同时跑的主 session，不含 /task。
         chatId,
         scopeKey,
         threadId,
+        replyToMsgId: activeRun?.replyToPlatformMsgId,
         chatType,
       dbPath: this.dbPath,
       botId: this.botIdentity.platformBotId,
