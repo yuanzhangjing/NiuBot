@@ -174,7 +174,13 @@ export class PersistentTransport implements TransportClient {
   }
 
   sendReply(chatId: string, text: string, replyToMsgId: string, options?: DeliveryOptions): Promise<string> {
-    return this.enqueueOutbound({ kind: "reply", chatId, text, replyToMsgId }, options) as Promise<string>;
+    return this.enqueueOutbound({
+      kind: "reply",
+      chatId,
+      text,
+      replyToMsgId,
+      replyInThread: options?.replyInThread,
+    }, options) as Promise<string>;
   }
 
   sendMarkdownCard(chatId: string, markdown: string, options?: DeliveryOptions): Promise<string> {
@@ -189,7 +195,15 @@ export class PersistentTransport implements TransportClient {
     replyToMsgId?: string,
     options?: DeliveryOptions,
   ): Promise<string> {
-    return this.enqueueOutbound({ kind: "card", chatId, header, content, footer, replyToMsgId }, options) as Promise<string>;
+    return this.enqueueOutbound({
+      kind: "card",
+      chatId,
+      header,
+      content,
+      footer,
+      replyToMsgId,
+      replyInThread: options?.replyInThread,
+    }, options) as Promise<string>;
   }
 
   async sendFile(chatId: string, filePath: string, fileName?: string, options?: DeliveryOptions): Promise<string> {
@@ -201,6 +215,7 @@ export class PersistentTransport implements TransportClient {
       filePath: managedPath,
       fileName: fileName ?? path.basename(filePath),
       replyToMsgId: options?.replyToMsgId,
+      replyInThread: options?.replyInThread,
     };
     try {
       return await this.enqueueOutbound(request, options, requestId) as string;
@@ -234,13 +249,18 @@ export class PersistentTransport implements TransportClient {
     return this.adapter.getChatName(chatId);
   }
 
+  getChatMetadata(chatId: string) {
+    if (!this.adapter.getChatMetadata) return Promise.resolve(undefined);
+    return this.adapter.getChatMetadata(chatId);
+  }
+
   getMessageContent(msgId: string): Promise<string | undefined> {
     return this.adapter.getMessageContent(msgId);
   }
 
   listChatMessages(
     chatId: string,
-    options?: { sinceUnixSec?: number; limit?: number },
+    options?: { sinceUnixSec?: number; limit?: number; threadId?: string },
   ): Promise<NormalizedMessage[]> {
     if (!this.adapter.listChatMessages) return Promise.resolve([]);
     return this.adapter.listChatMessages(chatId, options);
@@ -421,7 +441,12 @@ export class PersistentTransport implements TransportClient {
       case "text":
         return this.adapter.sendText(request.chatId, request.text);
       case "reply":
-        return this.adapter.sendReply(request.chatId, request.text, request.replyToMsgId);
+        return this.adapter.sendReply(
+          request.chatId,
+          request.text,
+          request.replyToMsgId,
+          { replyInThread: request.replyInThread },
+        );
       case "markdown_card":
         return this.adapter.sendMarkdownCard(request.chatId, request.markdown);
       case "card":
@@ -431,13 +456,16 @@ export class PersistentTransport implements TransportClient {
           request.content,
           request.footer,
           request.replyToMsgId,
+          { replyInThread: request.replyInThread },
         );
       case "file":
         return this.adapter.sendFile(
           request.chatId,
           request.filePath,
           request.fileName,
-          request.replyToMsgId ? { replyToMsgId: request.replyToMsgId } : undefined,
+          request.replyToMsgId
+            ? { replyToMsgId: request.replyToMsgId, replyInThread: request.replyInThread }
+            : undefined,
         );
       case "edit":
         return this.adapter.editMessage(request.msgId, request.text).then(() => undefined);

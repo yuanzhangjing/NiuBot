@@ -6,7 +6,7 @@ import { pipeline } from "node:stream/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { NormalizedMessage, MessageHandler, PlatformAdapter, MentionInfo, MessageNode } from "../types.js";
-import type { DeliveryOptions } from "../../transport/types.js";
+import type { ChatMetadata, DeliveryOptions } from "../../transport/types.js";
 import { renderMessageNodes } from "../render.js";
 import { hasFeishuAtTag, mapFeishuAtTags, toCardAtTags } from "../mentions.js";
 import { classifyFetchedMessage, type ClassifiedMessageIdentity } from "./message-identity.js";
@@ -226,7 +226,7 @@ export class FeishuAdapter implements PlatformAdapter {
     log.info("feishu adapter stopped");
   }
 
-  async sendText(chatId: string, text: string): Promise<string> {
+  async sendText(chatId: string, text: string, _options?: DeliveryOptions): Promise<string> {
     if (Buffer.byteLength(text, "utf-8") > FILE_THRESHOLD_BYTES && !hasFeishuAtTag(text)) {
       log.info("sendText: content exceeds threshold, sending as file", { chatId, bytes: Buffer.byteLength(text, "utf-8") });
       return this.sendContentAsFile(chatId, text);
@@ -242,31 +242,39 @@ export class FeishuAdapter implements PlatformAdapter {
     return resp?.data?.message_id ?? "";
   }
 
-  async sendReply(chatId: string, text: string, replyToMsgId: string): Promise<string> {
+  async sendReply(chatId: string, text: string, replyToMsgId: string, options?: DeliveryOptions): Promise<string> {
     if (Buffer.byteLength(text, "utf-8") > FILE_THRESHOLD_BYTES && !hasFeishuAtTag(text)) {
       log.info("sendReply: content exceeds threshold, sending as file", { chatId, bytes: Buffer.byteLength(text, "utf-8") });
-      return this.sendContentAsFile(chatId, text, replyToMsgId);
+      return this.sendContentAsFile(chatId, text, replyToMsgId, options);
     }
     const resp = await this.client.im.message.reply({
       path: { message_id: replyToMsgId },
       data: {
         msg_type: "text",
         content: JSON.stringify({ text }),
+        ...(options?.replyInThread ? { reply_in_thread: true } : {}),
       },
     });
     return resp?.data?.message_id ?? "";
   }
 
-  async sendMarkdownCard(chatId: string, markdown: string): Promise<string> {
-    return this.sendCard(chatId, "", markdown);
+  async sendMarkdownCard(chatId: string, markdown: string, options?: DeliveryOptions): Promise<string> {
+    return this.sendCard(chatId, "", markdown, undefined, undefined, options);
   }
 
-  async sendCard(chatId: string, header: string, content: string, footer?: string, replyToMsgId?: string): Promise<string> {
+  async sendCard(
+    chatId: string,
+    header: string,
+    content: string,
+    footer?: string,
+    replyToMsgId?: string,
+    options?: DeliveryOptions,
+  ): Promise<string> {
     const hasAt = hasFeishuAtTag(content);
     if (!hasAt && Buffer.byteLength(content, "utf-8") > FILE_THRESHOLD_BYTES) {
       log.info("sendCard: content exceeds threshold, sending as file", { chatId, bytes: Buffer.byteLength(content, "utf-8") });
       const fileContent = footer ? `${content}\n\n---\n${footer}` : content;
-      return this.sendContentAsFile(chatId, fileContent, replyToMsgId);
+      return this.sendContentAsFile(chatId, fileContent, replyToMsgId, options);
     }
     const cardJson = buildCardJSON(header, content, footer);
     try {
@@ -276,6 +284,7 @@ export class FeishuAdapter implements PlatformAdapter {
           data: {
             msg_type: "interactive",
             content: cardJson,
+            ...(options?.replyInThread ? { reply_in_thread: true } : {}),
           },
         });
         return resp?.data?.message_id ?? "";
@@ -293,7 +302,7 @@ export class FeishuAdapter implements PlatformAdapter {
       if (hasAt) throw err;
       log.warn("sendCard: card API failed, fallback to file", { chatId, error: String(err) });
       const fileContent = footer ? `${content}\n\n---\n${footer}` : content;
-      return this.sendContentAsFile(chatId, fileContent, replyToMsgId);
+      return this.sendContentAsFile(chatId, fileContent, replyToMsgId, options);
     }
   }
 
@@ -351,12 +360,24 @@ export class FeishuAdapter implements PlatformAdapter {
   }
 
   /** 将文本内容写入临时 .md 文件并发送 */
-  private async sendContentAsFile(chatId: string, content: string, replyToMsgId?: string): Promise<string> {
+  private async sendContentAsFile(
+    chatId: string,
+    content: string,
+    replyToMsgId?: string,
+    options?: DeliveryOptions,
+  ): Promise<string> {
     const dir = mkdtempSync(path.join(tmpdir(), "niubot-msg-"));
     const filePath = path.join(dir, "reply.md");
     writeFileSync(filePath, content, "utf-8");
     try {
-      return await this.sendFile(chatId, filePath, "reply.md", replyToMsgId ? { replyToMsgId } : undefined);
+      return await this.sendFile(
+        chatId,
+        filePath,
+        "reply.md",
+        replyToMsgId
+          ? { replyToMsgId, replyInThread: options?.replyInThread }
+          : undefined,
+      );
     } finally {
       try { unlinkSync(filePath); } catch { /* ignore */ }
     }
@@ -371,7 +392,7 @@ export class FeishuAdapter implements PlatformAdapter {
         log.info("sendFile: image exceeds 10MB, sending as file", { chatId, fileName: name, bytes });
       } else {
         try {
-          return await this.sendImage(chatId, filePath, replyToMsgId);
+          return await this.sendImage(chatId, filePath, replyToMsgId, options);
         } catch (err) {
           log.warn("sendFile: image API failed, fallback to file", { chatId, fileName: name, error: String(err) });
         }
@@ -387,11 +408,16 @@ export class FeishuAdapter implements PlatformAdapter {
       });
       const fileKey = (uploadResp as any)?.data?.file_key ?? (uploadResp as any)?.file_key;
       if (!fileKey) throw new Error("File upload failed: no file_key returned");
-      return this.postMessage(chatId, "file", JSON.stringify({ file_key: fileKey }), replyToMsgId);
+      return this.postMessage(chatId, "file", JSON.stringify({ file_key: fileKey }), replyToMsgId, options);
     });
   }
 
-  private async sendImage(chatId: string, filePath: string, replyToMsgId?: string): Promise<string> {
+  private async sendImage(
+    chatId: string,
+    filePath: string,
+    replyToMsgId?: string,
+    options?: DeliveryOptions,
+  ): Promise<string> {
     return withFileReadStream(filePath, async (image) => {
       const uploadResp = await this.client.im.image.create({
         data: {
@@ -401,15 +427,25 @@ export class FeishuAdapter implements PlatformAdapter {
       });
       const imageKey = (uploadResp as any)?.data?.image_key ?? (uploadResp as any)?.image_key;
       if (!imageKey) throw new Error("Image upload failed: no image_key returned");
-      return this.postMessage(chatId, "image", JSON.stringify({ image_key: imageKey }), replyToMsgId);
+      return this.postMessage(chatId, "image", JSON.stringify({ image_key: imageKey }), replyToMsgId, options);
     });
   }
 
-  private async postMessage(chatId: string, msgType: string, content: string, replyToMsgId?: string): Promise<string> {
+  private async postMessage(
+    chatId: string,
+    msgType: string,
+    content: string,
+    replyToMsgId?: string,
+    options?: DeliveryOptions,
+  ): Promise<string> {
     if (replyToMsgId) {
       const resp = await this.client.im.message.reply({
         path: { message_id: replyToMsgId },
-        data: { msg_type: msgType, content },
+        data: {
+          msg_type: msgType,
+          content,
+          ...(options?.replyInThread ? { reply_in_thread: true } : {}),
+        },
       });
       return resp?.data?.message_id ?? "";
     }
@@ -448,9 +484,28 @@ export class FeishuAdapter implements PlatformAdapter {
     }
   }
 
+  async getChatMetadata(chatId: string): Promise<ChatMetadata | undefined> {
+    try {
+      const resp = await this.client.im.chat.get({
+        path: { chat_id: chatId },
+      });
+      const data = resp?.data;
+      return {
+        chatMode: typeof data?.chat_mode === "string" ? data.chat_mode : undefined,
+        groupMessageType: typeof data?.group_message_type === "string"
+          ? data.group_message_type
+          : undefined,
+        fetchedAt: Date.now(),
+      };
+    } catch (err) {
+      log.warn("getChatMetadata failed", { chatId, error: String(err) });
+      return undefined;
+    }
+  }
+
   async listChatMessages(
     chatId: string,
-    options?: { sinceUnixSec?: number; limit?: number },
+    options?: { sinceUnixSec?: number; limit?: number; threadId?: string },
   ): Promise<NormalizedMessage[]> {
     const sinceUnixSec = options?.sinceUnixSec;
     const incremental = sinceUnixSec != null;
@@ -468,8 +523,8 @@ export class FeishuAdapter implements PlatformAdapter {
       for (let page = 0; page < FEISHU_MESSAGE_MAX_PAGES && collected.length < maxTotal; page += 1) {
         const resp = await this.client.im.message.list({
           params: {
-            container_id_type: "chat",
-            container_id: chatId,
+            container_id_type: options?.threadId ? "thread" : "chat",
+            container_id: options?.threadId ?? chatId,
             page_size: FEISHU_MESSAGE_PAGE_SIZE,
             sort_type: sortType,
             ...(incremental ? { start_time: String(sinceUnixSec) } : {}),
@@ -619,8 +674,19 @@ export class FeishuAdapter implements PlatformAdapter {
     }
 
     const msgType = msg.message_type ?? "text";
-    const chatType = msg.chat_type === "group" ? "group" as const : "p2p" as const;
+    const rawChatType = msg.chat_type ?? "p2p";
+    const chatType = (rawChatType === "group" || rawChatType === "topic_group")
+      ? "group" as const
+      : "p2p" as const;
     const platformTs = parsePlatformTs(msg.create_time);
+    if (chatType === "group") {
+      log.debug("feishu incoming group message", {
+        rawChatType,
+        threadId: msg.thread_id,
+        rootId: msg.root_id,
+        parentId: msg.parent_id,
+      });
+    }
 
     // 非 text 类型记录原始结构，便于排查解析问题
     if (msgType !== "text") {
@@ -704,6 +770,8 @@ export class FeishuAdapter implements PlatformAdapter {
       botMentioned,
       senderIsBot,
       parentPlatformMsgId: msg.parent_id ?? undefined,
+      threadId: msg.thread_id ?? undefined,
+      rootId: msg.root_id ?? undefined,
       platformTs,
       timestamp: platformTs ? new Date(platformTs) : new Date(),
       platformMsgId: msg.message_id,

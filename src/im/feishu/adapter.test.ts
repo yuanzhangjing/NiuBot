@@ -123,6 +123,101 @@ describe("FeishuAdapter", () => {
     expect(messages.map((msg) => msg.contentText)).toEqual(["first", "second"]);
   });
 
+  test("lists thread history with container_id_type=thread", async () => {
+    const adapter = new FeishuAdapter("app-id", "app-secret");
+    const listed: Array<{ params: Record<string, unknown> }> = [];
+    (adapter as any).botOpenId = "ou-self";
+    (adapter as any).client = {
+      im: {
+        message: {
+          list: async ({ params }: any) => {
+            listed.push({ params });
+            return {
+              data: {
+                items: [{
+                  message_id: "om-reply",
+                  msg_type: "text",
+                  create_time: "2000",
+                  sender: { id: "ou-user", sender_type: "user", id_type: "open_id" },
+                  body: { content: JSON.stringify({ text: "reply" }) },
+                  thread_id: "omt_aaa",
+                  parent_id: "om-root",
+                  root_id: "om-root",
+                }],
+              },
+            };
+          },
+        },
+      },
+    };
+
+    const messages = await adapter.listChatMessages("oc-group", {
+      limit: 20,
+      threadId: "omt_aaa",
+    });
+    expect(listed[0]?.params).toMatchObject({
+      container_id_type: "thread",
+      container_id: "omt_aaa",
+    });
+    expect(messages[0]).toMatchObject({
+      threadId: "omt_aaa",
+      rootId: "om-root",
+      parentPlatformMsgId: "om-root",
+    });
+  });
+
+  test("returns chat metadata from chat.get", async () => {
+    const adapter = new FeishuAdapter("app-id", "app-secret");
+    let requestedChatId = "";
+    (adapter as any).client = {
+      im: {
+        chat: {
+          get: async ({ path }: any) => {
+            requestedChatId = path.chat_id;
+            return {
+              data: {
+                name: "Topic group",
+                chat_mode: "topic",
+                group_message_type: "thread",
+              },
+            };
+          },
+        },
+      },
+    };
+
+    const metadata = await adapter.getChatMetadata("oc-group");
+    expect(requestedChatId).toBe("oc-group");
+    expect(metadata).toMatchObject({
+      chatMode: "topic",
+      groupMessageType: "thread",
+    });
+    expect(metadata?.fetchedAt).toBeGreaterThan(0);
+  });
+
+  test("sends reply_in_thread only when requested and omits it otherwise", async () => {
+    const adapter = new FeishuAdapter("app-id", "app-secret");
+    const replyBodies: Array<Record<string, unknown>> = [];
+    (adapter as any).client = {
+      im: {
+        message: {
+          reply: async ({ data }: any) => {
+            replyBodies.push(data);
+            return { data: { message_id: "reply-id" } };
+          },
+        },
+      },
+    };
+
+    await adapter.sendReply("oc-group", "one", "om-root");
+    await adapter.sendReply("oc-group", "two", "om-root", { replyInThread: true });
+
+    expect(replyBodies).toEqual([
+      { msg_type: "text", content: JSON.stringify({ text: "one" }) },
+      { msg_type: "text", content: JSON.stringify({ text: "two" }), reply_in_thread: true },
+    ]);
+  });
+
   test("listChatMessages paginates incremental ASC so newest after the cursor is kept", async () => {
     const adapter = new FeishuAdapter("app-id", "app-secret");
     const listed: Array<{ params: Record<string, unknown> }> = [];
@@ -495,6 +590,32 @@ describe("FeishuAdapter", () => {
       botMentioned: true,
       senderIsBot: false,
       platformMsgId: "message-id",
+    });
+  });
+
+  test("maps topic_group to group and preserves thread/root ids", async () => {
+    const adapter = new FeishuAdapter("app-id", "app-secret");
+    (adapter as any).botOpenId = "ou-self";
+    const message = await (adapter as any).normalize({
+      message: {
+        chat_id: "group-id",
+        chat_type: "topic_group",
+        message_id: "om-reply",
+        message_type: "text",
+        content: JSON.stringify({ text: "hello" }),
+        create_time: "1784479200000",
+        thread_id: "omt_aaa",
+        root_id: "om-root",
+        parent_id: "om-root",
+      },
+      sender: { sender_id: { open_id: "user-open-id" }, sender_type: "user" },
+    });
+
+    expect(message).toMatchObject({
+      chatType: "group",
+      threadId: "omt_aaa",
+      rootId: "om-root",
+      parentPlatformMsgId: "om-root",
     });
   });
 

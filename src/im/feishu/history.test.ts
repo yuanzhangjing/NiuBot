@@ -33,6 +33,25 @@ describe("feishu history parse", () => {
     expect(bot?.contentType).toBe("interactive");
   });
 
+  test("preserves thread and root ids", () => {
+    const item = parseFeishuHistoryItem({
+      message_id: "om-reply",
+      chat_id: "oc-group",
+      msg_type: "text",
+      create_time: "1777532010676",
+      sender: { id: "ou-user", id_type: "open_id", sender_type: "user" },
+      body: { content: JSON.stringify({ text: "hello" }) },
+      thread_id: "omt_aaa",
+      parent_id: "om-root",
+      root_id: "om-root",
+    }, "oc-group");
+    expect(item).toMatchObject({
+      threadId: "omt_aaa",
+      rootId: "om-root",
+      parentPlatformMsgId: "om-root",
+    });
+  });
+
   test("skips items without sender or body", () => {
     expect(parseFeishuHistoryItem({ message_id: "om-x" }, "oc-group")).toBeNull();
   });

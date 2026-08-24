@@ -29,6 +29,10 @@ export interface NormalizedMessage {
   chatName?: string;
   /** 飞书 sender_type=app。未设置视为人。 */
   senderIsBot?: boolean;
+  /** 飞书话题 ID（omt_…）；普通群话题回复/P2P 回复也可能有。 */
+  threadId?: string;
+  /** 飞书根消息 ID（om_…），不是话题 ID。 */
+  rootId?: string;
   contentText: string;
   contentType: "text" | "image" | "file" | "audio" | "media" | "post" | "interactive" | "merge_forward" | "mixed";
   mentions?: MentionInfo[];
@@ -49,6 +53,14 @@ export type DeliveryOptions = {
   timeoutMs?: number;
   signal?: AbortSignal;
   replyToMsgId?: string;
+  /** 飞书 reply 时是否以话题形式回复（reply_in_thread）。 */
+  replyInThread?: boolean;
+};
+
+export type ChatMetadata = {
+  chatMode?: "group" | "topic" | string;
+  groupMessageType?: "chat" | "thread" | string;
+  fetchedAt?: number;
 };
 
 export type InboundTerminalStatus = "completed" | "failed" | "stopped" | "discarded";
@@ -88,6 +100,7 @@ export interface TransportClient {
   getBotOpenId(): Promise<string>;
   getBotName(): Promise<string | undefined>;
   getChatName(chatId: string): Promise<string | undefined>;
+  getChatMetadata?(chatId: string): Promise<ChatMetadata | undefined>;
   getMessageContent(msgId: string): Promise<string | undefined>;
   getAppCreatorId(): Promise<string | undefined>;
   /**
@@ -97,7 +110,7 @@ export interface TransportClient {
    */
   listChatMessages?(
     chatId: string,
-    options?: { sinceUnixSec?: number; limit?: number },
+    options?: { sinceUnixSec?: number; limit?: number; threadId?: string },
   ): Promise<NormalizedMessage[]>;
 
   /** Reliable implementations use these hooks to connect Engine lifecycle to inbox state. */
@@ -112,8 +125,8 @@ export type OutboundKind = "text" | "reply" | "markdown_card" | "card" | "file" 
 
 export type OutboundRequest =
   | { kind: "text"; chatId: string; text: string }
-  | { kind: "reply"; chatId: string; text: string; replyToMsgId: string }
+  | { kind: "reply"; chatId: string; text: string; replyToMsgId: string; replyInThread?: boolean }
   | { kind: "markdown_card"; chatId: string; markdown: string }
-  | { kind: "card"; chatId: string; header: string; content: string; footer?: string; replyToMsgId?: string }
-  | { kind: "file"; chatId: string; filePath: string; fileName?: string; replyToMsgId?: string }
+  | { kind: "card"; chatId: string; header: string; content: string; footer?: string; replyToMsgId?: string; replyInThread?: boolean }
+  | { kind: "file"; chatId: string; filePath: string; fileName?: string; replyToMsgId?: string; replyInThread?: boolean }
   | { kind: "edit"; msgId: string; text: string };

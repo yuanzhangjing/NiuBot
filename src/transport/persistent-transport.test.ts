@@ -345,6 +345,66 @@ describe("PersistentTransport outbox", () => {
     expect(sendFile?.args[3]).toEqual({ replyToMsgId: "om-user" });
   });
 
+  test("passes replyInThread through to reply and card adapters", async () => {
+    const fake = createAdapter();
+    const { runtime } = createRuntime(fake.adapter);
+
+    await runtime.sendReply("chat-1", "reply", "om-user", { replyInThread: true });
+    await runtime.sendCard("chat-1", "Card", "content", "footer", "om-user", { replyInThread: true });
+
+    const reply = fake.calls.find((call) => call.method === "sendReply");
+    const card = fake.calls.find((call) => call.method === "sendCard");
+    expect(reply?.args[3]).toEqual({ replyInThread: true });
+    expect(card?.args[5]).toEqual({ replyInThread: true });
+  });
+
+  test("forwards chat metadata from the adapter", async () => {
+    const fake = createAdapter({
+      async getChatMetadata() {
+        return {
+          chatMode: "topic",
+          groupMessageType: "thread",
+          fetchedAt: 123,
+        };
+      },
+    });
+    const { runtime } = createRuntime(fake.adapter);
+
+    await expect(runtime.getChatMetadata("chat-1")).resolves.toEqual({
+      chatMode: "topic",
+      groupMessageType: "thread",
+      fetchedAt: 123,
+    });
+  });
+
+  test("replays replyInThread from the outbox after recovery", async () => {
+    const fake = createAdapter();
+    const { runtime, db } = createRuntime(fake.adapter);
+    new TransportStore(db, "NiuBot", "feishu").insertOutbound(
+      "pending-reply",
+      {
+        kind: "reply",
+        chatId: "chat-1",
+        text: "recover me",
+        replyToMsgId: "om-user",
+        replyInThread: true,
+      },
+      JSON.stringify({
+        kind: "reply",
+        chatId: "chat-1",
+        text: "recover me",
+        replyToMsgId: "om-user",
+        replyInThread: true,
+      }),
+    );
+
+    await runtime.recover();
+    await viWaitFor(() => runtime.getStatusCounts().outbox.sent === 1);
+
+    const reply = fake.calls.find((call) => call.method === "sendReply");
+    expect(reply?.args[3]).toEqual({ replyInThread: true });
+  });
+
   test("cleans managed copies for expired unknown file deliveries during recovery", async () => {
     let deliveredPath = "";
     const never = new Promise<string>(() => {});

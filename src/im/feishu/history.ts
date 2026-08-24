@@ -174,6 +174,8 @@ export function parseFeishuHistoryItem(
     botMentioned,
     senderIsBot,
     parentPlatformMsgId: item.parent_id ?? undefined,
+    threadId: item.thread_id ?? undefined,
+    rootId: item.root_id ?? undefined,
     platformTs: ts,
     timestamp: ts ? new Date(ts > 1e12 ? ts : ts * 1000) : new Date(),
     platformMsgId: messageId,
