@@ -2872,6 +2872,7 @@ export class Pipeline {
     error: string,
     paused: boolean,
     threadId?: string,
+    replyToMsgId?: string,
   ): Promise<void> {
     let platformChatId = this.platformChatIds.get(chatId);
     if (!platformChatId) {
@@ -2881,6 +2882,14 @@ export class Pipeline {
       platformChatId = row?.platform_id;
     }
     if (!platformChatId) return;
+    if (threadId && !replyToMsgId) {
+      this.log.warn("cron failure skipped for isolated thread without reply anchor", {
+        chatId,
+        threadId,
+        description,
+      });
+      return;
+    }
     const detail = stripInternalTags(error).trim().slice(0, ERROR_DISPLAY_MAX_LEN);
     const content = paused
       ? `定时任务连续失败 ${CRON_FAILURE_LIMIT} 次，已暂停。\n\n${detail || "未知错误"}`
@@ -2890,7 +2899,7 @@ export class Pipeline {
       `⏰ ${description || "定时任务"}|${paused ? "red" : "orange"}`,
       content,
       undefined,
-      undefined,
+      replyToMsgId,
       { replyInThread: Boolean(threadId) },
     );
     this.storeBotResponse(chatId, content, platformMsgId, "text", threadId);

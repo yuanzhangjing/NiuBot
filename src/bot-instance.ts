@@ -213,8 +213,8 @@ export async function createBotInstance(
       await pipeline.processCronJob(chatId, userId, prompt, description, cronJobId, claimToken, threadId);
     },
     {
-      reportFailure: (chatId, description, error, paused, threadId) =>
-        pipeline.reportCronJobFailure(chatId, description, error, paused, threadId),
+      reportFailure: (chatId, description, error, paused, threadId, replyToMsgId) =>
+        pipeline.reportCronJobFailure(chatId, description, error, paused, threadId, replyToMsgId),
     },
   );
   const loopScheduler = new LoopScheduler(db, (job) => {

@@ -240,6 +240,7 @@ export type CronFailureReporter = (
   error: string,
   paused: boolean,
   threadId?: string,
+  replyToMsgId?: string,
 ) => Promise<void> | void;
 
 export interface CronSchedulerOptions {
@@ -352,6 +353,7 @@ export class CronScheduler {
             error,
             paused,
             job.threadId ?? undefined,
+            job.replyToMsgId ?? undefined,
           ),
         )
           .catch((reportError) => log.warn("failed to report cron failure", { id: job.id, error: String(reportError) }));
