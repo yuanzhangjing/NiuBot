@@ -4344,7 +4344,14 @@ export class Pipeline {
       });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      this.replyText(chatId, platformChatId, msgId, `更新失败：${msg.slice(0, 500)}`);
+      this.replyText(
+        chatId,
+        platformChatId,
+        msgId,
+        `更新失败：${msg.slice(0, 500)}`,
+        threadId,
+        Boolean(threadId),
+      );
     }
   }
 

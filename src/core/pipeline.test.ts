@@ -2165,6 +2165,45 @@ bots:
     expect(sentTexts.at(-1)).toContain("更新失败");
   });
 
+  test("/update error reply stays in the active topic", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const { im } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db,
+      im,
+      new RecordingAgent(),
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+    (pipeline as any).engineLifecycle = createTestLifecycle(dir, undefined, {
+      checkForUpdate: async () => { throw new Error("npm exited with code 1"); },
+    });
+    const sendReply = vi.spyOn((pipeline as any).transport, "sendReply").mockResolvedValue("pmid-update-error");
+
+    await (pipeline as any).handleUpdate(
+      "c1",
+      "chat-open-id",
+      "om-root",
+      true,
+      false,
+      "omt_aaa",
+      "c1#omt_aaa",
+    );
+
+    expect(sendReply).toHaveBeenCalledWith(
+      "chat-open-id",
+      expect.stringContaining("更新失败"),
+      "om-root",
+      { replyInThread: true },
+    );
+  });
+
   test("manual restart delegates the resolved chat and Bot identity to EngineLifecycle", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);

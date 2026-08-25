@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_PREFLIGHT_TIMEOUT_MS,
+  buildRestartNotificationBody,
   buildRestartRuntimeEnvironment,
   buildInstallArgs,
   isNpmInstalledPath,
@@ -23,6 +24,17 @@ afterEach(() => {
 });
 
 describe("restart worker helpers", () => {
+  it("keeps restart notifications anchored to the original reply", () => {
+    expect(buildRestartNotificationBody({ wakeReplyTo: "om-root" }, "重启成功。")).toEqual({
+      text: "重启成功。",
+      reply_to_msg_id: "om-root",
+    });
+    expect(buildRestartNotificationBody({}, "重启成功。")).toEqual({
+      text: "重启成功。",
+      reply_to_msg_id: undefined,
+    });
+  });
+
   it("uses a Windows-safe configurable preflight timeout", () => {
     expect(DEFAULT_PREFLIGHT_TIMEOUT_MS).toBe(120_000);
     expect(resolvePreflightTimeoutMs({})).toBe(120_000);

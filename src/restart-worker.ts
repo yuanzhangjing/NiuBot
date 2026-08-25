@@ -1061,10 +1061,21 @@ async function wakeMainSession(context: RestartContext): Promise<void> {
 async function notify(context: RestartContext, text: string): Promise<void> {
   if (!context.notifyChatId) return;
   try {
-    await postToBot(context, "/send", { text });
+    await postToBot(context, "/send", buildRestartNotificationBody(context, text));
   } catch (err) {
     log(context, `notify failed: ${errorMessage(err)}`);
   }
+}
+
+/** 重启结果通知必须带原消息锚点，避免话题群里新开一个话题。 */
+export function buildRestartNotificationBody(
+  context: { wakeReplyTo?: string },
+  text: string,
+): Record<string, unknown> {
+  return {
+    text,
+    reply_to_msg_id: context.wakeReplyTo,
+  };
 }
 
 async function runLogged(
