@@ -11,6 +11,8 @@ export interface QueuedMessage {
   threadId?: string;
   /** 本轮要回复的 platform message ID（Loop/Cron/wake 等无当前用户消息时使用）。 */
   replyToMsgId?: string;
+  /** 即使未隔离也必须禁止 create 新话题。 */
+  strict?: boolean;
   text: string;
   timestamp: number;
   platformMsgId?: string;

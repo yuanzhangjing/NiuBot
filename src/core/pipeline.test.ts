@@ -485,6 +485,7 @@ function createTestLifecycle(
 afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
   for (const db of openDatabases) {
     if (db.open) db.close();
   }
@@ -1103,6 +1104,62 @@ describe("Pipeline runtime", () => {
     expect(sentTexts).toHaveLength(0);
     expect(sendCalls.every((call) => call.replyToMsgId !== undefined)).toBe(true);
     expect(sendCalls.some((call) => call.options?.replyInThread === true)).toBe(true);
+  });
+
+  test("keeps strict reply when topic metadata is present but thread_id is missing", async () => {
+    vi.stubEnv("NIUBOT_TOPIC_ISOLATION", "0");
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-topic-no-thread-test-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare(`
+      INSERT INTO chats (id, type, platform, platform_id, chat_mode, group_message_type, chat_mode_fetched_at)
+      VALUES ('c1', 'group', 'feishu', 'oc-group', 'topic', 'thread', ?)
+    `).run(Date.now());
+    const agent = new ReplyAgent("topic reply");
+    const calls: Array<{ kind: string; replyToMsgId?: string; options?: DeliveryOptions }> = [];
+    const im = createImStub();
+    im.sendText = async () => {
+      calls.push({ kind: "create-text" });
+      return "pmid-create";
+    };
+    im.sendReply = async (_chatId, _text, replyToMsgId, options) => {
+      calls.push({ kind: "reply-text", replyToMsgId, options });
+      throw new Error("reply unavailable");
+    };
+    im.sendCard = async (_chatId, _header, _content, _footer, replyToMsgId, options) => {
+      calls.push({ kind: "reply-card", replyToMsgId, options });
+      throw new Error("reply unavailable");
+    };
+    im.sendFile = async (_chatId, _filePath, _fileName, options) => {
+      calls.push({ kind: "reply-file", replyToMsgId: options?.replyToMsgId, options });
+      throw new Error("reply unavailable");
+    };
+    const pipeline = new Pipeline(
+      db,
+      im,
+      agent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+    await pipeline.start();
+
+    (pipeline as any).handleMessage(createMessage({
+      chatType: "group",
+      chatPlatformId: "oc-group",
+      botMentioned: true,
+      platformTs: Date.now(),
+      platformMsgId: "om-root",
+      contentText: "hello",
+    }));
+    await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(1));
+    await vi.waitFor(() => expect(calls.length).toBeGreaterThan(0));
+
+    expect(calls.filter((call) => call.kind === "create-text")).toHaveLength(0);
+    expect(calls.every((call) => call.replyToMsgId !== undefined)).toBe(true);
+    expect(calls.some((call) => call.options?.replyInThread === true)).toBe(true);
   });
 
   test("isolated restart wake falls back to the latest thread anchor without creating a topic", async () => {
@@ -6330,6 +6387,52 @@ describe("nbt send prefers the active-run reply target", () => {
     }]);
   });
 
+  test("watchdog card replies in an isolated topic without creating a new one", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-watchdog-topic-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare(`
+      INSERT INTO chats (id, type, platform, platform_id, chat_mode, group_message_type, chat_mode_fetched_at)
+      VALUES ('c1', 'group', 'feishu', 'oc-group', 'topic', 'thread', ?)
+    `).run(Date.now());
+    const calls: Array<{ method: string; replyToMsgId?: string; options?: DeliveryOptions }> = [];
+    const im = createImStub();
+    im.sendCard = async (_chatId, _header, _content, _footer, replyToMsgId, options) => {
+      calls.push({ method: "card", replyToMsgId, options });
+      return "card-id";
+    };
+    im.sendText = async () => {
+      calls.push({ method: "text" });
+      return "text-id";
+    };
+    const pipeline = new Pipeline(
+      db,
+      im,
+      new RecordingAgent(),
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+    (pipeline as any).platformChatIds.set("c1", "oc-group");
+
+    (pipeline as any).sendWatchdogCard(
+      "c1#omt_aaa",
+      "Header",
+      "body",
+      false,
+      "om-root",
+    );
+    await vi.waitFor(() => expect(calls.length).toBe(1));
+
+    expect(calls).toEqual([{
+      method: "card",
+      replyToMsgId: "om-root",
+      options: { replyInThread: true },
+    }]);
+  });
+
   test("sendToChat strips other-bot ats and appends the fuse notice after 20 bot turns", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-send-"));
     tempDirs.push(dir);
@@ -6559,6 +6662,48 @@ describe("nbt send prefers the active-run reply target", () => {
     await pipeline.sendToChat("oc-group", "restart notice", undefined, {
       scopeKey: "c1#omt_aaa",
       threadId: "omt_aaa",
+      replyToMsgId: "om-root",
+    });
+
+    expect(calls).toEqual([{
+      method: "reply",
+      replyToMsgId: "om-root",
+      options: { replyInThread: true },
+    }]);
+  });
+
+  test("IPC send stays strict when isolation is disabled and thread id is absent", async () => {
+    vi.stubEnv("NIUBOT_TOPIC_ISOLATION", "0");
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-send-strict-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare(`
+      INSERT INTO chats (id, type, platform, platform_id, chat_mode, group_message_type, chat_mode_fetched_at)
+      VALUES ('c1', 'group', 'feishu', 'oc-group', 'topic', 'thread', ?)
+    `).run(Date.now());
+    const calls: Array<{ method: string; replyToMsgId?: string; options?: DeliveryOptions }> = [];
+    const im = createImStub();
+    im.sendReply = async (_chatId, _text, replyToMsgId, options) => {
+      calls.push({ method: "reply", replyToMsgId, options });
+      return "reply-id";
+    };
+    im.sendText = async () => {
+      calls.push({ method: "text" });
+      return "text-id";
+    };
+    const pipeline = new Pipeline(
+      db,
+      im,
+      new RecordingAgent(),
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+
+    await pipeline.sendToChat("oc-group", "restart notice", undefined, {
+      scopeKey: "c1",
       replyToMsgId: "om-root",
     });
 

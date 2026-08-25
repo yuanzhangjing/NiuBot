@@ -7,6 +7,8 @@ export interface SessionScope {
   threadId?: string;
   scopeKey: string;
   isolated: boolean;
+  /** 话题群/话题形式群即使关掉隔离，也禁止 create 新话题。 */
+  strict: boolean;
 }
 
 export const CHAT_MODE_TTL_MS = 10 * 60 * 1_000;
@@ -40,6 +42,11 @@ export function shouldIsolateChat(meta: Pick<ChatMetadata, "chatMode" | "groupMe
   return false;
 }
 
+export function shouldStrictTopicReply(meta: Pick<ChatMetadata, "chatMode" | "groupMessageType">): boolean {
+  if (meta.chatMode === "topic") return true;
+  return meta.chatMode === "group" && meta.groupMessageType === "thread";
+}
+
 export function resolveSessionScope(input: {
   chatId: string;
   platformChatId: string;
@@ -54,12 +61,18 @@ export function resolveSessionScope(input: {
       groupMessageType: input.groupMessageType ?? undefined,
     })
     && Boolean(input.threadId);
+  const strict = input.chatType === "group"
+    && shouldStrictTopicReply({
+      chatMode: input.chatMode ?? undefined,
+      groupMessageType: input.groupMessageType ?? undefined,
+    });
   return {
     chatId: input.chatId,
     platformChatId: input.platformChatId,
     threadId: isolated ? input.threadId : undefined,
     scopeKey: isolated ? buildScopeKey(input.chatId, input.threadId) : input.chatId,
     isolated,
+    strict,
   };
 }
 
@@ -74,5 +87,6 @@ export function scopeForMessage(
     threadId: parsed.threadId,
     scopeKey,
     isolated: Boolean(parsed.threadId),
+    strict: false,
   };
 }

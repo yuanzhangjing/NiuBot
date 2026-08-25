@@ -22,6 +22,7 @@ import {
   parseScopeKey,
   resolveSessionScope,
   shouldIsolateChat,
+  shouldStrictTopicReply,
   CHAT_MODE_TTL_MS,
   type SessionScope,
 } from "./session-scope.js";
@@ -286,6 +287,8 @@ interface ChatSession {
   userId: string;
   threadId?: string;
   isolated: boolean;
+  /** 当前群是话题形态时，即使未隔离也禁止 create 新话题。 */
+  strict: boolean;
   /** 触发消息的 platform msg ID（用于首条回复时引用） */
   triggerPlatformMsgId?: string;
   /** 是否已发送过回复（首条用 reply，后续用普通 send） */
@@ -301,6 +304,8 @@ interface RunningTask {
   description: string;
   startedAt: number;
   source: "cron" | "task";
+  /** 独立任务创建时保存的回复锚点，watchdog 通知不能新开话题。 */
+  replyToMsgId?: string;
   cronJobId?: number;
   cronClaimToken?: string;
 }
@@ -906,7 +911,7 @@ export class Pipeline {
   ): Promise<void> {
     const scopeKey = scope?.scopeKey ?? this.platformChatIdToScopeKey(platformChatId) ?? platformChatId;
     const threadId = scope?.threadId;
-    const isolated = Boolean(threadId);
+    const strict = Boolean(threadId) || this.isStrictTopicChat(parseScopeKey(scopeKey).chatId);
     const replyToMsgId = scope?.replyToMsgId
       ?? this.currentTurnReplyTarget(platformChatId, scheduleToken, scopeKey)
       ?? (threadId ? this.latestThreadPlatformMsgId(parseScopeKey(scopeKey).chatId, threadId) : undefined);
@@ -918,11 +923,11 @@ export class Pipeline {
         platformChatId,
         prepared.text,
         replyToMsgId,
-        { replyInThread: isolated },
+        { replyInThread: strict },
       ),
       () => this.transport.sendText(platformChatId, prepared.text),
       replyToMsgId,
-      { allowChatFallback: !isolated, replyInThread: isolated },
+      { allowChatFallback: !strict, replyInThread: strict },
     );
     const chatRow = this.db.prepare("SELECT id FROM chats WHERE platform_id = ?")
       .get(platformChatId) as { id: string } | undefined;
@@ -941,7 +946,7 @@ export class Pipeline {
   ): Promise<void> {
     const scopeKey = scope?.scopeKey ?? this.platformChatIdToScopeKey(platformChatId) ?? platformChatId;
     const threadId = scope?.threadId;
-    const isolated = Boolean(threadId);
+    const strict = Boolean(threadId) || this.isStrictTopicChat(parseScopeKey(scopeKey).chatId);
     const replyToMsgId = scope?.replyToMsgId
       ?? this.currentTurnReplyTarget(platformChatId, scheduleToken, scopeKey)
       ?? (threadId ? this.latestThreadPlatformMsgId(parseScopeKey(scopeKey).chatId, threadId) : undefined);
@@ -953,7 +958,7 @@ export class Pipeline {
       prepared.text,
       replyToMsgId,
       true,
-      { allowChatFallback: !isolated, replyInThread: isolated },
+      { allowChatFallback: !strict, replyInThread: strict },
     );
     const chatRow = this.db.prepare("SELECT id FROM chats WHERE platform_id = ?")
       .get(platformChatId) as { id: string } | undefined;
@@ -1000,7 +1005,12 @@ export class Pipeline {
       return this.sendPreferringReply(
         platformChatId,
         logLabel,
-        (id) => this.transport.sendReply(platformChatId, text, id),
+        (id) => this.transport.sendReply(
+          platformChatId,
+          text,
+          id,
+          { replyInThread: options.replyInThread },
+        ),
         () => this.transport.sendText(platformChatId, text),
         preferReply ? replyToMsgId : undefined,
         options,
@@ -1080,6 +1090,35 @@ export class Pipeline {
     };
   }
 
+  /** 内置命令卡片：有当前消息就 reply 到话题，始终不主动 create 新话题。 */
+  private sendBuiltinCard(
+    platformChatId: string,
+    chatId: string,
+    header: string,
+    content: string,
+    msgId?: string,
+    threadId?: string,
+  ): Promise<string> {
+    const strict = Boolean(threadId) || this.isStrictTopicChat(chatId);
+    if (strict && !msgId) {
+      const error = new Error("No reply anchor available; create fallback is disabled");
+      this.log.warn("strict topic card skipped without reply anchor", {
+        chatId,
+        platformChatId,
+        header,
+      });
+      return Promise.reject(error);
+    }
+    return this.transport.sendCard(
+      platformChatId,
+      header,
+      content,
+      undefined,
+      msgId,
+      { replyInThread: strict },
+    );
+  }
+
   private noteHumanInbound(chatId: string, senderIsBot?: boolean): void {
     if (!senderIsBot) this.botTurnCounts.set(chatId, 0);
   }
@@ -1107,7 +1146,7 @@ export class Pipeline {
   ): Promise<void> {
     const scopeKey = scope?.scopeKey ?? this.platformChatIdToScopeKey(platformChatId) ?? platformChatId;
     const threadId = scope?.threadId;
-    const isolated = Boolean(threadId);
+    const strict = Boolean(threadId) || this.isStrictTopicChat(parseScopeKey(scopeKey).chatId);
     const replyToMsgId = scope?.replyToMsgId
       ?? this.currentTurnReplyTarget(platformChatId, scheduleToken, scopeKey)
       ?? (threadId ? this.latestThreadPlatformMsgId(parseScopeKey(scopeKey).chatId, threadId) : undefined);
@@ -1118,11 +1157,11 @@ export class Pipeline {
         platformChatId,
         filePath,
         undefined,
-        { replyToMsgId, replyInThread: isolated },
+        { replyToMsgId, replyInThread: strict },
       ),
       () => this.transport.sendFile(platformChatId, filePath),
       replyToMsgId,
-      { allowChatFallback: !isolated, replyInThread: isolated },
+      { allowChatFallback: !strict, replyInThread: strict },
     );
     const chatRow = this.db.prepare("SELECT id FROM chats WHERE platform_id = ?")
       .get(platformChatId) as { id: string } | undefined;
@@ -1262,6 +1301,14 @@ export class Pipeline {
       return fetched;
     }
     return stored ?? {};
+  }
+
+  private isStrictTopicChat(chatId: string): boolean {
+    const metadata = getStoredChatMetadata(this.db, chatId) ?? {};
+    return shouldStrictTopicReply({
+      chatMode: metadata.chatMode,
+      groupMessageType: metadata.groupMessageType,
+    });
   }
 
   private resolveMessageScope(
@@ -1561,11 +1608,11 @@ export class Pipeline {
           msg.chatPlatformId,
           interruptText,
           replyToMsgId,
-          { replyInThread: scope.isolated },
+          { replyInThread: scope.strict },
         ),
         () => this.transport.sendText(msg.chatPlatformId, interruptText),
         msg.platformMsgId,
-        { allowChatFallback: !scope.isolated, replyInThread: scope.isolated },
+        { allowChatFallback: !scope.strict, replyInThread: scope.strict },
       ).then((pmid) => {
         this.storeBotResponse(chatId, interruptText, pmid, "text", scope.threadId);
       }).catch(() => {});
@@ -1603,6 +1650,7 @@ export class Pipeline {
       chatId,
       scopeKey: scope.scopeKey,
       threadId: scope.threadId,
+      strict: scope.strict,
       text: agentText,
       senderLabel: label,
       senderId: userId,
@@ -1637,7 +1685,8 @@ export class Pipeline {
     storeMessage(this.db, {
       chatId,
       senderId: this.botUserId,
-      sessionId: this.chatSessions.get(chatId)?.sessionId,
+      sessionId: this.chatSessions.get(buildScopeKey(chatId, threadId))?.sessionId
+        ?? this.chatSessions.get(chatId)?.sessionId,
       role: "assistant",
       contentText: text,
       contentType,
@@ -2209,7 +2258,14 @@ export class Pipeline {
     if (lines.length === 0) lines.push(`当前没有 ${mode === "loop" ? "Loop" : "Cron"} 任务。`);
     lines.push("", `创建：/${mode} <任务与时间>`, `删除：/${mode} del <id>`);
     const content = lines.join("\n");
-    this.transport.sendCard(platformChatId, mode === "loop" ? "循环任务|turquoise" : "定时任务|turquoise", content, undefined, msgId)
+    this.sendBuiltinCard(
+      platformChatId,
+      chatId,
+      mode === "loop" ? "循环任务|turquoise" : "定时任务|turquoise",
+      content,
+      msgId,
+      threadId,
+    )
       .then((pmid) => { this.storeBotResponse(chatId, content, pmid); })
       .catch((err) => this.log.error("schedule list send failed", { mode, chatId, error: String(err) }));
   }
@@ -2251,8 +2307,17 @@ export class Pipeline {
     threadId?: string,
     replyInThread = false,
   ): void {
+    const strict = replyInThread || Boolean(threadId) || this.isStrictTopicChat(chatId);
+    if (!msgId && strict) {
+      this.log.warn("strict topic reply skipped without reply anchor", {
+        chatId,
+        platformChatId,
+        text,
+      });
+      return;
+    }
     const sendPromise = msgId
-      ? this.transport.sendReply(platformChatId, text, msgId, { replyInThread })
+      ? this.transport.sendReply(platformChatId, text, msgId, { replyInThread: strict })
       : this.transport.sendText(platformChatId, text);
     sendPromise.then((pmid) => {
       this.storeBotResponse(chatId, text, pmid, "text", threadId);
@@ -2368,7 +2433,7 @@ export class Pipeline {
       ...sections,
     ].join("\n\n");
     const header = count > 0 ? `运行中 · ${count} 个任务|orange` : "Status|blue";
-    this.transport.sendCard(platformChatId, header, content, undefined, msgId)
+    this.sendBuiltinCard(platformChatId, chatId, header, content, msgId, threadId)
       .then((pmid) => { this.storeBotResponse(chatId, content, pmid, "text", threadId); })
       .catch((err) => this.log.error("running list card send failed", { chatId, scopeKey, error: String(err) }));
   }
@@ -2454,7 +2519,7 @@ export class Pipeline {
       `**Working directory:** \`${this.workingDirectory}\``,
     ].join("\n");
 
-    const send = this.transport.sendCard(platformChatId, "服务|blue", content, undefined, msgId);
+    const send = this.sendBuiltinCard(platformChatId, chatId, "服务|blue", content, msgId);
     send
       .then((pmid) => {
         this.storeBotResponse(chatId, content, pmid);
@@ -2864,8 +2929,8 @@ export class Pipeline {
         model: response.model,
       }),
       replyToMsgId,
-      replyInThread: Boolean(chatSession.threadId),
-      allowChatFallback: !chatSession.threadId,
+      replyInThread: chatSession.strict,
+      allowChatFallback: !chatSession.strict,
       signal,
     });
     if (!result.ok) {
@@ -2922,8 +2987,9 @@ export class Pipeline {
       platformChatId = row?.platform_id;
     }
     if (!platformChatId) return;
-    if (threadId && !replyToMsgId) {
-      this.log.warn("cron failure skipped for isolated thread without reply anchor", {
+    const strict = this.isStrictTopicChat(chatId);
+    if (strict && !replyToMsgId) {
+      this.log.warn("cron failure skipped for strict topic without reply anchor", {
         chatId,
         threadId,
         description,
@@ -2940,7 +3006,7 @@ export class Pipeline {
       content,
       undefined,
       replyToMsgId,
-      { replyInThread: Boolean(threadId) },
+      { replyInThread: strict },
     );
     this.storeBotResponse(chatId, content, platformMsgId, "text", threadId);
   }
@@ -3094,6 +3160,7 @@ export class Pipeline {
           userId: row.user_id ?? "",
           threadId,
           isolated: Boolean(threadId),
+          strict: this.isStrictTopicChat(row.chat_id),
           hasReplied: true, // recovered sessions skip reply-to
         });
         this.platformChatIds.set(row.chat_id, row.platform_id);
@@ -3138,6 +3205,7 @@ export class Pipeline {
   ): Promise<void> {
     const threadId = scope?.threadId;
     const scopeKey = scope?.scopeKey ?? chatId;
+    const strict = this.isStrictTopicChat(chatId);
     // 从入口开始跟踪完整生命周期（含清理），优雅关闭只有在全部收尾后才放行 DB。
     this.independentRunCount += 1;
     try {
@@ -3251,6 +3319,7 @@ export class Pipeline {
     this.runningTasks.set(agentSession.id, {
       agentSession, backend: sessionBackend, backendType: sessionBackendType,
       chatId, scopeKey, description, startedAt: Date.now(), source,
+      replyToMsgId: scope?.replyToMsgId,
       cronJobId: cronRun?.cronJobId,
       cronClaimToken: cronRun?.claimToken,
     });
@@ -3303,8 +3372,8 @@ export class Pipeline {
         content,
         footer,
         replyToMsgId: scope?.replyToMsgId,
-        replyInThread: Boolean(threadId),
-        allowChatFallback: !threadId,
+        replyInThread: strict,
+        allowChatFallback: !strict,
       });
       if (!sendResult.ok) {
         this.log.warn(`${source} final response delivery failed`, {
@@ -3738,7 +3807,7 @@ export class Pipeline {
       const progress = `正在探测模型 **${resolvedModel}**，可能需要几十秒，请稍等…`;
       try {
         // 进度提示不入库，避免污染会话历史；发送失败不阻断探测
-        await this.transport.sendCard(platformChatId, "Model|orange", progress, undefined, msgId);
+        await this.sendBuiltinCard(platformChatId, chatId, "Model|orange", progress, msgId);
       } catch (err) {
         this.log.warn("model probe progress send failed", { model: resolvedModel, error: String(err) });
       }
@@ -4068,7 +4137,7 @@ export class Pipeline {
     }
 
     const content = lines.join("\n");
-    const send = this.transport.sendCard(platformChatId, "Model|blue", content, undefined, msgId);
+    const send = this.sendBuiltinCard(platformChatId, chatId, "Model|blue", content, msgId);
     send
       .then((pmid) => { this.storeBotResponse(chatId, content, pmid); })
       .catch(() => {});
@@ -4076,7 +4145,7 @@ export class Pipeline {
 
   /** 发送 Agent 命令卡片回复 */
   private sendAgentCard(chatId: string, platformChatId: string, msgId: string | undefined, header: string, content: string): void {
-    const send = this.transport.sendCard(platformChatId, header, content, undefined, msgId);
+    const send = this.sendBuiltinCard(platformChatId, chatId, header, content, msgId);
     send
       .then((pmid) => { this.storeBotResponse(chatId, content, pmid); })
       .catch((err) => this.log.warn("agent card send failed", {
@@ -4132,14 +4201,7 @@ export class Pipeline {
       );
     }
     const content = lines.join("\n");
-    const send = this.transport.sendCard(
-      platformChatId,
-      "帮助|blue",
-      content,
-      undefined,
-      msgId,
-      { replyInThread: Boolean(threadId) },
-    );
+    const send = this.sendBuiltinCard(platformChatId, chatId, "帮助|blue", content, msgId, threadId);
     send
       .then((pmid) => { this.storeBotResponse(chatId, content, pmid); })
       .catch(() => {});
@@ -4156,7 +4218,7 @@ export class Pipeline {
       const status = lifecycle.getKeepAwakeStatus();
       const baseText = formatKeepAwakeStatus(status);
       const sendStatus = (content: string, header: string) => {
-        const send = this.transport.sendCard(platformChatId, header, content, undefined, msgId);
+        const send = this.sendBuiltinCard(platformChatId, chatId, header, content, msgId);
         send.then((pmid) => this.storeBotResponse(chatId, content, pmid)).catch(() => {});
       };
       void collectDisplayStatus().then((display) => {
@@ -4173,7 +4235,7 @@ export class Pipeline {
     }
     void lifecycle.setKeepAwakeEnabled(action === "on").then((status) => {
       const content = formatKeepAwakeStatus(status);
-      const send = this.transport.sendCard(platformChatId, formatKeepAwakeHeader(status), content, undefined, msgId);
+      const send = this.sendBuiltinCard(platformChatId, chatId, formatKeepAwakeHeader(status), content, msgId);
       send.then((pmid) => this.storeBotResponse(chatId, content, pmid)).catch(() => {});
     }).catch((err) => {
       this.log.error("keep-awake command failed", { action, error: String(err) });
@@ -4198,13 +4260,13 @@ export class Pipeline {
     const replyToMsgId = activeRun?.replyToPlatformMsgId;
 
     const sendResult = (content: string, header = "Shell|blue") => {
-      const sendPromise = this.transport.sendCard(
+      const sendPromise = this.sendBuiltinCard(
         platformChatId,
+        chatId,
         header,
         content,
-        undefined,
         msgId,
-        { replyInThread: Boolean(threadId) },
+        threadId,
       );
       sendPromise.then((pmid) => {
         this.storeBotResponse(chatId, content, pmid);
@@ -4285,7 +4347,7 @@ export class Pipeline {
       if (entry.exitCode !== 0) line += ` (exit ${entry.exitCode})`;
       return line;
     });
-    this.transport.sendCard(platformChatId, "Shell 历史|blue", lines.join("\n"), undefined, msgId)
+    this.sendBuiltinCard(platformChatId, chatId, "Shell 历史|blue", lines.join("\n"), msgId)
       .then((pmid) => { this.storeBotResponse(chatId, lines.join("\n"), pmid); })
       .catch(() => {});
   }
@@ -4302,7 +4364,16 @@ export class Pipeline {
     // /update 不带参数时附带自动升级状态/帮助，单卡片展示
     const autoInfo = showAutoInfo ? this.buildAutoUpdateStatusLines() : null;
     const effectiveScopeKey = scopeKey ?? chatId;
-    const replyOptions = { replyInThread: Boolean(threadId) };
+    const replyOptions = {
+      replyInThread: Boolean(threadId) || this.isStrictTopicChat(chatId),
+    };
+    if (replyOptions.replyInThread && !msgId) {
+      this.log.warn("update reply skipped in strict topic without reply anchor", {
+        chatId,
+        platformChatId,
+      });
+      return;
+    }
 
     try {
       if (!this.engineLifecycle) throw new Error("Engine 生命周期服务不可用。");
@@ -4408,16 +4479,17 @@ export class Pipeline {
     const replyToMsgId = opts?.replyToMsgId
       ?? activeRun?.replyToPlatformMsgId
       ?? (threadId ? this.latestThreadPlatformMsgId(parseScopeKey(scopeKey).chatId, threadId) : undefined);
+    const strict = Boolean(threadId) || (chatId ? this.isStrictTopicChat(chatId) : false);
 
     const sendRestartNotice = (text: string): void => {
       if (!platformChatId) return;
       this.sendPreferringReply(
         platformChatId,
         "restart",
-        (anchor) => this.transport.sendReply(platformChatId, text, anchor, { replyInThread: Boolean(threadId) }),
+        (anchor) => this.transport.sendReply(platformChatId, text, anchor, { replyInThread: strict }),
         () => this.transport.sendText(platformChatId, text),
         replyToMsgId,
-        { allowChatFallback: !threadId, replyInThread: Boolean(threadId) },
+        { allowChatFallback: !strict, replyInThread: strict },
       ).catch(() => {});
     };
 
@@ -4462,6 +4534,7 @@ export class Pipeline {
     const chatId = parsedScope.chatId;
     const threadId = parsedScope.threadId;
     const isolated = Boolean(threadId);
+    const strict = messages.at(-1)?.strict ?? this.isStrictTopicChat(chatId);
     const transition = this.globalSessionTransition ?? this.sessionTransitionLocks.get(scopeKey);
     if (transition) {
       this.log.info("queued run waiting for session transition", { chatId, runId: runId ?? null });
@@ -4796,8 +4869,8 @@ export class Pipeline {
         content: displayText,
         footer,
         replyToMsgId: triggerMsgId,
-        replyInThread: isolated,
-        allowChatFallback: !isolated,
+        replyInThread: strict,
+        allowChatFallback: !strict,
         signal,
         textFallback: (sendErr) => addLoopFullMarker(`发送失败：${extractPlatformErrorDetail(sendErr)}`),
       });
@@ -4883,10 +4956,15 @@ export class Pipeline {
           const pmid = await this.sendPreferringReply(
             platformChatId,
             "process-error",
-            (replyToMsgId) => this.transport.sendReply(platformChatId, errorText, replyToMsgId),
+            (replyToMsgId) => this.transport.sendReply(
+              platformChatId,
+              errorText,
+              replyToMsgId,
+              { replyInThread: strict },
+            ),
             () => this.transport.sendText(platformChatId, errorText),
             triggerMsgId,
-            { allowChatFallback: !isolated, replyInThread: isolated },
+            { allowChatFallback: !strict, replyInThread: strict },
           );
           this.storeBotResponse(chatId, errorText, pmid, "text", threadId);
         } catch { /* give up */ }
@@ -4928,6 +5006,7 @@ export class Pipeline {
     signal?: AbortSignal,
   ): Promise<ChatSession> {
     const isolated = Boolean(threadId);
+    const strict = this.isStrictTopicChat(chatId);
     let platformChatId = this.platformChatIds.get(chatId);
     if (!platformChatId) {
       const platformRow = this.db.prepare("SELECT platform_id FROM chats WHERE id = ?")
@@ -5053,6 +5132,7 @@ cap=4 只限制本群同时跑的主 session，不含 /task。
         triggerPlatformMsgId: this.triggerMsgIds.get(scopeKey),
         threadId,
         isolated,
+        strict,
         hasReplied: false,
       };
       this.chatSessions.set(scopeKey, resumedSession);
@@ -5146,6 +5226,7 @@ cap=4 只限制本群同时跑的主 session，不含 /task。
       triggerPlatformMsgId: this.triggerMsgIds.get(scopeKey),
       threadId,
       isolated,
+      strict,
       hasReplied: false,
     };
     this.chatSessions.set(scopeKey, chatSession);
@@ -5339,35 +5420,89 @@ cap=4 只限制本群同时跑的主 session，不含 /task。
 
   // ── Watchdog ─────────────────────────────────────────────
 
-  /** 向指定 chat 发送系统通知（不走 pipeline 队列） */
-  private sendWatchdogNotification(chatId: string, text: string): void {
-    const platformChatId = this.platformChatIds.get(chatId);
-    if (!platformChatId) return;
-    const prepared = this.prepareOutboundText(platformChatId, text);
-    this.sendPreferringReply(
+  private resolveWatchdogTarget(scopeKey: string): {
+    chatId: string;
+    platformChatId: string;
+    threadId?: string;
+  } | undefined {
+    const parsed = parseScopeKey(scopeKey);
+    let platformChatId = this.platformChatIds.get(parsed.chatId);
+    if (!platformChatId) {
+      const row = this.db.prepare("SELECT platform_id FROM chats WHERE id = ?")
+        .get(parsed.chatId) as { platform_id: string } | undefined;
+      platformChatId = row?.platform_id;
+      if (platformChatId) this.platformChatIds.set(parsed.chatId, platformChatId);
+    }
+    if (!platformChatId) return undefined;
+    return {
+      chatId: parsed.chatId,
       platformChatId,
+      threadId: parsed.threadId,
+    };
+  }
+
+  /** 向指定 chat 发送系统通知（不走 pipeline 队列） */
+  private sendWatchdogNotification(scopeKey: string, text: string): void {
+    const target = this.resolveWatchdogTarget(scopeKey);
+    if (!target) return;
+    const chatId = target.chatId;
+    const threadId = target.threadId;
+    const strict = Boolean(threadId) || this.isStrictTopicChat(chatId);
+    const replyToMsgId = this.runtimeState.getActiveRunForScope(scopeKey)?.replyToPlatformMsgId
+      ?? this.chatSessions.get(scopeKey)?.triggerPlatformMsgId
+      ?? (threadId ? this.latestThreadPlatformMsgId(chatId, threadId) : undefined);
+    if (strict && !replyToMsgId) {
+      this.log.warn("watchdog notification skipped in strict topic without reply anchor", {
+        chatId,
+        scopeKey,
+      });
+      return;
+    }
+    const prepared = this.prepareOutboundText(target.platformChatId, text);
+    this.sendPreferringReply(
+      target.platformChatId,
       "watchdog",
-      (replyToMsgId) => this.transport.sendReply(platformChatId, prepared.text, replyToMsgId),
-      () => this.transport.sendText(platformChatId, prepared.text),
-      this.runtimeState.getActiveRun(chatId)?.replyToPlatformMsgId,
+      (anchor) => this.transport.sendReply(
+        target.platformChatId,
+        prepared.text,
+        anchor,
+        { replyInThread: strict },
+      ),
+      () => this.transport.sendText(target.platformChatId, prepared.text),
+      replyToMsgId,
+      { allowChatFallback: !strict, replyInThread: strict },
     ).then((pmid) => {
-      this.storeBotResponse(chatId, prepared.historyText, pmid);
+      this.storeBotResponse(chatId, prepared.historyText, pmid, "text", threadId);
     }).catch(() => {});
   }
 
-  private sendWatchdogCard(chatId: string, header: string, content: string, preferReply = false): void {
-    const platformChatId = this.platformChatIds.get(chatId);
-    if (!platformChatId) return;
-    const prepared = this.prepareOutboundText(platformChatId, content);
+  private sendWatchdogCard(
+    scopeKey: string,
+    header: string,
+    content: string,
+    preferReply = false,
+    explicitReplyToMsgId?: string,
+  ): void {
+    const target = this.resolveWatchdogTarget(scopeKey);
+    if (!target) return;
+    const chatId = target.chatId;
+    const threadId = target.threadId;
+    const strict = Boolean(threadId) || this.isStrictTopicChat(chatId);
+    const replyToMsgId = explicitReplyToMsgId
+      ?? this.runtimeState.getActiveRunForScope(scopeKey)?.replyToPlatformMsgId
+      ?? this.chatSessions.get(scopeKey)?.triggerPlatformMsgId
+      ?? (threadId ? this.latestThreadPlatformMsgId(chatId, threadId) : undefined);
+    const prepared = this.prepareOutboundText(target.platformChatId, content);
     this.sendCardKeepingAt(
-      platformChatId,
+      target.platformChatId,
       "watchdog-card",
       header,
       prepared.text,
-      this.runtimeState.getActiveRun(chatId)?.replyToPlatformMsgId,
-      preferReply,
+      replyToMsgId,
+      strict || preferReply,
+      { allowChatFallback: !strict, replyInThread: strict },
     ).then((pmid) => {
-      this.storeBotResponse(chatId, prepared.historyText, pmid);
+      this.storeBotResponse(chatId, prepared.historyText, pmid, "text", threadId);
     }).catch(() => {});
   }
 
@@ -5536,7 +5671,13 @@ cap=4 只限制本群同时跑的主 session，不含 /task。
           `「${task.description}」已经运行约 ${runningHours} 小时，进程仍在运行。`,
           formatOutputActivity(idleMs),
         ];
-        this.sendWatchdogCard(task.chatId, header, parts.join("\n\n"));
+        this.sendWatchdogCard(
+          task.scopeKey ?? task.chatId,
+          header,
+          parts.join("\n\n"),
+          false,
+          task.replyToMsgId,
+        );
         a.lastLongRunningNotifiedAt = now;
         continue;
       }
@@ -5555,7 +5696,13 @@ cap=4 只限制本群同时跑的主 session，不含 /task。
         if (a.notifyCount === 0) {
           const header = `⚠️ 定时任务卡住已终止`;
           const content = `「${task.description}」运行 ${totalMin} 分钟，其中 ${idleMin} 分钟无输出，已自动终止。`;
-          this.sendWatchdogCard(task.chatId, header, content);
+          this.sendWatchdogCard(
+            task.scopeKey ?? task.chatId,
+            header,
+            content,
+            false,
+            task.replyToMsgId,
+          );
         }
         task.backend.cancelSession(task.agentSession).catch(() => {});
         a.notifyCount++;

@@ -4,6 +4,7 @@ import {
   parseScopeKey,
   resolveSessionScope,
   shouldIsolateChat,
+  shouldStrictTopicReply,
 } from "./session-scope.js";
 
 describe("session scope", () => {
@@ -35,6 +36,20 @@ describe("session scope", () => {
     }
   });
 
+  test("strict reply is independent from the isolation kill switch", () => {
+    const old = process.env.NIUBOT_TOPIC_ISOLATION;
+    process.env.NIUBOT_TOPIC_ISOLATION = "0";
+    try {
+      expect(shouldStrictTopicReply({ chatMode: "topic" })).toBe(true);
+      expect(shouldStrictTopicReply({ chatMode: "group", groupMessageType: "thread" })).toBe(true);
+      expect(shouldStrictTopicReply({ chatMode: "group", groupMessageType: "chat" })).toBe(false);
+      expect(shouldStrictTopicReply({ chatMode: "p2p" })).toBe(false);
+    } finally {
+      if (old === undefined) delete process.env.NIUBOT_TOPIC_ISOLATION;
+      else process.env.NIUBOT_TOPIC_ISOLATION = old;
+    }
+  });
+
   test("resolves scope key without using thread_id when chat mode is unknown", () => {
     const scope = resolveSessionScope({
       chatId: "c5",
@@ -46,6 +61,31 @@ describe("session scope", () => {
       chatId: "c5",
       scopeKey: "c5",
       isolated: false,
+      strict: false,
     });
+  });
+
+  test("keeps strict reply when isolation is disabled", () => {
+    const old = process.env.NIUBOT_TOPIC_ISOLATION;
+    process.env.NIUBOT_TOPIC_ISOLATION = "0";
+    try {
+      const scope = resolveSessionScope({
+        chatId: "c5",
+        platformChatId: "oc-group",
+        chatType: "group",
+        chatMode: "topic",
+        groupMessageType: "thread",
+        threadId: "omt_aaa",
+      });
+      expect(scope).toMatchObject({
+        scopeKey: "c5",
+        threadId: undefined,
+        isolated: false,
+        strict: true,
+      });
+    } finally {
+      if (old === undefined) delete process.env.NIUBOT_TOPIC_ISOLATION;
+      else process.env.NIUBOT_TOPIC_ISOLATION = old;
+    }
   });
 });
