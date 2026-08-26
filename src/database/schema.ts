@@ -14,6 +14,44 @@ interface Migration {
   up: (db: Database.Database) => void;
 }
 
+function dropLegacyScopeRuntimeTables(db: Database.Database): void {
+  db.exec(`DROP TABLE IF EXISTS scope_runtime_models`);
+  db.exec(`DROP TABLE IF EXISTS scope_runtime_backends`);
+}
+
+function ensureScopeRuntimeConfigsTable(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS scope_runtime_configs (
+      bot_name     TEXT NOT NULL,
+      scope_key    TEXT NOT NULL,
+      backend_type TEXT NOT NULL,
+      model        TEXT,
+      effort       TEXT,
+      updated_at   TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (bot_name, scope_key)
+    )
+  `);
+  const columns = db.prepare("PRAGMA table_info(scope_runtime_configs)").all() as Array<{ name: string }>;
+  if (!columns.some((column) => column.name === "source")) return;
+  db.exec(`
+    CREATE TABLE scope_runtime_configs_new (
+      bot_name     TEXT NOT NULL,
+      scope_key    TEXT NOT NULL,
+      backend_type TEXT NOT NULL,
+      model        TEXT,
+      effort       TEXT,
+      updated_at   TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (bot_name, scope_key)
+    );
+    INSERT INTO scope_runtime_configs_new (bot_name, scope_key, backend_type, model, effort, updated_at)
+    SELECT bot_name, scope_key, backend_type, model, effort, updated_at
+    FROM scope_runtime_configs
+    WHERE source IS NULL OR source = 'explicit';
+    DROP TABLE scope_runtime_configs;
+    ALTER TABLE scope_runtime_configs_new RENAME TO scope_runtime_configs;
+  `);
+}
+
 /**
  * 迁移列表。每个条目对应一个 schema 版本。
  * - version 必须连续递增（1, 2, 3, ...）
@@ -868,6 +906,40 @@ const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 34,
+    description: "Per-scope agent config for private default and chat overrides",
+    up: (db) => {
+      ensureScopeRuntimeConfigsTable(db);
+    },
+  },
+  {
+    version: 35,
+    description: "Drop unused per-backend scope override tables",
+    up: (db) => {
+      dropLegacyScopeRuntimeTables(db);
+    },
+  },
+  {
+    version: 36,
+    description: "Keep scope agent config without inherited/explicit source",
+    up: (db) => {
+      ensureScopeRuntimeConfigsTable(db);
+    },
+  },
+  {
+    version: 37,
+    description: "No-op: unpublished inherited-row cleanup, kept for local schema watermarks",
+    up: (_db) => {},
+  },
+  {
+    version: 38,
+    description: "Remove leftover scope override tables and source column",
+    up: (db) => {
+      dropLegacyScopeRuntimeTables(db);
+      ensureScopeRuntimeConfigsTable(db);
+    },
+  },
 ];
 
 const transportMigrations: Migration[] = [
@@ -1038,6 +1110,10 @@ export interface BotBackendModelState {
   effort?: string;
 }
 
+export interface ScopeRuntimeConfig extends BotBackendModelState {
+  backendType: AgentBackendType;
+}
+
 export type RuntimeEventName =
   | "started"
   | "stage_changed"
@@ -1170,6 +1246,74 @@ export function clearBotRuntimeModels(db: Database.Database, botName: string): v
 /** 清除某个 backend 的运行时 effort 选择（/effort reset）。 */
 export function clearBotBackendEffort(db: Database.Database, botName: string, backendType: AgentBackendType): void {
   setBotBackendModelState(db, botName, backendType, { effort: undefined });
+}
+
+/** 用户的私聊 chat id。新群/新话题没覆盖时，agent/model/effort 跟这份走。 */
+export function findP2pChatIdForUser(db: Database.Database, userId: string): string | undefined {
+  const row = db.prepare(`
+    SELECT c.id
+    FROM chats c
+    JOIN users u ON u.platform = c.platform AND u.platform_id = c.user_id
+    WHERE c.type = 'p2p' AND u.id = ?
+    ORDER BY c.id
+    LIMIT 1
+  `).get(userId) as { id: string } | undefined;
+  return row?.id;
+}
+
+export function getScopeRuntimeConfig(
+  db: Database.Database,
+  botName: string,
+  scopeKey: string,
+): ScopeRuntimeConfig | undefined {
+  const row = db.prepare(
+    "SELECT backend_type, model, effort FROM scope_runtime_configs WHERE bot_name = ? AND scope_key = ?",
+  ).get(botName, scopeKey) as {
+    backend_type: string;
+    model: string | null;
+    effort: string | null;
+  } | undefined;
+  if (!row) return undefined;
+  const backendType = normalizeBackend(row.backend_type);
+  if (!backendType) return undefined;
+  return {
+    backendType,
+    model: row.model ?? undefined,
+    effort: row.effort ?? undefined,
+  };
+}
+
+export function setScopeRuntimeConfig(
+  db: Database.Database,
+  botName: string,
+  scopeKey: string,
+  config: ScopeRuntimeConfig,
+): void {
+  db.prepare(`
+    INSERT INTO scope_runtime_configs (bot_name, scope_key, backend_type, model, effort, updated_at)
+    VALUES (?, ?, ?, ?, ?, datetime('now'))
+    ON CONFLICT(bot_name, scope_key) DO UPDATE SET
+      backend_type = excluded.backend_type,
+      model = excluded.model,
+      effort = excluded.effort,
+      updated_at = excluded.updated_at
+  `).run(
+    botName,
+    scopeKey,
+    config.backendType,
+    config.model ?? null,
+    config.effort ?? null,
+  );
+}
+
+export function deleteScopeRuntimeConfig(
+  db: Database.Database,
+  botName: string,
+  scopeKey: string,
+): void {
+  db.prepare(
+    "DELETE FROM scope_runtime_configs WHERE bot_name = ? AND scope_key = ?",
+  ).run(botName, scopeKey);
 }
 
 export function loadPersistedBotBackend(dbPath: string, botName: string): AgentBackendType | undefined {

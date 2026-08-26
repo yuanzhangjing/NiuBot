@@ -147,6 +147,43 @@ class TransientRetryBackend extends CliAgentBackend<BaseCliSession> {
   }
 }
 
+class Resume404Backend extends CliAgentBackend<BaseCliSession> {
+  attempts = 0;
+
+  constructor() {
+    super("test-cli");
+  }
+
+  command(): string {
+    return "node";
+  }
+
+  buildSession(config: SessionConfig): BaseCliSession {
+    return {
+      workingDirectory: process.cwd(),
+      extraEnv: {},
+      cumulativeBytes: 0,
+      compactCount: 0,
+      jsonlOffset: 0,
+      agentSessionId: config.agentSessionId,
+    };
+  }
+
+  buildInput(_session: BaseCliSession, _message: string): { args: string[] } {
+    this.attempts += 1;
+    return {
+      args: [
+        "-e",
+        "process.stderr.write('Failed to restore session from remote: 404 Not Found\\n'); process.exit(1);",
+      ],
+    };
+  }
+
+  parseOutput(stdout: string): ParsedOutput {
+    return { text: stdout.trim(), turnCompleted: true };
+  }
+}
+
 describe("CliAgentBackend transient retry", () => {
   test("retries once after a transient CLI error and then succeeds", async () => {
     const backend = new TransientRetryBackend();
@@ -155,6 +192,19 @@ describe("CliAgentBackend transient retry", () => {
       text: "recovered",
     });
     expect(backend.attempts).toBe(2);
+  });
+
+  test("surfaces a missing backend session instead of starting a new one", async () => {
+    const backend = new Resume404Backend();
+    const session = await backend.createSession({
+      workingDirectory: process.cwd(),
+      agentSessionId: "019ffb94-1c5b-72f3-b3eb-42e766619372",
+    });
+    await expect(backend.sendMessage(session as AgentSession, "continue")).rejects.toMatchObject({
+      message: expect.stringMatching(/^Command failed: node \(exit 1\)$/),
+    });
+    expect(backend.attempts).toBe(1);
+    expect(backend.getAgentSessionId(session.id)).toBe("019ffb94-1c5b-72f3-b3eb-42e766619372");
   });
 
   test("does not retry a non-transient command failure", async () => {

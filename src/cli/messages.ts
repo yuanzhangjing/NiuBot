@@ -13,6 +13,12 @@ import {
   type MessageRow,
 } from "../messages/store.js";
 import { formatLocalDateTimeWithTZ, TZ, utcToLocalDateTime } from "../tz.js";
+import {
+  chatIsIsolatedTopic,
+  historyThreadLabel,
+  resolveHistoryThreadScope,
+  type ResolvedHistoryThreadScope,
+} from "./history-scope.js";
 
 interface MessageListItem {
   row: MessageRow;
@@ -20,6 +26,11 @@ interface MessageListItem {
 }
 
 export type MessagesGroupSync = (db: Database.Database, chatId: string, threadId?: string) => Promise<void>;
+
+interface MessageFormatOptions {
+  includeTimezone?: boolean;
+  threadScope?: ResolvedHistoryThreadScope;
+}
 
 export async function handleMessages(
   db: Database.Database,
@@ -55,8 +66,13 @@ async function messagesList(
 ): Promise<void> {
   const { flags } = parseArgs(args);
   const targetChatId = flags["chat-id"] ?? currentChatId;
-  const allThreads = flags["all-threads"] === "true";
-  const threadId = resolveThreadFilter(flags, currentChatId, targetChatId, allThreads);
+  const threadScope = resolveHistoryThreadScope(
+    flags,
+    currentChatId,
+    targetChatId,
+    chatType === "group" ? process.env["NIUBOT_THREAD_ID"] : undefined,
+    chatIsIsolatedTopic(db, targetChatId),
+  );
   if (!targetChatId) {
     console.error("Error: NIUBOT_CHAT_ID not set and --chat-id not provided");
     process.exit(1);
@@ -70,7 +86,7 @@ async function messagesList(
     console.error(`Error: ${(err as Error).message}`);
     process.exit(1);
   }
-  await syncGroupMessagesIfNeeded(db, targetChatId, syncGroupChat, threadId);
+  await syncGroupMessagesIfNeeded(db, targetChatId, syncGroupChat, threadScope.threadId);
 
   let rows: MessageRow[];
   try {
@@ -85,7 +101,8 @@ async function messagesList(
       role: flags["role"],
       userId: flags["user-id"],
       contentType: flags["content-type"],
-      threadId,
+      threadId: threadScope.threadId,
+      allThreads: threadScope.allThreads,
     });
   } catch (err) {
     console.error(`Error: ${(err as Error).message}`);
@@ -97,7 +114,7 @@ async function messagesList(
     return;
   }
 
-  printMessagesForList(rows.map((row) => ({ row })));
+  printMessagesForList(rows.map((row) => ({ row })), { threadScope });
 }
 
 async function messagesSearch(
@@ -115,25 +132,35 @@ async function messagesSearch(
     process.exit(1);
   }
 
-  const searchAll = flags["all"] === "true";
+  const allChats = flags["all-chats"] === "true" || flags["all"] === "true";
+  if (allChats && (flags["all-threads"] === "true" || flags["thread-id"] !== undefined)) {
+    throw new Error("--all-chats cannot be combined with --thread-id or --all-threads");
+  }
   const targetChatId = flags["chat-id"] ?? currentChatId;
-  const allThreads = flags["all-threads"] === "true";
-  const threadId = resolveThreadFilter(flags, currentChatId, targetChatId, allThreads);
+  const threadScope = allChats
+    ? { allThreads: true }
+    : resolveHistoryThreadScope(
+      flags,
+      currentChatId,
+      targetChatId,
+      chatType === "group" ? process.env["NIUBOT_THREAD_ID"] : undefined,
+      chatIsIsolatedTopic(db, targetChatId),
+    );
   const contextCount = Number(flags["context"] ?? flags["C"] ?? "0");
   const limit = Number(flags["limit"] ?? flags["n"] ?? "10");
 
-  if (!searchAll && !targetChatId) {
-    console.error("Error: NIUBOT_CHAT_ID not set. Use --all to search all chats.");
+  if (!allChats && !targetChatId) {
+    console.error("Error: NIUBOT_CHAT_ID not set. Use --all-chats to search all chats.");
     process.exit(1);
   }
-  if (!searchAll && targetChatId) {
+  if (!allChats && targetChatId) {
     try {
       assertChatAccess({ currentChatId, chatType, targetChatId });
     } catch (err) {
       console.error(`Error: ${(err as Error).message}`);
       process.exit(1);
     }
-    await syncGroupMessagesIfNeeded(db, targetChatId, syncGroupChat, threadId);
+    await syncGroupMessagesIfNeeded(db, targetChatId, syncGroupChat, threadScope.threadId);
   }
   let rows: MessageRow[];
   try {
@@ -141,7 +168,7 @@ async function messagesSearch(
       currentChatId,
       chatType,
       query,
-      searchAll,
+      searchAll: allChats,
       targetChatId,
       targetChatType: flags["chat-type"] as "p2p" | "group" | undefined,
       limit,
@@ -149,7 +176,8 @@ async function messagesSearch(
       before: flags["before"],
       role: flags["role"],
       userId: flags["user-id"],
-      threadId,
+      threadId: threadScope.threadId,
+      allThreads: threadScope.allThreads,
     });
   } catch (err) {
     console.error(`Error: ${(err as Error).message}`);
@@ -162,7 +190,7 @@ async function messagesSearch(
   }
 
   if (contextCount === 0) {
-    printMessagesForList(rows.map((row) => ({ row })));
+    printMessagesForList(rows.map((row) => ({ row })), { threadScope });
     return;
   }
 
@@ -174,23 +202,12 @@ async function messagesSearch(
         row,
         prefix: row.id === r.id ? ">>> " : "    ",
       })),
-      { includeTimezone: false },
+      { includeTimezone: false, threadScope },
     );
 
     for (const line of lines) console.log(line);
     console.log("---");
   }
-}
-
-function resolveThreadFilter(
-  flags: Record<string, string>,
-  currentChatId: string | undefined,
-  targetChatId: string | undefined,
-  allThreads: boolean,
-): string | undefined {
-  if (flags["thread-id"] !== undefined) return flags["thread-id"];
-  if (allThreads || targetChatId !== currentChatId) return undefined;
-  return process.env["NIUBOT_THREAD_ID"] || undefined;
 }
 
 function messagesGet(
@@ -226,34 +243,44 @@ function messagesGet(
   const roleLabel = row.role === "assistant" ? "assistant" : "user";
   const ts = formatLocalDateTimeWithTZ(row.created_at);
 
-  console.log(`[#${row.id}] [${ts}] ${senderLabel} (${roleLabel}):`);
+  const threadLabel = row.thread_id ? ` [${historyThreadLabel(row.thread_id)}]` : "";
+  console.log(`[#${row.id}] [${ts}]${threadLabel} ${senderLabel} (${roleLabel}):`);
   console.log(row.content_text ?? "");
 }
 
-function printMessagesForList(items: MessageListItem[]): void {
-  for (const line of formatMessagesForList(items)) console.log(line);
+function printMessagesForList(items: MessageListItem[], options: MessageFormatOptions = {}): void {
+  for (const line of formatMessagesForList(items, options)) console.log(line);
 }
 
 export function formatMessagesForList(
   input: MessageRow[] | MessageListItem[],
-  options: { includeTimezone?: boolean } = {},
+  options: MessageFormatOptions = {},
 ): string[] {
   const includeTimezone = options.includeTimezone ?? true;
   const items = normalizeMessageListItems(input);
   const lines: string[] = [];
   let currentDate: string | null = null;
+  let currentThreadKey: string | null | undefined;
 
   if (includeTimezone) {
     lines.push(`Timezone: ${TZ}`);
+  }
+  if (options.threadScope?.threadId && !options.threadScope.allThreads) {
+    lines.push(`当前话题：${options.threadScope.threadId}`, "");
   }
 
   for (const item of items) {
     const localTs = utcToLocalDateTime(item.row.created_at);
     const [date = "", time = ""] = localTs.split(" ");
-    if (date !== currentDate) {
+    const showThread = options.threadScope?.allThreads === true;
+    const threadKey = showThread ? (item.row.thread_id ?? "") : null;
+    if (date !== currentDate || showThread && threadKey !== currentThreadKey) {
       if (currentDate !== null) lines.push("");
-      lines.push(date);
+      lines.push(showThread
+        ? `${date} · ${historyThreadLabel(item.row.thread_id)}`
+        : date);
       currentDate = date;
+      currentThreadKey = threadKey;
     }
     lines.push(formatMessageListLine(item.row, time, item.prefix ?? ""));
   }
@@ -299,21 +326,26 @@ async function syncGroupMessagesIfNeeded(
 }
 
 function printHelp(): void {
-  console.log(`Query message history. Raw record of every chat message.
+  console.log(`查询聊天消息。这里看的是本地保存的原始消息记录（群聊会先同步飞书）。
 
-Commands:
-  list    List recent messages [default: -n 20]
-          Options: -n <count> | --offset <id> (id-keyset, not skip-N) | --since/--before <datetime>
+命令:
+  list    列出最近消息（默认 -n 20）
+          选项: -n <数量> | --offset <id> | --since/--before <时间>
                    --role user|assistant | --user-id <id> | --content-type <t>
-          Group chats sync from the IM first, then read the local DB.
+                   --thread-id <id> | --all-threads
 
-  search  <query>  Search messages by keyword [default: -n 10]
-          Options: -n <count> | --all (all chats) | --chat-type p2p|group
-                   -C <count> (context lines around match) | --since/--before <datetime>
+  search <关键词>  按关键词搜索消息（默认 -n 10）
+          选项: -n <数量> | --all-chats（仅私聊：跨所有聊天）| --chat-type p2p|group
+                   -C <数量>（匹配前后上下文行数）| --since/--before <时间>
                    --role user|assistant | --user-id <id>
-          Group chats sync from the IM first, then search the local DB.
+                   --thread-id <id> | --all-threads
 
-  get     <id>     Show full content of a single message
+  get <id>  查看单条消息全文
 
-Date/local datetime filters use ${TZ}; ISO datetime with Z/offset is accepted.`);
+话题群默认只看当前话题；--all-threads 查看整个群（仍是本群）。在话题中，
+thread-id 默认来自 NIUBOT_THREAD_ID，也可以显式指定。
+--all-chats 仅私聊可用，跨所有聊天搜索；群聊禁用，避免把其他会话内容
+暴露到群里。不能与 --all-threads / --thread-id 一起用。
+
+日期/本地时间按 ${TZ}；带 Z 或时区偏移的 ISO 时间也接受。`);
 }

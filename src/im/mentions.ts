@@ -106,14 +106,45 @@ export function mapOutsideAtTags(text: string, rewrite: (chunk: string) => strin
   return parts.join("");
 }
 
+/** 代码块里的 @U2 是在讲语法，不要转成飞书 at。 */
+function mapOutsideCode(text: string, rewrite: (chunk: string) => string): string {
+  const parts: string[] = [];
+  const fence = /```[\s\S]*?```/g;
+  let last = 0;
+  for (const match of text.matchAll(fence)) {
+    const index = match.index ?? 0;
+    parts.push(mapOutsideInlineCode(text.slice(last, index), rewrite));
+    parts.push(match[0]);
+    last = index + match[0].length;
+  }
+  parts.push(mapOutsideInlineCode(text.slice(last), rewrite));
+  return parts.join("");
+}
+
+function mapOutsideInlineCode(text: string, rewrite: (chunk: string) => string): string {
+  const parts: string[] = [];
+  const inline = /`[^`]*`/g;
+  let last = 0;
+  for (const match of text.matchAll(inline)) {
+    const index = match.index ?? 0;
+    parts.push(rewrite(text.slice(last, index)));
+    parts.push(match[0]);
+    last = index + match[0].length;
+  }
+  parts.push(rewrite(text.slice(last)));
+  return parts.join("");
+}
+
 function convertShortAts(text: string, byId: Map<string, MentionUser>): string {
   return mapOutsideAtTags(text, (chunk) =>
-    chunk.replace(shortAtPattern(), (full, num: string) => {
-      const user = byId.get(`u${num}`);
-      if (!user?.platformId) return full;
-      const name = user.name?.trim() || `U${num}`;
-      return `<at user_id="${user.platformId}">${name}</at>`;
-    }),
+    mapOutsideCode(chunk, (plain) =>
+      plain.replace(shortAtPattern(), (full, num: string) => {
+        const user = byId.get(`u${num}`);
+        if (!user?.platformId) return full;
+        const name = user.name?.trim() || `U${num}`;
+        return `<at user_id="${user.platformId}">${name}</at>`;
+      }),
+    ),
   );
 }
 

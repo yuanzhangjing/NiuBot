@@ -25,14 +25,39 @@ const INJECTED_CONTEXT_TAGS = new Set([
   "skills_instructions",
   "speakers",
   "system-reminder",
+  "user_info",
+  "user_rule",
+  "user_rules",
+  "rules",
+  "always_applied_workspace_rules",
+  "always_applied_workspace_rule",
 ]);
 const CODEX_AGENTS_CONTEXT_PREFIX = "# AGENTS.md instructions for ";
 const MEDIA_TYPES = new Set(["image", "input_image", "output_image", "audio", "video", "file", "media"]);
-const EXPLICIT_USER_EVENTS = new WeakSet<TranscriptEvent>();
 
+/** 仅在用户原文和注入上下文拼在同一条 user 里时包裹。 */
 export function wrapInjectedUserMessage(content: string): string {
   const id = randomUUID();
   return `<niubot-user-message id="${id}" length="${content.length}">\n${content}\n</niubot-user-message id="${id}">`;
+}
+
+/** 整段都是已知注入/harness，没有用户原文。 */
+export function isStandaloneInjectedContext(content: string): boolean {
+  const stripped = stripInjectedContextPrefix(content);
+  return stripped.stripped && stripped.content.length === 0;
+}
+
+/** list 概要用：解开 tag / 去掉注入前缀，引用结构保持原文。 */
+export function visibleUserPayload(content: string): string {
+  const extracted = extractInjectedUserMessage(unwrapOuterUserQuery(content));
+  if (!extracted.content) return "";
+  if (extracted.explicit) return extracted.content;
+  const inner = unwrapOuterUserQuery(extracted.content);
+  if (isStandaloneInjectedContext(inner)) return "";
+  const stripped = stripInjectedContextPrefix(inner);
+  if (stripped.stripped && stripped.content.length > 0) return stripped.content;
+  if (stripped.stripped) return "";
+  return inner;
 }
 
 export function readClaudeTranscript(file: string, agentSessionId: string): SessionTranscript {
@@ -257,16 +282,24 @@ function textTranscriptEvent(
     ? extractInjectedUserMessage(text)
     : { content: text, explicit: false };
   if (!extracted.content) return undefined;
-  const event: TranscriptEvent = {
+  return {
     timestamp,
     type: role,
     content: sanitizeTranscriptString(extracted.content),
   };
-  if (extracted.explicit) EXPLICIT_USER_EVENTS.add(event);
-  return event;
+}
+
+function unwrapOuterUserQuery(content: string): string {
+  const trimmed = content.trim();
+  const open = trimmed.match(/^<user_query(?:\s[^>]*)?>\s*/i);
+  if (!open) return content;
+  const close = trimmed.toLowerCase().lastIndexOf("</user_query>");
+  if (close < open[0].length) return content;
+  return trimmed.slice(open[0].length, close).trim();
 }
 
 function extractInjectedUserMessage(content: string): { content: string; explicit: boolean } {
+  content = unwrapOuterUserQuery(content);
   INJECTED_USER_MARKER.lastIndex = 0;
   let match: RegExpExecArray | null;
   while ((match = INJECTED_USER_MARKER.exec(content)) !== null) {
@@ -280,31 +313,12 @@ function extractInjectedUserMessage(content: string): { content: string; explici
     }
   }
   const legacy = stripInjectedContextPrefix(content);
-  // A standalone context-looking block is ambiguous: it may be backend harness
-  // context, but it may also be the user's literal message. Keep it here. The
-  // session CLI can safely hide synthetic context by checking the messages table.
   if (legacy.stripped && legacy.content.length === 0) return { content, explicit: false };
   const legacyEnginePrompt = legacy.blocks >= 2
     && (legacy.first === "niubot-system-rules" || legacy.first === "compact-recovery");
   return { content: legacyEnginePrompt ? legacy.content : content, explicit: false };
 }
 
-/** Whether this event was recovered from NiuBot's explicit user-message wrapper. */
-export function isExplicitUserMessage(event: TranscriptEvent): boolean {
-  return EXPLICIT_USER_EVENTS.has(event);
-}
-
-/** Whether a complete user event only contains known injected context blocks. */
-export function isStandaloneInjectedContext(content: string): boolean {
-  const stripped = stripInjectedContextPrefix(content);
-  return stripped.stripped && stripped.content.length === 0;
-}
-
-/**
- * Codex 会把 AGENTS.md、environment_context 和通过 user prompt 注入的 Engine
- * 上下文都记成 user message。新记录用 niubot-user-message 标记精确取回原文；
- * 这里同时清理 Codex 自带上下文，并兼容标记上线前已存在的 active session。
- */
 function stripInjectedContextPrefix(content: string): {
   content: string;
   stripped: boolean;
@@ -330,10 +344,10 @@ function stripInjectedContextPrefix(content: string): {
       continue;
     }
 
-    const opening = /^<([a-z0-9_-]+)(?:\s[^>]*)?>/.exec(content.slice(start));
-    const tag = opening?.[1];
+    const opening = /^<([a-z0-9_-]+)(?:\s[^>]*)?>/i.exec(content.slice(start));
+    const tag = opening?.[1]?.toLowerCase();
     if (!opening || !tag || !INJECTED_CONTEXT_TAGS.has(tag)) break;
-    const closingTag = `</${tag}>`;
+    const closingTag = `</${opening[1]}>`;
     const closing = content.indexOf(closingTag, start + opening[0].length);
     if (closing < 0) break;
     cursor = closing + closingTag.length;

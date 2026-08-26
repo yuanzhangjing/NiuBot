@@ -3,9 +3,9 @@
  * 新增 CLI agent 只需继承并实现抽象方法。
  */
 
-import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import { AgentSessionNotStartedError, ERROR_DISPLAY_MAX_LEN, type AgentBackend, type AgentSession, type AgentResponse, type SessionConfig, type AgentSessionActivity, type ExecHooks, type SessionTranscript } from "./types.js";
+import { createEngineHandle, nativeSessionId } from "./session-id.js";
 import { NIUBOT_HOME } from "../config.js";
 import { createLogger } from "../logger.js";
 import { prependNiubotBinToPath } from "../platform/cli-runtime.js";
@@ -25,7 +25,7 @@ export interface BaseCliSession {
   /** 推理强度（low/medium/high/xhigh/max），backend 支持时透传给 CLI */
   reasoningEffort?: string;
   importantContext?: string;
-  /** agent 侧的 session ID（用于 resume），由基类自动管理 */
+  /** NativeSessionId：backend 原生 id，用于 --resume。禁止放 EngineHandle。 */
   agentSessionId?: string;
   extraEnv: Record<string, string>;
   cumulativeBytes: number;
@@ -44,7 +44,7 @@ export interface ParsedOutput {
   lastMessage?: string;
   /** backend 给出的未完成原因，如缺少 agent_end / turn.completed。 */
   incompleteReason?: string;
-  /** agent 侧的 session ID（用于 resume） */
+  /** NativeSessionId：backend 真正开场后的 id */
   agentSessionId?: string;
   /** 本次调用的上下文 token 总数 */
   contextTokens?: number;
@@ -186,9 +186,7 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
     if (message && !message.startsWith("Command failed:")) return err;
     try {
       const parsed = this.parseOutput(stdout, session);
-      if (parsed.agentSessionId) {
-        session.agentSessionId = parsed.agentSessionId;
-      }
+      session.agentSessionId = nativeSessionId(parsed.agentSessionId ?? session.agentSessionId, agentSession.id);
       const parsedError = this.getParsedError(parsed);
       if (!parsedError && parsed.turnCompleted) return err;
       const next = parsed.turnCompleted && parsedError
@@ -241,15 +239,13 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
   }
 
   async createSession(config: SessionConfig): Promise<AgentSession> {
-    const id = `${this.name}_${Date.now()}_${randomUUID().slice(0, 8)}`;
-    const session = this.buildSession(config);
-    // 基类统一管理 agentSessionId（recover 时从 config 传入）
-    if (config.agentSessionId) {
-      session.agentSessionId = config.agentSessionId;
-    }
-    this.sessions.set(id, session);
-    this.log.info("session created", { sessionId: id });
-    return { id };
+    const handle = createEngineHandle(this.name);
+    const nativeId = nativeSessionId(config.agentSessionId);
+    const session = this.buildSession({ ...config, agentSessionId: nativeId });
+    session.agentSessionId = nativeId;
+    this.sessions.set(handle, session);
+    this.log.info("session created", { engineHandle: handle, nativeSessionId: nativeId ?? null });
+    return { id: handle };
   }
 
   async sendMessage(agentSession: AgentSession, message: string): Promise<AgentResponse> {
@@ -268,9 +264,9 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
     const mode = s.agentSessionId ? "resume" : "new";
 
     this.log.info("sending prompt", {
-      sessionId: agentSession.id,
+      engineHandle: agentSession.id,
       mode,
-      agentSessionId: s.agentSessionId ?? null,
+      nativeSessionId: s.agentSessionId ?? null,
       textLength: message.length,
       attempt,
       stdinDefined: stdin !== undefined,
@@ -313,10 +309,7 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
       s.cumulativeBytes += stdout.length;
 
       const parsed = this.parseOutput(stdout, s);
-      // 基类自动管理 agentSessionId
-      if (parsed.agentSessionId) {
-        s.agentSessionId = parsed.agentSessionId;
-      }
+      s.agentSessionId = nativeSessionId(parsed.agentSessionId ?? s.agentSessionId, agentSession.id);
 
       if (!parsed.turnCompleted) {
         throw this.buildIncompleteTurnError(parsed, stdout);
@@ -485,7 +478,8 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
   }
 
   getAgentSessionId(sessionId: string): string | undefined {
-    return this.sessions.get(sessionId)?.agentSessionId;
+    const session = this.sessions.get(sessionId);
+    return nativeSessionId(session?.agentSessionId, sessionId);
   }
 
   getCumulativeBytes(sessionId: string): number {

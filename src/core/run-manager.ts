@@ -9,6 +9,7 @@ const log = createLogger("run-manager");
 type RunAgentInput = {
   runId: string;
   chatId: string;
+  agent: AgentBackend;
   session: AgentSession;
   message: string;
   signal?: AbortSignal;
@@ -30,7 +31,6 @@ type SendFinalResponseInput = {
 
 export class RunManager {
   constructor(
-    private readonly agent: AgentBackend,
     private readonly runtimeState: RuntimeStateStore,
     private readonly responseSender: ResponseSender,
   ) {}
@@ -41,7 +41,7 @@ export class RunManager {
       log.info("agent run skipped, signal already aborted", {
         runId: input.runId,
         chatId: input.chatId,
-        agentSessionId: input.session.id,
+        engineHandle: input.session.id,
       });
       return { status: "stopped" };
     }
@@ -51,13 +51,13 @@ export class RunManager {
     log.info("agent run started", {
       runId: input.runId,
       chatId: input.chatId,
-      agentSessionId: input.session.id,
+      engineHandle: input.session.id,
       messageLength: input.message.length,
     });
 
     try {
       const response = await abortable(
-        this.agent.sendMessage(input.session, input.message),
+        input.agent.sendMessage(input.session, input.message),
         input.signal,
       );
 

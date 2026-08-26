@@ -19,8 +19,8 @@ export function resolveBotRuntimeConfig(
   };
 
   return {
-    backendType: pickBackend(runtimeState?.backendType)
-      ?? pickBackend(configBackend)
+    backendType: pickBackend(configBackend)
+      ?? pickBackend(runtimeState?.backendType)
       ?? availableBackends[0]
       ?? "claude",
     model: runtimeState?.model,

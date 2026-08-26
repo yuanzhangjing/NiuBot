@@ -315,9 +315,9 @@ export default class PiBackend extends CliAgentBackend<PiSession> {
     }
     if (!session.agentSessionId) return null;
 
+    const piHome = process.env["PI_HOME"]?.trim() ? resolve(process.env["PI_HOME"]!) : join(homedir(), ".pi");
     const sessionsRoot = join(
-      homedir(),
-      ".pi",
+      piHome,
       "agent",
       "sessions",
       encodePiSessionDir(session.workingDirectory),
@@ -327,7 +327,7 @@ export default class PiBackend extends CliAgentBackend<PiSession> {
     try {
       const match = readdirSync(sessionsRoot)
         .filter((name) => name.endsWith(".jsonl"))
-        .find((name) => name.endsWith(`_${session.agentSessionId}.jsonl`) || name.includes(session.agentSessionId!));
+        .find((name) => name.endsWith(`_${session.agentSessionId}.jsonl`));
       if (!match) return null;
       session.sessionLogPath = join(sessionsRoot, match);
       return session.sessionLogPath;

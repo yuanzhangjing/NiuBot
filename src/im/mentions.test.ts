@@ -64,6 +64,15 @@ describe("rewriteOutboundMentions", () => {
     expect(rewriteOutboundMentions(card, users, { selfUserId: "u3" }).mentionedOtherBot).toBe(true);
   });
 
+  test("does not convert short ats inside markdown code", () => {
+    expect(rewriteOutboundMentions("用 `@U2` 这种短号", users, { selfUserId: "u3" }).text)
+      .toBe("用 `@U2` 这种短号");
+    expect(rewriteOutboundMentions("```\n@U4\n```", users, { selfUserId: "u3" }).text)
+      .toBe("```\n@U4\n```");
+    expect(rewriteOutboundMentions("plain @U2 and `@U4`", users, { selfUserId: "u3" }).text)
+      .toBe('plain <at user_id="ou_zen">Zen</at> and `@U4`');
+  });
+
   test("leaves unknown short ids unchanged", () => {
     expect(rewriteOutboundMentions("hi @U99", users, { selfUserId: "u3" }).text).toBe("hi @U99");
   });

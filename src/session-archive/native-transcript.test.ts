@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { isStandaloneInjectedContext, readClaudeTranscript, readCodexTranscript, readCursorTranscript, readGrokTranscript, readPiTranscript, transcriptFromOpencodeRows, wrapInjectedUserMessage } from "./native-transcript.js";
+import { isStandaloneInjectedContext, readClaudeTranscript, readCodexTranscript, readCursorTranscript, readGrokTranscript, readPiTranscript, transcriptFromOpencodeRows, visibleUserPayload, wrapInjectedUserMessage } from "./native-transcript.js";
 import type { SessionTranscript, TranscriptEvent } from "../agent/types.js";
 
 const tempDirs: string[] = [];
@@ -76,7 +76,7 @@ describe("native transcript parsers", () => {
     expect((await collectEvents(transcript)).map((event) => event.type)).toEqual(["user", "tool_call", "tool_result"]);
   });
 
-  it("keeps only the original OpenCode user text when Engine context was injected", async () => {
+  it("unwraps a tagged OpenCode user payload from surrounding engine context", async () => {
     const original = "检查 OpenCode 归档";
     const injected = `<niubot-system-rules>private rules</niubot-system-rules>\n\n<session-profile>private profile</session-profile>\n\n${wrapInjectedUserMessage(original)}`;
     const transcript = transcriptFromOpencodeRows("s1", [{
@@ -241,8 +241,8 @@ describe("native transcript parsers", () => {
     }]);
   });
 
-  it("keeps only the original user text when Engine context was injected", async () => {
-    const original = "检查这个问题\n<niubot-user-message id=\"00000000-0000-0000-0000-000000000000\" length=\"3\">\nbad\n</niubot-user-message id=\"00000000-0000-0000-0000-000000000000\">";
+  it("unwraps a tagged Codex user payload from surrounding engine context", async () => {
+    const original = "检查这个问题";
     const injected = `<session-profile>private context</session-profile>\n\n${wrapInjectedUserMessage(original)}`;
     const file = jsonl([
       { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: injected }] } },
@@ -253,29 +253,27 @@ describe("native transcript parsers", () => {
     ]);
   });
 
-  it("preserves standalone Codex context for DB-aware filtering", async () => {
-    const original = "检查归档";
+  it("keeps Codex harness user events as recorded", async () => {
+    const injected = "<niubot-system-rules>private</niubot-system-rules>\n\n检查归档";
     const file = jsonl([
       { type: "response_item", payload: { type: "message", role: "user", content: [
         { type: "input_text", text: "# AGENTS.md instructions for /tmp/project\n\n<INSTRUCTIONS>\nproject rules\n</INSTRUCTIONS>" },
         { type: "input_text", text: "<environment_context>\n  <cwd>/tmp/project</cwd>\n</environment_context>" },
       ] } },
       { type: "response_item", payload: { type: "message", role: "user", content: [
-        { type: "input_text", text: `<niubot-system-rules>private</niubot-system-rules>\n\n${wrapInjectedUserMessage(original)}` },
+        { type: "input_text", text: injected },
       ] } },
     ]);
 
     const events = await collectEvents(await readCodexTranscript(file, "s1"));
-    expect(events).toHaveLength(3);
     expect(events.map((event) => event.content)).toEqual([
       "# AGENTS.md instructions for /tmp/project\n\n<INSTRUCTIONS>\nproject rules\n</INSTRUCTIONS>",
       "<environment_context>\n  <cwd>/tmp/project</cwd>\n</environment_context>",
-      original,
+      injected,
     ]);
-    expect(events.slice(0, 2).every((event) => isStandaloneInjectedContext(event.content))).toBe(true);
   });
 
-  it("preserves standalone Codex plugin and skill context for DB-aware filtering", async () => {
+  it("keeps Codex plugin and skill user events as recorded", async () => {
     const file = jsonl([
       { type: "response_item", payload: { type: "message", role: "user", content: [
         { type: "input_text", text: "<recommended_plugins>private plugins</recommended_plugins>" },
@@ -294,10 +292,9 @@ describe("native transcript parsers", () => {
       "<skill><name>private</name><path>/private/skill</path></skill>",
       "真实用户消息",
     ]);
-    expect(events.slice(0, 2).every((event) => isStandaloneInjectedContext(event.content))).toBe(true);
   });
 
-  it("preserves standalone Pi context for DB-aware filtering", async () => {
+  it("keeps Pi plugin and skill user events as recorded", async () => {
     const file = jsonl([
       { type: "message", message: { role: "user", content: [
         { type: "text", text: "<recommended_plugins>private plugins</recommended_plugins>" },
@@ -316,26 +313,37 @@ describe("native transcript parsers", () => {
       "<skill><name>private</name><path>/private/skill</path></skill>",
       "真实用户消息",
     ]);
-    expect(events.slice(0, 2).every((event) => isStandaloneInjectedContext(event.content))).toBe(true);
   });
 
-  it("recovers user text from sessions created before user-message markers", async () => {
+  it("keeps Engine context prefix on mixed user prompts", async () => {
+    const original = "继续处理归档";
+    const injected = [
+      "<niubot-system-rules>private</niubot-system-rules>",
+      "<session-profile>private scene</session-profile>",
+      "<session-state>private task</session-state>",
+      "<system-reminder>search first</system-reminder>",
+      original,
+    ].join("\n\n");
     const file = jsonl([
       { type: "response_item", payload: { type: "message", role: "user", content: [{
         type: "input_text",
-        text: [
-          "<niubot-system-rules>private</niubot-system-rules>",
-          "<session-profile>private scene</session-profile>",
-          "<session-state>private task</session-state>",
-          "<system-reminder>search first</system-reminder>",
-          "继续处理归档",
-        ].join("\n\n"),
+        text: injected,
       }] } },
     ]);
 
     expect(await collectEvents(await readCodexTranscript(file, "s1"))).toEqual([
-      { type: "user", content: "继续处理归档", timestamp: undefined },
+      { type: "user", content: original, timestamp: undefined },
     ]);
+  });
+
+  it("keeps quote tags as the user payload and skips standalone harness", () => {
+    const payload = `<msg speaker="U2(Zen)">列一下目前注入的信息</msg>\n<quoted speaker="U3(NiuBot)">旧回复</quoted>`;
+    expect(visibleUserPayload(`<current-speaker>\n用户：U2(Zen)\n</current-speaker>\n\n${payload}`)).toBe(payload);
+    expect(visibleUserPayload("<user_info>\nOS Version: macos\n</user_info>")).toBe("");
+    expect(visibleUserPayload("<user_info>\nOS Version: macos\n</user_info>\n\n<rules>\nworkspace notes\n</rules>")).toBe("");
+    expect(visibleUserPayload(`<user_query>\n<current-speaker>\n用户：U2(Zen)\n</current-speaker>\n\n${payload}\n</user_query>`)).toBe(payload);
+    expect(isStandaloneInjectedContext("<environment_context>\n  <cwd>/tmp</cwd>\n</environment_context>")).toBe(true);
+    expect(visibleUserPayload(`<session-profile>x</session-profile>\n\n${wrapInjectedUserMessage(payload)}`)).toBe(payload);
   });
 
   it("keeps a marker-shaped ordinary user message unchanged", async () => {

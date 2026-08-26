@@ -2,9 +2,9 @@ import { describe, expect, test } from "vitest";
 import { resolveBotRuntimeConfig } from "./runtime-config.js";
 
 describe("resolveBotRuntimeConfig", () => {
-  test("uses persisted runtime backend and model", () => {
+  test("uses config backend even if a global runtime backend was persisted", () => {
     expect(resolveBotRuntimeConfig("claude", { backendType: "codex", model: "gpt-5.5" }, ["claude", "codex"]))
-      .toEqual({ backendType: "codex", model: "gpt-5.5" });
+      .toEqual({ backendType: "claude", model: "gpt-5.5" });
   });
 
   test("falls back to config backend when persisted backend is unavailable", () => {
@@ -17,7 +17,7 @@ describe("resolveBotRuntimeConfig", () => {
       .toEqual({ backendType: "codex", model: undefined });
   });
 
-  test("normalizes legacy cursor-agent runtime backend to cursor", () => {
-    expect(resolveBotRuntimeConfig("claude", { backendType: "cursor-agent" }, ["claude", "cursor"]).backendType).toBe("cursor");
+  test("normalizes legacy cursor-agent runtime backend to cursor when config backend is unavailable", () => {
+    expect(resolveBotRuntimeConfig("missing", { backendType: "cursor-agent" }, ["claude", "cursor"]).backendType).toBe("cursor");
   });
 });

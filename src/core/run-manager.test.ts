@@ -73,11 +73,12 @@ describe("RunManager", () => {
   test("marks a successful agent call and final send as done", async () => {
     const { store, runId } = createStore();
     const agent = new RecordingAgent(async () => ({ text: "reply" }));
-    const manager = new RunManager(agent, store, createSender());
+    const manager = new RunManager(store, createSender());
 
     const agentResult = await manager.runAgent({
       runId,
       chatId: "c1",
+      agent,
       session: { id: "agent-1" },
       message: "hello",
     });
@@ -94,36 +95,54 @@ describe("RunManager", () => {
     expect(agent.sendMessageCalls).toEqual(["hello"]);
   });
 
+  test("sends the run to the backend passed in that call", async () => {
+    const { store, runId } = createStore();
+    const used = new RecordingAgent(async () => ({ text: "a" }));
+    const unused = new RecordingAgent(async () => ({ text: "b" }));
+    const manager = new RunManager(store, createSender());
+
+    const result = await manager.runAgent({
+      runId,
+      chatId: "c1",
+      agent: used,
+      session: { id: "agent-a" },
+      message: "one",
+    });
+
+    expect(result).toMatchObject({ status: "response", response: { text: "a" } });
+    expect(used.sendMessageCalls).toEqual(["one"]);
+    expect(unused.sendMessageCalls).toEqual([]);
+  });
+
   test("logs agent lifecycle without prompt content", async () => {
     const logs = captureStdout();
     const { store, runId } = createStore();
     const agent = new RecordingAgent(async () => ({ text: "reply" }));
-    const manager = new RunManager(agent, store, createSender());
+    const manager = new RunManager(store, createSender());
 
     await manager.runAgent({
       runId,
       chatId: "c1",
+      agent,
       session: { id: "agent-1" },
       message: "secret prompt",
     });
 
     const output = logs.join("");
-    expect(output).toContain("[run-manager] agent run started runId=run-1 chatId=c1 agentSessionId=agent-1 messageLength=13");
+    expect(output).toContain("[run-manager] agent run started runId=run-1 chatId=c1 engineHandle=agent-1 messageLength=13");
     expect(output).toContain("[run-manager] agent run completed runId=run-1 chatId=c1 responseLength=5");
     expect(output).not.toContain("secret prompt");
   });
 
   test("marks the run failed when the agent throws", async () => {
     const { store, runId } = createStore();
-    const manager = new RunManager(
-      new RecordingAgent(async () => { throw new Error("agent failed"); }),
-      store,
-      createSender(),
-    );
+    const agent = new RecordingAgent(async () => { throw new Error("agent failed"); });
+    const manager = new RunManager(store, createSender());
 
     await expect(manager.runAgent({
       runId,
       chatId: "c1",
+      agent,
       session: { id: "agent-1" },
       message: "hello",
     })).rejects.toThrow("agent failed");
@@ -139,15 +158,13 @@ describe("RunManager", () => {
     const events: RuntimeStateEvent[] = [];
     const { store, runId } = createStore((event) => events.push(event));
     let resolveAgent: ((response: AgentResponse) => void) | undefined;
-    const manager = new RunManager(
-      new RecordingAgent(() => new Promise<AgentResponse>((resolve) => { resolveAgent = resolve; })),
-      store,
-      createSender(),
-    );
+    const agent = new RecordingAgent(() => new Promise<AgentResponse>((resolve) => { resolveAgent = resolve; }));
+    const manager = new RunManager(store, createSender());
 
     const pending = manager.runAgent({
       runId,
       chatId: "c1",
+      agent,
       session: { id: "agent-1" },
       message: "hello",
     });
@@ -166,7 +183,7 @@ describe("RunManager", () => {
   test("marks the run failed when final response cannot be sent", async () => {
     const { store, runId } = createStore();
     store.markRunStage(runId, "agent_running");
-    const manager = new RunManager(new RecordingAgent(async () => ({ text: "reply" })), store, createSender({
+    const manager = new RunManager(store, createSender({
       async sendFinalResponse() {
         return { ok: false, error: "all failed", methodsTried: ["card:create", "text:create", "file:create"] };
       },
@@ -190,7 +207,7 @@ describe("RunManager", () => {
     const events: RuntimeStateEvent[] = [];
     const { store, runId } = createStore((event) => events.push(event));
     store.markRunStage(runId, "agent_running");
-    const manager = new RunManager(new RecordingAgent(async () => ({ text: "reply" })), store, createSender({
+    const manager = new RunManager(store, createSender({
       async sendFinalResponse() {
         return { ok: false, error: "im.sendCard timed out after 30ms", methodsTried: ["card:create"] };
       },
@@ -218,11 +235,12 @@ describe("RunManager", () => {
     const { store, runId } = createStore();
     const controller = new AbortController();
     controller.abort();
-    const manager = new RunManager(new RecordingAgent(async () => ({ text: "reply" })), store, createSender());
+    const manager = new RunManager(store, createSender());
 
     const result = await manager.runAgent({
       runId,
       chatId: "c1",
+      agent: new RecordingAgent(async () => ({ text: "reply" })),
       session: { id: "agent-1" },
       message: "hello",
       signal: controller.signal,
@@ -236,15 +254,13 @@ describe("RunManager", () => {
     const { store, runId } = createStore();
     const controller = new AbortController();
     let agentResolved = false;
-    const manager = new RunManager(
-      new RecordingAgent(() => new Promise<AgentResponse>(() => { agentResolved = true; })),
-      store,
-      createSender(),
-    );
+    const agent = new RecordingAgent(() => new Promise<AgentResponse>(() => { agentResolved = true; }));
+    const manager = new RunManager(store, createSender());
 
     const pending = manager.runAgent({
       runId,
       chatId: "c1",
+      agent,
       session: { id: "agent-1" },
       message: "hello",
       signal: controller.signal,
@@ -262,15 +278,12 @@ describe("RunManager", () => {
     vi.useFakeTimers();
     const controller = new AbortController();
     const { store, runId } = createStore();
-    const manager = new RunManager(
-      new RecordingAgent(() => new Promise<AgentResponse>(() => {})),
-      store,
-      createSender(),
-    );
+    const manager = new RunManager(store, createSender());
 
     const pending = manager.runAgent({
       runId,
       chatId: "c1",
+      agent: new RecordingAgent(() => new Promise<AgentResponse>(() => {})),
       session: { id: "agent-1" },
       message: "hello",
       signal: controller.signal,
@@ -285,11 +298,12 @@ describe("RunManager", () => {
 
   test("uses the standard empty response fallback", async () => {
     const { store, runId } = createStore();
-    const manager = new RunManager(new RecordingAgent(async () => ({ text: "" })), store, createSender());
+    const manager = new RunManager(store, createSender());
 
     const result = await manager.runAgent({
       runId,
       chatId: "c1",
+      agent: new RecordingAgent(async () => ({ text: "" })),
       session: { id: "agent-1" },
       message: "hello",
     });

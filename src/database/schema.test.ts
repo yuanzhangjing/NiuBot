@@ -21,6 +21,10 @@ import {
   clearBotRuntimeModels,
   getBotBackendModelState,
   setBotBackendModelState,
+  getScopeRuntimeConfig,
+  setScopeRuntimeConfig,
+  deleteScopeRuntimeConfig,
+  findP2pChatIdForUser,
   loadPersistedBotRuntimeState,
   getRecentRuntimeEvents,
   markUnfinishedRuntimeRunsFailedByRestart,
@@ -433,6 +437,101 @@ describe("bot runtime state", () => {
       backendType: "codex",
       model: "gpt-5.5",
     });
+  });
+
+  test("persists agent config per scope", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-scope-config-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    expect(LATEST_SCHEMA_VERSION).toBeGreaterThanOrEqual(34);
+
+    setScopeRuntimeConfig(db, "NiuBot", "c5#t1", {
+      backendType: "grok",
+      model: "grok-model",
+      effort: "high",
+    });
+    expect(getScopeRuntimeConfig(db, "NiuBot", "c5#t1")).toEqual({
+      backendType: "grok",
+      model: "grok-model",
+      effort: "high",
+    });
+
+    setScopeRuntimeConfig(db, "NiuBot", "c5#t1", {
+      backendType: "grok",
+    });
+    expect(getScopeRuntimeConfig(db, "NiuBot", "c5#t1")).toEqual({
+      backendType: "grok",
+    });
+
+    deleteScopeRuntimeConfig(db, "NiuBot", "c5#t1");
+    expect(getScopeRuntimeConfig(db, "NiuBot", "c5#t1")).toBeUndefined();
+  });
+
+  test("drops leftover scope override tables and the source column", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-drop-legacy-scope-"));
+    tempDirs.push(dir);
+    const dbPath = path.join(dir, "niubot.db");
+    const db = initDatabase(dbPath);
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS scope_runtime_models (
+        bot_name TEXT NOT NULL,
+        scope_key TEXT NOT NULL,
+        backend_type TEXT NOT NULL,
+        PRIMARY KEY (bot_name, scope_key, backend_type)
+      );
+      CREATE TABLE IF NOT EXISTS scope_runtime_backends (
+        bot_name TEXT NOT NULL,
+        scope_key TEXT NOT NULL,
+        backend_type TEXT NOT NULL,
+        PRIMARY KEY (bot_name, scope_key)
+      );
+    `);
+    db.exec("DROP TABLE scope_runtime_configs");
+    db.exec(`
+      CREATE TABLE scope_runtime_configs (
+        bot_name TEXT NOT NULL,
+        scope_key TEXT NOT NULL,
+        backend_type TEXT NOT NULL,
+        model TEXT,
+        effort TEXT,
+        source TEXT NOT NULL DEFAULT 'inherited',
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (bot_name, scope_key)
+      );
+    `);
+    db.prepare(`
+      INSERT INTO scope_runtime_configs (bot_name, scope_key, backend_type, model, source)
+      VALUES ('NiuBot', 'c1', 'grok', 'p2p-model', 'explicit'),
+             ('NiuBot', 'c5#t1', 'grok', NULL, 'inherited')
+    `).run();
+    db.prepare("DELETE FROM niubot_component_schema_versions WHERE component = 'core'").run();
+    db.pragma("user_version = 37");
+    db.close();
+
+    const migrated = initDatabase(dbPath);
+    expect(migrated.pragma("user_version", { simple: true })).toBe(LATEST_SCHEMA_VERSION);
+    expect(migrated.prepare("SELECT name FROM sqlite_master WHERE name = 'scope_runtime_models'").get()).toBeUndefined();
+    expect(migrated.prepare("SELECT name FROM sqlite_master WHERE name = 'scope_runtime_backends'").get()).toBeUndefined();
+    expect((migrated.prepare("PRAGMA table_info(scope_runtime_configs)").all() as Array<{ name: string }>)
+      .some((column) => column.name === "source")).toBe(false);
+    expect(getScopeRuntimeConfig(migrated, "NiuBot", "c1")).toEqual({
+      backendType: "grok",
+      model: "p2p-model",
+    });
+    expect(getScopeRuntimeConfig(migrated, "NiuBot", "c5#t1")).toBeUndefined();
+  });
+
+  test("finds a user's p2p chat for default runtime fallback", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-p2p-chat-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u2', 'Zen', 'feishu', 'ou-zen')").run();
+    db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u3', 'Other', 'feishu', 'ou-other')").run();
+    db.prepare("INSERT INTO chats (id, type, platform, platform_id, user_id) VALUES ('c1', 'p2p', 'feishu', 'oc-p2p', 'ou-zen')").run();
+    db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c5', 'group', 'feishu', 'oc-group')").run();
+
+    expect(findP2pChatIdForUser(db, "u2")).toBe("c1");
+    expect(findP2pChatIdForUser(db, "u3")).toBeUndefined();
   });
 });
 

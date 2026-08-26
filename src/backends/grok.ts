@@ -17,7 +17,7 @@ interface GrokSession extends BaseCliSession {
   sessionDir?: string;
   /** 首轮用 --session-id，后续用 --resume。 */
   isNewSession: boolean;
-  /** 客户端预分配的 session 目录 id；agentSessionId 只在 grok 真正开场后写入。 */
+  /** 首轮预分配的 NativeSessionId；EngineHandle 禁止放这里。 */
   clientSessionId: string;
   /** events.jsonl 增量读取位置，供 /status 和 watchdog 刷新。 */
   eventsOffset: number;
@@ -170,10 +170,7 @@ export default class GrokBackend extends CliAgentBackend<GrokSession> {
   }
 
   protected isTransientCliError(err: unknown): boolean {
-    const message = err instanceof Error ? err.message : String(err ?? "");
-    const stdout = err && typeof err === "object" && "stdout" in err ? String(err.stdout ?? "") : "";
-    const stderr = err && typeof err === "object" && "stderr" in err ? String(err.stderr ?? "") : "";
-    return TRANSIENT_GROK_CLI_ERROR.test(`${message}\n${stdout}\n${stderr}`);
+    return TRANSIENT_GROK_CLI_ERROR.test(cliErrorText(err));
   }
 
   parseOutput(stdout: string, session: GrokSession): ParsedOutput {
@@ -497,6 +494,12 @@ export function encodeGrokSessionDir(cwd: string): string {
   return encodeURIComponent(resolveWorkspacePath(cwd));
 }
 
+/** 进行中的 Grok session：磁盘上还在写的 chat_history.jsonl。 */
+export function locateGrokChatHistory(cwd: string, nativeSessionId: string): string | undefined {
+  const file = join(getGrokHome(), "sessions", encodeGrokSessionDir(cwd), nativeSessionId, "chat_history.jsonl");
+  return existsSync(file) ? file : undefined;
+}
+
 /** 取当前轮最后一条应发给用户的 assistant 文本。遇 user 行即停，避免跨轮。 */
 export function extractLastGrokAssistantText(raw: string): string | undefined {
   return extractLastGrokAssistant(raw).text;
@@ -587,6 +590,13 @@ function parseGrokStream(stdout: string): {
 }
 
 const TRANSIENT_GROK_CLI_ERROR = /reqwest|error stream|connection (error|reset|refused)|timed? ?out|econnreset|enotfound|socket hang up|broken pipe|tls handshake|cli-chat-proxy/i;
+
+function cliErrorText(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err ?? "");
+  const stdout = err && typeof err === "object" && "stdout" in err ? String(err.stdout ?? "") : "";
+  const stderr = err && typeof err === "object" && "stderr" in err ? String(err.stderr ?? "") : "";
+  return `${message}\n${stdout}\n${stderr}`;
+}
 
 function extractGrokError(result: GrokJsonResult): string | undefined {
   let raw: string | undefined;

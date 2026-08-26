@@ -15,7 +15,8 @@ when_to_use: "用户提到任务/进度、记忆、身份/场景、消息或上�
 
 ## 身份、规则与恢复
 
-- **nbt whoami**：身份/场景恢复。**nbt feishu-creds**：当前 Bot 的飞书应用身份（`appId` / `appSecret`），调开放接口时再用。**nbt system-rules**：规则恢复。**nbt messages**：`list [-n 20] [--since/--before] [--role]` / `search <query>` / `get <id>`（群聊 list/search 会先从飞书 sync 再查本库）。**nbt sessions**：`list` / `search <query>` / `get <id>`。**nbt contacts**：`list-users` / `list-chats` / `get-user` / `get-chat` / `set-name`。
+- **nbt whoami**：身份/场景恢复。**nbt feishu-creds**：当前 Bot 的飞书应用身份（`appId` / `appSecret`），调开放接口时再用。**nbt system-rules**：规则恢复。**nbt messages**：`list` / `search <query>` / `get <id>`（群聊 list/search 会先从飞书 sync 再查本库）。**nbt sessions**：`list` / `search <query>` / `get <id>`。**nbt contacts**：`list-users` / `list-chats` / `get-user` / `get-chat` / `set-name`。
+- 话题群中 `nbt messages` 和 `nbt sessions` 默认只看当前话题；`--all-threads` 看整个群（仍是本群），`--thread-id <id>` 指定话题。`--all-chats` 仅私聊可用，跨所有聊天搜索；群聊禁用，避免把其他会话内容暴露到群里。不要和 `--all-threads` 搞混。`sessions list` 默认包含进行中的活跃会话。
 - 上下文丢失按对应命令恢复；用户数据只能通过 nbt CLI 访问。
 - `nbt feishu-creds` 的 secret 不要写进用户可见回复。
 

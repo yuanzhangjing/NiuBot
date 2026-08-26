@@ -1,4 +1,4 @@
-import { escapeYamlContent } from "../im/render.js";
+import { isStructuredImPayload, renderMsg } from "../im/render.js";
 import { createLogger } from "../logger.js";
 
 const log = createLogger("queue");
@@ -316,11 +316,8 @@ export class MessageQueue {
       const mergedText = messages.length === 1
         ? messages[0].text
         : messages.map((m) => {
-            // 已经是 YAML 格式（- msg: / - forward:）的保持原样
-            if (m.text.startsWith("- msg:") || m.text.startsWith("- forward:")) return m.text;
-            // 独立消息包装成 YAML 格式
-            const label = m.senderLabel ?? "user";
-            return `- msg: "${escapeYamlContent(label)}: ${escapeYamlContent(m.text)}"`;
+            if (isStructuredImPayload(m.text)) return m.text;
+            return renderMsg(m.senderLabel ?? "user", m.text);
           }).join("\n");
 
       log.info("flush", { chatId: scopeKey, messageCount: messages.length, textLength: mergedText.length });

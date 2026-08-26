@@ -10,19 +10,16 @@ import {
   type LocatedSessionArchive,
 } from "../session-archive/reader.js";
 import {
-  isExplicitUserMessage,
-  isStandaloneInjectedContext,
-} from "../session-archive/native-transcript.js";
-import {
-  getSessionEdgeExchanges,
   listSessionMessages,
-  type SessionEdgeExchanges,
-  type SessionExchange,
 } from "../messages/store.js";
+import { loadLiveTranscript } from "../session-archive/live-transcript.js";
+import { visibleUserPayload } from "../session-archive/native-transcript.js";
 import {
   getSessionForAccess,
   listSessions,
+  sessionPublicId,
   listSessionsOverlappingUtcRange,
+  type SessionActivityCursor,
   type SessionRow,
 } from "../sessions/store.js";
 import {
@@ -32,6 +29,12 @@ import {
   userTimeRangeToUtc,
   utcToLocalDateTime,
 } from "../tz.js";
+import {
+  chatIsIsolatedTopic,
+  historyThreadLabel,
+  resolveHistoryThreadScope,
+  type ResolvedHistoryThreadScope,
+} from "./history-scope.js";
 
 type ParseArgs = (args: string[]) => { positional: string[]; flags: Record<string, string> };
 
@@ -94,7 +97,7 @@ export async function handleSessions(
   if (!botName) throw new Error("NIUBOT_BOT_NAME not set");
   const sub = args[0];
   if (sub === "list") {
-    sessionList(db, args.slice(1), currentChatId, chatType, niubotHome, botName, parseArgs);
+    await sessionList(db, args.slice(1), currentChatId, chatType, niubotHome, botName, parseArgs);
   } else if (sub === "search") {
     await sessionSearch(db, args.slice(1), currentChatId, chatType, niubotHome, botName, parseArgs);
   } else if (sub === "get") {
@@ -106,7 +109,7 @@ export async function handleSessions(
   }
 }
 
-function sessionList(
+async function sessionList(
   db: Database.Database,
   args: string[],
   currentChatId: string | undefined,
@@ -114,34 +117,48 @@ function sessionList(
   niubotHome: string,
   botName: string,
   parseArgs: ParseArgs,
-): void {
+): Promise<void> {
   const { flags } = parseArgs(args);
   const targetChatId = requireChatId(flags["chat-id"] ?? currentChatId);
+  const threadScope = resolveHistoryThreadScope(
+    flags,
+    currentChatId,
+    targetChatId,
+    chatType === "group" ? process.env["NIUBOT_THREAD_ID"] : undefined,
+    chatIsIsolatedTopic(db, targetChatId),
+  );
+  const status = parseSessionListStatus(flags["status"]);
   const pageSize = boundedCountFlag(flags["limit"] ?? flags["n"], 10, 100);
-  let after: { endedAt: string; id: string } | undefined;
+  let after: SessionActivityCursor | undefined;
   if (flags["after"]) {
     const cursor = getSessionForAccess(db, flags["after"], { currentChatId, chatType });
-    if (!cursor || cursor.chat_id !== targetChatId || !cursor.ended_at) {
+    if (!cursor || cursor.chat_id !== targetChatId || !sessionMatchesThreadScope(cursor, threadScope)) {
       throw new Error(`Session cursor not found: ${flags["after"]}`);
     }
-    after = { endedAt: cursor.ended_at, id: cursor.id };
+    after = sessionActivityCursor(cursor);
   }
   const rows = listSessions(db, {
     currentChatId,
     chatType,
     targetChatId,
+    threadId: threadScope.threadId,
+    allThreads: threadScope.allThreads,
+    status,
     limit: pageSize + 1,
     since: flags["since"],
     before: flags["before"],
     after,
   });
   if (rows.length === 0) {
-    console.log("(无归档 session)");
+    console.log("(无 session)");
     return;
   }
   const hasMore = rows.length > pageSize;
   const page = rows.slice(0, pageSize);
   console.log(`Timezone: ${TZ}`);
+  if (threadScope.threadId && !threadScope.allThreads) {
+    console.log(`当前话题：${threadScope.threadId}`);
+  }
   let currentDate: string | undefined;
   for (const row of page) {
     const archive = locate(niubotHome, botName, row);
@@ -151,8 +168,12 @@ function sessionList(
       console.log(time.date);
       currentDate = time.date;
     }
-    console.log(formatSessionListRow(row, !archive, time.range));
-    console.log(`  ${sessionOverviewPreview(getSessionEdgeExchanges(db, row.id))}`);
+    const transcript = loadNativeTranscript(niubotHome, botName, row);
+    const overview = transcript
+      ? await sessionOverviewFromTranscript(row.id, transcript.events)
+      : { preview: "概要: 无原生记录", turns: 0 };
+    console.log(formatSessionListRow(row, !archive, time.range, threadScope.allThreads && chatType === "group", overview.turns));
+    console.log(`  ${overview.preview}`);
   }
   console.log(`\n本页 ${page.length} 条${hasMore ? "，还有更多" : "，已到最后一页"}`);
   if (hasMore) {
@@ -174,28 +195,54 @@ async function sessionSearch(
   const query = positional.join(" ");
   if (!query) throw new Error("Usage: nbt sessions search <query>");
   const targetChatId = requireChatId(flags["chat-id"] ?? currentChatId);
+  const threadScope = resolveHistoryThreadScope(
+    flags,
+    currentChatId,
+    targetChatId,
+    chatType === "group" ? process.env["NIUBOT_THREAD_ID"] : undefined,
+    chatIsIsolatedTopic(db, targetChatId),
+  );
   const pageSize = boundedCountFlag(flags["limit"] ?? flags["n"], 10, 100);
   const messagesOnly = flags["messages-only"] === "true";
+  const includeTools = flags["include-tools"] === "true";
   const sessionScanLimit = boundedCountFlag(flags["sessions"], 500, 10_000);
   const eventRange = userTimeRangeToUtc({ since: flags["since"], before: flags["before"] });
-  let through: { endedAt: string; id: string } | undefined;
-  if (flags["through-session"]) {
-    const anchor = getSessionForAccess(db, flags["through-session"], { currentChatId, chatType });
-    if (!anchor || anchor.chat_id !== targetChatId || anchor.status !== "archived" || !anchor.ended_at) {
-      throw new Error(`Search anchor session not found: ${flags["through-session"]}`);
+  let requestedThrough: SessionActivityCursor | undefined;
+  let throughRow: SessionRow | undefined;
+  const untilSession = flags["until-session"] ?? flags["through-session"];
+  if (untilSession) {
+    const anchor = getSessionForAccess(db, untilSession, { currentChatId, chatType });
+    if (!anchor || anchor.chat_id !== targetChatId || !sessionMatchesThreadScope(anchor, threadScope)) {
+      throw new Error(`Search anchor session not found: ${untilSession}`);
     }
-    through = { endedAt: anchor.ended_at, id: anchor.id };
+    if (anchor.status === "active") {
+      throw new Error("--until-session cannot target an active session; last_active_at still moves");
+    }
+    requestedThrough = sessionActivityCursor(anchor);
+    throughRow = anchor;
   }
   const candidateRows = listSessionsOverlappingUtcRange(db, {
     currentChatId,
     chatType,
     targetChatId,
+    threadId: threadScope.threadId,
+    allThreads: threadScope.allThreads,
+    status: "all",
     limit: sessionScanLimit + 1,
     sinceUtc: eventRange.since,
     beforeUtc: eventRange.before,
-    through,
+    through: requestedThrough,
   });
-  const throughSessionId = through?.id ?? candidateRows[0]?.id;
+  const through = requestedThrough ?? (
+    !untilSession
+      && candidateRows[0]?.status === "archived"
+      ? sessionActivityCursor(candidateRows[0])
+      : undefined
+  );
+  if (!throughRow && through && candidateRows[0]?.id === through.id) {
+    throughRow = candidateRows[0];
+  }
+  const throughSessionId = throughRow ? sessionPublicId(throughRow) : undefined;
   const candidateSessionsTruncated = candidateRows.length > sessionScanLimit;
   const rows = candidateRows.slice(0, sessionScanLimit);
   const needle = query.toLocaleLowerCase();
@@ -203,14 +250,17 @@ async function sessionSearch(
   let cursorFound = flags["after"] === undefined;
   let hasMore = false;
   scan: for (const row of rows) {
-    const archive = locate(niubotHome, botName, row);
-    if (!archive) continue;
     try {
-      const transcript = transcriptFor(db, row, archive);
+      const transcript = loadNativeTranscript(niubotHome, botName, row);
+      if (!transcript) continue;
       const messageIds = sessionMessageIds(db, row.id);
-      for await (const item of timelineEvents(row.id, transcript.events, messageIds)) {
+      for await (const item of visibleTimelineEvents(row.id, transcript.events, messageIds)) {
         if (!cursorFound) {
           if (item.eventId === flags["after"]) cursorFound = true;
+          continue;
+        }
+        if (!includeTools
+          && (item.event.type === "tool_call" || item.event.type === "tool_result")) {
           continue;
         }
         if (messagesOnly && item.event.type !== "user" && !item.finalAssistant) continue;
@@ -224,14 +274,14 @@ async function sessionSearch(
         page.push({
           eventId: item.eventId,
           messageId: item.messageId,
-          sessionId: row.id,
+          sessionId: sessionPublicId(row),
           turnNumber: item.turnNumber,
           event: { ...item.event, content: "" },
           snippet: snippet(item.event.content, index, query.length),
         });
       }
     } catch (err) {
-      console.error(`Warning: cannot read session ${row.id}: ${(err as Error).message}`);
+      console.error(`Warning: cannot read session ${sessionPublicId(row)}: ${(err as Error).message}`);
     }
   }
   if (!cursorFound) throw new Error(`Search cursor not found: ${flags["after"]}`);
@@ -284,11 +334,15 @@ async function sessionGet(
     MAX_OUTPUT_CHARS,
   );
   let row = getSessionForAccess(db, sessionId, { currentChatId, chatType });
-  let transcript: SessionTranscript;
   if (!row) throw new Error(`Session not found: ${sessionId}`);
+  if (flags["thread-id"] && !flags["all-threads"] && row.thread_id !== flags["thread-id"]) {
+    throw new Error(`Session not found in thread ${flags["thread-id"]}: ${sessionId}`);
+  }
   const archive = locate(niubotHome, botName, row);
-  if (!archive) throw new Error(`Session archive not found: ${sessionId}`);
-  transcript = transcriptFor(db, row, archive);
+  const transcript = loadNativeTranscript(niubotHome, botName, row);
+  if (!transcript) {
+    throw new Error(`Session transcript not available: ${sessionPublicId(row)}`);
+  }
 
   if (flags["format"] === "jsonl"
     && (flags["turn"] || flags["after-turn"] || flags["after-event"]
@@ -299,12 +353,13 @@ async function sessionGet(
     await printEventStream(row.id, transcript.events, requestedEventId, flags["format"], maxChars);
     return;
   }
+  const sourceLabel = archive ? undefined : "live";
   const targetTurn = optionalPositiveIntegerFlag(flags["turn"], "--turn");
   const summary = flags["summary"] === "true";
   if (summary) {
     if (flags["after-event"]) throw new Error("--after-event cannot be combined with --summary");
     if (flags["verbose"] === "true") throw new Error("--verbose cannot be combined with --summary");
-    await printSessionSummary(row, transcript.events, botName, targetTurn, flags, maxChars);
+    await printSessionSummary(row, transcript.events, botName, targetTurn, flags, maxChars, sourceLabel);
     return;
   }
   if (flags["after-turn"]) throw new Error("--after-turn requires --summary");
@@ -331,6 +386,7 @@ async function sessionGet(
     maxChars,
     verbose,
     flags,
+    sourceLabel,
   });
 }
 
@@ -341,6 +397,7 @@ async function printSessionSummary(
   targetTurn: number | undefined,
   flags: Record<string, string>,
   maxChars: number,
+  sourceLabel?: string,
 ): Promise<void> {
   const afterTurn = optionalNonNegativeIntegerFlag(flags["after-turn"], "--after-turn") ?? 0;
   if (targetTurn && flags["after-turn"]) throw new Error("--turn cannot be combined with --after-turn");
@@ -349,7 +406,7 @@ async function printSessionSummary(
     : boundedCountFlag(flags["page-size"], DEFAULT_TURN_PAGE_SIZE, MAX_TURN_PAGE_SIZE);
   const selection = await selectTranscriptTurns(row.id, events, { targetTurn, afterTurn, pageSize });
   if (targetTurn && selection.turns.length === 0) throw new Error(`Turn not found: ${targetTurn}`);
-  printTurnSessionHeader(row, selection.turns, selection.totalTurns);
+  printTurnSessionHeader(row, selection.turns, selection.totalTurns, sourceLabel);
   if (selection.turns.length === 0) {
     console.log("(没有更多 turn)");
     return;
@@ -362,7 +419,7 @@ async function printSessionSummary(
     const timestamp = compactEventTimestamp(turn.events[0]?.event.timestamp);
     const showDate = timestamp.date !== currentDate;
     currentDate = timestamp.date;
-    const result = printTurn(botName, row.id, turn, remainingChars, {
+    const result = printTurn(botName, sessionPublicId(row), turn, remainingChars, {
       date: showDate ? timestamp.date : undefined,
       time: timestamp.time,
     });
@@ -375,9 +432,9 @@ async function printSessionSummary(
     if (turn !== selection.turns.at(-1)) console.log("---\n");
   }
   if (pageTruncated) {
-    printTurnRetryCommand(row.id, targetTurn, lastCompleteTurn?.number ?? afterTurn, pageSize, maxChars);
+    printTurnRetryCommand(sessionPublicId(row), targetTurn, lastCompleteTurn?.number ?? afterTurn, pageSize, maxChars);
   } else if (!targetTurn && lastCompleteTurn && lastCompleteTurn.number < selection.totalTurns) {
-    console.log(`下一页：/nbt sessions get ${row.id} --summary --after-turn ${lastCompleteTurn.number} --page-size ${pageSize}`);
+    console.log(`下一页：/nbt sessions get ${sessionPublicId(row)} --summary --after-turn ${lastCompleteTurn.number} --page-size ${pageSize}`);
   }
 }
 
@@ -385,48 +442,23 @@ function locate(niubotHome: string, botName: string, row: SessionRow): LocatedSe
   return findSessionArchive(getSessionArchiveDirectory(niubotHome, botName, row.chat_id), row.id);
 }
 
-function transcriptFor(db: Database.Database, row: SessionRow, archive: LocatedSessionArchive): SessionTranscript {
+function transcriptFor(archive: LocatedSessionArchive): SessionTranscript {
   const transcript = loadArchivedTranscript(archive.path).transcript;
-  const realUserMessages = new Map<string, number>();
-  for (const message of listSessionMessages(db, row.id)) {
-    if (message.role !== "user" || !isStandaloneInjectedContext(message.content_text)) continue;
-    realUserMessages.set(message.content_text, (realUserMessages.get(message.content_text) ?? 0) + 1);
-  }
-  const events = omitSyntheticContextEvents(transcript.events, realUserMessages);
-  return { ...transcript, events: inferToolResultNames(events) };
+  return { ...transcript, events: inferToolResultNames(transcript.events) };
 }
 
-async function* omitSyntheticContextEvents(
-  events: SessionTranscript["events"],
-  realUserMessages: Map<string, number>,
-): AsyncGenerator<TranscriptEvent> {
-  let pendingContextEvents: TranscriptEvent[] = [];
-
-  const flushPending = (): TranscriptEvent[] => {
-    const kept: TranscriptEvent[] = [];
-    for (const event of pendingContextEvents) {
-      const remaining = realUserMessages.get(event.content) ?? 0;
-      if (remaining === 0) continue;
-      realUserMessages.set(event.content, remaining - 1);
-      kept.push(event);
-    }
-    pendingContextEvents = [];
-    return kept;
-  };
-
-  for await (const event of events) {
-    if (event.type === "user" && isStandaloneInjectedContext(event.content)) {
-      if (!isExplicitUserMessage(event)) {
-        pendingContextEvents.push(event);
-        continue;
-      }
-      const remaining = realUserMessages.get(event.content) ?? 0;
-      if (remaining > 0) realUserMessages.set(event.content, remaining - 1);
-    }
-    for (const pending of flushPending()) yield pending;
-    yield event;
-  }
-  for (const pending of flushPending()) yield pending;
+function loadNativeTranscript(
+  niubotHome: string,
+  botName: string,
+  row: SessionRow,
+): SessionTranscript | undefined {
+  const archive = locate(niubotHome, botName, row);
+  if (archive) return transcriptFor(archive);
+  return loadLiveTranscript({
+    backend: row.backend_type,
+    agentSessionId: row.agent_session_id,
+    cwd: process.env["NIUBOT_WORK_DIR"]?.trim() || process.cwd(),
+  });
 }
 
 async function* inferToolResultNames(
@@ -457,7 +489,15 @@ async function printEventStream(
   for await (const event of events) {
     const eventId = makeEventId(sessionId, event, seen);
     if (requestedEventId && eventId !== requestedEventId) continue;
-    const { event: outputEvent, truncated } = limitEventContent(event, remainingChars);
+    const displayed = format === "jsonl" ? event : displayedTranscriptEvent(event);
+    if (!displayed) {
+      if (requestedEventId) {
+        printEvent(eventId, { ...event, content: "（引擎注入，已过滤）" });
+        return;
+      }
+      continue;
+    }
+    const { event: outputEvent, truncated } = limitEventContent(displayed, remainingChars);
     if (format === "jsonl") {
       console.log(JSON.stringify({ event_id: eventId, ...outputEvent, ...(truncated ? { truncated: true } : {}) }));
     } else {
@@ -552,9 +592,50 @@ async function* transcriptTurns(
   if (current) yield current;
 }
 
+async function* visibleTimelineEvents(
+  sessionId: string,
+  events: SessionTranscript["events"],
+  messageIds?: Map<string, number[]>,
+): AsyncGenerator<TimelineItem> {
+  let turnNumber = 0;
+  let yieldedUser = false;
+  for await (const item of timelineEvents(sessionId, events, messageIds)) {
+    if (item.turnNumber !== turnNumber) {
+      turnNumber = item.turnNumber;
+      yieldedUser = false;
+    }
+    if (item.event.type === "user") {
+      const content = conversationUserContent(item.event.content);
+      if (!content) continue;
+      yieldedUser = true;
+      yield { ...item, event: { ...item.event, content } };
+      continue;
+    }
+    if (!yieldedUser) continue;
+    yield item;
+  }
+}
+
+function displayedTranscriptEvent(event: TranscriptEvent): TranscriptEvent | undefined {
+  if (event.type !== "user") return event;
+  const content = conversationUserContent(event.content);
+  if (!content) return undefined;
+  return { ...event, content };
+}
+
+function turnHasVisibleUser(turn: TranscriptTurn): boolean {
+  return turn.events.some((item) => item.event.type === "user" && conversationUserContent(item.event.content));
+}
+
 async function* timelineSteps(
   sessionId: string,
   events: SessionTranscript["events"],
+): AsyncGenerator<TimelineItem> {
+  yield* pairTimelineSteps(visibleTimelineEvents(sessionId, events));
+}
+
+async function* pairTimelineSteps(
+  items: AsyncIterable<TimelineItem>,
 ): AsyncGenerator<TimelineItem> {
   let stepNumber = 0;
   let buffered: Array<{ item: TimelineItem; waitingForResult: boolean }> = [];
@@ -575,7 +656,7 @@ async function* timelineSteps(
     return flushed;
   };
 
-  for await (const item of timelineEvents(sessionId, events)) {
+  for await (const item of items) {
     const boundary = item.event.type === "user"
       || (item.event.type === "assistant" && item.finalAssistant);
     if (boundary) {
@@ -630,6 +711,7 @@ async function selectTranscriptTurns(
   let totalTurns = 0;
   for await (const turn of transcriptTurns(sessionId, events)) {
     totalTurns = turn.number;
+    if (!options.targetTurn && !turnHasVisibleUser(turn)) continue;
     if (options.targetTurn) {
       if (turn.number === options.targetTurn) turns.push(turn);
     } else if (turn.number > options.afterTurn && turns.length < options.pageSize) {
@@ -686,10 +768,11 @@ function printTimeline(
     maxChars: number;
     verbose: boolean;
     flags: Record<string, string>;
+    sourceLabel?: string;
   },
 ): void {
   console.log(`Timezone: ${TZ}`);
-  console.log(`Session ${row.id} · ${row.backend_type ?? "unknown"} · ${compactSessionTimeRange(row)}`);
+  console.log(sessionHeader(row, options.sourceLabel));
   if (selection.items.length > 0) {
     const first = selection.items[0]!.stepNumber;
     const last = selection.items.at(-1)!.stepNumber;
@@ -775,7 +858,7 @@ function printTimeline(
   console.log(`本页显示 ${printed} 步${hasMore ? "，还有更多" : "，已到最后一步"}`);
   if (hasMore && lastPrinted) {
     console.log(`下一页：${timelineContinuationCommand(
-      row.id,
+      sessionPublicId(row),
       lastPrinted.pairedResult?.eventId ?? lastPrinted.eventId,
       options,
     )}`);
@@ -846,9 +929,14 @@ function assistantSections(turn: TranscriptTurn): {
   };
 }
 
-function printTurnSessionHeader(row: SessionRow, turns: TranscriptTurn[], totalTurns: number): void {
+function printTurnSessionHeader(
+  row: SessionRow,
+  turns: TranscriptTurn[],
+  totalTurns: number,
+  sourceLabel?: string,
+): void {
   console.log(`Timezone: ${TZ}`);
-  console.log(`Session ${row.id} · ${row.backend_type ?? "unknown"} · ${compactSessionTimeRange(row)}`);
+  console.log(sessionHeader(row, sourceLabel));
   if (turns.length > 0) {
     console.log(`范围：第 ${turns[0]!.number}～${turns.at(-1)!.number} 轮，共 ${totalTurns} 轮\n`);
   } else {
@@ -873,7 +961,11 @@ function printTurn(
   let remainingChars = maxChars;
 
   console.log("用户：");
-  const userResult = printLimitedText(users.map((item) => item.event.content).join("\n\n"), remainingChars);
+  const userText = users
+    .map((item) => conversationUserContent(item.event.content))
+    .filter((content): content is string => Boolean(content))
+    .join("\n\n") || (users.length > 0 ? "（引擎注入，已过滤）" : "（无用户消息）");
+  const userResult = printLimitedText(userText, remainingChars);
   remainingChars = userResult.remainingChars;
   if (userResult.truncated) return { remainingChars, truncated: true };
 
@@ -971,9 +1063,11 @@ function listContinuationCommand(
   flags: Record<string, string>,
 ): string {
   const parts = ["/nbt sessions list", `--after ${quoteArg(after)}`, `-n ${pageSize}`];
+  appendSessionScopeFlags(parts, flags);
   appendPreservedFlag(parts, flags, "since");
   appendPreservedFlag(parts, flags, "before");
   appendPreservedFlag(parts, flags, "chat-id");
+  appendPreservedFlag(parts, flags, "status");
   return parts.join(" ");
 }
 
@@ -994,10 +1088,19 @@ function searchContinuationCommand(
   appendPreservedFlag(parts, flags, "before");
   appendPreservedFlag(parts, flags, "chat-id");
   appendPreservedFlag(parts, flags, "sessions");
-  if (throughSessionId) parts.push(`--through-session ${quoteArg(throughSessionId)}`);
+  appendSessionScopeFlags(parts, flags);
+  if (throughSessionId) parts.push(`--until-session ${quoteArg(throughSessionId)}`);
   if (flags["messages-only"] === "true") parts.push("--messages-only");
   if (flags["include-tools"] === "true") parts.push("--include-tools");
   return parts.join(" ");
+}
+
+function appendSessionScopeFlags(parts: string[], flags: Record<string, string>): void {
+  if (flags["all-threads"] === "true") {
+    parts.push("--all-threads");
+  } else {
+    appendPreservedFlag(parts, flags, "thread-id");
+  }
 }
 
 function timelineContinuationCommand(
@@ -1065,14 +1168,39 @@ function sessionListTime(row: SessionRow): { date: string; range: string } {
   };
 }
 
-function formatSessionListRow(row: SessionRow, archiveMissing: boolean, timeRange: string): string {
-  const archive = archiveMissing ? " · 归档缺失" : "";
+function formatSessionListRow(
+  row: SessionRow,
+  archiveMissing: boolean,
+  timeRange: string,
+  showThread: boolean,
+  turnCount: number,
+): string {
   const metadata = [
     sessionSourceLabel(row.source),
     row.backend_type ?? "unknown",
-    `${row.turn_count ?? 0}轮`,
+    `${turnCount}轮`,
   ].join(" · ");
-  return `[${row.id}] [${timeRange}] ${metadata}${archive}`;
+  const thread = showThread ? ` · ${historyThreadLabel(row.thread_id)}` : "";
+  return `[${row.id}] [${timeRange}] ${metadata}${thread} · ${sessionStatusLabel(row, archiveMissing)}`;
+}
+
+function sessionStatusLabel(row: SessionRow, archiveMissing: boolean): string {
+  switch (row.status) {
+    case "active": return "进行中";
+    case "archive_failed": return "归档失败";
+    case "discarded": return "未启动";
+    case "archived": return archiveMissing ? "归档缺失" : "已归档";
+    default: return row.status || "未知状态";
+  }
+}
+
+function sessionBackendLabel(row: SessionRow, sourceLabel?: string): string {
+  return `${row.backend_type ?? "unknown"}${sourceLabel ? `+${sourceLabel}` : ""}`;
+}
+
+function sessionHeader(row: SessionRow, sourceLabel?: string): string {
+  const scope = row.thread_id ? `${historyThreadLabel(row.thread_id)} · ` : "";
+  return `Session ${sessionPublicId(row)} · ${sessionBackendLabel(row, sourceLabel)} · ${scope}${compactSessionTimeRange(row)}`;
 }
 
 function sessionSourceLabel(source: string): string {
@@ -1084,18 +1212,49 @@ function sessionSourceLabel(source: string): string {
   }
 }
 
-function sessionOverviewPreview(exchanges: SessionEdgeExchanges, maxRunes = 180): string {
-  const first = exchanges.first;
-  const last = exchanges.last;
-  const overview = sameExchange(first, last)
-    ? `概要: 问「${exchangeText(first.user?.content_text, 28, "未记录")}」→答「${exchangeText(first.response?.content_text, 42, "未回复")}」`
-    : `概要: 首问「${exchangeText(first.user?.content_text, 28, "未记录")}」→首答「${exchangeText(first.response?.content_text, 42, "未回复")}」；末问「${exchangeText(last.user?.content_text, 28, "未记录")}」→末答「${exchangeText(last.response?.content_text, 42, "未回复")}」`;
-  return truncateRunes(overview, maxRunes);
+async function sessionOverviewFromTranscript(
+  sessionId: string,
+  events: SessionTranscript["events"],
+  maxRunes = 180,
+): Promise<{ preview: string; turns: number }> {
+  const exchanges: Array<{ user: string; response?: string }> = [];
+  let turns = 0;
+  for await (const turn of transcriptTurns(sessionId, events)) {
+    turns = turn.number;
+    const user = conversationUserContent(
+      turn.events.filter((item) => item.event.type === "user").map((item) => item.event.content).join("\n"),
+    );
+    if (!user) continue;
+    const { finalMessages } = assistantSections(turn);
+    const response = (finalMessages.length > 0
+      ? finalMessages
+      : turn.events.filter((item) => item.event.type === "assistant")).map((item) => item.event.content).join("\n").trim()
+      || undefined;
+    exchanges.push({ user, response });
+  }
+  const first = exchanges[0];
+  const last = exchanges.at(-1);
+  if (!first || !last) {
+    return { preview: "概要: 无对话", turns };
+  }
+  const overview = exchanges.length === 1
+    ? `概要: 问「${exchangeText(first.user, 28, "未记录")}」→答「${exchangeText(first.response, 42, "未回复")}」`
+    : `概要: 首问「${exchangeText(first.user, 28, "未记录")}」→首答「${exchangeText(first.response, 42, "未回复")}」；末问「${exchangeText(last.user, 28, "未记录")}」→末答「${exchangeText(last.response, 42, "未回复")}」`;
+  return { preview: truncateRunes(overview, maxRunes), turns };
 }
 
-function sameExchange(first: SessionExchange, last: SessionExchange): boolean {
-  if (first.response || last.response) return first.response?.id === last.response?.id;
-  return first.user?.id === last.user?.id;
+function conversationUserContent(content: string): string | undefined {
+  const visible = visibleUserPayload(content);
+  if (!visible || isNonConversationUtterance(visible)) return undefined;
+  return visible;
+}
+
+function isNonConversationUtterance(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed) return true;
+  if (/^\/[a-z][a-z0-9_-]*(?:\s|$)/i.test(trimmed)) return true;
+  if (trimmed.startsWith("【重启完成】")) return true;
+  return false;
 }
 
 function exchangeText(content: string | undefined, maxRunes: number, fallback: string): string {
@@ -1113,6 +1272,26 @@ function truncateRunes(content: string, maxRunes: number): string {
 function requireChatId(value: string | undefined): string {
   if (!value) throw new Error("NIUBOT_CHAT_ID not set and --chat-id not provided");
   return value;
+}
+
+function parseSessionListStatus(value: string | undefined): "all" | "active" | "archived" {
+  const status = value ?? "all";
+  if (status === "active" || status === "archived") return status;
+  if (status === "all") return "all";
+  throw new Error(`--status must be one of: all, active, archived (got ${status})`);
+}
+
+function sessionActivityCursor(row: SessionRow): SessionActivityCursor {
+  const activityAt = row.ended_at ?? row.last_active_at ?? row.started_at;
+  return { activityAt, id: row.id };
+}
+
+function sessionMatchesThreadScope(
+  row: { thread_id: string | null },
+  scope: ResolvedHistoryThreadScope,
+): boolean {
+  if (scope.allThreads) return true;
+  return (row.thread_id ?? undefined) === scope.threadId;
 }
 
 function numberFlag(value: string | undefined, fallback: number): number {
@@ -1178,24 +1357,31 @@ export function markdownCodeFence(content: string): string {
 }
 
 function printHelp(): void {
-  console.log(`Query archived sessions.
+  console.log(`查询会话记录。读 backend 原生 transcript（归档 manifest 或进行中的 jsonl）。
 
-Commands:
-  list                         List archived sessions with their last user/response preview
-  search <query>               Search every execution event in archived sessions
-  get <session-id>             Show the execution timeline with event pagination
-  get <event-id>               Show one complete event returned by search
+命令:
+  list                        列出进行中/已归档会话及首尾问答预览
+  search <关键词>              搜索会话事件（与 list/get 一样过滤引擎注入）
+  get <session-id>            按时间线查看会话，支持事件分页（短 ID 或原生 id 都能查）
+  get <event-id>              查看 search 返回的单个完整事件
 
-Options:
+选项:
   list:   -n <count> | --after <session-id> | --since/--before <datetime>
-  search: -n <count> | --after <event-id> | --messages-only | --sessions <count>
-          --since/--before <datetime>
+          --thread-id <id> | --all-threads | --status all|active|archived
+  search: -n <count> | --after <event-id> | --until-session <session-id>
+          --messages-only | --sessions <count>
+          --include-tools | --since/--before <datetime> | --thread-id <id> | --all-threads
   get:    --page-size <events> | --after-event <event-id> | --turn <number>
           --event-chars <count> | --verbose
+          --thread-id <id>
           --summary [--page-size <turns> --after-turn <number>]
-  --format jsonl               Output all normalized events as JSONL
-  --max-chars <count>          Limit get output (default: event 20000, session 100000; max 1000000)
-  --since/--before <datetime>  List: filter archive time; search: filter event time
-                               Date/local datetime uses configured timezone; ISO Z/offset is accepted
-  -n, --limit <count>          Page size for list or search`);
+  --format jsonl              输出归一化事件 JSONL
+  --max-chars <数量>          限制 get 输出（默认：事件 20000、会话 100000；上限 1000000）
+  --since/--before <时间>     list 按归档时间过滤；search 按事件时间过滤
+                               本地时间按配置时区；带 Z 或时区偏移的 ISO 时间也接受
+  -n, --limit <数量>          list/search 的每页条数
+
+话题群默认只看当前话题，与 nbt messages 一致；--all-threads 查看整个群。
+list 显示内部短 ID；get/search 短 ID 和 backend 原生 id 都能认。
+list/get/search 都去掉引擎注入、斜杠指令和重启 wake；--format jsonl 仍是原始 transcript。`);
 }

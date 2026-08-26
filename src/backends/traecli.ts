@@ -277,7 +277,10 @@ export default class TraeCliBackend extends CliAgentBackend<TraeCliSession> {
     }
     if (!session.agentSessionId) return null;
 
-    const sessionsRoot = resolve(homedir(), ".trae", "cli", "sessions");
+    const traeHome = process.env["TRAE_HOME"]?.trim()
+      ? resolve(process.env["TRAE_HOME"]!)
+      : resolve(homedir(), ".trae");
+    const sessionsRoot = join(traeHome, "cli", "sessions");
     if (!existsSync(sessionsRoot)) return null;
 
     for (const year of this.readDirectoryNames(sessionsRoot)) {
@@ -286,7 +289,9 @@ export default class TraeCliBackend extends CliAgentBackend<TraeCliSession> {
         const monthDir = join(yearDir, month);
         for (const day of this.readDirectoryNames(monthDir)) {
           const dayDir = join(monthDir, day);
-          const match = this.readFileNames(dayDir).find((name) => name.endsWith(`${session.agentSessionId}.jsonl`));
+          const match = this.readFileNames(dayDir).find((name) => (
+            name === `${session.agentSessionId}.jsonl` || name.endsWith(`-${session.agentSessionId}.jsonl`)
+          ));
           if (match) {
             session.sessionLogPath = join(dayDir, match);
             return session.sessionLogPath;

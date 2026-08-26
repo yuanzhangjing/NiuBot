@@ -109,6 +109,40 @@ describe("GrokBackend", () => {
     expect(input.args).toContain("high");
   });
 
+  it("treats engine wrapper ids as a new session", async () => {
+    const backend = new GrokBackend();
+    const handle = await backend.createSession({
+      workingDirectory: "/tmp",
+      agentSessionId: "grok_1787630975612_af90f32a",
+    });
+    const session = (backend as any).sessions.get(handle.id);
+    const input = backend.buildInput(session, "hello");
+
+    expect(session.agentSessionId).toBeUndefined();
+    expect(session.isNewSession).toBe(true);
+    expect(input.args).toContain("--session-id");
+    expect(input.args).not.toContain("--resume");
+  });
+
+  it("does not treat a failed resume as a reason to start a new session", () => {
+    const backend = new GrokBackend();
+    const session = backend.buildSession({
+      workingDirectory: "/tmp",
+      agentSessionId: "019ffb94-1c5b-72f3-b3eb-42e766619372",
+    });
+    const notFound = Object.assign(new Error("Command failed: grok (exit 1)"), {
+      stderr: 'Session "019ffb94-1c5b-72f3-b3eb-42e766619372" not found locally, restoring conversation from remote...\nError: Failed to restore session from remote: fetching session record: session get failed: 404 Not Found',
+    });
+    const transientRestore = Object.assign(new Error("Command failed: grok (exit 1)"), {
+      stderr: 'Session "019ffb94-1c5b-72f3-b3eb-42e766619372" not found locally, restoring conversation from remote...\nError: Failed to restore session from remote: connection reset',
+    });
+
+    expect((backend as any).isTransientCliError(notFound)).toBe(false);
+    expect((backend as any).isTransientCliError(transientRestore)).toBe(true);
+    expect(session.agentSessionId).toBe("019ffb94-1c5b-72f3-b3eb-42e766619372");
+    expect(backend.buildInput(session, "hello").args).toContain("--resume");
+  });
+
   it("resumes with --resume when agentSessionId is present", () => {
     const backend = new GrokBackend();
     const session = backend.buildSession({

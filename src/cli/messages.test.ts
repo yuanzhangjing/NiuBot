@@ -151,6 +151,62 @@ describe("message access rules", () => {
       .toEqual(["new local"]);
   });
 
+  it("binds thread filter before id cutoff so topic continuation is not empty", () => {
+    const db = setupDb();
+    db.prepare(
+      "INSERT INTO messages (id, chat_id, sender_id, role, content_text, content_type, platform, thread_id) VALUES (10, 'c1', 'u2', 'user', 'keep-a-old', 'text', 'feishu', 'omt_a')",
+    ).run();
+    db.prepare(
+      "INSERT INTO messages (id, chat_id, sender_id, role, content_text, content_type, platform, thread_id) VALUES (11, 'c1', 'u2', 'user', 'other-thread', 'text', 'feishu', 'omt_b')",
+    ).run();
+    db.prepare(
+      "INSERT INTO messages (id, chat_id, sender_id, role, content_text, content_type, platform, thread_id) VALUES (12, 'c1', 'u2', 'user', 'keep-a-recent', 'text', 'feishu', 'omt_a')",
+    ).run();
+    db.prepare(
+      "INSERT INTO messages (id, chat_id, sender_id, role, content_text, content_type, platform, thread_id) VALUES (13, 'c1', 'u2', 'user', 'current-excluded', 'text', 'feishu', 'omt_a')",
+    ).run();
+
+    expect(listContinuationMessages(db, {
+      chatId: "c1",
+      threadId: "omt_a",
+      beforeMsgId: 13,
+      limit: 10,
+    }).map((row) => row.content_text)).toEqual(["keep-a-old", "keep-a-recent"]);
+  });
+
+  it("limits main-thread continuation to rows without thread_id", () => {
+    const db = setupDb();
+    db.prepare(
+      "INSERT INTO messages (id, chat_id, sender_id, role, content_text, content_type, platform, thread_id) VALUES (30, 'c1', 'u2', 'user', 'topic-only', 'text', 'feishu', 'omt_x')",
+    ).run();
+
+    expect(listContinuationMessages(db, { chatId: "c1", limit: 10 }).map((row) => row.content_text))
+      .toEqual(["current chat text", "topic-only"]);
+    expect(listContinuationMessages(db, { chatId: "c1", mainThreadOnly: true, limit: 10 }).map((row) => row.content_text))
+      .toEqual(["current chat text"]);
+  });
+
+  it("defaults message list to the main thread when no thread is selected", () => {
+    const db = setupDb();
+    db.prepare(
+      "INSERT INTO messages (id, chat_id, sender_id, role, content_text, content_type, platform, thread_id) VALUES (20, 'c1', 'u2', 'user', 'topic-only', 'text', 'feishu', 'omt_x')",
+    ).run();
+
+    expect(listMessages(db, {
+      currentChatId: "c1",
+      chatType: "group",
+      targetChatId: "c1",
+      limit: 10,
+    }).map((row) => row.content_text)).toEqual(["current chat text"]);
+    expect(listMessages(db, {
+      currentChatId: "c1",
+      chatType: "group",
+      targetChatId: "c1",
+      allThreads: true,
+      limit: 10,
+    }).map((row) => row.content_text)).toEqual(["current chat text", "topic-only"]);
+  });
+
   it("keeps Cron internal prompts in the session transcript but out of normal messages", () => {
     const db = setupDb();
     db.prepare(`
@@ -178,6 +234,99 @@ describe("message access rules", () => {
 });
 
 describe("handleMessages group sync", () => {
+  it("defaults a topic group query to the current thread and labels it", async () => {
+    const db = setupDb();
+    vi.stubEnv("NIUBOT_THREAD_ID", "omt_aaa");
+    db.prepare(
+      "INSERT INTO messages (id, chat_id, sender_id, role, content_text, content_type, platform, thread_id) VALUES (10, 'c1', 'u2', 'user', 'topic a', 'text', 'feishu', 'omt_aaa')",
+    ).run();
+    db.prepare(
+      "INSERT INTO messages (id, chat_id, sender_id, role, content_text, content_type, platform, thread_id) VALUES (11, 'c1', 'u2', 'user', 'topic b', 'text', 'feishu', 'omt_bbb')",
+    ).run();
+
+    const lines: string[] = [];
+    vi.spyOn(console, "log").mockImplementation((...values) => lines.push(values.join(" ")));
+    try {
+      await handleMessages(db, ["list", "-n", "20"], "c1", "group", parseArgs);
+    } finally {
+      vi.restoreAllMocks();
+    }
+    expect(lines.join("\n")).toContain("当前话题：omt_aaa");
+    expect(lines.join("\n")).toContain("topic a");
+    expect(lines.join("\n")).not.toContain("topic b");
+  });
+
+  it("lists thread replies in ordinary groups without --all-threads", async () => {
+    const db = setupDb();
+    db.prepare(
+      "INSERT INTO messages (id, chat_id, sender_id, role, content_text, content_type, platform, thread_id) VALUES (10, 'c1', 'u2', 'user', 'reply-thread', 'text', 'feishu', 'omt_reply')",
+    ).run();
+    const lines: string[] = [];
+    vi.spyOn(console, "log").mockImplementation((...values) => lines.push(values.join(" ")));
+    try {
+      await handleMessages(db, ["list", "-n", "20"], "c1", "group", parseArgs);
+    } finally {
+      vi.restoreAllMocks();
+    }
+    expect(lines.join("\n")).toContain("reply-thread");
+    expect(lines.join("\n")).toContain("current chat text");
+  });
+
+  it("keeps isolated topic 主群 list off other threads", async () => {
+    const db = setupDb();
+    db.prepare("UPDATE chats SET chat_mode = 'topic', group_message_type = 'thread' WHERE id = 'c1'").run();
+    db.prepare(
+      "INSERT INTO messages (id, chat_id, sender_id, role, content_text, content_type, platform, thread_id) VALUES (10, 'c1', 'u2', 'user', 'topic-only', 'text', 'feishu', 'omt_x')",
+    ).run();
+    const lines: string[] = [];
+    vi.spyOn(console, "log").mockImplementation((...values) => lines.push(values.join(" ")));
+    try {
+      await handleMessages(db, ["list", "-n", "20"], "c1", "group", parseArgs);
+    } finally {
+      vi.restoreAllMocks();
+    }
+    expect(lines.join("\n")).toContain("current chat text");
+    expect(lines.join("\n")).not.toContain("topic-only");
+  });
+
+  it("labels every scope when listing all threads", async () => {
+    const db = setupDb();
+    db.prepare(
+      "INSERT INTO messages (id, chat_id, sender_id, role, content_text, content_type, platform, thread_id) VALUES (10, 'c1', 'u2', 'user', 'topic a', 'text', 'feishu', 'omt_aaa')",
+    ).run();
+
+    const output = formatMessagesForList(
+      [
+        {
+          id: 10,
+          chat_id: "c1",
+          sender_id: "u2",
+          sender_name: "Zen",
+          role: "user",
+          content_text: "topic a",
+          content_type: "text",
+          thread_id: "omt_aaa",
+          created_at: "2026-08-25 05:00:00",
+        },
+        {
+          id: 1,
+          chat_id: "c1",
+          sender_id: "u2",
+          sender_name: "Zen",
+          role: "user",
+          content_text: "main",
+          content_type: "text",
+          thread_id: null,
+          created_at: "2026-08-25 05:01:00",
+        },
+      ],
+      { threadScope: { allThreads: true } },
+    ).join("\n");
+
+    expect(output).toContain("话题 omt_aaa");
+    expect(output).toContain("主群");
+  });
+
   it("does not inherit the current topic filter when listing another p2p chat", async () => {
     const db = setupDb();
     vi.stubEnv("NIUBOT_THREAD_ID", "omt_aaa");
@@ -254,5 +403,54 @@ describe("handleMessages group sync", () => {
     }
     expect(logs.join("\n")).toContain("current chat text");
     expect(errors.join("\n")).toContain("group history sync failed: feishu down");
+  });
+});
+
+describe("handleMessages search scope flags", () => {
+  it("treats legacy --all as --all-chats", async () => {
+    const db = setupDb();
+    const lines: string[] = [];
+    vi.spyOn(console, "log").mockImplementation((...values) => lines.push(values.join(" ")));
+    try {
+      await handleMessages(db, ["search", "text", "--all"], "c2", "p2p", parseArgs);
+    } finally {
+      vi.restoreAllMocks();
+    }
+    expect(lines.join("\n")).toContain("current chat text");
+    expect(lines.join("\n")).toContain("other chat text");
+  });
+
+  it("rejects combining --all-chats with topic scope flags", async () => {
+    const db = setupDb();
+    await expect(handleMessages(db, ["search", "text", "--all-chats", "--all-threads"], "c2", "p2p", parseArgs))
+      .rejects.toThrow("--all-chats cannot be combined with --thread-id or --all-threads");
+  });
+
+  it("help documents that --all-chats is private-chat only", async () => {
+    const db = setupDb();
+    const lines: string[] = [];
+    vi.spyOn(console, "log").mockImplementation((...values) => lines.push(values.join(" ")));
+    try {
+      await handleMessages(db, ["--help"], "c1", "group", parseArgs);
+    } finally {
+      vi.restoreAllMocks();
+    }
+    const text = lines.join("\n");
+    expect(text).toContain("--all-chats 仅私聊可用");
+    expect(text).toContain("群聊禁用");
+    expect(text).toContain("--all-threads 查看整个群（仍是本群）");
+  });
+
+  it("searches every chat with --all-chats in p2p", async () => {
+    const db = setupDb();
+    const lines: string[] = [];
+    vi.spyOn(console, "log").mockImplementation((...values) => lines.push(values.join(" ")));
+    try {
+      await handleMessages(db, ["search", "text", "--all-chats"], "c2", "p2p", parseArgs);
+    } finally {
+      vi.restoreAllMocks();
+    }
+    expect(lines.join("\n")).toContain("current chat text");
+    expect(lines.join("\n")).toContain("other chat text");
   });
 });

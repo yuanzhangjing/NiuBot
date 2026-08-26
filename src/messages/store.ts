@@ -27,16 +27,6 @@ export interface SessionMessageRow {
   content_text: string;
 }
 
-export interface SessionExchange {
-  user?: SessionMessageRow;
-  response?: SessionMessageRow;
-}
-
-export interface SessionEdgeExchanges {
-  first: SessionExchange;
-  last: SessionExchange;
-}
-
 export interface MessageFilter {
   since?: string;
   before?: string;
@@ -44,6 +34,7 @@ export interface MessageFilter {
   userId?: string;
   contentType?: string;
   threadId?: string;
+  allThreads?: boolean;
 }
 
 const MESSAGE_COLUMNS = `
@@ -185,15 +176,21 @@ export function listContinuationMessages(
   options: {
     chatId: string;
     threadId?: string;
+    mainThreadOnly?: boolean;
     beforeMsgId?: number;
     limit: number;
   },
 ): ContinuationMessageRow[] {
-  const cutoff = options.beforeMsgId != null ? "AND m.id < ?" : "";
   const params: (string | number)[] = [options.chatId];
+  let threadFilter = "";
+  if (options.threadId) {
+    threadFilter = "AND m.thread_id = ?";
+    params.push(options.threadId);
+  } else if (options.mainThreadOnly) {
+    threadFilter = "AND m.thread_id IS NULL";
+  }
+  const cutoff = options.beforeMsgId != null ? "AND m.id < ?" : "";
   if (options.beforeMsgId != null) params.push(options.beforeMsgId);
-  const threadFilter = options.threadId ? "AND m.thread_id = ?" : "";
-  if (options.threadId) params.push(options.threadId);
   params.push(options.limit);
 
   const rows = db.prepare(`
@@ -218,74 +215,6 @@ export function listSessionMessages(db: Database.Database, sessionId: string): S
   `).all(sessionId) as SessionMessageRow[];
 }
 
-/** First and last completed exchanges, without scanning transcript sources. */
-export function getSessionEdgeExchanges(db: Database.Database, sessionId: string): SessionEdgeExchanges {
-  const firstResponse = getSessionResponse(db, sessionId, "ASC");
-  const lastResponse = getSessionResponse(db, sessionId, "DESC");
-  if (!firstResponse || !lastResponse) {
-    return {
-      first: { user: getSessionUser(db, sessionId, "ASC") },
-      last: { user: getSessionUser(db, sessionId, "DESC") },
-    };
-  }
-  return {
-    first: { user: getUserBeforeResponse(db, sessionId, firstResponse.id), response: firstResponse },
-    last: { user: getUserBeforeResponse(db, sessionId, lastResponse.id), response: lastResponse },
-  };
-}
-
-function getSessionResponse(
-  db: Database.Database,
-  sessionId: string,
-  order: "ASC" | "DESC",
-): SessionMessageRow | undefined {
-  return db.prepare(`
-    SELECT m.id, m.role, m.content_text
-    FROM messages m
-    WHERE m.session_key = ?
-      AND m.role = 'assistant'
-      AND m.content_text IS NOT NULL
-      AND EXISTS (
-        SELECT 1
-        FROM messages u
-        WHERE u.session_key = m.session_key
-          AND u.role = 'user'
-          AND u.content_text IS NOT NULL
-          AND u.id < m.id
-      )
-    ORDER BY m.id ${order}
-    LIMIT 1
-  `).get(sessionId) as SessionMessageRow | undefined;
-}
-
-function getSessionUser(
-  db: Database.Database,
-  sessionId: string,
-  order: "ASC" | "DESC",
-): SessionMessageRow | undefined {
-  return db.prepare(`
-    SELECT id, role, content_text
-    FROM messages
-    WHERE session_key = ? AND role = 'user' AND content_text IS NOT NULL
-    ORDER BY id ${order}
-    LIMIT 1
-  `).get(sessionId) as SessionMessageRow | undefined;
-}
-
-function getUserBeforeResponse(
-  db: Database.Database,
-  sessionId: string,
-  responseId: number,
-): SessionMessageRow | undefined {
-  return db.prepare(`
-    SELECT id, role, content_text
-    FROM messages
-    WHERE session_key = ? AND role = 'user' AND content_text IS NOT NULL AND id < ?
-    ORDER BY id DESC
-    LIMIT 1
-  `).get(sessionId, responseId) as SessionMessageRow | undefined;
-}
-
 function appendMessageFilters(sql: string, params: unknown[], filters: MessageFilter): string {
   const range = userTimeRangeToUtc({ since: filters.since, before: filters.before });
   if (range.since) {
@@ -308,9 +237,14 @@ function appendMessageFilters(sql: string, params: unknown[], filters: MessageFi
     sql += " AND m.content_type = ?";
     params.push(filters.contentType);
   }
+  if (filters.allThreads) {
+    return sql;
+  }
   if (filters.threadId) {
     sql += " AND m.thread_id = ?";
     params.push(filters.threadId);
+  } else {
+    sql += " AND m.thread_id IS NULL";
   }
   return sql;
 }

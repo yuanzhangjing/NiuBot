@@ -9,8 +9,11 @@ import type { BackendCapability } from "../agent/backend-capability.js";
 import { AgentSessionNotStartedError, type AgentBackend, type AgentResponse, type AgentSession, type SessionConfig } from "../agent/types.js";
 import {
   ensureUser,
+  storeMessage,
   getBotBackendModelState,
   getBotRuntimeState,
+  getScopeRuntimeConfig,
+  setScopeRuntimeConfig,
   getRecentRuntimeEvents,
   getUserIsBot,
   initDatabase as openDatabase,
@@ -71,6 +74,10 @@ class RecordingAgent implements AgentBackend {
   async cancelSession(session: AgentSession): Promise<void> { this.cancelSessionCalls.push(session.id); }
   async closeSession(session: AgentSession): Promise<void> {
     this.closeSessionCalls.push(session.id);
+  }
+
+  getAgentSessionId(sessionId: string): string | undefined {
+    return this.backendSessions.has(sessionId) ? `native-${sessionId}` : undefined;
   }
 
   async exportSessionTranscript(session: AgentSession) {
@@ -415,6 +422,25 @@ class SequenceReplyAgent extends RecordingAgent {
   }
 }
 
+/** 模拟 grok：CLI 真正 session id 和引擎包装 id 不是同一个。 */
+class NativeIdAgent extends ReplyAgent {
+  readonly nativeIds = new Map<string, string>();
+
+  constructor(replyText = "agent reply", private readonly nativePrefix = "native") {
+    super(replyText);
+  }
+
+  override async createSession(config: SessionConfig): Promise<AgentSession> {
+    const session = await super.createSession(config);
+    this.nativeIds.set(session.id, config.agentSessionId ?? `${this.nativePrefix}-${session.id}`);
+    return session;
+  }
+
+  override getAgentSessionId(sessionId: string): string | undefined {
+    return this.nativeIds.get(sessionId);
+  }
+}
+
 function createBotIdentity(): BotIdentity {
   return {
     name: "NiuBot",
@@ -527,7 +553,7 @@ describe("Pipeline Loop integration", () => {
 
     await vi.waitFor(() => expect(getLoopJob(db, id)?.status).toBe("completed"));
     expect(agent.createSessionCalls).toHaveLength(2);
-    expect(agent.createSessionCalls[1]?.agentSessionId).toBe("agent_1");
+    expect(agent.createSessionCalls[1]?.agentSessionId).toBe("native-agent_1");
     expect(agent.sendMessageCalls).toHaveLength(2);
     expect(agent.sendMessageCalls[1]).toContain("<loop-continuation>");
     expect(agent.sendMessageCalls[1]).toContain("check the remembered context");
@@ -667,7 +693,9 @@ describe("Pipeline Loop integration", () => {
     const scheduler = new LoopScheduler(db, (job) => pipeline.enqueueLoopJob(job.id));
     expect(await scheduler.tick(new Date())).toBe(1);
     await vi.waitFor(() => expect(getLoopJob(db, id)?.status).toBe("completed"));
-    expect(agent.createSessionCalls).toHaveLength(2);
+    expect(agent.createSessionCalls).toHaveLength(3);
+    expect(agent.createSessionCalls[1]?.agentSessionId).toBe("native-agent_1");
+    expect(agent.createSessionCalls[2]?.agentSessionId).toBeUndefined();
     expect(agent.sendMessageCalls[1]).toContain("continue in whichever main conversation is current");
   });
 
@@ -758,7 +786,8 @@ describe("Pipeline Loop integration", () => {
     }));
 
     await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(2));
-    expect(agent.sendMessageCalls[1]).toContain("quoted:");
+    expect(agent.sendMessageCalls[1]).toContain("<quoted");
+    expect(agent.sendMessageCalls[1]).toContain("<msg");
     expect(db.prepare("SELECT COUNT(*) AS count FROM loop_jobs").get()).toEqual({ count: 0 });
   });
 
@@ -1028,6 +1057,219 @@ describe("Pipeline runtime", () => {
       .get("om-topic-message") as { chat_id: string; thread_id: string } | undefined;
     expect(row).toEqual({ chat_id: "c1", thread_id: "omt_aaa" });
     expect(agent.createSessionCalls[0]?.replyToMsgId).toBe("om-topic-message");
+  });
+
+  test("wakes isolated topic follow-ups after the root mentioned the bot", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-topic-followup-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare(`
+      INSERT INTO chats (id, type, platform, platform_id, chat_mode, group_message_type, chat_mode_fetched_at)
+      VALUES ('c1', 'group', 'feishu', 'oc-group', 'topic', 'thread', ?)
+    `).run(Date.now());
+    const agent = new ReplyAgent("ok");
+    const pipeline = new Pipeline(
+      db, createImStub(), agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex",
+    );
+    await pipeline.start();
+
+    (pipeline as any).handleMessage(createMessage({
+      chatType: "group",
+      chatPlatformId: "oc-group",
+      botMentioned: true,
+      threadId: "omt_aaa",
+      rootId: "om-root",
+      platformMsgId: "om-root",
+      contentText: "@NiuBot hi",
+    }));
+    await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(1));
+
+    (pipeline as any).handleMessage(createMessage({
+      chatType: "group",
+      chatPlatformId: "oc-group",
+      botMentioned: false,
+      threadId: "omt_aaa",
+      rootId: "om-root",
+      parentPlatformMsgId: "om-root",
+      platformMsgId: "om-followup",
+      contentText: "不 at 的跟帖",
+    }));
+    await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(2));
+    expect(agent.sendMessageCalls[1]).toContain("不 at 的跟帖");
+
+    const silentBefore = agent.sendMessageCalls.length;
+    (pipeline as any).handleMessage(createMessage({
+      chatType: "group",
+      chatPlatformId: "oc-group",
+      botMentioned: false,
+      threadId: "omt_other",
+      rootId: "om-other",
+      platformMsgId: "om-other-followup",
+      contentText: "另一个话题没请过 Bot",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(agent.sendMessageCalls).toHaveLength(silentBefore);
+    pipeline.stop();
+  });
+
+  test("wakes a topic follow-up while the first @ is still buffering", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-topic-followup-buffer-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare(`
+      INSERT INTO chats (id, type, platform, platform_id, chat_mode, group_message_type, chat_mode_fetched_at)
+      VALUES ('c1', 'group', 'feishu', 'oc-group', 'topic', 'thread', ?)
+    `).run(Date.now());
+    const agent = new ReplyAgent("ok");
+    const pipeline = new Pipeline(
+      db, createImStub(), agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex",
+    );
+    await pipeline.start();
+
+    (pipeline as any).handleMessage(createMessage({
+      chatType: "group",
+      chatPlatformId: "oc-group",
+      botMentioned: true,
+      threadId: "omt_buf",
+      rootId: "om-buf-root",
+      platformMsgId: "om-buf-root",
+      contentText: "@NiuBot hi",
+    }));
+    (pipeline as any).handleMessage(createMessage({
+      chatType: "group",
+      chatPlatformId: "oc-group",
+      botMentioned: false,
+      threadId: "omt_buf",
+      rootId: "om-buf-root",
+      parentPlatformMsgId: "om-buf-root",
+      platformMsgId: "om-buf-followup",
+      contentText: "紧跟着的跟帖",
+    }));
+    await vi.waitFor(() => {
+      expect(agent.sendMessageCalls.some((text) => text.includes("紧跟着的跟帖"))).toBe(true);
+    });
+    pipeline.stop();
+  });
+
+  test("does not trigger on an explicit other-bot target in an owned topic", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-topic-other-bot-target-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare(`
+      INSERT INTO chats (id, type, platform, platform_id, chat_mode, group_message_type, chat_mode_fetched_at)
+      VALUES ('c1', 'group', 'feishu', 'oc-group', 'topic', 'thread', ?)
+    `).run(Date.now());
+    const agent = new ReplyAgent("ok");
+    const pipeline = new Pipeline(
+      db, createImStub(), agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex",
+    );
+    await pipeline.start();
+
+    const botUserId = pipeline.getBotUserId();
+    if (!botUserId) throw new Error("test bot user was not initialized");
+    storeMessage(db, {
+      chatId: "c1",
+      senderId: botUserId,
+      role: "assistant",
+      contentText: "之前的回复",
+      platform: "feishu",
+      platformMsgId: "om-niubot-reply",
+      threadId: "omt_owned",
+      agentSeen: true,
+    });
+
+    (pipeline as any).handleMessage(createMessage({
+      chatType: "group",
+      chatPlatformId: "oc-group",
+      contentText: "@CowBot /agent 2",
+      botMentioned: false,
+      mentions: [{
+        platformUserId: "ou-cow",
+        name: "CowBot",
+        isBot: false,
+        isApp: true,
+        key: "cow",
+      }],
+      threadId: "omt_owned",
+      rootId: "om-topic-root",
+      parentPlatformMsgId: "om-niubot-reply",
+      platformMsgId: "om-cow-agent",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(agent.sendMessageCalls).toHaveLength(0);
+    pipeline.stop();
+  });
+
+  test("does not treat history-synced bot rows as topic ownership", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-topic-history-claim-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare(`
+      INSERT INTO chats (id, type, platform, platform_id, chat_mode, group_message_type, chat_mode_fetched_at)
+      VALUES ('c1', 'group', 'feishu', 'oc-group', 'topic', 'thread', ?)
+    `).run(Date.now());
+    const agent = new ReplyAgent("ok");
+    const pipeline = new Pipeline(
+      db, createImStub(), agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex",
+    );
+    await pipeline.start();
+    const botUserId = pipeline.getBotUserId()!;
+    db.prepare(`
+      INSERT INTO messages (chat_id, sender_id, role, content_text, content_type, platform, thread_id)
+      VALUES ('c1', ?, 'assistant', 'old synced reply', 'text', 'feishu', 'omt_hist')
+    `).run(botUserId);
+
+    const silentBefore = agent.sendMessageCalls.length;
+    (pipeline as any).handleMessage(createMessage({
+      chatType: "group",
+      chatPlatformId: "oc-group",
+      botMentioned: false,
+      threadId: "omt_hist",
+      rootId: "om-hist-root",
+      platformMsgId: "om-hist-followup",
+      contentText: "历史话题跟帖",
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(agent.sendMessageCalls).toHaveLength(silentBefore);
+    pipeline.stop();
+  });
+
+  test("injects topic-isolation on a new topic session and stores help cards in the thread", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-topic-card-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare(`
+      INSERT INTO chats (id, type, platform, platform_id, chat_mode, group_message_type, chat_mode_fetched_at)
+      VALUES ('c1', 'group', 'feishu', 'oc-group', 'topic', 'thread', ?)
+    `).run(Date.now());
+    const agent = new RecordingAgent();
+    const pipeline = new Pipeline(
+      db, createImStub(), agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex",
+    );
+    await pipeline.start();
+
+    (pipeline as any).handleMessage(createMessage({
+      chatType: "group",
+      chatPlatformId: "oc-group",
+      botMentioned: true,
+      threadId: "omt_card",
+      rootId: "om-card-root",
+      platformMsgId: "om-card-root",
+      contentText: "@NiuBot hello topic",
+    }));
+    await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(1));
+    expect(agent.sendMessageCalls[0]).toContain("<topic-isolation>");
+    expect(agent.sendMessageCalls[0]).toContain("/stop 只停本话题");
+
+    (pipeline as any).sendHelpCard("c1", "oc-group", "om-card-root", true, "omt_card");
+    await vi.waitFor(() => {
+      const row = db.prepare(
+        "SELECT thread_id FROM messages WHERE role = 'assistant' AND content_text LIKE '%常用命令%' ORDER BY id DESC LIMIT 1",
+      ).get() as { thread_id: string | null } | undefined;
+      expect(row?.thread_id).toBe("omt_card");
+    });
+    pipeline.stop();
   });
 
   test("runs two topic threads in parallel and blocks create fallback on reply failure", async () => {
@@ -1800,6 +2042,152 @@ describe("Pipeline runtime", () => {
     const attached = await (pipeline as any).getOrCreateSession("c1", "c1", undefined, undefined);
     expect(attached.sessionId).toBe("s1");
     expect(agent.createSessionCalls[0]?.agentSessionId).toBe("claude-session-id");
+  });
+
+  test("persists the backend-native session id after the first turn, not the engine wrapper id", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-native-id-test-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const agent = new NativeIdAgent("ok", "grok-native");
+    const pipeline = new Pipeline(
+      db, createImStub(), agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "grok",
+    );
+    await pipeline.start();
+
+    (pipeline as any).handleMessage(createMessage({ contentText: "first", platformMsgId: "m1" }));
+    await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(1));
+    await vi.waitFor(() => expect((pipeline as any).chatSessions.size).toBe(0));
+
+    const stored = db.prepare(
+      "SELECT agent_session_id, backend_type FROM sessions WHERE status = 'active' AND source = 'user'",
+    ).get() as { agent_session_id: string | null; backend_type: string | null };
+    expect(stored).toEqual({
+      agent_session_id: "grok-native-agent_1",
+      backend_type: "grok",
+    });
+
+    expect(agent.sendMessageCalls[0]).toContain("<session-profile");
+
+    (pipeline as any).handleMessage(createMessage({ contentText: "second", platformMsgId: "m2" }));
+    await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(2));
+    expect(agent.createSessionCalls).toHaveLength(2);
+    expect(agent.createSessionCalls[1]?.agentSessionId).toBe("grok-native-agent_1");
+    expect(agent.sendMessageCalls[1]).toBe("second");
+    expect(agent.sendMessageCalls[1]).not.toContain("<session-profile");
+    expect(agent.sendMessageCalls[1]).not.toContain("<recent-messages>");
+  });
+
+  test("does not re-inject recent messages when native-resuming after unload", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-resume-no-reinject-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare(`
+      INSERT INTO users (id, name, platform, platform_id)
+      VALUES ('u2', 'admin', 'feishu', 'user-open-id')
+    `).run();
+    db.prepare(`
+      INSERT INTO chats (id, type, platform, platform_id, user_id)
+      VALUES ('c1', 'p2p', 'feishu', 'chat-open-id', 'user-open-id')
+    `).run();
+    db.prepare(`
+      INSERT INTO sessions (id, chat_id, user_id, source, status, started_at, ended_at)
+      VALUES ('old', 'c1', 'u2', 'user', 'archived', datetime('now', '-1 hour'), datetime('now', '-30 minutes'))
+    `).run();
+    db.prepare(`
+      INSERT INTO messages (chat_id, sender_id, session_key, role, content_text, content_type, platform)
+      VALUES ('c1', 'u2', 'old', 'user', 'older chat that belongs in new-session continuation', 'text', 'feishu')
+    `).run();
+    const agent = new NativeIdAgent("ok", "grok-native");
+    const pipeline = new Pipeline(
+      db, createImStub(), agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "grok",
+    );
+    await pipeline.start();
+
+    (pipeline as any).handleMessage(createMessage({ contentText: "first", platformMsgId: "m1" }));
+    await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(1));
+    expect(agent.sendMessageCalls[0]).toContain("<session-profile");
+    expect(agent.sendMessageCalls[0]).toContain("<recent-messages>");
+    expect(agent.sendMessageCalls[0]).toContain("older chat that belongs in new-session continuation");
+    await vi.waitFor(() => expect((pipeline as any).chatSessions.size).toBe(0));
+
+    (pipeline as any).handleMessage(createMessage({ contentText: "second", platformMsgId: "m2" }));
+    await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(2));
+    expect(agent.createSessionCalls[1]?.agentSessionId).toBe("grok-native-agent_1");
+    expect(agent.sendMessageCalls[1]).toBe("second");
+    expect(agent.sendMessageCalls[1]).not.toContain("<session-profile");
+    expect(agent.sendMessageCalls[1]).not.toContain("<recent-messages>");
+    expect(agent.sendMessageCalls[1]).not.toContain("older chat that belongs in new-session continuation");
+  });
+
+  test("archives a leftover session when the current default backend differs", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-backend-mismatch-resume-test-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare(`
+      INSERT INTO users (id, name, platform, platform_id)
+      VALUES ('u2', 'admin', 'feishu', 'user-open-id')
+    `).run();
+    db.prepare(`
+      INSERT INTO chats (id, type, platform, platform_id)
+      VALUES ('c1', 'p2p', 'feishu', 'chat-open-id')
+    `).run();
+    db.prepare(`
+      INSERT INTO sessions (id, chat_id, user_id, status, agent_session_id, backend_type, last_active_at)
+      VALUES ('s1', 'c1', 'u2', 'active', 'codex_1787613030736_b30d032e', 'codex', datetime('now'))
+    `).run();
+    const codexAgent = new NativeIdAgent("ok", "codex-native");
+    const grokAgent = new NativeIdAgent("ok", "grok-native");
+    const pipeline = new Pipeline(
+      db,
+      createImStub(),
+      grokAgent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "grok",
+      async (type) => type === "codex" ? codexAgent : grokAgent,
+      () => ["codex", "grok"],
+    );
+    await pipeline.start();
+
+    (pipeline as any).handleMessage(createMessage({ contentText: "after default became grok", platformMsgId: "m1" }));
+    await vi.waitFor(() => expect(grokAgent.sendMessageCalls).toHaveLength(1));
+
+    expect(codexAgent.sendMessageCalls).toHaveLength(0);
+    expect(grokAgent.createSessionCalls).toHaveLength(1);
+    expect(db.prepare("SELECT status FROM sessions WHERE id = 's1'").get()).toEqual({ status: "discarded" });
+  });
+
+  test("does not resume an engine wrapper id after unload", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-wrapper-resume-test-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare(`
+      INSERT INTO users (id, name, platform, platform_id)
+      VALUES ('u2', 'admin', 'feishu', 'user-open-id')
+    `).run();
+    db.prepare(`
+      INSERT INTO chats (id, type, platform, platform_id)
+      VALUES ('c1', 'p2p', 'feishu', 'chat-open-id')
+    `).run();
+    db.prepare(`
+      INSERT INTO sessions (id, chat_id, user_id, status, agent_session_id, backend_type, last_active_at)
+      VALUES ('s1', 'c1', 'u2', 'active', 'grok_1787630975612_af90f32a', 'grok', datetime('now'))
+    `).run();
+    const agent = new NativeIdAgent("ok", "grok-native");
+    const pipeline = new Pipeline(
+      db, createImStub(), agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "grok",
+    );
+    await pipeline.start();
+
+    (pipeline as any).handleMessage(createMessage({ contentText: "after restart", platformMsgId: "m1" }));
+    await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(1));
+
+    expect(agent.createSessionCalls[0]?.agentSessionId).toBeUndefined();
+    expect(db.prepare("SELECT agent_session_id FROM sessions WHERE id = 's1'").get()).toEqual({
+      agent_session_id: "grok-native-agent_1",
+    });
   });
 
   test("injects session profile on first message after recovering a non-resumable active session", async () => {
@@ -2596,7 +2984,10 @@ bots:
 
     await (pipeline as any).handleModelCommand(["new-model"], "c1", "chat-open-id");
 
-    expect(identity.model).toBe("new-model");
+    expect(getScopeRuntimeConfig(db, "NiuBot", "c1")).toMatchObject({
+      backendType: "codex",
+      model: "new-model",
+    });
     expect(activeAgentSession.model).toBe("new-model");
     expect(agent.backendSessions.get("agent_1")).toEqual({
       model: "new-model",
@@ -2608,10 +2999,7 @@ bots:
     expect(sentCards[1]?.content).toContain("模型已切换为 **new-model**");
     expect(sentCards[1]?.content).not.toContain("下次会话生效");
     expect(agent.validateModelCalls).toEqual(["new-model"]);
-    expect(getBotRuntimeState(db, "NiuBot")).toEqual({
-      backendType: "codex",
-      model: "new-model",
-    });
+    expect(getBotRuntimeState(db, "NiuBot")).toBeUndefined();
   });
 
   test("sends progress before probing an unknown model", async () => {
@@ -2681,7 +3069,10 @@ bots:
     releaseProbe({ valid: true });
     await done;
 
-    expect(identity.model).toBe("unknown-model");
+    expect(getScopeRuntimeConfig(db, "NiuBot", "c1")).toMatchObject({
+      backendType: "codex",
+      model: "unknown-model",
+    });
     expect(sentCards).toHaveLength(2);
     expect(sentCards[1]?.content).toContain("模型已切换为 **unknown-model**");
 
@@ -2728,7 +3119,10 @@ bots:
     await (pipeline as any).handleModelCommand(["fragile-model"], "c1", "chat-open-id");
 
     expect(agent.validateModelCalls).toEqual(["fragile-model"]);
-    expect(identity.model).toBe("fragile-model");
+    expect(getScopeRuntimeConfig(db, "NiuBot", "c1")).toMatchObject({
+      backendType: "codex",
+      model: "fragile-model",
+    });
     expect(sendCardCalls).toBe(2);
     expect(sentCards).toHaveLength(1);
     expect(sentCards[0]?.content).toContain("模型已切换为 **fragile-model**");
@@ -2840,11 +3234,11 @@ bots:
 
     (pipeline as any).handleModelCommand(["reset"], "c1", "chat-open-id");
 
-    expect(identity.model).toBeUndefined();
-    expect(getBotRuntimeState(db, "NiuBot")).toEqual({
+    expect(getScopeRuntimeConfig(db, "NiuBot", "c1")).toMatchObject({
       backendType: "codex",
-      model: undefined,
     });
+    expect(getScopeRuntimeConfig(db, "NiuBot", "c1")?.model).toBeUndefined();
+    expect(identity.model).toBe("runtime-model");
   });
 
   test("/autoupdate toggles and persists the enabled flag", () => {
@@ -3063,16 +3457,13 @@ bots:
 
     (pipeline as any).handleEffortCommand(["high"], "c1", "chat-open-id");
 
-    expect(identity.effort).toBe("high");
+    expect(identity.effort).toBeUndefined();
     expect(activeAgentSession.reasoningEffort).toBe("high");
-    expect(getBotBackendModelState(db, "NiuBot", "codex")).toEqual({
+    expect(getScopeRuntimeConfig(db, "NiuBot", "c1")).toMatchObject({
+      backendType: "codex",
       effort: "high",
     });
-    // effort 只存 bot_backend_model_state，runtime 表不含 effort
-    expect(getBotRuntimeState(db, "NiuBot")).toEqual({
-      backendType: "codex",
-      model: undefined,
-    });
+    expect(getBotBackendModelState(db, "NiuBot", "codex")).toBeUndefined();
   });
 
   test("switches effort by index number like /model", () => {
@@ -3093,13 +3484,13 @@ bots:
     );
 
     (pipeline as any).handleEffortCommand(["1"], "c1", "chat-open-id");
-    expect(identity.effort).toBe("low");
+    expect(getScopeRuntimeConfig(db, "NiuBot", "c1")).toMatchObject({ effort: "low" });
 
     (pipeline as any).handleEffortCommand(["3"], "c1", "chat-open-id");
-    expect(identity.effort).toBe("high");
+    expect(getScopeRuntimeConfig(db, "NiuBot", "c1")).toMatchObject({ effort: "high" });
 
     (pipeline as any).handleEffortCommand(["99"], "c1", "chat-open-id");
-    expect(identity.effort).toBe("high");
+    expect(getScopeRuntimeConfig(db, "NiuBot", "c1")).toMatchObject({ effort: "high" });
   });
 
   test("rejects invalid effort levels", () => {
@@ -3147,10 +3538,11 @@ bots:
 
     (pipeline as any).handleEffortCommand(["reset"], "c1", "chat-open-id");
 
-    expect(identity.effort).toBeUndefined();
-    expect(getBotBackendModelState(db, "NiuBot", "codex")).toEqual({
-      effort: undefined,
+    expect(identity.effort).toBe("high");
+    expect(getScopeRuntimeConfig(db, "NiuBot", "c1")).toMatchObject({
+      backendType: "codex",
     });
+    expect(getScopeRuntimeConfig(db, "NiuBot", "c1")?.effort).toBeUndefined();
   });
 
   test("keeps effort on unsupported backend and reports it", () => {
@@ -3174,13 +3566,95 @@ bots:
     (pipeline as any).handleEffortCommand(["high"], "c1", "chat-open-id");
 
     // trae 未声明支持 effort：值保存，但提示当前 backend 不生效
-    expect(identity.effort).toBe("high");
+    expect(getScopeRuntimeConfig(db, "NiuBot", "c1")).toMatchObject({
+      backendType: "trae",
+      effort: "high",
+    });
     const lastCard = sentCards.at(-1);
     expect(lastCard?.content).toContain("推理强度已切换为 **high**");
     expect(lastCard?.content).toContain("trae）不支持 effort");
   });
 
-  test("persists backend and restored models after /agent switch", async () => {
+  test("keeps /model and /effort inside the current scope", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-scope-models-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const pipeline = new Pipeline(
+      db,
+      createImStub(),
+      new RecordingAgent(),
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+    const topicA = { id: "agent_a" } as Record<string, unknown>;
+    const topicB = { id: "agent_b" } as Record<string, unknown>;
+    (pipeline as any).chatSessions.set("c5#t1", {
+      agentSession: topicA, sessionId: "s-a", platformChatId: "chat-open-id", userId: "u2", hasReplied: false,
+    });
+    (pipeline as any).chatSessions.set("c5#t2", {
+      agentSession: topicB, sessionId: "s-b", platformChatId: "chat-open-id", userId: "u2", hasReplied: false,
+    });
+
+    await (pipeline as any).handleModelCommand(["gpt-topic-a"], "c5", "chat-open-id", undefined, "c5#t1");
+    (pipeline as any).handleEffortCommand(["max"], "c5", "chat-open-id", undefined, "c5#t1");
+    (pipeline as any).handleEffortCommand(["low"], "c5", "chat-open-id", undefined, "c5#t2");
+
+    expect(getScopeRuntimeConfig(db, "NiuBot", "c5#t1")).toMatchObject({
+      backendType: "codex",
+      model: "gpt-topic-a",
+      effort: "max",
+    });
+    expect(getScopeRuntimeConfig(db, "NiuBot", "c5#t2")).toMatchObject({
+      backendType: "codex",
+      effort: "low",
+    });
+    expect(getBotBackendModelState(db, "NiuBot", "codex")).toBeUndefined();
+    expect(topicA.model).toBe("gpt-topic-a");
+    expect(topicA.reasoningEffort).toBe("max");
+    expect(topicB.model).toBeUndefined();
+    expect(topicB.reasoningEffort).toBe("low");
+  });
+
+  test("does not pin a topic on /model or /effort reset when it has no override", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-reset-no-override-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u2', 'Zen', 'feishu', 'ou-zen')").run();
+    db.prepare("INSERT INTO chats (id, type, platform, platform_id, user_id) VALUES ('c1', 'p2p', 'feishu', 'oc-p2p', 'ou-zen')").run();
+    db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c5', 'group', 'feishu', 'oc-group')").run();
+    setScopeRuntimeConfig(db, "NiuBot", "c1", {
+      backendType: "grok",
+      model: "haiku",
+      effort: "medium",
+    });
+    const { im, sentCards } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db,
+      im,
+      new RecordingAgent(),
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+
+    await (pipeline as any).handleModelCommand(["reset"], "c5", "oc-group", "m1", "c5#t1", "u2");
+    (pipeline as any).handleEffortCommand(["reset"], "c5", "oc-group", "m1", "c5#t1", "u2");
+
+    expect(getScopeRuntimeConfig(db, "NiuBot", "c5#t1")).toBeUndefined();
+    expect((pipeline as any).resolveScopeConfig("c5#t1", "u2")).toMatchObject({
+      backendType: "grok",
+      model: "haiku",
+      effort: "medium",
+    });
+    expect(sentCards.every((card) => card.content.includes("当前跟着默认"))).toBe(true);
+  });
+
+  test("persists backend per scope after /agent switch", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
@@ -3200,20 +3674,82 @@ bots:
       async () => new RecordingAgent(),
       () => ["codex", "claude"],
     );
+    await (pipeline as any).handleAgentCommand(["claude"], "c1", "chat-open-id");
+    await (pipeline as any).sessionTransitionLocks.get("c1");
 
-    (pipeline as any).backendModelCache.set("claude", {
-      model: "claude-model",
+    expect(identity.model).toBe("codex-model");
+    expect((pipeline as any).backendType).toBe("codex");
+    expect(getBotRuntimeState(db, "NiuBot")).toBeUndefined();
+    expect(getScopeRuntimeConfig(db, "NiuBot", "c1")).toMatchObject({
+      backendType: "claude",
     });
+    expect(sentCards[0]?.content).toContain("这是你的默认");
+  });
+
+  test("archives only the current scope when switching backends", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-agent-unload-archive-test-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare(`
+      INSERT INTO sessions (id, chat_id, user_id, status, agent_session_id, backend_type, started_at, last_active_at)
+      VALUES
+        ('unloaded', 'c1', 'u2', 'active', 'codex-thread-id', 'codex', datetime('now'), datetime('now')),
+        ('other', 'c2', 'u2', 'active', 'codex-thread-id-2', 'codex', datetime('now'), datetime('now'))
+    `).run();
+    const pipeline = new Pipeline(
+      db, createImStub(), new RecordingAgent(), createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex",
+      async () => new RecordingAgent(),
+      () => ["codex", "claude"],
+    );
 
     await (pipeline as any).handleAgentCommand(["claude"], "c1", "chat-open-id");
-    await (pipeline as any).globalSessionTransition;
+    await (pipeline as any).sessionTransitionLocks.get("c1");
 
-    expect(identity.model).toBe("claude-model");
-    expect(getBotRuntimeState(db, "NiuBot")).toEqual({
-      backendType: "claude",
-      model: "claude-model",
+    expect(db.prepare("SELECT status FROM sessions WHERE id = 'unloaded'").get()).toEqual({
+      status: "archived",
     });
-    expect(sentCards[0]?.content).toContain("重启后仍保持当前选择");
+    expect(db.prepare("SELECT status FROM sessions WHERE id = 'other'").get()).toEqual({
+      status: "active",
+    });
+    expect((pipeline as any).backendType).toBe("codex");
+    expect(getScopeRuntimeConfig(db, "NiuBot", "c1")?.backendType).toBe("claude");
+    expect(getScopeRuntimeConfig(db, "NiuBot", "c2")).toBeUndefined();
+  });
+
+  test("records /agent switch cards on the triggering thread", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-agent-thread-card-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare("INSERT INTO users (id, platform, platform_id, name) VALUES ('u2', 'feishu', 'u2p', 'Zen')").run();
+    db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c5', 'group', 'feishu', 'chat-open-id')").run();
+    const { im } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db, im, new RecordingAgent(), createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex",
+      async () => new RecordingAgent(),
+      () => ["codex", "claude"],
+    );
+    await pipeline.start();
+    storeMessage(db, {
+      chatId: "c5",
+      senderId: "u2",
+      role: "user",
+      contentText: "/agent claude",
+      platform: "feishu",
+      platformMsgId: "agent-switch-trigger",
+      threadId: "t-new",
+    });
+
+    await (pipeline as any).handleAgentCommand(
+      ["claude"], "c5", "chat-open-id", "agent-switch-trigger", "c5#t-new", "t-new",
+    );
+    await (pipeline as any).sessionTransitionLocks.get("c5#t-new");
+
+    const row = db.prepare(
+      "SELECT thread_id, content_text FROM messages WHERE role = 'assistant' ORDER BY id DESC LIMIT 1",
+    ).get() as { thread_id: string | null; content_text: string };
+    expect(row.thread_id).toBe("t-new");
+    expect(row.content_text).toContain("已切换到");
+    pipeline.stop();
   });
 
   test("/agent shows selectable and unavailable backend states", async () => {
@@ -3294,16 +3830,16 @@ bots:
     });
 
     await (pipeline as any).handleAgentCommand(["claude"], "c1", "chat-open-id");
-    await (pipeline as any).globalSessionTransition;
 
     expect((pipeline as any).backendType).toBe("codex");
     expect((pipeline as any).chatSessions.has("c1")).toBe(true);
+    expect((pipeline as any).sessionTransitionLocks.has("c1")).toBe(false);
     expect((db.prepare("SELECT status FROM sessions WHERE id = 'active-session'").get() as { status: string }).status)
       .toBe("active");
     expect(sentCards.at(-1)?.content).toContain("claude CLI not found");
   });
 
-  test("defers a new chat that first appears while the backend is switching", async () => {
+  test("does not block another chat while a scope is switching backends", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
     const db = initDatabase(path.join(dir, "niubot.db"));
@@ -3315,20 +3851,20 @@ bots:
       () => ["codex", "claude"],
     );
 
-    await (pipeline as any).handleAgentCommand(["claude"], "trigger-chat", "trigger-platform-chat");
-    (pipeline as any).handleMessage(createMessage({
+    const switchPromise = (pipeline as any).handleAgentCommand(["claude"], "trigger-chat", "trigger-platform-chat");
+    await (pipeline as any).handleMessage(createMessage({
       chatPlatformId: "brand-new-platform-chat",
       platformMsgId: "new-chat-message",
     }));
 
     const pendingChatId = (db.prepare("SELECT id FROM chats WHERE platform_id = ?").get("brand-new-platform-chat") as { id: string }).id;
-    expect((pipeline as any).pendingTransitionMessages.get(pendingChatId)).toHaveLength(1);
-    expect(db.prepare("SELECT COUNT(*) AS count FROM messages WHERE chat_id = ?").get(pendingChatId)).toEqual({ count: 0 });
-
-    resolveBackend(new RecordingAgent());
-    await (pipeline as any).globalSessionTransition;
     expect((pipeline as any).pendingTransitionMessages.has(pendingChatId)).toBe(false);
     expect(db.prepare("SELECT COUNT(*) AS count FROM messages WHERE chat_id = ?").get(pendingChatId)).toEqual({ count: 1 });
+
+    resolveBackend(new RecordingAgent());
+    await switchPromise;
+    await (pipeline as any).sessionTransitionLocks.get("trigger-chat");
+    expect(getScopeRuntimeConfig(db, "NiuBot", "trigger-chat")?.backendType).toBe("claude");
   });
 
   test("waits for another chat's session transition before switching backends", async () => {
@@ -3391,15 +3927,11 @@ bots:
     pipeline.stop();
   });
 
-  test("restores persisted backend-specific models on /agent switch after restart", async () => {
+  test("does not keep the previous backend's model when switching agents", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
     const db = initDatabase(path.join(dir, "niubot.db"));
-    setBotBackendModelState(db, "NiuBot", "claude", {
-      model: "claude-opus-4-6",
-    });
-
     const identity = createBotIdentity();
     identity.model = "gpt-5.4";
     const { im, sentCards } = createRecordingImStub();
@@ -3417,17 +3949,534 @@ bots:
     );
 
     await (pipeline as any).handleAgentCommand(["claude"], "c1", "chat-open-id");
-    await (pipeline as any).globalSessionTransition;
+    await (pipeline as any).sessionTransitionLocks.get("c1");
 
-    expect(identity.model).toBe("claude-opus-4-6");
-    expect(getBotRuntimeState(db, "NiuBot")).toEqual({
+    expect(identity.model).toBe("gpt-5.4");
+    expect((pipeline as any).backendType).toBe("codex");
+    expect(getBotRuntimeState(db, "NiuBot")).toBeUndefined();
+    expect(getScopeRuntimeConfig(db, "NiuBot", "c1")).toMatchObject({
       backendType: "claude",
-      model: "claude-opus-4-6",
     });
-    expect(getBotBackendModelState(db, "NiuBot", "claude")).toEqual({
-      model: "claude-opus-4-6",
+    expect(getScopeRuntimeConfig(db, "NiuBot", "c1")?.model).toBeUndefined();
+    expect(sentCards[0]?.content).toContain("Model: default");
+  });
+
+  test("keeps /agent inside the current scope and leaves the default backend elsewhere", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-scope-agent-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare(`
+      INSERT INTO chats (id, type, platform, platform_id)
+      VALUES ('c5', 'group', 'feishu', 'chat-open-id')
+    `).run();
+    const defaultAgent = new RecordingAgent();
+    const claudeAgent = new RecordingAgent();
+    const pipeline = new Pipeline(
+      db,
+      createImStub(),
+      defaultAgent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+      async (type) => type === "claude" ? claudeAgent : defaultAgent,
+      () => ["codex", "claude"],
+    );
+    (pipeline as any).platformChatIds.set("c5", "chat-open-id");
+
+    await (pipeline as any).handleAgentCommand(["claude"], "c5", "chat-open-id", undefined, "c5#t1");
+    await (pipeline as any).sessionTransitionLocks.get("c5#t1");
+
+    expect(getScopeRuntimeConfig(db, "NiuBot", "c5#t1")?.backendType).toBe("claude");
+    expect(getScopeRuntimeConfig(db, "NiuBot", "c5#t2")).toBeUndefined();
+    expect((pipeline as any).backendType).toBe("codex");
+
+    const sessionA = await (pipeline as any).getOrCreateSession("c5#t1", "c5", "t1");
+    expect(sessionA.backendType).toBe("claude");
+    expect(claudeAgent.createSessionCalls).toHaveLength(1);
+    expect(defaultAgent.createSessionCalls).toHaveLength(0);
+
+    const sessionB = await (pipeline as any).getOrCreateSession("c5#t2", "c5", "t2");
+    expect(sessionB.backendType).toBe("codex");
+    expect(sessionB.sessionId).not.toBe(sessionA.sessionId);
+    expect(defaultAgent.createSessionCalls).toHaveLength(1);
+    expect(claudeAgent.createSessionCalls).toHaveLength(1);
+  });
+
+  test("pins the current default when /agent is repeated on a following topic", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-agent-pin-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u2', 'Zen', 'feishu', 'ou-zen')").run();
+    db.prepare("INSERT INTO chats (id, type, platform, platform_id, user_id) VALUES ('c1', 'p2p', 'feishu', 'oc-p2p', 'ou-zen')").run();
+    db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c5', 'group', 'feishu', 'oc-group')").run();
+    setScopeRuntimeConfig(db, "NiuBot", "c1", {
+      backendType: "grok",
+      model: "haiku",
     });
-    expect(sentCards[0]?.content).toContain("claude-opus-4-6");
+    const { im, sentCards } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db, im, new RecordingAgent(), createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex",
+      async () => new RecordingAgent(),
+      () => ["codex", "grok"],
+    );
+    const topicSession = { id: "agent_t1" };
+    (pipeline as any).chatSessions.set("c5#t1", {
+      agentSession: topicSession, sessionId: "s-t1", platformChatId: "oc-group", userId: "u2", hasReplied: false,
+    });
+
+    await (pipeline as any).handleAgentCommand(["grok"], "c5", "oc-group", "m1", "c5#t1", "t1", "u2");
+
+    expect(getScopeRuntimeConfig(db, "NiuBot", "c5#t1")).toMatchObject({
+      backendType: "grok",
+      model: "haiku",
+    });
+    expect((pipeline as any).chatSessions.has("c5#t1")).toBe(true);
+    expect(sentCards.at(-1)?.content).toContain("已固定为");
+    expect(sentCards.at(-1)?.content).toContain("只影响当前对话");
+
+    await (pipeline as any).handleAgentCommand(["grok"], "c5", "oc-group", "m2", "c5#t1", "t1", "u2");
+    expect(sentCards.at(-1)?.content).toContain("无需切换");
+  });
+
+  test("pins the engine default in p2p when /agent matches and no row exists", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-agent-pin-p2p-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const { im, sentCards } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db, im, new RecordingAgent(), createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex",
+      async () => new RecordingAgent(),
+      () => ["codex", "grok"],
+    );
+
+    await (pipeline as any).handleAgentCommand(["codex"], "c1", "oc-p2p");
+
+    expect(getScopeRuntimeConfig(db, "NiuBot", "c1")).toMatchObject({
+      backendType: "codex",
+    });
+    expect(sentCards.at(-1)?.content).toContain("已固定为");
+  });
+
+  test("new group and topic inherit the speaker's p2p agent and model", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-p2p-default-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u2', 'Zen', 'feishu', 'ou-zen')").run();
+    db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u3', 'Other', 'feishu', 'ou-other')").run();
+    db.prepare("INSERT INTO chats (id, type, platform, platform_id, user_id) VALUES ('c1', 'p2p', 'feishu', 'oc-p2p', 'ou-zen')").run();
+    db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c5', 'group', 'feishu', 'oc-group')").run();
+    const defaultAgent = new RecordingAgent();
+    const claudeAgent = new RecordingAgent();
+    const pipeline = new Pipeline(
+      db,
+      createImStub(),
+      defaultAgent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+      async (type) => type === "claude" ? claudeAgent : defaultAgent,
+      () => ["codex", "claude"],
+    );
+    (pipeline as any).platformChatIds.set("c1", "oc-p2p");
+    (pipeline as any).platformChatIds.set("c5", "oc-group");
+
+    await (pipeline as any).handleAgentCommand(["claude"], "c1", "oc-p2p", undefined, "c1", undefined, "u2");
+    await (pipeline as any).sessionTransitionLocks.get("c1");
+    setScopeRuntimeConfig(db, "NiuBot", "c1", {
+      backendType: "claude",
+      model: "opus",
+    });
+
+    expect(getScopeRuntimeConfig(db, "NiuBot", "c1")?.backendType).toBe("claude");
+    expect(getScopeRuntimeConfig(db, "NiuBot", "c5")).toBeUndefined();
+    expect((pipeline as any).resolveScopeBackendType("c5", "u2")).toBe("claude");
+    expect((pipeline as any).resolveScopeModels("c5", "claude", "u2")).toEqual({ model: "opus" });
+    expect((pipeline as any).resolveScopeBackendType("c5", "u3")).toBe("codex");
+    expect((pipeline as any).resolveScopeBackendType("c1", "u2")).toBe("claude");
+
+    (pipeline as any).chatUserIds.set("c5", "u2");
+    const inherited = await (pipeline as any).getOrCreateSession("c5#t-new", "c5", "t-new");
+    expect(inherited.backendType).toBe("claude");
+    expect(claudeAgent.createSessionCalls[0]?.model).toBe("opus");
+    expect(getScopeRuntimeConfig(db, "NiuBot", "c5#t-new")).toBeUndefined();
+
+    setScopeRuntimeConfig(db, "NiuBot", "c5#t-own", { backendType: "codex" });
+    const own = await (pipeline as any).getOrCreateSession("c5#t-own", "c5", "t-own");
+    expect(own.backendType).toBe("codex");
+  });
+
+  test("keeps the scope backend after /new", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-new-keeps-agent-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const pipeline = new Pipeline(
+      db, createImStub(), new RecordingAgent(), createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex",
+      async () => new RecordingAgent(),
+      () => ["codex", "claude"],
+    );
+
+    await (pipeline as any).handleAgentCommand(["claude"], "c1", "chat-open-id");
+    await (pipeline as any).sessionTransitionLocks.get("c1");
+    expect(getScopeRuntimeConfig(db, "NiuBot", "c1")?.backendType).toBe("claude");
+
+    (pipeline as any).handleBuiltinCommand("/new", "u2", "c1", "chat-open-id", "p2p");
+    await (pipeline as any).sessionTransitionLocks.get("c1");
+
+    expect(getScopeRuntimeConfig(db, "NiuBot", "c1")?.backendType).toBe("claude");
+    expect((pipeline as any).backendType).toBe("codex");
+  });
+
+  test("topics without an override follow later private default changes", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-scope-config-live-follow-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u2', 'Zen', 'feishu', 'ou-zen')").run();
+    db.prepare("INSERT INTO chats (id, type, platform, platform_id, user_id) VALUES ('c1', 'p2p', 'feishu', 'oc-p2p', 'ou-zen')").run();
+    db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c5', 'group', 'feishu', 'oc-group')").run();
+    const codexAgent = new RecordingAgent();
+    const grokAgent = new RecordingAgent();
+    const pipeline = new Pipeline(
+      db,
+      createImStub(),
+      codexAgent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+      async (type) => type === "grok" ? grokAgent : codexAgent,
+      () => ["codex", "grok"],
+    );
+    (pipeline as any).platformChatIds.set("c1", "oc-p2p");
+    (pipeline as any).platformChatIds.set("c5", "oc-group");
+    (pipeline as any).chatUserIds.set("c5", "u2");
+
+    setScopeRuntimeConfig(db, "NiuBot", "c1", {
+      backendType: "grok",
+    });
+    const first = await (pipeline as any).getOrCreateSession("c5#t1", "c5", "t1");
+    expect(first.backendType).toBe("grok");
+    expect(getScopeRuntimeConfig(db, "NiuBot", "c5#t1")).toBeUndefined();
+
+    await (pipeline as any).archiveSession("c5#t1", "c5");
+    setScopeRuntimeConfig(db, "NiuBot", "c1", {
+      backendType: "codex",
+    });
+    const second = await (pipeline as any).getOrCreateSession("c5#t1", "c5", "t1");
+    expect(second.backendType).toBe("codex");
+    expect(getScopeRuntimeConfig(db, "NiuBot", "c5#t1")).toBeUndefined();
+    expect(grokAgent.createSessionCalls).toHaveLength(1);
+    expect(codexAgent.createSessionCalls).toHaveLength(1);
+  });
+
+  test("follows the current default instead of a leftover session backend", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-scope-config-legacy-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u2', 'Zen', 'feishu', 'ou-zen')").run();
+    db.prepare("INSERT INTO chats (id, type, platform, platform_id, user_id) VALUES ('c1', 'p2p', 'feishu', 'oc-p2p', 'ou-zen')").run();
+    db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c5', 'group', 'feishu', 'oc-group')").run();
+    db.prepare(`
+      INSERT INTO sessions (id, chat_id, user_id, status, thread_id, backend_type, last_active_at)
+      VALUES ('s1', 'c5', 'u2', 'active', 't1', 'grok', datetime('now'))
+    `).run();
+    setScopeRuntimeConfig(db, "NiuBot", "c1", {
+      backendType: "codex",
+    });
+    const codexAgent = new RecordingAgent();
+    const grokAgent = new RecordingAgent();
+    const pipeline = new Pipeline(
+      db,
+      createImStub(),
+      codexAgent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+      async (type) => type === "grok" ? grokAgent : codexAgent,
+      () => ["codex", "grok"],
+    );
+    (pipeline as any).platformChatIds.set("c1", "oc-p2p");
+    (pipeline as any).platformChatIds.set("c5", "oc-group");
+    (pipeline as any).chatUserIds.set("c5", "u2");
+
+    const session = await (pipeline as any).getOrCreateSession("c5#t1", "c5", "t1");
+    expect(session.backendType).toBe("codex");
+    expect(getScopeRuntimeConfig(db, "NiuBot", "c5#t1")).toBeUndefined();
+    expect(codexAgent.createSessionCalls).toHaveLength(1);
+    expect(db.prepare("SELECT status FROM sessions WHERE id = 's1'").get()).toEqual({ status: "discarded" });
+  });
+
+  test("recovers the p2p default after restart when chatUserIds is empty", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-userid-recover-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u2', 'Zen', 'feishu', 'ou-zen')").run();
+    db.prepare("INSERT INTO chats (id, type, platform, platform_id, user_id) VALUES ('c1', 'p2p', 'feishu', 'oc-p2p', 'ou-zen')").run();
+    db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c5', 'group', 'feishu', 'oc-group')").run();
+    db.prepare(`
+      INSERT INTO sessions (id, chat_id, user_id, status, thread_id, backend_type, last_active_at)
+      VALUES ('s1', 'c5', 'u2', 'active', 't1', 'grok', datetime('now'))
+    `).run();
+    setScopeRuntimeConfig(db, "NiuBot", "c1", {
+      backendType: "grok",
+    });
+    const codexAgent = new RecordingAgent();
+    const grokAgent = new RecordingAgent();
+    const pipeline = new Pipeline(
+      db,
+      createImStub(),
+      codexAgent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+      async (type) => type === "grok" ? grokAgent : codexAgent,
+      () => ["codex", "grok"],
+    );
+    (pipeline as any).platformChatIds.set("c5", "oc-group");
+
+    const session = await (pipeline as any).getOrCreateSession("c5#t1", "c5", "t1");
+    expect(session.backendType).toBe("grok");
+    expect(getScopeRuntimeConfig(db, "NiuBot", "c5#t1")).toBeUndefined();
+    expect(grokAgent.createSessionCalls).toHaveLength(1);
+    expect(db.prepare("SELECT status FROM sessions WHERE id = 's1'").get()).toEqual({ status: "active" });
+  });
+
+  test("loop dispatch remembers the creator so group jobs follow p2p default", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-loop-userid-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u2', 'Zen', 'feishu', 'ou-zen')").run();
+    db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c5', 'group', 'feishu', 'oc-group')").run();
+    const now = new Date();
+    const id = addLoopJob(db, {
+      chatId: "c5",
+      threadId: "t1",
+      creatorUserId: "u2",
+      intervalSeconds: 60,
+      prompt: "tick",
+      now: new Date(now.getTime() - 60_000),
+    });
+    claimDueLoopJobs(db, now);
+    const pipeline = new Pipeline(
+      db, createImStub(), new RecordingAgent(), createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex",
+    );
+    pipeline.enqueueLoopJob(id);
+    expect((pipeline as any).chatUserIds.get("c5")).toBe("u2");
+  });
+
+  test("does not freeze a scope when backend creation fails", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-scope-config-failed-backend-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u2', 'Zen', 'feishu', 'ou-zen')").run();
+    db.prepare("INSERT INTO chats (id, type, platform, platform_id, user_id) VALUES ('c1', 'p2p', 'feishu', 'oc-p2p', 'ou-zen')").run();
+    db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c5', 'group', 'feishu', 'oc-group')").run();
+    setScopeRuntimeConfig(db, "NiuBot", "c1", { backendType: "grok" });
+    const pipeline = new Pipeline(
+      db,
+      createImStub(),
+      new RecordingAgent(),
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+      async () => { throw new Error("backend unavailable"); },
+      () => ["codex"],
+    );
+    (pipeline as any).platformChatIds.set("c5", "oc-group");
+    (pipeline as any).chatUserIds.set("c5", "u2");
+
+    await expect((pipeline as any).getOrCreateSession("c5#t1", "c5", "t1")).rejects.toThrow("backend unavailable");
+    expect(getScopeRuntimeConfig(db, "NiuBot", "c5#t1")).toBeUndefined();
+  });
+
+  test("agent reset deletes the override so the topic follows the p2p default", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-agent-reset-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u2', 'Zen', 'feishu', 'ou-zen')").run();
+    db.prepare("INSERT INTO chats (id, type, platform, platform_id, user_id) VALUES ('c1', 'p2p', 'feishu', 'oc-p2p', 'ou-zen')").run();
+    db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c5', 'group', 'feishu', 'oc-group')").run();
+    setScopeRuntimeConfig(db, "NiuBot", "c1", {
+      backendType: "grok",
+    });
+    const codexAgent = new RecordingAgent();
+    const grokAgent = new RecordingAgent();
+    const pipeline = new Pipeline(
+      db,
+      createImStub(),
+      codexAgent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+      async (type) => type === "grok" ? grokAgent : codexAgent,
+      () => ["codex", "grok"],
+    );
+    (pipeline as any).platformChatIds.set("c5", "oc-group");
+    (pipeline as any).chatUserIds.set("c5", "u2");
+
+    await (pipeline as any).handleAgentCommand(["reset"], "c5", "oc-group", undefined, "c5#t1", "t1", "u2");
+    await (pipeline as any).sessionTransitionLocks.get("c5#t1");
+    expect(getScopeRuntimeConfig(db, "NiuBot", "c5#t1")).toBeUndefined();
+
+    setScopeRuntimeConfig(db, "NiuBot", "c1", {
+      backendType: "codex",
+    });
+    const session = await (pipeline as any).getOrCreateSession("c5#t1", "c5", "t1");
+    expect(session.backendType).toBe("codex");
+  });
+
+  test("agent reset restores the p2p model and effort, not the topic overlay", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-agent-reset-models-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u2', 'Zen', 'feishu', 'ou-zen')").run();
+    db.prepare("INSERT INTO chats (id, type, platform, platform_id, user_id) VALUES ('c1', 'p2p', 'feishu', 'oc-p2p', 'ou-zen')").run();
+    db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c5', 'group', 'feishu', 'oc-group')").run();
+    setScopeRuntimeConfig(db, "NiuBot", "c1", {
+      backendType: "grok",
+      model: "haiku",
+      effort: "medium",
+    });
+    setScopeRuntimeConfig(db, "NiuBot", "c5#t1", {
+      backendType: "grok",
+      model: "opus",
+      effort: "max",
+    });
+    const pipeline = new Pipeline(
+      db,
+      createImStub(),
+      new RecordingAgent(),
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+      async () => new RecordingAgent(),
+      () => ["codex", "grok"],
+    );
+    (pipeline as any).chatUserIds.set("c5", "u2");
+
+    await (pipeline as any).handleAgentCommand(["reset"], "c5", "oc-group", undefined, "c5#t1", "t1", "u2");
+    await (pipeline as any).sessionTransitionLocks.get("c5#t1");
+
+    expect(getScopeRuntimeConfig(db, "NiuBot", "c5#t1")).toBeUndefined();
+    expect((pipeline as any).resolveScopeConfig("c5#t1", "u2")).toEqual({
+      backendType: "grok",
+      model: "haiku",
+      effort: "medium",
+    });
+  });
+
+  test("first session uses botIdentity without writing a scope row", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-identity-default-freeze-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u2', 'Zen', 'feishu', 'ou-zen')").run();
+    db.prepare("INSERT INTO chats (id, type, platform, platform_id, user_id) VALUES ('c1', 'p2p', 'feishu', 'oc-p2p', 'ou-zen')").run();
+    const identity = createBotIdentity();
+    identity.model = "gpt-from-identity";
+    identity.effort = "xhigh";
+    const agent = new RecordingAgent();
+    const pipeline = new Pipeline(
+      db,
+      createImStub(),
+      agent,
+      identity,
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+    (pipeline as any).platformChatIds.set("c1", "oc-p2p");
+
+    await (pipeline as any).getOrCreateSession("c1", "c1");
+    expect(agent.createSessionCalls[0]?.model).toBe("gpt-from-identity");
+    expect(agent.createSessionCalls[0]?.reasoningEffort).toBe("xhigh");
+    expect(getScopeRuntimeConfig(db, "NiuBot", "c1")).toBeUndefined();
+  });
+
+  test("does not freeze an archived session backend when no scope snapshot exists", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-archived-session-backfill-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u2', 'Zen', 'feishu', 'ou-zen')").run();
+    db.prepare("INSERT INTO chats (id, type, platform, platform_id, user_id) VALUES ('c1', 'p2p', 'feishu', 'oc-p2p', 'ou-zen')").run();
+    db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c5', 'group', 'feishu', 'oc-group')").run();
+    db.prepare(`
+      INSERT INTO sessions (id, chat_id, user_id, status, thread_id, backend_type, last_active_at)
+      VALUES ('s-old', 'c5', 'u2', 'archived', 't1', 'grok', datetime('now'))
+    `).run();
+    setScopeRuntimeConfig(db, "NiuBot", "c1", {
+      backendType: "codex",
+    });
+    const codexAgent = new RecordingAgent();
+    const grokAgent = new RecordingAgent();
+    const pipeline = new Pipeline(
+      db,
+      createImStub(),
+      codexAgent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+      async (type) => type === "grok" ? grokAgent : codexAgent,
+      () => ["codex", "grok"],
+    );
+    (pipeline as any).platformChatIds.set("c5", "oc-group");
+    (pipeline as any).chatUserIds.set("c5", "u2");
+
+    const session = await (pipeline as any).getOrCreateSession("c5#t1", "c5", "t1");
+    expect(session.backendType).toBe("codex");
+    expect(getScopeRuntimeConfig(db, "NiuBot", "c5#t1")).toBeUndefined();
+    expect(codexAgent.createSessionCalls).toHaveLength(1);
+    expect(grokAgent.createSessionCalls).toHaveLength(0);
+  });
+
+  test("reports /model failure when the scope backend cannot be loaded", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-model-backend-load-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u2', 'Zen', 'feishu', 'ou-zen')").run();
+    db.prepare("INSERT INTO chats (id, type, platform, platform_id, user_id) VALUES ('c1', 'p2p', 'feishu', 'oc-p2p', 'ou-zen')").run();
+    setScopeRuntimeConfig(db, "NiuBot", "c1", {
+      backendType: "grok",
+    });
+    const { im, sentCards } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db,
+      im,
+      new RecordingAgent(),
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+      async (type) => {
+        if (type === "grok") throw new Error("grok CLI not found");
+        return new RecordingAgent();
+      },
+      () => ["codex", "grok"],
+    );
+
+    await (pipeline as any).handleModelCommand(["gpt-x"], "c1", "oc-p2p", undefined, "c1", "u2");
+
+    expect(sentCards.at(-1)?.header).toBe("Model|red");
+    expect(sentCards.at(-1)?.content).toContain("处理 /model 失败");
+    expect(sentCards.at(-1)?.content).toContain("grok CLI not found");
+    expect(getScopeRuntimeConfig(db, "NiuBot", "c1")).toEqual({ backendType: "grok" });
   });
 
   test("archives the current session on /new", async () => {
@@ -3505,7 +4554,7 @@ bots:
     expect(sentTexts.some((text) => text.includes("新建会话失败"))).toBe(false);
   });
 
-  test("does not claim an orphaned active session was archived without a file", async () => {
+  test("archives an unloaded session from the stored native backend id", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
     const db = initDatabase(path.join(dir, "niubot.db"));
@@ -3520,9 +4569,55 @@ bots:
     await (pipeline as any).archiveSession("c1");
 
     expect(db.prepare("SELECT status, agent_session_id FROM sessions WHERE id = 'orphan'").get()).toEqual({
-      status: "archive_failed",
+      status: "archived",
       agent_session_id: "native-session-id",
     });
+    expect(existsSync(path.join(dir, ".niubot-test", "NiuBot", "session-archives", "c1"))).toBe(true);
+  });
+
+  test("discards an unloaded session whose stored id is an engine wrapper", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare(`
+      INSERT INTO sessions (id, chat_id, user_id, status, agent_session_id, backend_type, started_at, last_active_at)
+      VALUES ('wrapper', 'c1', 'u2', 'active', 'grok_1787630975612_af90f32a', 'grok', datetime('now'), datetime('now'))
+    `).run();
+    const { im, sentTexts } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db, im, new RecordingAgent(), createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "grok",
+    );
+
+    (pipeline as any).handleBuiltinCommand("/new", "u2", "c1", "chat-open-id");
+    await (pipeline as any).sessionTransitionLocks.get("c1");
+
+    expect(db.prepare("SELECT status FROM sessions WHERE id = 'wrapper'").get()).toEqual({
+      status: "discarded",
+    });
+    expect(sentTexts).toContain("已开始新会话，当前上下文已清空。");
+    expect(sentTexts.some((text) => text.includes("归档失败"))).toBe(false);
+  });
+
+  test("marks an unloaded wrapper session as archive_failed when it already has turns", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare(`
+      INSERT INTO sessions (id, chat_id, user_id, status, agent_session_id, backend_type, started_at, last_active_at, turn_count, message_count)
+      VALUES ('wrapper-used', 'c1', 'u2', 'active', 'grok_1787630975612_af90f32a', 'grok', datetime('now'), datetime('now'), 2, 4)
+    `).run();
+    const { im, sentTexts } = createRecordingImStub();
+    const pipeline = new Pipeline(
+      db, im, new RecordingAgent(), createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "grok",
+    );
+
+    (pipeline as any).handleBuiltinCommand("/new", "u2", "c1", "chat-open-id");
+    await (pipeline as any).sessionTransitionLocks.get("c1");
+
+    expect(db.prepare("SELECT status FROM sessions WHERE id = 'wrapper-used'").get()).toEqual({
+      status: "archive_failed",
+    });
+    expect(sentTexts.some((text) => text.includes("归档失败"))).toBe(true);
   });
 
   test("does not change an active independent session when /new has no main session", async () => {
@@ -3652,7 +4747,7 @@ bots:
 
     expect(events).toEqual(["refresh", "create", "refresh", "create"]);
     expect(agent.createSessionCalls).toHaveLength(2);
-    expect(agent.createSessionCalls[1]?.agentSessionId).toBe("agent_1");
+    expect(agent.createSessionCalls[1]?.agentSessionId).toBe("native-agent_1");
   });
 
   test("does not retry an uncertain card timeout and still releases the queue", async () => {
@@ -4050,6 +5145,7 @@ bots:
     expect(agent.sendMessageCalls).toHaveLength(1);
     expect(agent.sendMessageCalls[0]).toContain("<session-profile");
     expect(agent.sendMessageCalls[0]).toContain("这是一个全新的对话 session");
+    expect(agent.sendMessageCalls[0]).toContain("<niubot-user-message");
     expect(agent.sendMessageCalls[0]).not.toContain("<niubot-system-rules>");
     expect(agent.sendMessageCalls[0]).not.toContain("plain bot profile");
   });
@@ -4096,6 +5192,7 @@ bots:
     expect(agent.sendMessageCalls[0]).toContain("<session-profile");
     expect(agent.sendMessageCalls[0]).toContain("这是一个全新的对话 session");
     expect(agent.sendMessageCalls[0]).toContain("hello");
+    expect(agent.sendMessageCalls[0]).toContain("<niubot-user-message");
   });
 
   test("passes stable context to backend but not first user prompt when backend handles stable itself", async () => {
@@ -4139,6 +5236,7 @@ bots:
     expect(agent.sendMessageCalls[0]).not.toContain("<niubot-system-rules>");
     expect(agent.sendMessageCalls[0]).not.toContain("cursor rules profile");
     expect(agent.sendMessageCalls[0]).toContain("hello");
+    expect(agent.sendMessageCalls[0]).toContain("<niubot-user-message");
   });
 
   test("does not read workspace bot profile when stable context options are omitted", async () => {
@@ -4222,9 +5320,10 @@ bots:
     expect(agent.sendMessageCalls[3]).toContain(COMPACT_RECOVERY_REMINDER);
     expect(agent.sendMessageCalls[3]).not.toContain("<niubot-system-rules>");
     expect(agent.sendMessageCalls[3]).toContain("fourth");
-    for (const call of agent.sendMessageCalls) {
-      expect(call).toContain("<niubot-user-message");
-    }
+    expect(agent.sendMessageCalls[0]).toContain("<niubot-user-message");
+    expect(agent.sendMessageCalls[1]).toContain("<niubot-user-message");
+    expect(agent.sendMessageCalls[2]).not.toContain("<niubot-user-message");
+    expect(agent.sendMessageCalls[3]).toContain("<niubot-user-message");
     expect(SYSTEM_RULES).toContain("nbt system-rules");
   });
 

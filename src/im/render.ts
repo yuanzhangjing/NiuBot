@@ -1,61 +1,72 @@
 /**
- * 统一消息渲染工具 — YAML 风格格式。
- * 被 adapter（merge_forward 内部渲染）和 pipeline（顶层消息格式化）共用。
+ * 把 MessageNode 树渲染成给 agent 看的标签结构。
+ * 叶子 → <msg>，转发 → <forward>，引用 → <quoted>。
  */
 import type { MessageNode } from "./types.js";
 
-/** 转义 YAML msg 值中的双引号、换行、反斜杠，保持单行格式 */
-export function escapeYamlContent(s: string): string {
-  return s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n");
+export function escapeXmlText(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+export function escapeXmlAttr(s: string): string {
+  return escapeXmlText(s).replace(/"/g, "&quot;");
+}
+
+export function isStructuredImPayload(text: string): boolean {
+  const t = text.trimStart();
+  return t.startsWith("<msg") || t.startsWith("<forward") || t.startsWith("<quoted");
+}
+
+/** 当前这条用户消息。 */
+export function renderMsg(speaker: string, content: string): string {
+  return wrapTag("msg", speaker, escapeXmlText(content));
+}
+
+/** 被回复的那条。 */
+export function renderQuotedText(speaker: string, content: string): string {
+  return wrapTag("quoted", speaker, escapeXmlText(content));
+}
+
+/** 合并转发根节点。 */
+export function renderForward(speaker: string, children: MessageNode[]): string {
+  return wrapTag("forward", speaker, renderMessageNodes(children));
 }
 
 /**
- * 统一渲染 MessageNode 列表为 YAML 风格文本。
- * 规则：
- *   - 叶子消息 → - msg: "sender: content"
- *   - 转发组   → - forward: sender + messages 列表
- *   - 引用     → quoted 字段（同结构）
+ * 渲染 MessageNode 列表。
+ * depth 保留给旧调用方，标签不靠缩进表达结构。
  */
-export function renderMessageNodes(nodes: MessageNode[], depth: number): string {
-  const lines: string[] = [];
-  const indent = "  ".repeat(depth);
-
-  for (const node of nodes) {
-    if (lines.length > 0) lines.push("");
-
-    if (node.contentType === "forward" && node.children) {
-      // 转发组
-      lines.push(`${indent}- forward: ${node.sender}`);
-      if (node.quoted) {
-        renderQuoted(node.quoted, depth + 1, lines);
-      }
-      lines.push(`${indent}  messages:`);
-      lines.push(renderMessageNodes(node.children, depth + 2));
-    } else {
-      // 叶子消息
-      const content = node.content ?? `[${node.contentType}]`;
-      lines.push(`${indent}- msg: "${escapeYamlContent(node.sender)}: ${escapeYamlContent(content)}"`);
-      if (node.quoted) {
-        renderQuoted(node.quoted, depth + 1, lines);
-      }
-    }
-  }
-
-  return lines.join("\n");
+export function renderMessageNodes(nodes: MessageNode[], _depth = 0): string {
+  return nodes.map((node) => renderMessageNode(node)).join("\n");
 }
 
-/** 渲染 quoted 字段 */
-function renderQuoted(node: MessageNode, depth: number, lines: string[]): void {
-  const indent = "  ".repeat(depth);
+function renderMessageNode(node: MessageNode): string {
   if (node.contentType === "forward" && node.children) {
-    lines.push(`${indent}quoted:`);
-    lines.push(`${indent}  forward: ${node.sender}`);
-    lines.push(`${indent}  messages:`);
-    lines.push(renderMessageNodes(node.children, depth + 2));
-  } else {
-    const sender = node.sender ? `${escapeYamlContent(node.sender)}: ` : "";
-    const content = escapeYamlContent(node.content ?? `[${node.contentType}]`);
-    lines.push(`${indent}quoted:`);
-    lines.push(`${indent}  msg: "${sender}${content}"`);
+    const parts: string[] = [];
+    if (node.quoted) parts.push(renderQuotedNode(node.quoted));
+    parts.push(renderMessageNodes(node.children));
+    return wrapTag("forward", node.sender, parts.join("\n"));
   }
+  const content = escapeXmlText(node.content ?? `[${node.contentType}]`);
+  if (node.quoted) {
+    return wrapTag("msg", node.sender, `${content}\n${renderQuotedNode(node.quoted)}`);
+  }
+  return wrapTag("msg", node.sender, content);
+}
+
+function renderQuotedNode(node: MessageNode): string {
+  if (node.contentType === "forward" && node.children) {
+    return wrapTag("quoted", undefined, renderMessageNode(node));
+  }
+  const content = escapeXmlText(node.content ?? `[${node.contentType}]`);
+  if (node.quoted) {
+    return wrapTag("quoted", node.sender, `${content}\n${renderQuotedNode(node.quoted)}`);
+  }
+  return wrapTag("quoted", node.sender, content);
+}
+
+function wrapTag(tag: string, speaker: string | undefined, inner: string): string {
+  const attr = speaker?.trim() ? ` speaker="${escapeXmlAttr(speaker.trim())}"` : "";
+  if (!inner.includes("\n")) return `<${tag}${attr}>${inner}</${tag}>`;
+  return `<${tag}${attr}>\n${inner}\n</${tag}>`;
 }

@@ -20,13 +20,23 @@
 
 ### 1. 会话与 resume
 
+三种 id，禁止混用（定义见 `src/agent/session-id.ts`）：
+
+| 名字 | 字段 | 用途 | 禁止 |
+|---|---|---|---|
+| **ChatSessionId** | `sessions.id` | NiuBot 会话记录、footer | 拿去 `--resume` |
+| **EngineHandle** | `AgentSession.id` | 引擎 Map 键，`createEngineHandle()` 生成 | `--resume`、写入 `sessions.agent_session_id` |
+| **NativeSessionId** | `BaseCliSession.agentSessionId` / `sessions.agent_session_id` | 唯一允许 `--resume` 的 backend 真 id | 放入 EngineHandle |
+
+写入或续接 NativeSessionId 必须走 `nativeSessionId()`。EngineHandle 只允许 `createEngineHandle()` 创建。
+
 | 要求 | 说明 |
 |---|---|
-| 首轮能拿到 agent session id | 越早越好：流式首事件 / 预分配 `--session-id` / 首条 JSON |
-| `agentSessionId` 语义 | **仅在 CLI 真正开场后**写入；预分配 id 用单独字段（如 `clientSessionId`），否则失败首轮会被当成已开场 |
-| 后续轮 resume | 有 id 后必须走 resume/continue，不能重复 create |
+| 首轮能拿到 NativeSessionId | 越早越好：流式首事件 / 预分配 `--session-id` / 首条 JSON |
+| NativeSessionId 语义 | **仅在 CLI 真正开场后**写入；预分配 id 用单独字段（如 `clientSessionId`），否则失败首轮会被当成已开场 |
+| 后续轮 resume | 有 NativeSessionId 后必须走 resume/continue，不能重复 create。resume 失败就报错，不要自动新开；要开新场由用户 `/new` |
 | 崩溃半开场 | 若本地 session 目录/文件已存在，下一轮必须 resume，不能再 create 同 id |
-| 进程重启 recover | pipeline 会把 DB 里的 `agent_session_id` 塞进 `SessionConfig.agentSessionId` |
+| 进程重启 recover | pipeline 把 DB 的 `agent_session_id` 经 `nativeSessionId()` 后塞进 `SessionConfig.agentSessionId` |
 
 ### 2. 用户可见回复（最容易错）
 
@@ -127,5 +137,6 @@
 - 用 spend `total_tokens`（含大 cache）当 footer 上下文  
 - 等进程退出才第一次知道 session id  
 - 依赖基类默认 `recentLines`（stdout 原样）当 `/status` 日志  
-- 预分配 id 直接写进 `agentSessionId`，失败首轮被当成已开场  
+- 预分配 id 直接写进 NativeSessionId（`agentSessionId`），失败首轮被当成已开场  
+- 把 EngineHandle（`AgentSession.id`）写进 `sessions.agent_session_id` 或拿去 `--resume`  
 - 对照另一个 backend 抄完就发版，不经真机多轮 + `/status` + 重启 resume  

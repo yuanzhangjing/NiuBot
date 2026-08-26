@@ -300,7 +300,9 @@ export default class CodexBackend extends CliAgentBackend<CodexSession> {
         const monthDir = join(yearDir, month);
         for (const day of this.readDirectoryNames(monthDir)) {
           const dayDir = join(monthDir, day);
-          const match = this.readFileNames(dayDir).find((name) => name.endsWith(`${session.agentSessionId}.jsonl`));
+          const match = this.readFileNames(dayDir).find((name) => (
+            name === `${session.agentSessionId}.jsonl` || name.endsWith(`-${session.agentSessionId}.jsonl`)
+          ));
           if (match) {
             session.sessionLogPath = join(dayDir, match);
             return session.sessionLogPath;

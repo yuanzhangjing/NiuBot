@@ -39,13 +39,18 @@ export interface SessionConfig {
   isAdmin?: boolean;
   /** Bot profile 路径（仅管理员 session 传递给 agent 环境变量） */
   botProfilePath?: string;
-  /** Agent 侧 session ID（用于 recover 时 resume） */
+  /**
+   * NativeSessionId：backend 原生会话 id，用于 --resume。
+   * 禁止传 EngineHandle（`AgentSession.id` / `grok_时间戳_hex`）。
+   * 写入前必须经过 `nativeSessionId()`。
+   */
   agentSessionId?: string;
   /** 主会话调度能力令牌：仅主 Agent 回合注入，独立 session 不注入，防止身份借用 */
   scheduleToken?: string;
 }
 
 export interface AgentSession {
+  /** EngineHandle：引擎内部句柄，CliAgentBackend Map 键。不是 NativeSessionId，不能 --resume。 */
   id: string;
 }
 
@@ -136,8 +141,8 @@ export interface AgentBackend {
   /** 获取 session 累计字节数（可选，用于统计） */
   getCumulativeBytes?(sessionId: string): number;
 
-  /** 获取 agent 侧 session ID（用于持久化，recover 时 resume） */
-  getAgentSessionId?(sessionId: string): string | undefined;
+  /** 返回 NativeSessionId（用于落库和 resume）。参数是 EngineHandle。禁止返回 EngineHandle。 */
+  getAgentSessionId?(engineHandle: string): string | undefined;
 
   /**
    * stable context 是否由 pipeline 前缀进首条 user（及 compact 后重灌）。

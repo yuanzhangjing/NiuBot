@@ -18,7 +18,7 @@ const LEGACY_DEFAULT_BOT_PROFILE = `# Bot Profile
 /** 新 session 首条消息：引导 agent 按需检索历史上下文 */
 export const NEW_SESSION_SEARCH_REMINDER =
 `<system-reminder>
-这是一个全新的对话 session。如果用户提到历史决策、旧任务或你不确定的背景，先使用 nbt sessions search/get 检索当前聊天的原生 session 记录，不要凭记忆猜测。
+这是一个全新的对话 session。如果用户提到历史决策、旧任务或你不确定的背景，先使用 nbt sessions list 查看当前话题的会话，再按需 search/get，不要凭记忆猜测。
 </system-reminder>`;
 
 /** compact 后下一条消息：提醒 agent 恢复可能被压缩掉的规则和状态 */
@@ -28,7 +28,7 @@ export const COMPACT_RECOVERY_REMINDER =
 如果 NiuBot 系统规则丢失，先运行 nbt system-rules。
 如果当前身份、会话或用户记忆丢失，运行 nbt whoami。
 如果最近对话丢失，运行 nbt messages list。
-如果历史对话细节丢失，使用 nbt sessions search/get 检索当前聊天的原生 session 记录。
+如果当前话题的活跃会话或历史细节丢失，先用 nbt sessions list，再按需使用 nbt sessions search/get。
 如果任务状态丢失，运行 nbt task list，并读取对应 task README。
 如果问题涉及项目规则原文，重新读取 workspace 的 AGENTS.md。
 不要把 compact 摘要当成原文。
@@ -148,9 +148,12 @@ export function buildImportantContext(
   }
   const chatDisplay = scene.chatLabel ?? scene.chatId;
   sceneLines.push(`会话：${chatDisplay}（${isGroup ? "群聊" : "私聊"}）`);
-
   if (isGroup) {
-    // 群聊：不在 session 级注入用户身份，由消息级 <current-speaker> 动态注入
+    const bots = listChatBots(db, scene.chatId, extractUserIdFromShortLabel(scene.botLabel));
+    if (bots.length > 0) {
+      sceneLines.push(`本群 Bot：${bots.map((bot) => formatShortLabel(bot.id, bot.name)).join("、")}`);
+    }
+    sceneLines.push("要通知其他人或 Bot，用 @ 加短号即可，例如 U2。");
   } else if (scene.userId) {
     // 私聊：在 session 级注入用户身份和记忆
     const userDisplay = formatShortLabel(scene.userId, scene.userName);
@@ -164,10 +167,6 @@ export function buildImportantContext(
     }
   }
   parts.push(`<current-scene>\n${sceneLines.join("\n")}\n</current-scene>`);
-
-  if (isGroup) {
-    parts.push(buildBotCollabContext(db, scene.chatId, scene.botLabel));
-  }
 
   // 2. User memory（仅私聊注入，群聊由消息级注入）
   if (!isGroup && scene.userId) {
@@ -195,28 +194,10 @@ export interface SpeakerInfo {
   isBot?: boolean;
 }
 
-const BOT_COLLAB_RULES = `只有明确需要其他 Bot 收到、感知这条消息时才 at 它；其他时候不要 at。
-不 at 就不会被叫醒。人看得见群里的消息，不必为了给人看去 at。
-叫其他 Bot 用 @U4 这种短号，引擎会转成飞书 at。不要手写飞书 at 标签。`;
-
 function extractUserIdFromShortLabel(label: string | undefined): string | undefined {
   if (!label) return undefined;
   const match = label.match(/^U(\d+)/i);
   return match ? `u${match[1]}` : undefined;
-}
-
-export function buildBotCollabContext(
-  db: Database.Database,
-  chatId: string,
-  botLabel?: string,
-): string {
-  const selfUserId = extractUserIdFromShortLabel(botLabel);
-  const bots = listChatBots(db, chatId, selfUserId);
-  const lines = [BOT_COLLAB_RULES];
-  if (bots.length > 0) {
-    lines.push(`本群 Bot：${bots.map((bot) => formatShortLabel(bot.id, bot.name)).join("、")}`);
-  }
-  return `<bot-collab>\n${lines.join("\n")}\n</bot-collab>`;
 }
 
 /**
@@ -271,8 +252,8 @@ export function buildSpeakerContext(
 // ── Task and conversation context (可以接受 compact 压缩) ──────
 
 /**
- * 构建 task/conversation 上下文：task 索引 + session 归档目录 + 续接消息。
- * 注入 user prompt 前缀。
+ * 构建 task/conversation 上下文：task 索引 + 续接消息。
+ * 历史检索走 nbt sessions，不再把归档目录 path 注入 prompt。
  */
 export function buildNormalContext(
   db: Database.Database,
@@ -281,29 +262,20 @@ export function buildNormalContext(
   beforeMsgId?: number,
   chatType: "p2p" | "group" = "p2p",
   userId?: string,
-  sessionArchiveDirectory?: string,
   threadId?: string,
+  mainThreadOnly = false,
 ): string {
   const parts: string[] = [];
 
-  // 1. 活跃任务索引（统一走 task 管理接口做可见性过滤）
   const taskContext = buildActiveTaskContext(workingDirectory, chatType, userId);
   if (taskContext) parts.push(taskContext);
 
-  // 2. 当前 chat 的完整 session 归档入口
-  if (sessionArchiveDirectory) parts.push(buildSessionArchiveContext(sessionArchiveDirectory));
-
-  // 3. 续接上下文：最近对话尾部消息 — 最微观，紧接用户新消息
-  const continuation = buildContinuationContext(db, chatId, beforeMsgId, threadId);
+  const continuation = buildContinuationContext(db, chatId, beforeMsgId, threadId, mainThreadOnly);
   if (continuation) {
     parts.push(continuation);
   }
 
   return parts.join("\n\n");
-}
-
-export function buildSessionArchiveContext(sessionArchiveDirectory: string): string {
-  return `<session-archives path=${JSON.stringify(sessionArchiveDirectory)}>\n这里保存当前聊天已归档 session 的原生数据源引用和元数据。需要恢复更早的事实、决策或执行过程时，使用 nbt sessions list/search/get 检索和解析。\n</session-archives>`;
 }
 
 export function buildActiveTaskContext(
@@ -327,12 +299,19 @@ function buildContinuationContext(
   chatId: string,
   beforeMsgId?: number,
   threadId?: string,
+  mainThreadOnly = false,
 ): string | null {
   // 确认该 chat 存在已归档的 session（没有历史 session 则不需要续接）
   if (!hasEndedUserSession(db, chatId)) return null;
 
   // 捞该 chat 最近 N 条消息（截止到当前消息之前，避免把用户刚发的消息当历史注入）
-  const rows = listContinuationMessages(db, { chatId, threadId, beforeMsgId, limit: CONTINUATION_TAIL_COUNT });
+  const rows = listContinuationMessages(db, {
+    chatId,
+    threadId,
+    mainThreadOnly,
+    beforeMsgId,
+    limit: CONTINUATION_TAIL_COUNT,
+  });
 
   if (rows.length === 0) return null;
 
@@ -349,7 +328,7 @@ function buildContinuationContext(
     lines[0] = `…${lines[0]!.slice(-(CONTINUATION_TOTAL_MAX_LEN - 1))}`;
   }
 
-  return `<recent-messages>\n以下是最近的对话记录：\n\n${lines.join("\n")}\n\n不必复述，结合全局状态自然延续即可。\n</recent-messages>`;
+  return `<recent-messages>\n以下是最近的对话记录：\n\n${lines.join("\n")}\n\n不必复述，结合全局状态自然延续即可。更早的消息用 nbt messages list / search。\n</recent-messages>`;
 }
 
 // ── Task index ─────────────────────────────────────────────
