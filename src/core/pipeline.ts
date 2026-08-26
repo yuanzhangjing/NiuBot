@@ -380,7 +380,7 @@ export class Pipeline {
   /** bot 的内部用户 ID */
   private botUserId: string | null = null;
 
-  /** 本群连续被 Bot 触发并跑 Agent 的回合数（人入站清零） */
+  /** 每个 session scope 连续被 Bot 触发并跑 Agent 的回合数（人入站清零） */
   private botTurnCounts = new Map<string, number>();
 
   /** admin 角色映射：userId → role */
@@ -860,6 +860,24 @@ export class Pipeline {
     return chatRow.id;
   }
 
+  private resolveOutboundScopeKey(
+    platformChatId: string,
+    scheduleToken?: string,
+    explicitScopeKey?: string,
+  ): string {
+    const chatRow = this.db.prepare("SELECT id FROM chats WHERE platform_id = ?")
+      .get(platformChatId) as { id: string } | undefined;
+    const chatId = chatRow?.id;
+    const tokenScopeKey = scheduleToken ? this.tokenToScope.get(scheduleToken) : undefined;
+    const matchesChat = (candidate?: string): candidate is string => {
+      if (!candidate) return false;
+      return !chatId || parseScopeKey(candidate).chatId === chatId;
+    };
+    if (matchesChat(tokenScopeKey)) return tokenScopeKey;
+    if (matchesChat(explicitScopeKey)) return explicitScopeKey;
+    return chatId ?? this.platformChatIdToScopeKey(platformChatId) ?? platformChatId;
+  }
+
   /** IPC 发送：仅主 Agent 当前回合（schedule token 匹配）才挂到用户消息下 */
   private currentTurnReplyTarget(
     platformChatId: string,
@@ -921,14 +939,14 @@ export class Pipeline {
     scheduleToken?: string,
     scope?: { scopeKey?: string; threadId?: string; replyToMsgId?: string },
   ): Promise<void> {
-    const scopeKey = scope?.scopeKey ?? this.platformChatIdToScopeKey(platformChatId) ?? platformChatId;
+    const scopeKey = this.resolveOutboundScopeKey(platformChatId, scheduleToken, scope?.scopeKey);
     const chatId = parseScopeKey(scopeKey).chatId;
-    const threadId = scope?.threadId;
+    const threadId = parseScopeKey(scopeKey).threadId ?? scope?.threadId;
     const inThread = this.userSpokeInThread(chatId, threadId);
     const replyToMsgId = scope?.replyToMsgId
       ?? this.currentTurnReplyTarget(platformChatId, scheduleToken, scopeKey)
       ?? (inThread && threadId ? this.latestThreadPlatformMsgId(chatId, threadId) : undefined);
-    const prepared = this.prepareOutboundText(platformChatId, text);
+    const prepared = this.prepareOutboundText(platformChatId, text, scopeKey);
     const platformMsgId = await this.sendPreferringReply(
       platformChatId,
       "sendToChat",
@@ -957,14 +975,14 @@ export class Pipeline {
     scheduleToken?: string,
     scope?: { scopeKey?: string; threadId?: string; replyToMsgId?: string },
   ): Promise<void> {
-    const scopeKey = scope?.scopeKey ?? this.platformChatIdToScopeKey(platformChatId) ?? platformChatId;
+    const scopeKey = this.resolveOutboundScopeKey(platformChatId, scheduleToken, scope?.scopeKey);
     const chatId = parseScopeKey(scopeKey).chatId;
-    const threadId = scope?.threadId;
+    const threadId = parseScopeKey(scopeKey).threadId ?? scope?.threadId;
     const inThread = this.userSpokeInThread(chatId, threadId);
     const replyToMsgId = scope?.replyToMsgId
       ?? this.currentTurnReplyTarget(platformChatId, scheduleToken, scopeKey)
       ?? (inThread && threadId ? this.latestThreadPlatformMsgId(chatId, threadId) : undefined);
-    const prepared = this.prepareOutboundText(platformChatId, content);
+    const prepared = this.prepareOutboundText(platformChatId, content, scopeKey);
     const platformMsgId = await this.sendCardKeepingAt(
       platformChatId,
       "sendCardToChat",
@@ -1047,6 +1065,7 @@ export class Pipeline {
   private prepareOutboundText(
     platformChatId: string,
     text: string,
+    scopeKey?: string,
   ): {
     text: string;
     historyText: string;
@@ -1055,7 +1074,9 @@ export class Pipeline {
       .get(platformChatId) as { id: string; type: string } | undefined;
     const chatId = chatRow?.id;
     const isGroup = chatRow?.type === "group";
-    const fuseTripped = isGroup && !!chatId && (this.botTurnCounts.get(chatId) ?? 0) > BOT_COLLAB_FUSE_LIMIT;
+    const resolvedScopeKey = scopeKey ?? chatId;
+    const botTurnCount = resolvedScopeKey ? (this.botTurnCounts.get(resolvedScopeKey) ?? 0) : 0;
+    const fuseTripped = isGroup && !!resolvedScopeKey && botTurnCount > BOT_COLLAB_FUSE_LIMIT;
     const users = this.loadMentionUsers();
     const result = rewriteOutboundMentions(text, users, {
       selfUserId: this.botUserId,
@@ -1063,7 +1084,7 @@ export class Pipeline {
     });
     let out = result.text;
     if (fuseTripped) {
-      this.log.info("bot-collab fuse tripped", { chatId, count: chatId ? this.botTurnCounts.get(chatId) : undefined });
+      this.log.info("bot-collab fuse tripped", { chatId, scopeKey: resolvedScopeKey, count: botTurnCount });
       out = appendFuseNotice(out);
     }
     return {
@@ -1083,9 +1104,10 @@ export class Pipeline {
       allowChatFallback?: boolean;
       signal?: AbortSignal;
       textFallback?: string | ((error: unknown) => string);
+      scopeKey?: string;
     },
   ): Promise<SendResult & { historyText: string; sentText: string }> {
-    const prepared = this.prepareOutboundText(platformChatId, options.content);
+    const prepared = this.prepareOutboundText(platformChatId, options.content, options.scopeKey);
     const result = await this.responseSender.sendFinalResponse({
       chatId: platformChatId,
       header: options.header,
@@ -1133,22 +1155,22 @@ export class Pipeline {
     );
   }
 
-  private noteHumanInbound(chatId: string, senderIsBot?: boolean): void {
-    if (!senderIsBot) this.botTurnCounts.set(chatId, 0);
+  private noteHumanInbound(scopeKey: string, senderIsBot?: boolean): void {
+    if (!senderIsBot) this.botTurnCounts.set(scopeKey, 0);
   }
 
-  private noteBotCollabTurn(chatId: string, chatType: "p2p" | "group", messages: QueuedMessage[]): void {
+  private noteBotCollabTurn(scopeKey: string, chatType: "p2p" | "group", messages: QueuedMessage[]): void {
     if (chatType !== "group") return;
     const inbound = messages.filter((message) => !message.triggerKind || message.triggerKind === "user");
     if (inbound.length === 0) return;
     const anyHuman = inbound.some((message) => !message.senderId || !getUserIsBot(this.db, message.senderId));
     if (anyHuman) {
-      this.botTurnCounts.set(chatId, 0);
+      this.botTurnCounts.set(scopeKey, 0);
       return;
     }
-    const next = (this.botTurnCounts.get(chatId) ?? 0) + 1;
-    this.botTurnCounts.set(chatId, next);
-    this.log.info("bot-collab turn", { chatId, count: next });
+    const next = (this.botTurnCounts.get(scopeKey) ?? 0) + 1;
+    this.botTurnCounts.set(scopeKey, next);
+    this.log.info("bot-collab turn", { scopeKey, count: next });
   }
 
   /** 通过 IPC 发送文件到指定 chat */
@@ -1158,9 +1180,9 @@ export class Pipeline {
     scheduleToken?: string,
     scope?: { scopeKey?: string; threadId?: string; replyToMsgId?: string },
   ): Promise<void> {
-    const scopeKey = scope?.scopeKey ?? this.platformChatIdToScopeKey(platformChatId) ?? platformChatId;
+    const scopeKey = this.resolveOutboundScopeKey(platformChatId, scheduleToken, scope?.scopeKey);
     const chatId = parseScopeKey(scopeKey).chatId;
-    const threadId = scope?.threadId;
+    const threadId = parseScopeKey(scopeKey).threadId ?? scope?.threadId;
     const inThread = this.userSpokeInThread(chatId, threadId);
     const replyToMsgId = scope?.replyToMsgId
       ?? this.currentTurnReplyTarget(platformChatId, scheduleToken, scopeKey)
@@ -1546,7 +1568,7 @@ export class Pipeline {
     const chatUserId = msg.chatType === "p2p" ? msg.senderPlatformId : undefined;
     const chatId = ensureChat(this.db, platform, msg.chatPlatformId, msg.chatType, msg.chatName, chatUserId);
     const scope = this.resolveMessageScope(chatId, msg.chatPlatformId, msg);
-    this.noteHumanInbound(chatId, msg.senderIsBot);
+    this.noteHumanInbound(scope.scopeKey, msg.senderIsBot);
 
     if (this.globalSessionTransition || this.sessionTransitionLocks.has(scope.scopeKey)) {
       this.log.info("message deferred during session transition", {
@@ -1756,7 +1778,8 @@ export class Pipeline {
     const userId = ensureUser(this.db, platform, msg.senderPlatformId, msg.senderName, "bot_sender");
     if (msg.senderIsBot) setUserIsBot(this.db, userId);
     const chatId = ensureChat(this.db, platform, msg.chatPlatformId, msg.chatType, msg.chatName);
-    this.noteHumanInbound(chatId, msg.senderIsBot);
+    const scope = this.resolveMessageScope(chatId, msg.chatPlatformId, msg);
+    this.noteHumanInbound(scope.scopeKey, msg.senderIsBot);
 
     const platformTsStr = msg.platformTs
       ? utcDateTimeForSql(new Date(msg.platformTs))
@@ -2881,7 +2904,7 @@ export class Pipeline {
       // 引用触发消息（/goal 那条）；只发一次最终正文，发送成功后结算
       const activeRun = this.runtimeState.getActiveRunForScope(scopeKey);
       const replyToMsgId = activeRun?.replyToPlatformMsgId ?? undefined;
-      const delivered = await this.deliverGoalFinalResponse(chatSession, goal, response, replyToMsgId, signal);
+      const delivered = await this.deliverGoalFinalResponse(scopeKey, chatSession, goal, response, replyToMsgId, signal);
       this.finishGoal(chatId, goal, outcome, conclusion, delivered);
       return true;
     }
@@ -2967,6 +2990,7 @@ export class Pipeline {
 
   /** 发送 Goal 最终正文（唯一一次 IM 交付，卡片 + 引用触发消息 + 汇总 + footer；与常规交付同一降级链）；失败时返回 false。 */
   private async deliverGoalFinalResponse(
+    scopeKey: string,
     chatSession: ChatSession,
     goal: ActiveGoal,
     response: AgentResponse,
@@ -2982,6 +3006,7 @@ export class Pipeline {
       "SELECT turn_count FROM sessions WHERE id = ?",
     ).get(chatSession.sessionId) as { turn_count: number } | undefined;
     const result = await this.sendPreparedFinalResponse(chatSession.platformChatId, {
+      scopeKey,
       header: buildGoalCardHeader(goal, elapsedMs),
       content: `> 目标：${goal.objective}\n\n${text}`,
       footer: buildResponseFooter({
@@ -3295,6 +3320,7 @@ export class Pipeline {
       }
       // 统一最终交付：卡片（带 footer）→ 文本 → 文件降级链，与主对话/Goal 同一套
       const sendResult = await this.sendPreparedFinalResponse(platformChatId, {
+        scopeKey,
         header,
         content,
         footer,
@@ -4804,7 +4830,7 @@ export class Pipeline {
     const existingGoal = this.activeGoals.get(scopeKey);
     if (existingGoal && !existingGoal.endedAt && (existingGoal.finishRunId === runId || existingGoal.turnCount > 0)) {
       const goalChatType = (this.db.prepare("SELECT type FROM chats WHERE id = ?").get(chatId) as { type: string } | undefined)?.type;
-      this.noteBotCollabTurn(chatId, goalChatType === "group" ? "group" : "p2p", messages);
+      this.noteBotCollabTurn(scopeKey, goalChatType === "group" ? "group" : "p2p", messages);
       await this.runGoalLoop(chatId, scopeKey, existingGoal, runId, signal);
       return;
     }
@@ -5113,6 +5139,7 @@ export class Pipeline {
       let deliveredResponseBody = false;
       this.log.info("send decision", { chatId, useReply: !!triggerMsgId, merged: isMerged, messageCount: messages.length, triggerMsgId: triggerMsgId ?? "none" });
       const sendResult = await this.sendPreparedFinalResponse(chatSession.platformChatId, {
+        scopeKey,
         header: loopCardHeader,
         content: displayText,
         footer,
@@ -5482,6 +5509,9 @@ export class Pipeline {
     this.pendingNewSessionReminder.delete(chatId);
     this.pendingCompactRecovery.delete(chatId);
     this.lastCompactCounts.delete(chatId);
+    for (const [token, tokenScopeKey] of this.tokenToScope) {
+      if (tokenScopeKey === chatId) this.tokenToScope.delete(token);
+    }
     this.chatScheduleTokens.delete(chatId);
   }
 
@@ -5804,7 +5834,7 @@ cap=4 只限制本群同时跑的主 session，不含 /task。
       });
       return;
     }
-    const prepared = this.prepareOutboundText(target.platformChatId, text);
+    const prepared = this.prepareOutboundText(target.platformChatId, text, scopeKey);
     this.sendPreferringReply(
       target.platformChatId,
       "watchdog",
@@ -5838,7 +5868,7 @@ cap=4 只限制本群同时跑的主 session，不含 /task。
       ?? this.runtimeState.getActiveRunForScope(scopeKey)?.replyToPlatformMsgId
       ?? this.chatSessions.get(scopeKey)?.triggerPlatformMsgId
       ?? (threadId ? this.latestThreadPlatformMsgId(chatId, threadId) : undefined);
-    const prepared = this.prepareOutboundText(target.platformChatId, content);
+    const prepared = this.prepareOutboundText(target.platformChatId, content, scopeKey);
     this.sendCardKeepingAt(
       target.platformChatId,
       "watchdog-card",

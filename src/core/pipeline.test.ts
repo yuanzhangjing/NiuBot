@@ -8,6 +8,7 @@ import { CliAgentBackend, type BaseCliSession, type ParsedOutput } from "../agen
 import type { BackendCapability } from "../agent/backend-capability.js";
 import { AgentSessionNotStartedError, type AgentBackend, type AgentResponse, type AgentSession, type SessionConfig } from "../agent/types.js";
 import {
+  ensureChat,
   ensureUser,
   storeMessage,
   getBotBackendModelState,
@@ -4841,6 +4842,8 @@ bots:
       userId: "u2",
       hasReplied: false,
     });
+    (pipeline as any).chatScheduleTokens.set("c1", "old-turn-token");
+    (pipeline as any).tokenToScope.set("old-turn-token", "c1");
     (pipeline as any).pendingCompactRecovery.add("c1");
     (pipeline as any).lastCompactCounts.set("c1", 1);
 
@@ -4855,6 +4858,7 @@ bots:
     expect(sentTexts).toContain("已开始新会话，当前上下文已清空。");
     expect(existsSync(path.join(dir, ".niubot-test", "NiuBot", "session-archives", "c1"))).toBe(true);
     expect((pipeline as any).chatSessions.has("c1")).toBe(false);
+    expect((pipeline as any).tokenToScope.has("old-turn-token")).toBe(false);
     expect((pipeline as any).pendingCompactRecovery.has("c1")).toBe(false);
     expect((pipeline as any).lastCompactCounts.has("c1")).toBe(false);
   });
@@ -7958,6 +7962,74 @@ describe("nbt send prefers the active-run reply target", () => {
       method: "text",
       payload: "CowBot ping\n\n互叫已停，需要人接手。",
     }]);
+  });
+
+  test("applies the scope bot-collab fuse to a topic turn", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-topic-fuse-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    db.prepare(`
+      INSERT INTO chats (id, type, platform, platform_id, chat_mode, group_message_type, chat_mode_fetched_at)
+      VALUES ('c1', 'group', 'feishu', 'group-open-id', 'topic', 'thread', ?)
+    `).run(Date.now());
+    const cowId = ensureUser(db, "feishu", "ou-cow", "CowBot");
+    setUserIsBot(db, cowId);
+    const agent = new ReplyAgent(`@${cowId.toUpperCase()} 下一棒`);
+    const { im, sentCards } = createRecordingImStub();
+    const pipeline = new Pipeline(db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");
+    await pipeline.start();
+    const selfId = pipeline.getBotUserId()!;
+    (pipeline as any).botTurnCounts.set("c1#omt_fuse", 20);
+
+    (pipeline as any).handleMessage(createMessage({
+      chatPlatformId: "group-open-id",
+      chatType: "group",
+      senderPlatformId: "ou-cow",
+      senderName: "CowBot",
+      senderIsBot: true,
+      contentText: `@${selfId.toUpperCase()} 接着讨论`,
+      contentType: "text",
+      botMentioned: true,
+      mentions: [{ platformUserId: "bot-open-id", name: "NiuBot", isBot: true, key: "self" }],
+      threadId: "omt_fuse",
+      rootId: "om-fuse-root",
+      platformMsgId: "om-fuse-turn",
+    }));
+
+    await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(1));
+    await vi.waitFor(() => expect(sentCards).toHaveLength(1));
+    expect(sentCards[0]!.content).toBe("CowBot 下一棒\n\n互叫已停，需要人接手。");
+    expect((pipeline as any).botTurnCounts.get("c1")).toBeUndefined();
+    expect((pipeline as any).botTurnCounts.get("c1#omt_fuse")).toBe(21);
+
+    await pipeline.sendCardToChat(
+      "group-open-id",
+      "Header",
+      `<at user_id="ou-cow">CowBot</at> ping`,
+      undefined,
+      { scopeKey: "c1#omt_other", threadId: "omt_other", replyToMsgId: "om-other-root" },
+    );
+    expect(sentCards.at(-1)?.content).toBe('<at user_id="ou-cow">CowBot</at> ping');
+    pipeline.stop();
+  });
+
+  test("does not apply a token from another chat to outbound fuse handling", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-cross-chat-fuse-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    ensureChat(db, "feishu", "group-open-id", "group");
+    ensureChat(db, "feishu", "other-group-open-id", "group");
+    const { im, sent } = createSendTrackingIm();
+    const pipeline = new Pipeline(db, im, new ReplyAgent("done"), createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");
+    await pipeline.start();
+
+    (pipeline as any).tokenToScope.set("c1-turn-token", "c1#omt_other");
+    (pipeline as any).botTurnCounts.set("c1#omt_other", 21);
+
+    await pipeline.sendToChat("other-group-open-id", "cross chat", "c1-turn-token");
+
+    expect(sent).toEqual([{ method: "text", payload: "cross chat" }]);
+    pipeline.stop();
   });
 
   test("marks app senders as bots and ignores bot replies that do not at the bot", async () => {
