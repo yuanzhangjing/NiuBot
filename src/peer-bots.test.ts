@@ -1,13 +1,25 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import Database from "better-sqlite3";
 import { afterEach, describe, expect, test } from "vitest";
 import { ensureUser, getUserIdentityByPlatformId, initDatabase } from "./database/schema.js";
 import { PeerBotDirectory, seedPeerBots } from "./peer-bots.js";
 
 const tempDirs: string[] = [];
+const openDatabases = new Set<Database.Database>();
+
+function openTestDatabase(filePath: string): Database.Database {
+  const db = initDatabase(filePath);
+  openDatabases.add(db);
+  return db;
+}
 
 afterEach(() => {
+  for (const db of openDatabases) {
+    if (db.open) db.close();
+  }
+  openDatabases.clear();
   for (const dir of tempDirs.splice(0)) {
     rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 10 });
   }
@@ -28,7 +40,7 @@ describe("seedPeerBots", () => {
   test("writes other bots into the local users table as is_bot", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-peer-bots-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     seedPeerBots(db, "NiuBot", [
       { botId: "NiuBot", openId: "ou-niu", name: "NiuBot" },
       { botId: "CowBot", openId: "ou-cow", name: "CowBot" },

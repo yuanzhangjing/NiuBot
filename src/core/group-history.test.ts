@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import Database from "better-sqlite3";
 import { afterEach, describe, expect, test } from "vitest";
 import {
   initDatabase,
@@ -23,8 +24,19 @@ import {
 import type { NormalizedMessage } from "../transport/types.js";
 
 const tempDirs: string[] = [];
+const openDatabases = new Set<Database.Database>();
+
+function openTestDatabase(filePath: string): Database.Database {
+  const db = initDatabase(filePath);
+  openDatabases.add(db);
+  return db;
+}
 
 afterEach(() => {
+  for (const db of openDatabases) {
+    if (db.open) db.close();
+  }
+  openDatabases.clear();
   for (const dir of tempDirs.splice(0)) {
     rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
@@ -57,7 +69,7 @@ describe("group history sync", () => {
   test("only syncs group chats that have a platform id", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "group-history-target-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "t.db"));
+    const db = openTestDatabase(path.join(dir, "t.db"));
     const groupId = ensureChat(db, "feishu", "oc-group", "group", "bots");
     const p2pId = ensureChat(db, "feishu", "oc-p2p", "p2p", "zen");
     expect(getGroupChatSyncTarget(db, groupId)).toEqual({
@@ -71,7 +83,7 @@ describe("group history sync", () => {
   test("caches by platform_msg_id and does not insert duplicates", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "group-history-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "t.db"));
+    const db = openTestDatabase(path.join(dir, "t.db"));
     const chatId = ensureChat(db, "feishu", "oc-group", "group", "bots");
     const first = cacheHistoryMessages(db, chatId, "feishu", [historyMsg()]);
     const second = cacheHistoryMessages(db, chatId, "feishu", [historyMsg(), historyMsg({
@@ -90,7 +102,7 @@ describe("group history sync", () => {
   test("sync writes unseen messages and skips the already stored trigger", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "group-history-sync-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "t.db"));
+    const db = openTestDatabase(path.join(dir, "t.db"));
     const chatId = ensureChat(db, "feishu", "oc-group", "group", "bots");
     const selfId = ensureUser(db, "feishu", "ou-self", "NiuBot", "bot_sender");
     storeMessage(db, {
@@ -158,7 +170,7 @@ describe("group history sync", () => {
   test("syncGroupChatToDb no-ops for p2p chats", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "group-history-p2p-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "t.db"));
+    const db = openTestDatabase(path.join(dir, "t.db"));
     const chatId = ensureChat(db, "feishu", "oc-p2p", "p2p", "zen");
     let listCalls = 0;
     const result = await syncGroupChatToDb(db, chatId, {
@@ -176,7 +188,7 @@ describe("group history sync", () => {
   test("does not advance the fetch cursor when listChatMessages throws", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "group-history-throw-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "t.db"));
+    const db = openTestDatabase(path.join(dir, "t.db"));
     const chatId = ensureChat(db, "feishu", "oc-group", "group", "bots");
     await expect(syncGroupHistory({
       db,
@@ -196,7 +208,7 @@ describe("group history sync", () => {
   test("incremental sync requests more than one Feishu page", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "group-history-incremental-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "t.db"));
+    const db = openTestDatabase(path.join(dir, "t.db"));
     const chatId = ensureChat(db, "feishu", "oc-group", "group", "bots");
     const limits: Array<number | undefined> = [];
     await syncGroupHistory({
@@ -231,7 +243,7 @@ describe("group history sync", () => {
   test("thread sync writes thread cursor and does not move chat cursor", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "group-history-thread-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "t.db"));
+    const db = openTestDatabase(path.join(dir, "t.db"));
     const chatId = ensureChat(db, "feishu", "oc-group", "group", "bots");
     const listed = [historyMsg({
       platformMsgId: "om-thread-reply",
