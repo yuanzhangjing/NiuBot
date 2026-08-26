@@ -270,7 +270,7 @@ Usage: nbt restart [--update <version>] [--wake [<提示>]]
   // sourceDirectory 与 restart-compat 一致：env 显式指定优先，否则回退 runtimeRoot。
   // 源码开发版路径由 worker 内部 resolveRestartSourceDirectory 从 config.yaml 解析。
   const sourceDirectory = process.env["NIUBOT_SOURCE_DIR"] ?? runtimeRoot;
-  const { launchRestartWorker } = await import("./restart-launcher.js");
+  const { launchRestartWorker, resolveRestartNotifyScope } = await import("./restart-launcher.js");
   try {
     const worker = launchRestartWorker({
       niubotHome: NIUBOT_HOME,
@@ -280,9 +280,7 @@ Usage: nbt restart [--update <version>] [--wake [<提示>]]
       environment: process.env["NIUBOT_ENV"] ?? "",
       restartMode: process.env["NIUBOT_LEGACY_SOURCE_MIGRATION"] === "1" ? "source" : undefined,
       notifyChatId: CHAT_ID,
-      notifyScopeKey: process.env["NIUBOT_SCOPE_KEY"],
-      notifyThreadId: process.env["NIUBOT_THREAD_ID"],
-      wakeReplyTo: process.env["NIUBOT_WAKE_REPLY_TO"],
+      ...resolveRestartNotifyScope(process.env),
       updateVersion,
       wakePrompt,
     });

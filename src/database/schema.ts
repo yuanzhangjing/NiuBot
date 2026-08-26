@@ -1248,7 +1248,7 @@ export function clearBotBackendEffort(db: Database.Database, botName: string, ba
   setBotBackendModelState(db, botName, backendType, { effort: undefined });
 }
 
-/** 用户的私聊 chat id。新群/新话题没覆盖时，agent/model/effort 跟这份走。 */
+/** 用户的私聊 chat id。配置回退已改成 Bot 默认整包，这段只留给查私聊会话。 */
 export function findP2pChatIdForUser(db: Database.Database, userId: string): string | undefined {
   const row = db.prepare(`
     SELECT c.id

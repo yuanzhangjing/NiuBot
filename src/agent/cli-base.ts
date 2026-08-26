@@ -248,6 +248,16 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
     return { id: handle };
   }
 
+  refreshSessionEnv(session: AgentSession, env: { threadId?: string; replyToMsgId?: string }): void {
+    const current = this.sessions.get(session.id);
+    if (!current) return;
+    current.extraEnv = {
+      ...current.extraEnv,
+      NIUBOT_THREAD_ID: env.threadId ?? "",
+      NIUBOT_WAKE_REPLY_TO: env.threadId && env.replyToMsgId ? env.replyToMsgId : "",
+    };
+  }
+
   async sendMessage(agentSession: AgentSession, message: string): Promise<AgentResponse> {
     return this.sendMessageAttempt(agentSession, message, 0);
   }
@@ -931,8 +941,10 @@ export function buildNiubotEnv(config: SessionConfig): Record<string, string> {
   if (config.userId) env["NIUBOT_USER_ID"] = config.userId;
   if (config.chatId) env["NIUBOT_CHAT_ID"] = config.chatId;
   if (config.scopeKey) env["NIUBOT_SCOPE_KEY"] = config.scopeKey;
-  if (config.threadId) env["NIUBOT_THREAD_ID"] = config.threadId;
-  if (config.replyToMsgId) env["NIUBOT_WAKE_REPLY_TO"] = config.replyToMsgId;
+  // 显式覆盖父进程残留：私聊没有话题 id，空字符串才能盖掉引擎里漏进来的旧值。
+  env["NIUBOT_THREAD_ID"] = config.threadId ?? "";
+  // 只有隔离话题才把回复锚点交给 nbt restart。私聊带上会被飞书收成「回复话题」。
+  env["NIUBOT_WAKE_REPLY_TO"] = config.replyToMsgId && config.threadId ? config.replyToMsgId : "";
   if (config.chatType) env["NIUBOT_CHAT_TYPE"] = config.chatType;
   if (config.dbPath) env["NIUBOT_DB_PATH"] = config.dbPath;
   if (config.botId) env["NIUBOT_BOT_ID"] = config.botId;

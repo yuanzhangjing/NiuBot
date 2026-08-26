@@ -18,12 +18,18 @@ export function resolveBotRuntimeConfig(
     return normalized && availableBackends.includes(normalized) ? normalized : undefined;
   };
 
+  const runtimeBackend = pickBackend(runtimeState?.backendType);
+  if (runtimeBackend) {
+    return {
+      backendType: runtimeBackend,
+      model: runtimeState?.model,
+      effort: runtimeState?.effort,
+    };
+  }
+
   return {
     backendType: pickBackend(configBackend)
-      ?? pickBackend(runtimeState?.backendType)
       ?? availableBackends[0]
       ?? "claude",
-    model: runtimeState?.model,
-    effort: runtimeState?.effort,
   };
 }

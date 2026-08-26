@@ -60,12 +60,25 @@ const ONE_SHOT_ENVIRONMENT_NAMES = [
   "NIUBOT_RESTART_NOTIFY_CHAT_ID",
   "NIUBOT_RESTART_SCOPE_KEY",
   "NIUBOT_RESTART_THREAD_ID",
+  "NIUBOT_RESTART_WAKE_PROMPT",
   "NIUBOT_WAKE_REPLY_TO",
   "NIUBOT_CHAT_ID",
   "NIUBOT_API_SOCKET",
   "NIUBOT_INSTANCE_ID",
   "NIUBOT_CONTROL_TOKEN",
   "NIUBOT_STARTED_AT",
+  // Agent 子进程环境，不能带进下一轮 Engine，否则私聊重启会继续回上次误开的话题。
+  "NIUBOT_THREAD_ID",
+  "NIUBOT_SCOPE_KEY",
+  "NIUBOT_SCHEDULE_TOKEN",
+  "NIUBOT_USER_ID",
+  "NIUBOT_CHAT_TYPE",
+  "NIUBOT_IS_ADMIN",
+  "NIUBOT_BOT_PROFILE_PATH",
+  "NIUBOT_BOT_ID",
+  "NIUBOT_DB_PATH",
+  "NIUBOT_WORK_DIR",
+  "NIUBOT_PLATFORM",
   PREFLIGHT_DATABASE_MANIFEST_ENV,
 ] as const;
 
@@ -1038,7 +1051,7 @@ async function wakeMainSession(context: RestartContext): Promise<void> {
       prompt,
       scope_key: context.notifyScopeKey,
       thread_id: context.notifyThreadId,
-      reply_to_msg_id: context.wakeReplyTo,
+      reply_to_msg_id: context.notifyThreadId ? context.wakeReplyTo : undefined,
     });
     log(context, `main session wake queued: ${prompt.slice(0, 60)}`);
     // 唤醒投递成功后，追加一条用户可见确认：明确「重启后已唤醒」及唤醒内容，
@@ -1067,14 +1080,14 @@ async function notify(context: RestartContext, text: string): Promise<void> {
   }
 }
 
-/** 重启结果通知必须带原消息锚点，避免话题群里新开一个话题。 */
+/** 话题内才带原消息锚点，避免新开话题；私聊/普通群不 reply，避免飞书收成回复话题。 */
 export function buildRestartNotificationBody(
-  context: { wakeReplyTo?: string },
+  context: { wakeReplyTo?: string; notifyThreadId?: string },
   text: string,
 ): Record<string, unknown> {
   return {
     text,
-    reply_to_msg_id: context.wakeReplyTo,
+    reply_to_msg_id: context.notifyThreadId ? context.wakeReplyTo : undefined,
   };
 }
 

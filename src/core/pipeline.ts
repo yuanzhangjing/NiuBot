@@ -35,7 +35,9 @@ import {
   setUserIsBot, getUserIsBot,
   setUserAdminRole, getAdminUserIds, getUserAdminRole, type AdminRole,
   getScopeRuntimeConfig, setScopeRuntimeConfig, deleteScopeRuntimeConfig,
-  findP2pChatIdForUser, type ScopeRuntimeConfig,
+  getBotRuntimeState, setBotRuntimeState,
+  getBotBackendModelState, setBotBackendModelState,
+  type ScopeRuntimeConfig,
   getRecentRuntimeEvents,
   getChatMetadata as getStoredChatMetadata,
   updateChatMetadata,
@@ -920,11 +922,12 @@ export class Pipeline {
     scope?: { scopeKey?: string; threadId?: string; replyToMsgId?: string },
   ): Promise<void> {
     const scopeKey = scope?.scopeKey ?? this.platformChatIdToScopeKey(platformChatId) ?? platformChatId;
+    const chatId = parseScopeKey(scopeKey).chatId;
     const threadId = scope?.threadId;
-    const strict = Boolean(threadId) || this.isStrictTopicChat(parseScopeKey(scopeKey).chatId);
+    const inThread = this.userSpokeInThread(chatId, threadId);
     const replyToMsgId = scope?.replyToMsgId
       ?? this.currentTurnReplyTarget(platformChatId, scheduleToken, scopeKey)
-      ?? (threadId ? this.latestThreadPlatformMsgId(parseScopeKey(scopeKey).chatId, threadId) : undefined);
+      ?? (inThread && threadId ? this.latestThreadPlatformMsgId(chatId, threadId) : undefined);
     const prepared = this.prepareOutboundText(platformChatId, text);
     const platformMsgId = await this.sendPreferringReply(
       platformChatId,
@@ -933,11 +936,11 @@ export class Pipeline {
         platformChatId,
         prepared.text,
         replyToMsgId,
-        { replyInThread: strict },
+        { replyInThread: inThread },
       ),
       () => this.transport.sendText(platformChatId, prepared.text),
       replyToMsgId,
-      { allowChatFallback: !strict, replyInThread: strict },
+      { allowChatFallback: !this.isStrictTopicChat(chatId), replyInThread: inThread },
     );
     const chatRow = this.db.prepare("SELECT id FROM chats WHERE platform_id = ?")
       .get(platformChatId) as { id: string } | undefined;
@@ -955,11 +958,12 @@ export class Pipeline {
     scope?: { scopeKey?: string; threadId?: string; replyToMsgId?: string },
   ): Promise<void> {
     const scopeKey = scope?.scopeKey ?? this.platformChatIdToScopeKey(platformChatId) ?? platformChatId;
+    const chatId = parseScopeKey(scopeKey).chatId;
     const threadId = scope?.threadId;
-    const strict = Boolean(threadId) || this.isStrictTopicChat(parseScopeKey(scopeKey).chatId);
+    const inThread = this.userSpokeInThread(chatId, threadId);
     const replyToMsgId = scope?.replyToMsgId
       ?? this.currentTurnReplyTarget(platformChatId, scheduleToken, scopeKey)
-      ?? (threadId ? this.latestThreadPlatformMsgId(parseScopeKey(scopeKey).chatId, threadId) : undefined);
+      ?? (inThread && threadId ? this.latestThreadPlatformMsgId(chatId, threadId) : undefined);
     const prepared = this.prepareOutboundText(platformChatId, content);
     const platformMsgId = await this.sendCardKeepingAt(
       platformChatId,
@@ -968,7 +972,7 @@ export class Pipeline {
       prepared.text,
       replyToMsgId,
       true,
-      { allowChatFallback: !strict, replyInThread: strict },
+      { allowChatFallback: !this.isStrictTopicChat(chatId), replyInThread: inThread },
     );
     const chatRow = this.db.prepare("SELECT id FROM chats WHERE platform_id = ?")
       .get(platformChatId) as { id: string } | undefined;
@@ -1109,8 +1113,8 @@ export class Pipeline {
     msgId?: string,
     threadId?: string,
   ): Promise<string> {
-    const strict = Boolean(threadId) || this.isStrictTopicChat(chatId);
-    if (strict && !msgId) {
+    const inThread = this.userSpokeInThread(chatId, threadId);
+    if (inThread && this.isStrictTopicChat(chatId) && !msgId) {
       const error = new Error("No reply anchor available; create fallback is disabled");
       this.log.warn("strict topic card skipped without reply anchor", {
         chatId,
@@ -1125,7 +1129,7 @@ export class Pipeline {
       content,
       undefined,
       msgId,
-      { replyInThread: strict },
+      { replyInThread: inThread },
     );
   }
 
@@ -1155,11 +1159,12 @@ export class Pipeline {
     scope?: { scopeKey?: string; threadId?: string; replyToMsgId?: string },
   ): Promise<void> {
     const scopeKey = scope?.scopeKey ?? this.platformChatIdToScopeKey(platformChatId) ?? platformChatId;
+    const chatId = parseScopeKey(scopeKey).chatId;
     const threadId = scope?.threadId;
-    const strict = Boolean(threadId) || this.isStrictTopicChat(parseScopeKey(scopeKey).chatId);
+    const inThread = this.userSpokeInThread(chatId, threadId);
     const replyToMsgId = scope?.replyToMsgId
       ?? this.currentTurnReplyTarget(platformChatId, scheduleToken, scopeKey)
-      ?? (threadId ? this.latestThreadPlatformMsgId(parseScopeKey(scopeKey).chatId, threadId) : undefined);
+      ?? (inThread && threadId ? this.latestThreadPlatformMsgId(chatId, threadId) : undefined);
     const platformMsgId = await this.sendPreferringReply(
       platformChatId,
       "sendFileToChat",
@@ -1167,11 +1172,11 @@ export class Pipeline {
         platformChatId,
         filePath,
         undefined,
-        { replyToMsgId, replyInThread: strict },
+        { replyToMsgId, replyInThread: inThread },
       ),
       () => this.transport.sendFile(platformChatId, filePath),
       replyToMsgId,
-      { allowChatFallback: !strict, replyInThread: strict },
+      { allowChatFallback: !this.isStrictTopicChat(chatId), replyInThread: inThread },
     );
     const chatRow = this.db.prepare("SELECT id FROM chats WHERE platform_id = ?")
       .get(platformChatId) as { id: string } | undefined;
@@ -1607,7 +1612,7 @@ export class Pipeline {
 
     // 缓存映射
     this.platformChatIds.set(chatId, msg.chatPlatformId);
-    this.chatUserIds.set(chatId, userId);
+    this.rememberChatUser(chatId, userId, msg.senderIsBot);
 
     // 独立消息：纯文本（保持 skill 等模式匹配可用）
     // 回复 / 转发：标签树表达嵌套关系
@@ -1683,7 +1688,7 @@ export class Pipeline {
         msg.chatPlatformId,
         msg.chatType,
         msg.platformMsgId,
-        scope.threadId,
+        msg.threadId ?? scope.threadId,
         scope.scopeKey,
       );
       if (inboxId != null && claimToken) {
@@ -1698,7 +1703,7 @@ export class Pipeline {
     const isPending = this.queue.push({
       chatId,
       scopeKey: scope.scopeKey,
-      threadId: scope.threadId,
+      threadId: msg.threadId ?? scope.threadId,
       strict: scope.strict,
       text: agentText,
       senderLabel: label,
@@ -2352,8 +2357,8 @@ export class Pipeline {
     threadId?: string,
     replyInThread = false,
   ): void {
-    const strict = replyInThread || Boolean(threadId) || this.isStrictTopicChat(chatId);
-    if (!msgId && strict) {
+    const inThread = replyInThread || this.userSpokeInThread(chatId, threadId);
+    if (!msgId && inThread && this.isStrictTopicChat(chatId)) {
       this.log.warn("strict topic reply skipped without reply anchor", {
         chatId,
         platformChatId,
@@ -2362,7 +2367,7 @@ export class Pipeline {
       return;
     }
     const sendPromise = msgId
-      ? this.transport.sendReply(platformChatId, text, msgId, { replyInThread: strict })
+      ? this.transport.sendReply(platformChatId, text, msgId, { replyInThread: inThread })
       : this.transport.sendText(platformChatId, text);
     sendPromise.then((pmid) => {
       this.storeBotResponse(chatId, text, pmid, "text", threadId);
@@ -2738,8 +2743,10 @@ export class Pipeline {
   ): Promise<{ output: string }> {
     const scopeKey = scope?.scopeKey ?? chatId;
     const threadId = scope?.threadId;
-    const replyToMsgId = scope?.replyToMsgId
-      ?? (threadId ? this.latestThreadPlatformMsgId(chatId, threadId) : undefined);
+    const replyToMsgId = this.userSpokeInThread(chatId, threadId)
+      ? (scope?.replyToMsgId
+        ?? (threadId ? this.latestThreadPlatformMsgId(chatId, threadId) : undefined))
+      : undefined;
     this.queue.push({
       chatId,
       scopeKey,
@@ -3574,8 +3581,8 @@ export class Pipeline {
   }
 
   /**
-   * /agent 命令：查看或切换当前对话的 agent backend。
-   * 私聊写默认，群/话题写覆盖。没覆盖的跟着私聊默认走。
+   * /agent 命令：查看或切换当前对话的 agent 整包（backend + 该 backend 自己的 model/effort）。
+   * 当前会话写覆盖；私聊同时更新 Bot 默认。没覆盖的跟着 Bot 默认走。
    */
   private async handleAgentCommand(
     args: string[],
@@ -3690,12 +3697,7 @@ export class Pipeline {
         await this.stopActiveRunForSessionTransition(effectiveScopeKey, chatId);
         await this.waitForSessionCreation(effectiveScopeKey);
         await this.archiveSession(effectiveScopeKey, chatId);
-        const fallback = this.resolveFallbackConfig(effectiveScopeKey, userId);
-        const next: ScopeRuntimeConfig = {
-          backendType: target,
-          model: fallback.backendType === target ? fallback.model : undefined,
-          effort: fallback.backendType === target ? fallback.effort : undefined,
-        };
+        const next = this.packageForBackend(target);
         this.persistScopeConfig(effectiveScopeKey, next);
         const model = next.model ?? "default";
         const defaultNote = this.isP2pScope(effectiveScopeKey)
@@ -3730,6 +3732,7 @@ export class Pipeline {
         await this.waitForSessionCreation(scopeKey);
         await this.archiveSession(scopeKey, chatId);
         deleteScopeRuntimeConfig(this.db, this.botIdentity.name, scopeKey);
+        if (this.isP2pScope(scopeKey)) this.clearBotDefault();
         this.sendAgentCard(
           chatId,
           platformChatId,
@@ -4077,28 +4080,80 @@ export class Pipeline {
     }
   }
 
-  /** 当前对话覆盖 ?? 私聊默认 ?? 引擎启动配置。没有覆盖就不写库。 */
+  /** 当前会话覆盖 ?? Bot 默认 ?? 配置文件。都是整包。私聊写入时同时更新 Bot 默认。 */
   private resolveScopeConfig(scopeKey: string, userId?: string): ScopeRuntimeConfig {
     const own = getScopeRuntimeConfig(this.db, this.botIdentity.name, scopeKey);
     if (own) return own;
     return this.resolveFallbackConfig(scopeKey, userId);
   }
 
-  private resolveFallbackConfig(scopeKey: string, userId?: string): ScopeRuntimeConfig {
-    const p2pChatId = this.p2pFallbackChatId(scopeKey, userId);
-    if (p2pChatId) {
-      const p2p = getScopeRuntimeConfig(this.db, this.botIdentity.name, p2pChatId);
-      if (p2p) return p2p;
-    }
+  private resolveFallbackConfig(_scopeKey?: string, _userId?: string): ScopeRuntimeConfig {
+    return this.loadBotDefaultPackage() ?? this.enginePackage();
+  }
+
+  private enginePackage(): ScopeRuntimeConfig {
+    const cached = this.backendModelCache.get(this.backendType);
     return {
       backendType: this.backendType,
-      model: this.botIdentity.model,
-      effort: this.botIdentity.effort,
+      model: cached?.model,
+      effort: cached?.effort,
     };
+  }
+
+  private loadBotDefaultPackage(): ScopeRuntimeConfig | undefined {
+    const runtime = getBotRuntimeState(this.db, this.botIdentity.name);
+    if (!runtime?.backendType) return undefined;
+    const models = getBotBackendModelState(this.db, this.botIdentity.name, runtime.backendType);
+    return {
+      backendType: runtime.backendType,
+      model: models?.model ?? runtime.model,
+      effort: models?.effort,
+    };
+  }
+
+  /** 某个 backend 自己的整包：用它上次的 model/effort，绝不借用别的 backend 的模型。 */
+  private packageForBackend(backendType: ScopeRuntimeConfig["backendType"]): ScopeRuntimeConfig {
+    const saved = getBotBackendModelState(this.db, this.botIdentity.name, backendType);
+    if (saved) {
+      return {
+        backendType,
+        model: saved.model,
+        effort: saved.effort,
+      };
+    }
+    if (backendType === this.backendType) {
+      const cached = this.backendModelCache.get(backendType);
+      return {
+        backendType,
+        model: cached?.model,
+        effort: cached?.effort,
+      };
+    }
+    return { backendType };
   }
 
   private persistScopeConfig(scopeKey: string, config: ScopeRuntimeConfig): void {
     setScopeRuntimeConfig(this.db, this.botIdentity.name, scopeKey, config);
+    if (this.isP2pScope(scopeKey)) this.persistBotDefault(config);
+  }
+
+  private persistBotDefault(config: ScopeRuntimeConfig): void {
+    setBotRuntimeState(this.db, this.botIdentity.name, {
+      backendType: config.backendType,
+      model: config.model,
+    });
+    setBotBackendModelState(this.db, this.botIdentity.name, config.backendType, {
+      model: config.model,
+      effort: config.effort,
+    });
+  }
+
+  private clearBotDefault(): void {
+    this.persistBotDefault({
+      backendType: this.backendType,
+      model: undefined,
+      effort: undefined,
+    });
   }
 
   private resolveScopeBackendType(scopeKey: string, userId?: string): AgentBackendType {
@@ -4112,16 +4167,26 @@ export class Pipeline {
     return chat?.type !== "group";
   }
 
+  /** 用户这句话在话题里才回话题；话题群没有主时间线，缺 thread 也必须 reply。 */
+  private userSpokeInThread(chatId: string, threadId?: string): boolean {
+    return Boolean(threadId) || this.isStrictTopicChat(chatId);
+  }
+
   private hasOwnScopeConfig(scopeKey: string): boolean {
     return Boolean(getScopeRuntimeConfig(this.db, this.botIdentity.name, scopeKey));
   }
 
-  /** Loop/wake 重启后 map 是空的，要从 session 或私聊行找回说话的人，才能读到私聊默认。 */
+  private rememberChatUser(chatId: string, userId: string, senderIsBot?: boolean): void {
+    if (senderIsBot || getUserIsBot(this.db, userId)) return;
+    this.chatUserIds.set(chatId, userId);
+  }
+
+  /** Loop/wake 重启后 map 是空的，要从 session 或私聊行找回说话的人。Bot 发言不记成配置主人。 */
   private resolveChatUserId(chatId: string, threadId?: string): string | undefined {
     const mapped = this.chatUserIds.get(chatId);
-    if (mapped) return mapped;
+    if (mapped && !getUserIsBot(this.db, mapped)) return mapped;
     const fromSession = this.lookupActiveUserSession(chatId, threadId)?.user_id ?? undefined;
-    if (fromSession) {
+    if (fromSession && !getUserIsBot(this.db, fromSession)) {
       this.chatUserIds.set(chatId, fromSession);
       return fromSession;
     }
@@ -4134,17 +4199,6 @@ export class Pipeline {
     if (!owner) return undefined;
     this.chatUserIds.set(chatId, owner.id);
     return owner.id;
-  }
-
-  /** 群/话题没有自己的覆盖时，跟这个人私聊里的设置。已经在私聊里则不再回指。 */
-  private p2pFallbackChatId(scopeKey: string, userId?: string): string | undefined {
-    if (!userId) return undefined;
-    const chatId = parseScopeKey(scopeKey).chatId;
-    const chat = this.db.prepare("SELECT type FROM chats WHERE id = ?").get(chatId) as { type: string | null } | undefined;
-    if (chat?.type === "p2p") return undefined;
-    const p2pChatId = findP2pChatIdForUser(this.db, userId);
-    if (!p2pChatId || p2pChatId === chatId) return undefined;
-    return p2pChatId;
   }
 
   private async ensureBackend(type: AgentBackendType): Promise<AgentBackend> {
@@ -4650,17 +4704,18 @@ export class Pipeline {
     const replyToMsgId = opts?.replyToMsgId
       ?? activeRun?.replyToPlatformMsgId
       ?? (threadId ? this.latestThreadPlatformMsgId(parseScopeKey(scopeKey).chatId, threadId) : undefined);
-    const strict = Boolean(threadId) || (chatId ? this.isStrictTopicChat(chatId) : false);
+    const inThread = Boolean(threadId) || (chatId ? this.isStrictTopicChat(chatId) : false);
+    const replyAnchor = inThread ? replyToMsgId : undefined;
 
     const sendRestartNotice = (text: string): void => {
       if (!platformChatId) return;
       this.sendPreferringReply(
         platformChatId,
         "restart",
-        (anchor) => this.transport.sendReply(platformChatId, text, anchor, { replyInThread: strict }),
+        (anchor) => this.transport.sendReply(platformChatId, text, anchor, { replyInThread: inThread }),
         () => this.transport.sendText(platformChatId, text),
-        replyToMsgId,
-        { allowChatFallback: !strict, replyInThread: strict },
+        replyAnchor,
+        { allowChatFallback: !inThread || !(chatId && this.isStrictTopicChat(chatId)), replyInThread: inThread },
       ).catch(() => {});
     };
 
@@ -4676,7 +4731,7 @@ export class Pipeline {
         chatId,
         scopeKey,
         threadId,
-        wakeReplyTo: replyToMsgId,
+        wakeReplyTo: replyAnchor,
         updateVersion: opts?.updateVersion,
       });
       this.log.info("restart worker launched", {
@@ -4771,12 +4826,15 @@ export class Pipeline {
     const platformChatId = this.chatSessions.get(scopeKey)?.platformChatId
       ?? this.platformChatIds.get(chatId);
 
-    // 从消息列表中取最后一条的 platformMsgId 作为 reply 目标。
+    // 用户当前这句话：主会话也引用这一句；已经在话题里才 reply_in_thread。
+    // 重启唤醒没有当前用户消息：在话题里才回原帖，否则发到会话。
     const lastMsg = messages.length > 0 ? messages[messages.length - 1] : undefined;
+    const inUserThread = this.userSpokeInThread(chatId, lastMsg?.threadId);
     let triggerMsgId = lastMsg?.replyToMsgId ?? lastMsg?.platformMsgId ?? this.triggerMsgIds.get(scopeKey);
     this.triggerMsgIds.delete(scopeKey);
-    // Loop / 重启唤醒没有对应的当前用户消息，不引用历史消息，避免挂错位置。
-    if (isWakeTurn) triggerMsgId = lastMsg?.replyToMsgId ?? undefined;
+    if (isWakeTurn) {
+      triggerMsgId = inUserThread ? (lastMsg?.replyToMsgId ?? undefined) : undefined;
+    }
 
     const isMerged = messages.length > 1;
     const reactionMsgIds = messages
@@ -4803,6 +4861,10 @@ export class Pipeline {
       const msgIds = messages.map((m) => m.dbMsgId).filter((id): id is number => id != null);
       const firstMsgId = msgIds.length > 0 ? Math.min(...msgIds) : undefined;
       const chatSession = await this.getOrCreateSession(scopeKey, chatId, threadId, firstMsgId, signal);
+      this.backendForSession(chatSession).refreshSessionEnv?.(chatSession.agentSession, {
+        threadId: lastMsg?.threadId,
+        replyToMsgId: lastMsg?.platformMsgId ?? lastMsg?.replyToMsgId,
+      });
       const chatTypeRow = this.db.prepare("SELECT type FROM chats WHERE id = ?").get(chatId) as { type: string } | undefined;
       const processChatType = (chatTypeRow?.type ?? "p2p") as "p2p" | "group";
 
@@ -5039,7 +5101,7 @@ export class Pipeline {
         content: displayText,
         footer,
         replyToMsgId: triggerMsgId,
-        replyInThread: strict,
+        replyInThread: inUserThread,
         allowChatFallback: !strict,
         signal,
         textFallback: (sendErr) => addLoopFullMarker(`发送失败：${extractPlatformErrorDetail(sendErr)}`),
@@ -5130,13 +5192,13 @@ export class Pipeline {
               platformChatId,
               errorText,
               replyToMsgId,
-              { replyInThread: strict },
+              { replyInThread: inUserThread },
             ),
             () => this.transport.sendText(platformChatId, errorText),
             triggerMsgId,
-            { allowChatFallback: !strict, replyInThread: strict },
+            { allowChatFallback: !strict, replyInThread: inUserThread },
           );
-          this.storeBotResponse(chatId, errorText, pmid, "text", threadId);
+          this.storeBotResponse(chatId, errorText, pmid, "text", lastMsg?.threadId ?? threadId);
         } catch { /* give up */ }
       }
     }

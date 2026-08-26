@@ -24,10 +24,17 @@ afterEach(() => {
 });
 
 describe("restart worker helpers", () => {
-  it("keeps restart notifications anchored to the original reply", () => {
-    expect(buildRestartNotificationBody({ wakeReplyTo: "om-root" }, "重启成功。")).toEqual({
+  it("anchors restart notifications only inside an isolated topic", () => {
+    expect(buildRestartNotificationBody(
+      { wakeReplyTo: "om-root", notifyThreadId: "omt_aaa" },
+      "重启成功。",
+    )).toEqual({
       text: "重启成功。",
       reply_to_msg_id: "om-root",
+    });
+    expect(buildRestartNotificationBody({ wakeReplyTo: "om-root" }, "重启成功。")).toEqual({
+      text: "重启成功。",
+      reply_to_msg_id: undefined,
     });
     expect(buildRestartNotificationBody({}, "重启成功。")).toEqual({
       text: "重启成功。",
@@ -67,6 +74,21 @@ describe("restart worker helpers", () => {
     expect(preflightEnv["NIUBOT_ENV"]).toBe("production");
     expect(preflightEnv["NIUBOT_UPDATE_VERSION"]).toBeUndefined();
     expect(preflightEnv["NIUBOT_CONTROL_TOKEN"]).toBeUndefined();
+  });
+
+  it("strips leftover agent thread env before launching the next engine", () => {
+    const runtimeEnv = buildRestartRuntimeEnvironment("/src/niubot", "dev", {
+      NIUBOT_THREAD_ID: "omt_stale",
+      NIUBOT_SCOPE_KEY: "c1",
+      NIUBOT_SCHEDULE_TOKEN: "tok",
+      NIUBOT_USER_ID: "u2",
+      NIUBOT_HOME: "/tmp/home",
+    });
+    expect(runtimeEnv["NIUBOT_THREAD_ID"]).toBeUndefined();
+    expect(runtimeEnv["NIUBOT_SCOPE_KEY"]).toBeUndefined();
+    expect(runtimeEnv["NIUBOT_SCHEDULE_TOKEN"]).toBeUndefined();
+    expect(runtimeEnv["NIUBOT_USER_ID"]).toBeUndefined();
+    expect(runtimeEnv["NIUBOT_HOME"]).toBe("/tmp/home");
   });
 
   it("preserves custom POSIX tool directories when selecting the candidate Node runtime", () => {

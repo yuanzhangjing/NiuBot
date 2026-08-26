@@ -39,6 +39,21 @@ export interface RestartWorkerLaunch {
   stateFile: string;
 }
 
+/** 用户当前这句话在话题里，才把 thread/锚点交给 restart；不在就不进话题。 */
+export function resolveRestartNotifyScope(env: NodeJS.ProcessEnv = process.env): {
+  notifyScopeKey?: string;
+  notifyThreadId?: string;
+  wakeReplyTo?: string;
+} {
+  const notifyScopeKey = env["NIUBOT_SCOPE_KEY"] || undefined;
+  const threadId = env["NIUBOT_THREAD_ID"] || undefined;
+  return {
+    notifyScopeKey,
+    notifyThreadId: threadId,
+    wakeReplyTo: threadId ? (env["NIUBOT_WAKE_REPLY_TO"] || undefined) : undefined,
+  };
+}
+
 export function buildRestartWorkerEnvironment(
   options: RestartWorkerLaunchOptions,
   base: NodeJS.ProcessEnv = process.env,

@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { buildRestartWorkerEnvironment } from "./restart-launcher.js";
+import { buildRestartWorkerEnvironment, resolveRestartNotifyScope } from "./restart-launcher.js";
 import { beginRestartDebugLog, resolveRestartDebugLog } from "./restart-log.js";
 
 describe("restart launcher", () => {
@@ -53,6 +53,36 @@ describe("restart launcher", () => {
     expect(env["NIUBOT_ENV"]).toBe("production");
     expect(env["NIUBOT_RESTART_WAKE_PROMPT"]).toBe("");
     expect(env["NIUBOT_RESTART_STOP_AFTER_COMPLETION"]).toBe("1");
+  });
+
+  it("keeps restart thread anchors only when the user message is in a thread", () => {
+    expect(resolveRestartNotifyScope({
+      NIUBOT_SCOPE_KEY: "c1#omt_aaa",
+      NIUBOT_THREAD_ID: "omt_aaa",
+      NIUBOT_WAKE_REPLY_TO: "om-root",
+    })).toEqual({
+      notifyScopeKey: "c1#omt_aaa",
+      notifyThreadId: "omt_aaa",
+      wakeReplyTo: "om-root",
+    });
+    expect(resolveRestartNotifyScope({
+      NIUBOT_SCOPE_KEY: "c1",
+      NIUBOT_THREAD_ID: "omt_side",
+      NIUBOT_WAKE_REPLY_TO: "om-root",
+    })).toEqual({
+      notifyScopeKey: "c1",
+      notifyThreadId: "omt_side",
+      wakeReplyTo: "om-root",
+    });
+    expect(resolveRestartNotifyScope({
+      NIUBOT_SCOPE_KEY: "c1",
+      NIUBOT_THREAD_ID: "",
+      NIUBOT_WAKE_REPLY_TO: "om-root",
+    })).toEqual({
+      notifyScopeKey: "c1",
+      notifyThreadId: undefined,
+      wakeReplyTo: undefined,
+    });
   });
 
   it("passes wake prompt to the restart worker", () => {

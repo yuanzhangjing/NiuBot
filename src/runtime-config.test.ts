@@ -2,14 +2,15 @@ import { describe, expect, test } from "vitest";
 import { resolveBotRuntimeConfig } from "./runtime-config.js";
 
 describe("resolveBotRuntimeConfig", () => {
-  test("uses config backend even if a global runtime backend was persisted", () => {
-    expect(resolveBotRuntimeConfig("claude", { backendType: "codex", model: "gpt-5.5" }, ["claude", "codex"]))
-      .toEqual({ backendType: "claude", model: "gpt-5.5" });
+  test("uses the persisted bot default as a complete package", () => {
+    expect(resolveBotRuntimeConfig("claude", { backendType: "codex", model: "gpt-5.5", effort: "high" }, ["claude", "codex"]))
+      .toEqual({ backendType: "codex", model: "gpt-5.5", effort: "high" });
   });
 
-  test("falls back to config backend when persisted backend is unavailable", () => {
+  test("falls back to config backend as a complete package when persisted backend is unavailable", () => {
     const resolved = resolveBotRuntimeConfig("claude", { backendType: "missing-backend", model: "runtime-model" }, ["claude", "codex"]);
-    expect(resolved).toEqual({ backendType: "claude", model: "runtime-model" });
+    expect(resolved).toEqual({ backendType: "claude" });
+    expect(resolved).not.toHaveProperty("model");
   });
 
   test("picks first available backend when no config backend", () => {

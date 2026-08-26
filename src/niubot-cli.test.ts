@@ -148,6 +148,17 @@ describe("niubot CLI path helpers", () => {
     expect(env["NIUBOT_WAKE_REPLY_TO"]).toBe("om-root");
   });
 
+  it("does not pass a restart reply anchor in p2p chats", () => {
+    const env = buildNiubotEnv({
+      chatId: "c1",
+      scopeKey: "c1",
+      replyToMsgId: "om-root",
+    });
+
+    expect(env["NIUBOT_WAKE_REPLY_TO"]).toBe("");
+    expect(env["NIUBOT_THREAD_ID"]).toBe("");
+  });
+
   it("injects the current display timezone for agent CLI processes", () => {
     const env = buildNiubotEnv({ workingDirectory: "/tmp/project" });
     expect(env["NIUBOT_TZ"]).toBe(TZ);

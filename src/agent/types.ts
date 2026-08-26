@@ -111,6 +111,9 @@ export interface AgentBackend {
   /** 创建 agent session */
   createSession(config: SessionConfig): Promise<AgentSession>;
 
+  /** 按当前用户消息刷新子进程环境（话题 id 跟着这一句走）。 */
+  refreshSessionEnv?(session: AgentSession, env: { threadId?: string; replyToMsgId?: string }): void;
+
   /** 发送消息，等待完整响应（非流式） */
   sendMessage(
     session: AgentSession,
