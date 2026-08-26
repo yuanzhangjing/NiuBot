@@ -1306,6 +1306,30 @@ export function setScopeRuntimeConfig(
   );
 }
 
+/**
+ * 为首次使用的 scope 固化解析后的配置，但不覆盖并发写入的显式覆盖。
+ * 与 setScopeRuntimeConfig 不同，这个函数只负责 scope 行，不会更新 Bot 默认。
+ */
+export function ensureScopeRuntimeConfig(
+  db: Database.Database,
+  botName: string,
+  scopeKey: string,
+  config: ScopeRuntimeConfig,
+): ScopeRuntimeConfig {
+  db.prepare(`
+    INSERT INTO scope_runtime_configs (bot_name, scope_key, backend_type, model, effort, updated_at)
+    VALUES (?, ?, ?, ?, ?, datetime('now'))
+    ON CONFLICT(bot_name, scope_key) DO NOTHING
+  `).run(
+    botName,
+    scopeKey,
+    config.backendType,
+    config.model ?? null,
+    config.effort ?? null,
+  );
+  return getScopeRuntimeConfig(db, botName, scopeKey) ?? config;
+}
+
 export function deleteScopeRuntimeConfig(
   db: Database.Database,
   botName: string,

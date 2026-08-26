@@ -23,6 +23,7 @@ import {
   setBotBackendModelState,
   getScopeRuntimeConfig,
   setScopeRuntimeConfig,
+  ensureScopeRuntimeConfig,
   deleteScopeRuntimeConfig,
   findP2pChatIdForUser,
   loadPersistedBotRuntimeState,
@@ -465,6 +466,31 @@ describe("bot runtime state", () => {
 
     deleteScopeRuntimeConfig(db, "NiuBot", "c5#t1");
     expect(getScopeRuntimeConfig(db, "NiuBot", "c5#t1")).toBeUndefined();
+  });
+
+  test("materializes a scope config without overwriting an existing one", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-scope-materialize-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+
+    const first = ensureScopeRuntimeConfig(db, "NiuBot", "c5#t1", {
+      backendType: "grok",
+      model: "grok-model",
+      effort: "high",
+    });
+    expect(first).toEqual({
+      backendType: "grok",
+      model: "grok-model",
+      effort: "high",
+    });
+
+    const second = ensureScopeRuntimeConfig(db, "NiuBot", "c5#t1", {
+      backendType: "codex",
+      model: "codex-model",
+      effort: "low",
+    });
+    expect(second).toEqual(first);
+    expect(getScopeRuntimeConfig(db, "NiuBot", "c5#t1")).toEqual(first);
   });
 
   test("drops leftover scope override tables and the source column", () => {

@@ -4341,7 +4341,10 @@ bots:
     const inherited = await (pipeline as any).getOrCreateSession("c5#t-new", "c5", "t-new");
     expect(inherited.backendType).toBe("claude");
     expect(claudeAgent.createSessionCalls[0]?.model).toBe("opus");
-    expect(getScopeRuntimeConfig(db, "NiuBot", "c5#t-new")).toBeUndefined();
+    expect(getScopeRuntimeConfig(db, "NiuBot", "c5#t-new")).toMatchObject({
+      backendType: "claude",
+      model: "opus",
+    });
 
     setScopeRuntimeConfig(db, "NiuBot", "c5#t-own", { backendType: "codex" });
     const own = await (pipeline as any).getOrCreateSession("c5#t-own", "c5", "t-own");
@@ -4371,7 +4374,7 @@ bots:
     expect((pipeline as any).backendType).toBe("codex");
   });
 
-  test("topics without an override follow later private default changes", async () => {
+  test("topics without an override keep the default from first session creation", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-scope-config-live-follow-"));
     tempDirs.push(dir);
     const db = initDatabase(path.join(dir, "niubot.db"));
@@ -4396,21 +4399,37 @@ bots:
     (pipeline as any).platformChatIds.set("c5", "oc-group");
     (pipeline as any).chatUserIds.set("c5", "u2");
 
-    setBotDefault(db, { backendType: "grok" });
+    setBotDefault(db, { backendType: "grok", model: "grok-first", effort: "high" });
     const first = await (pipeline as any).getOrCreateSession("c5#t1", "c5", "t1");
     expect(first.backendType).toBe("grok");
-    expect(getScopeRuntimeConfig(db, "NiuBot", "c5#t1")).toBeUndefined();
+    expect(grokAgent.createSessionCalls[0]).toMatchObject({
+      model: "grok-first",
+      reasoningEffort: "high",
+    });
+    expect(getScopeRuntimeConfig(db, "NiuBot", "c5#t1")).toEqual({
+      backendType: "grok",
+      model: "grok-first",
+      effort: "high",
+    });
 
     await (pipeline as any).archiveSession("c5#t1", "c5");
-    setBotDefault(db, { backendType: "codex" });
+    setBotDefault(db, { backendType: "codex", model: "codex-later", effort: "low" });
     const second = await (pipeline as any).getOrCreateSession("c5#t1", "c5", "t1");
-    expect(second.backendType).toBe("codex");
-    expect(getScopeRuntimeConfig(db, "NiuBot", "c5#t1")).toBeUndefined();
-    expect(grokAgent.createSessionCalls).toHaveLength(1);
-    expect(codexAgent.createSessionCalls).toHaveLength(1);
+    expect(second.backendType).toBe("grok");
+    expect(grokAgent.createSessionCalls[1]).toMatchObject({
+      model: "grok-first",
+      reasoningEffort: "high",
+    });
+    expect(getScopeRuntimeConfig(db, "NiuBot", "c5#t1")).toEqual({
+      backendType: "grok",
+      model: "grok-first",
+      effort: "high",
+    });
+    expect(grokAgent.createSessionCalls).toHaveLength(2);
+    expect(codexAgent.createSessionCalls).toHaveLength(0);
   });
 
-  test("follows the current default instead of a leftover session backend", async () => {
+  test("materializes the current default instead of a leftover session backend", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-scope-config-legacy-"));
     tempDirs.push(dir);
     const db = initDatabase(path.join(dir, "niubot.db"));
@@ -4442,7 +4461,9 @@ bots:
 
     const session = await (pipeline as any).getOrCreateSession("c5#t1", "c5", "t1");
     expect(session.backendType).toBe("codex");
-    expect(getScopeRuntimeConfig(db, "NiuBot", "c5#t1")).toBeUndefined();
+    expect(getScopeRuntimeConfig(db, "NiuBot", "c5#t1")).toMatchObject({
+      backendType: "codex",
+    });
     expect(codexAgent.createSessionCalls).toHaveLength(1);
     expect(db.prepare("SELECT status FROM sessions WHERE id = 's1'").get()).toEqual({ status: "discarded" });
   });
@@ -4477,7 +4498,9 @@ bots:
 
     const session = await (pipeline as any).getOrCreateSession("c5#t1", "c5", "t1");
     expect(session.backendType).toBe("grok");
-    expect(getScopeRuntimeConfig(db, "NiuBot", "c5#t1")).toBeUndefined();
+    expect(getScopeRuntimeConfig(db, "NiuBot", "c5#t1")).toMatchObject({
+      backendType: "grok",
+    });
     expect(grokAgent.createSessionCalls).toHaveLength(1);
     expect(db.prepare("SELECT status FROM sessions WHERE id = 's1'").get()).toEqual({ status: "active" });
   });
@@ -4651,7 +4674,7 @@ bots:
     });
   });
 
-  test("group follow-up from another bot keeps the bot default backend", async () => {
+  test("group follow-up from another bot materializes the bot default backend", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-bot-speaker-default-"));
     tempDirs.push(dir);
     const db = initDatabase(path.join(dir, "niubot.db"));
@@ -4681,10 +4704,13 @@ bots:
     const session = await (pipeline as any).getOrCreateSession("c5#t1", "c5", "t1");
     expect(session.backendType).toBe("grok");
     expect(grokAgent.createSessionCalls[0]?.model).toBe("haiku");
-    expect(getScopeRuntimeConfig(db, "NiuBot", "c5#t1")).toBeUndefined();
+    expect(getScopeRuntimeConfig(db, "NiuBot", "c5#t1")).toMatchObject({
+      backendType: "grok",
+      model: "haiku",
+    });
   });
 
-  test("first session uses botIdentity without writing a scope row", async () => {
+  test("first session materializes the botIdentity package into a scope row", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-identity-default-freeze-"));
     tempDirs.push(dir);
     const db = initDatabase(path.join(dir, "niubot.db"));
@@ -4709,10 +4735,15 @@ bots:
     await (pipeline as any).getOrCreateSession("c1", "c1");
     expect(agent.createSessionCalls[0]?.model).toBe("gpt-from-identity");
     expect(agent.createSessionCalls[0]?.reasoningEffort).toBe("xhigh");
-    expect(getScopeRuntimeConfig(db, "NiuBot", "c1")).toBeUndefined();
+    expect(getScopeRuntimeConfig(db, "NiuBot", "c1")).toEqual({
+      backendType: "codex",
+      model: "gpt-from-identity",
+      effort: "xhigh",
+    });
+    expect(getBotRuntimeState(db, "NiuBot")).toBeUndefined();
   });
 
-  test("does not freeze an archived session backend when no scope snapshot exists", async () => {
+  test("materializes the current default instead of freezing an archived session backend", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-archived-session-backfill-"));
     tempDirs.push(dir);
     const db = initDatabase(path.join(dir, "niubot.db"));
@@ -4743,7 +4774,7 @@ bots:
 
     const session = await (pipeline as any).getOrCreateSession("c5#t1", "c5", "t1");
     expect(session.backendType).toBe("codex");
-    expect(getScopeRuntimeConfig(db, "NiuBot", "c5#t1")).toBeUndefined();
+    expect(getScopeRuntimeConfig(db, "NiuBot", "c5#t1")).toMatchObject({ backendType: "codex" });
     expect(codexAgent.createSessionCalls).toHaveLength(1);
     expect(grokAgent.createSessionCalls).toHaveLength(0);
   });
@@ -5005,6 +5036,46 @@ bots:
     expect(agent.closeSessionCalls).toEqual(["deferred-agent-session", "deferred-agent-session"]);
     expect((db.prepare("SELECT status FROM sessions ORDER BY started_at DESC LIMIT 1").get() as { status: string }).status).toBe("archived");
     expect(sentTexts).toContain("已开始新会话，当前上下文已清空。");
+  });
+
+  test("waits for an asynchronously created session before changing effort", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-effort-session-order-"));
+    tempDirs.push(dir);
+    const db = initDatabase(path.join(dir, "niubot.db"));
+    const agent = new DeferredCreateAgent();
+    const pipeline = new Pipeline(
+      db,
+      createImStub(),
+      agent,
+      createBotIdentity(),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+
+    (pipeline as any).handleMessage(createMessage({ platformMsgId: "initial-message" }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(agent.createSessionCalls).toHaveLength(1);
+
+    const change = (pipeline as any).handleEffortCommand(
+      ["max"],
+      "c1",
+      "chat-open-id",
+      "effort-command",
+      "c1",
+      "u2",
+    ) as Promise<void>;
+    await Promise.resolve();
+    expect(getScopeRuntimeConfig(db, "NiuBot", "c1")).toBeUndefined();
+
+    agent.resolveCreate();
+    await change;
+
+    expect(getScopeRuntimeConfig(db, "NiuBot", "c1")).toEqual({
+      backendType: "codex",
+      effort: "max",
+    });
   });
 
   test("refreshes agent context files before creating a new chat session", async () => {

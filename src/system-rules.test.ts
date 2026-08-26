@@ -26,6 +26,8 @@ describe("SYSTEM_RULES", () => {
     expect(SYSTEM_RULES).toContain("Background Processes");
     expect(SYSTEM_RULES).toContain("对用户回复时，你就是当前 Bot");
     expect(SYSTEM_RULES).toContain("不要把 agent、backend、模型、NiuBot Engine 或 session 当作用户可见身份");
+    expect(SYSTEM_RULES).toContain("优先使用联系人名称和群名称");
+    expect(SYSTEM_RULES).toContain("不要主动输出 U2、C5 等内部短 ID");
     expect(SYSTEM_RULES).toContain("Current Scene");
     expect(SYSTEM_RULES).toContain("Bot Profile");
     expect(SYSTEM_RULES).toContain("只有管理员可以查看或修改 bot profile");

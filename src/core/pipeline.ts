@@ -34,7 +34,7 @@ import {
   markMessagesAgentSeen,
   setUserIsBot, getUserIsBot,
   setUserAdminRole, getAdminUserIds, getUserAdminRole, type AdminRole,
-  getScopeRuntimeConfig, setScopeRuntimeConfig, deleteScopeRuntimeConfig,
+  getScopeRuntimeConfig, setScopeRuntimeConfig, ensureScopeRuntimeConfig, deleteScopeRuntimeConfig,
   getBotRuntimeState, setBotRuntimeState,
   getBotBackendModelState, setBotBackendModelState,
   type ScopeRuntimeConfig,
@@ -2020,7 +2020,10 @@ export class Pipeline {
           this.replyText(chatId, platformChatId, msgId, "/effort 仅管理员可用。");
           return true;
         }
-        this.handleEffortCommand(parts.slice(1), chatId, platformChatId, msgId, effectiveScopeKey, userId);
+        void this.handleEffortCommand(parts.slice(1), chatId, platformChatId, msgId, effectiveScopeKey, userId).catch((err) => {
+          this.log.error("effort command failed", { error: String(err) });
+          this.sendAgentCard(chatId, platformChatId, msgId, "Effort|red", `处理 /effort 失败: ${String(err)}`, threadId);
+        });
         return true;
       }
       case "/timezone":
@@ -3594,6 +3597,9 @@ export class Pipeline {
     userId?: string,
   ): Promise<void> {
     const effectiveScopeKey = scopeKey ?? chatId;
+    if (this.sessionCreations.has(effectiveScopeKey)) {
+      await this.waitForSessionCreation(effectiveScopeKey);
+    }
     const replyThreadId = threadId ?? parseScopeKey(effectiveScopeKey).threadId;
     const currentBackend = this.resolveScopeBackendType(effectiveScopeKey, userId);
     let capabilities: BackendCapability[];
@@ -3758,6 +3764,9 @@ export class Pipeline {
    */
   private async handleModelCommand(args: string[], chatId: string, platformChatId: string, msgId?: string, scopeKey?: string, userId?: string): Promise<void> {
     const effectiveScopeKey = scopeKey ?? chatId;
+    if (this.sessionCreations.has(effectiveScopeKey)) {
+      await this.waitForSessionCreation(effectiveScopeKey);
+    }
     const replyThreadId = parseScopeKey(effectiveScopeKey).threadId;
     if (args.length === 0) {
       this.sendModelList(chatId, platformChatId, msgId, effectiveScopeKey, userId);
@@ -3880,8 +3889,11 @@ export class Pipeline {
    * - /effort <level>      → 切换（low/medium/high/xhigh/max）
    * - /effort reset        → 恢复 backend 默认
    */
-  private handleEffortCommand(args: string[], chatId: string, platformChatId: string, msgId?: string, scopeKey?: string, userId?: string): void {
+  private async handleEffortCommand(args: string[], chatId: string, platformChatId: string, msgId?: string, scopeKey?: string, userId?: string): Promise<void> {
     const effectiveScopeKey = scopeKey ?? chatId;
+    if (this.sessionCreations.has(effectiveScopeKey)) {
+      await this.waitForSessionCreation(effectiveScopeKey);
+    }
     const replyThreadId = parseScopeKey(effectiveScopeKey).threadId;
     const scopeBackendType = this.resolveScopeBackendType(effectiveScopeKey, userId);
     const supported = EFFORT_SUPPORTED_BACKENDS.has(scopeBackendType);
@@ -4085,6 +4097,10 @@ export class Pipeline {
     const own = getScopeRuntimeConfig(this.db, this.botIdentity.name, scopeKey);
     if (own) return own;
     return this.resolveFallbackConfig(scopeKey, userId);
+  }
+
+  private materializeScopeConfig(scopeKey: string, config: ScopeRuntimeConfig): ScopeRuntimeConfig {
+    return ensureScopeRuntimeConfig(this.db, this.botIdentity.name, scopeKey, config);
   }
 
   private resolveFallbackConfig(_scopeKey?: string, _userId?: string): ScopeRuntimeConfig {
@@ -5309,6 +5325,7 @@ export class Pipeline {
         agentSessionId: canResume ? nativeId : undefined,
         scheduleToken: this.chatScheduleTokens.get(scopeKey),
       }, sessionBackend);
+      this.materializeScopeConfig(scopeKey, scopeConfig);
       this.db.prepare(`
         UPDATE sessions
         SET backend_type = ?,
@@ -5369,7 +5386,6 @@ export class Pipeline {
       botProfilePath: this.stableContextOptions.botProfilePath,
       scheduleToken: this.chatScheduleTokens.get(scopeKey),
     }, sessionBackend);
-
     if (sessionBackend.needsStableUserPrefix() && stableContext) {
       this.pendingStableContext.set(scopeKey, stableContext);
     }
@@ -5377,43 +5393,48 @@ export class Pipeline {
     const sessionId = randomUUID().slice(0, 8);
 
     try {
-      if (isolated) {
+      const persistNewSession = this.db.transaction(() => {
+        if (isolated) {
+          this.db.prepare(`
+            UPDATE sessions
+            SET status = 'archived',
+                ended_at = datetime('now'),
+                last_active_at = datetime('now')
+            WHERE chat_id = ? AND status = 'active' AND source = 'user' AND thread_id IS NULL
+          `).run(chatId);
+        }
+        const orphan = this.db.prepare(`
+          SELECT MIN(id) as startId
+          FROM messages
+          WHERE chat_id = ? AND session_key IS NULL
+            AND (? IS NULL OR thread_id = ?)
+        `).get(chatId, threadId ?? null, threadId ?? null) as { startId: number | null } | undefined;
+        const startMsgId = orphan?.startId ?? null;
+
         this.db.prepare(`
-          UPDATE sessions
-          SET status = 'archived',
-              ended_at = datetime('now'),
-              last_active_at = datetime('now')
-          WHERE chat_id = ? AND status = 'active' AND source = 'user' AND thread_id IS NULL
-        `).run(chatId);
-      }
-      const orphan = this.db.prepare(`
-        SELECT MIN(id) as startId
-        FROM messages
-        WHERE chat_id = ? AND session_key IS NULL
-          AND (? IS NULL OR thread_id = ?)
-      `).get(chatId, threadId ?? null, threadId ?? null) as { startId: number | null } | undefined;
-      const startMsgId = orphan?.startId ?? null;
+          INSERT INTO sessions (
+            id, chat_id, user_id, status, start_msg_id, thread_id, started_at,
+            last_active_at, backend_type, agent_session_id
+          )
+          VALUES (?, ?, ?, 'active', ?, ?, datetime('now'), datetime('now'), ?, NULL)
+        `).run(
+          sessionId,
+          chatId,
+          userId ?? null,
+          startMsgId,
+          threadId ?? null,
+          scopeBackendType,
+        );
 
-      this.db.prepare(`
-        INSERT INTO sessions (
-          id, chat_id, user_id, status, start_msg_id, thread_id, started_at,
-          last_active_at, backend_type, agent_session_id
-        )
-        VALUES (?, ?, ?, 'active', ?, ?, datetime('now'), datetime('now'), ?, NULL)
-      `).run(
-        sessionId,
-        chatId,
-        userId ?? null,
-        startMsgId,
-        threadId ?? null,
-        scopeBackendType,
-      );
+        this.db.prepare(`
+          UPDATE messages SET session_key = ?
+          WHERE chat_id = ? AND session_key IS NULL
+            AND (? IS NULL OR thread_id = ?)
+        `).run(sessionId, chatId, threadId ?? null, threadId ?? null);
 
-      this.db.prepare(`
-        UPDATE messages SET session_key = ?
-        WHERE chat_id = ? AND session_key IS NULL
-          AND (? IS NULL OR thread_id = ?)
-      `).run(sessionId, chatId, threadId ?? null, threadId ?? null);
+        this.materializeScopeConfig(scopeKey, scopeConfig);
+      });
+      persistNewSession();
     } catch (dbErr) {
       await sessionBackend.closeSession(agentSession).catch(() => {});
       throw dbErr;
