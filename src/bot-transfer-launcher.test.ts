@@ -45,7 +45,7 @@ describe("Bot transfer worker launcher", () => {
     }
     expect(fs.existsSync(path.join(source, "run", "bot-transfer-active", `${launched.id}.json`))).toBe(true);
     expect(fs.existsSync(path.join(target, "run", "bot-transfer-active", `${launched.id}.json`))).toBe(true);
-    await waitForFile(sentinel);
+    await waitForFile(sentinel, launched.id);
     expect(fs.readFileSync(sentinel, "utf-8")).toBe(launched.id);
 
     expect(() => launchBotTransferWorker({
@@ -68,10 +68,10 @@ function temporaryRoot(): string {
   return root;
 }
 
-async function waitForFile(filePath: string): Promise<void> {
+async function waitForFile(filePath: string, expectedContents: string): Promise<void> {
   const deadline = Date.now() + 5_000;
   while (Date.now() < deadline) {
-    if (fs.existsSync(filePath)) return;
+    if (fs.existsSync(filePath) && fs.readFileSync(filePath, "utf-8") === expectedContents) return;
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   throw new Error(`timed out waiting for ${filePath}`);
