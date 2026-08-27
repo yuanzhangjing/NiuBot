@@ -4,7 +4,6 @@ import path from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, test } from "vitest";
 import {
-  initDatabase as openDatabase,
   ensureUser,
   ensureChat,
   storeMessage,
@@ -32,21 +31,12 @@ import {
   recordRuntimeEvent,
   LATEST_SCHEMA_VERSION,
 } from "./schema.js";
+import { closeTestDatabases, openTestDatabase } from "../../test-utils/database.js";
 
 const tempDirs: string[] = [];
-const openDatabases = new Set<Database.Database>();
-
-function initDatabase(filePath: string): Database.Database {
-  const db = openDatabase(filePath);
-  openDatabases.add(db);
-  return db;
-}
 
 afterEach(() => {
-  for (const db of openDatabases) {
-    if (db.open) db.close();
-  }
-  openDatabases.clear();
+  closeTestDatabases();
   for (const dir of tempDirs.splice(0)) {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -56,7 +46,7 @@ describe("loop schema", () => {
   test("creates the chat-scoped Loop table and due index", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-loop-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
 
     const columns = db.prepare("PRAGMA table_info(loop_jobs)").all() as Array<{ name: string }>;
     const indexes = db.prepare("PRAGMA index_list(loop_jobs)").all() as Array<{ name: string }>;
@@ -71,7 +61,7 @@ describe("loop schema", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-loop-migration-test-"));
     tempDirs.push(dir);
     const dbPath = path.join(dir, "niubot.db");
-    const legacy = initDatabase(dbPath);
+    const legacy = openTestDatabase(dbPath);
     legacy.prepare(`
       INSERT INTO loop_jobs (
         chat_id, creator_user_id, session_id, interval_seconds, prompt,
@@ -82,7 +72,7 @@ describe("loop schema", () => {
     legacy.pragma("user_version = 21");
     legacy.close();
 
-    const migrated = initDatabase(dbPath);
+    const migrated = openTestDatabase(dbPath);
     expect(migrated.prepare("SELECT id, chat_id, prompt FROM loop_jobs WHERE id = 1").get()).toEqual({
       id: 1,
       chat_id: "c1",
@@ -96,7 +86,7 @@ describe("loop schema", () => {
     expect(migrated.prepare("SELECT session_id FROM loop_jobs WHERE id = 2").pluck().get()).toBe("");
     migrated.close();
 
-    const reopened = initDatabase(dbPath);
+    const reopened = openTestDatabase(dbPath);
     expect(reopened.prepare("SELECT COUNT(*) FROM loop_jobs").pluck().get()).toBe(2);
     expect((reopened.prepare("PRAGMA index_list(loop_jobs)").all() as Array<{ name: string }>)
       .map((index) => index.name)).not.toContain("idx_loop_jobs_session");
@@ -107,7 +97,7 @@ describe("messages platform_msg_id unique index", () => {
   test("new databases have a unique index on platform message ids", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-msg-unique-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const indexes = db.prepare("PRAGMA index_list(messages)").all() as Array<{ name: string; unique: number }>;
     expect(indexes).toEqual(expect.arrayContaining([
       expect.objectContaining({ name: "idx_messages_platform_msg_id", unique: 1 }),
@@ -117,7 +107,7 @@ describe("messages platform_msg_id unique index", () => {
   test("storeMessage reuses the existing row for the same platform message id", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-msg-dedupe-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const userId = ensureUser(db, "feishu", "ou-zen", "Zen");
     const chatId = ensureChat(db, "feishu", "oc-group", "group", "bots");
     const first = storeMessage(db, {
@@ -144,7 +134,7 @@ describe("messages platform_msg_id unique index", () => {
   test("updateMessagePlatformId does not steal an id already owned by another row", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-msg-platform-id-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const userId = ensureUser(db, "feishu", "ou-zen", "Zen");
     const chatId = ensureChat(db, "feishu", "oc-group", "group", "bots");
     const first = storeMessage(db, {
@@ -173,7 +163,7 @@ describe("messages platform_msg_id unique index", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-msg-migrate-"));
     tempDirs.push(dir);
     const dbPath = path.join(dir, "niubot.db");
-    const legacy = initDatabase(dbPath);
+    const legacy = openTestDatabase(dbPath);
     const userId = ensureUser(legacy, "feishu", "ou-zen", "Zen");
     const chatId = ensureChat(legacy, "feishu", "oc-group", "group", "bots");
     legacy.exec("DROP INDEX IF EXISTS idx_messages_platform_msg_id");
@@ -193,7 +183,7 @@ describe("messages platform_msg_id unique index", () => {
     legacy.pragma("user_version = 30");
     legacy.close();
 
-    const migrated = initDatabase(dbPath);
+    const migrated = openTestDatabase(dbPath);
     const rows = migrated.prepare(
       "SELECT id, content_text FROM messages WHERE platform_msg_id = 'om-dup' ORDER BY id",
     ).all();
@@ -209,7 +199,7 @@ describe("topic schema v32", () => {
   test("adds topic columns, thread message fields, and thread history cursors", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-topic-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
 
     const chatColumns = db.prepare("PRAGMA table_info(chats)").all() as Array<{ name: string }>;
     const messageColumns = db.prepare("PRAGMA table_info(messages)").all() as Array<{ name: string }>;
@@ -278,7 +268,7 @@ describe("topic schema v32", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-topic-migrate-"));
     tempDirs.push(dir);
     const dbPath = path.join(dir, "niubot.db");
-    const legacy = initDatabase(dbPath);
+    const legacy = openTestDatabase(dbPath);
     const userId = ensureUser(legacy, "feishu", "ou-zen", "Zen");
     const chatId = ensureChat(legacy, "feishu", "oc-group", "group", "Group");
     legacy.exec(`
@@ -310,7 +300,7 @@ describe("topic schema v32", () => {
     legacy.pragma("user_version = 31");
     legacy.close();
 
-    const migrated = initDatabase(dbPath);
+    const migrated = openTestDatabase(dbPath);
     expect(migrated.pragma("user_version", { simple: true })).toBe(LATEST_SCHEMA_VERSION);
     expect(migrated.prepare(
       "SELECT COUNT(*) AS count FROM sessions WHERE chat_id = ? AND status = 'active' AND source = 'user'",
@@ -329,7 +319,7 @@ describe("core migration waterline", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-waterline-test-"));
     tempDirs.push(dir);
     const dbPath = path.join(dir, "niubot.db");
-    const first = initDatabase(dbPath);
+    const first = openTestDatabase(dbPath);
     first.exec(`
       CREATE TABLE core_marker_writes (count INTEGER NOT NULL);
       INSERT INTO core_marker_writes VALUES (0);
@@ -342,7 +332,7 @@ describe("core migration waterline", () => {
     `);
     first.close();
 
-    const reopened = initDatabase(dbPath);
+    const reopened = openTestDatabase(dbPath);
     expect(reopened.prepare("SELECT count FROM core_marker_writes").get()).toEqual({ count: 0 });
     expect(reopened.prepare(
       "SELECT version FROM niubot_component_schema_versions WHERE component = 'core'",
@@ -354,7 +344,7 @@ describe("bot runtime state", () => {
   test("persists backend and model for a bot", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
 
     setBotRuntimeState(db, "NiuBot", {
       backendType: "codex",
@@ -370,7 +360,7 @@ describe("bot runtime state", () => {
   test("can clear runtime models without clearing backend", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
 
     setBotRuntimeState(db, "NiuBot", {
       backendType: "codex",
@@ -387,7 +377,7 @@ describe("bot runtime state", () => {
   test("does not erase legacy lite model columns when updating the main model", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     setBotRuntimeState(db, "NiuBot", { backendType: "codex", model: "old" });
     setBotBackendModelState(db, "NiuBot", "codex", { model: "old" });
     db.prepare("UPDATE bot_runtime_state SET lite_model = 'legacy-lite' WHERE bot_name = 'NiuBot'").run();
@@ -403,7 +393,7 @@ describe("bot runtime state", () => {
   test("persists model cache separately for each backend", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
 
     setBotBackendModelState(db, "NiuBot", "claude", {
       model: "claude-opus-4-6",
@@ -424,7 +414,7 @@ describe("bot runtime state", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-test-"));
     tempDirs.push(dir);
     const dbPath = path.join(dir, "niubot.db");
-    const db = initDatabase(dbPath);
+    const db = openTestDatabase(dbPath);
 
     setBotRuntimeState(db, "NiuBot", {
       backendType: "codex",
@@ -443,7 +433,7 @@ describe("bot runtime state", () => {
   test("persists agent config per scope", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-scope-config-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     expect(LATEST_SCHEMA_VERSION).toBeGreaterThanOrEqual(34);
 
     setScopeRuntimeConfig(db, "NiuBot", "c5#t1", {
@@ -471,7 +461,7 @@ describe("bot runtime state", () => {
   test("materializes a scope config without overwriting an existing one", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-scope-materialize-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
 
     const first = ensureScopeRuntimeConfig(db, "NiuBot", "c5#t1", {
       backendType: "grok",
@@ -497,7 +487,7 @@ describe("bot runtime state", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-drop-legacy-scope-"));
     tempDirs.push(dir);
     const dbPath = path.join(dir, "niubot.db");
-    const db = initDatabase(dbPath);
+    const db = openTestDatabase(dbPath);
     db.exec(`
       CREATE TABLE IF NOT EXISTS scope_runtime_models (
         bot_name TEXT NOT NULL,
@@ -534,7 +524,7 @@ describe("bot runtime state", () => {
     db.pragma("user_version = 37");
     db.close();
 
-    const migrated = initDatabase(dbPath);
+    const migrated = openTestDatabase(dbPath);
     expect(migrated.pragma("user_version", { simple: true })).toBe(LATEST_SCHEMA_VERSION);
     expect(migrated.prepare("SELECT name FROM sqlite_master WHERE name = 'scope_runtime_models'").get()).toBeUndefined();
     expect(migrated.prepare("SELECT name FROM sqlite_master WHERE name = 'scope_runtime_backends'").get()).toBeUndefined();
@@ -550,7 +540,7 @@ describe("bot runtime state", () => {
   test("finds a user's p2p chat for default runtime fallback", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-p2p-chat-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u2', 'Zen', 'feishu', 'ou-zen')").run();
     db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u3', 'Other', 'feishu', 'ou-other')").run();
     db.prepare("INSERT INTO chats (id, type, platform, platform_id, user_id) VALUES ('c1', 'p2p', 'feishu', 'oc-p2p', 'ou-zen')").run();
@@ -565,7 +555,7 @@ describe("runtime events schema", () => {
   test("creates runtime_events for a new database", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
 
     const row = db.prepare(
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'runtime_events'",
@@ -578,13 +568,13 @@ describe("runtime events schema", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-test-"));
     tempDirs.push(dir);
     const dbPath = path.join(dir, "niubot.db");
-    const db = initDatabase(dbPath);
+    const db = openTestDatabase(dbPath);
     db.prepare("DROP TABLE runtime_events").run();
     db.pragma("user_version = 14");
     db.prepare("DELETE FROM niubot_component_schema_versions WHERE component = 'core'").run();
     db.close();
 
-    const migrated = initDatabase(dbPath);
+    const migrated = openTestDatabase(dbPath);
     const row = migrated.prepare(
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'runtime_events'",
     ).get() as { name: string } | undefined;
@@ -595,7 +585,7 @@ describe("runtime events schema", () => {
   test("queries recent events by chat and run", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
 
     recordRuntimeEvent(db, {
       botId: "NiuBot",
@@ -647,7 +637,7 @@ describe("runtime events schema", () => {
   test("marks unfinished runtime runs failed by restart", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
 
     recordRuntimeEvent(db, {
       botId: "NiuBot",
@@ -685,13 +675,13 @@ describe("cron timezone schema", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-test-"));
     tempDirs.push(dir);
     const dbPath = path.join(dir, "niubot.db");
-    const db = initDatabase(dbPath);
+    const db = openTestDatabase(dbPath);
     db.pragma("user_version = 15");
     db.exec("ALTER TABLE cron_jobs DROP COLUMN timezone");
     db.prepare("DELETE FROM niubot_component_schema_versions WHERE component = 'core'").run();
     db.close();
 
-    const migrated = initDatabase(dbPath);
+    const migrated = openTestDatabase(dbPath);
     const columns = migrated.prepare("PRAGMA table_info(cron_jobs)").all() as Array<{ name: string }>;
     expect(columns.map((column) => column.name)).toContain("timezone");
     // LATEST（26）是破坏性迁移（DROP COLUMN）：升级后 user_version 推进到最新，旧二进制被拒绝启动
@@ -706,7 +696,7 @@ describe("public upgrade rollback compatibility", () => {
       const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-test-"));
       tempDirs.push(dir);
       const dbPath = path.join(dir, "niubot.db");
-      const fixture = initDatabase(dbPath);
+      const fixture = openTestDatabase(dbPath);
       downgradeToPublicSchemaFixture(fixture, legacyVersion);
       fixture.prepare(`
         INSERT INTO cron_jobs (
@@ -717,7 +707,7 @@ describe("public upgrade rollback compatibility", () => {
       fixture.pragma(`user_version = ${legacyVersion}`);
       fixture.close();
 
-      const upgraded = initDatabase(dbPath);
+      const upgraded = openTestDatabase(dbPath);
       // LATEST（26）为破坏性迁移：升级后 user_version 推进到最新（旧二进制拒绝启动，而非崩溃）
       expect(upgraded.pragma("user_version", { simple: true })).toBe(LATEST_SCHEMA_VERSION);
       expect(upgraded.prepare(
@@ -746,7 +736,7 @@ describe("public upgrade rollback compatibility", () => {
       `).run("c1", "u1", "30 * * * *", null, "during-rollback", "", null, null)).not.toThrow();
       rolledBack.close();
 
-      const reupgraded = initDatabase(dbPath);
+      const reupgraded = openTestDatabase(dbPath);
       expect(reupgraded.pragma("user_version", { simple: true })).toBe(LATEST_SCHEMA_VERSION);
       expect(reupgraded.prepare(
         "SELECT prompt FROM cron_jobs ORDER BY id",
@@ -766,7 +756,7 @@ describe("public upgrade rollback compatibility", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-test-"));
     tempDirs.push(dir);
     const dbPath = path.join(dir, "niubot.db");
-    const fixture = initDatabase(dbPath);
+    const fixture = openTestDatabase(dbPath);
     downgradeToPublicSchemaFixture(fixture, 10);
     fixture.exec(`
       CREATE TABLE model_history (
@@ -781,7 +771,7 @@ describe("public upgrade rollback compatibility", () => {
     `);
     fixture.close();
 
-    const resumed = initDatabase(dbPath);
+    const resumed = openTestDatabase(dbPath);
     // LATEST（26）为破坏性迁移：升级后 user_version 推进到最新
     expect(resumed.pragma("user_version", { simple: true })).toBe(LATEST_SCHEMA_VERSION);
     expect((resumed.prepare("PRAGMA table_info(bot_runtime_state)").all() as Array<{ name: string }>)
@@ -870,7 +860,7 @@ describe("transport inbox claim schema", () => {
     `);
     legacy.close();
 
-    const migrated = initDatabase(dbPath);
+    const migrated = openTestDatabase(dbPath);
     const row = migrated.prepare(`
       SELECT status, message_id, attempt_count, claim_token, claimed_at
       FROM transport_inbox WHERE platform_msg_id = 'msg-1'
@@ -893,41 +883,41 @@ describe("transport inbox claim schema", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-test-"));
     tempDirs.push(dir);
     const dbPath = path.join(dir, "niubot.db");
-    const database = initDatabase(dbPath);
+    const database = openTestDatabase(dbPath);
     database.exec(`
       DELETE FROM niubot_component_schema_versions WHERE component = 'transport';
       DROP TABLE transport_outbox;
     `);
     database.close();
 
-    expect(() => openDatabase(dbPath)).toThrow(/Transport schema is incomplete/);
+    expect(() => openTestDatabase(dbPath)).toThrow(/Transport schema is incomplete/);
   });
 
   test("rejects component metadata that disagrees with transport tables", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-test-"));
     tempDirs.push(dir);
     const dbPath = path.join(dir, "niubot.db");
-    const database = initDatabase(dbPath);
+    const database = openTestDatabase(dbPath);
     database.prepare(
       "UPDATE niubot_component_schema_versions SET version = 1 WHERE component = 'transport'",
     ).run();
     database.close();
 
-    expect(() => openDatabase(dbPath)).toThrow(/does not match its tables/);
+    expect(() => openTestDatabase(dbPath)).toThrow(/does not match its tables/);
   });
 
   test("rejects transport tables with incomplete claim columns", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-test-"));
     tempDirs.push(dir);
     const dbPath = path.join(dir, "niubot.db");
-    const database = initDatabase(dbPath);
+    const database = openTestDatabase(dbPath);
     database.exec(`
       ALTER TABLE transport_inbox DROP COLUMN claimed_at;
       DELETE FROM niubot_component_schema_versions WHERE component = 'transport';
     `);
     database.close();
 
-    expect(() => openDatabase(dbPath)).toThrow(/claim schema is incomplete/);
+    expect(() => openTestDatabase(dbPath)).toThrow(/claim schema is incomplete/);
   });
 });
 
@@ -935,7 +925,7 @@ describe("bot identity helpers", () => {
   test("setUserIsBot and listChatBots include self and speakers", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-bot-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const selfId = ensureUser(db, "feishu", "ou-self", "NiuBot");
     const cowId = ensureUser(db, "feishu", "ou-cow", "CowBot");
     const humanId = ensureUser(db, "feishu", "ou-zen", "Zen");
@@ -966,7 +956,7 @@ describe("bot identity helpers", () => {
   test("getUserIdentityByPlatformId reports missing, human, and bot rows", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-identity-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const humanId = ensureUser(db, "feishu", "ou-zen", "Zen");
     const cowId = ensureUser(db, "feishu", "ou-cow", "CowBot");
     setUserIsBot(db, cowId);

@@ -1,17 +1,15 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type Database from "better-sqlite3";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import type { AgentBackend, AgentResponse, AgentSession, SessionConfig } from "../agent/types.js";
 import { Pipeline } from "../core/pipeline.js";
-import { initDatabase } from "../database/schema.js";
+import { closeTestDatabases, openTestDatabase } from "../../test-utils/database.js";
 import type { MessageHandler, PlatformAdapter } from "../im/types.js";
 import { PersistentTransport } from "./persistent-transport.js";
 import type { NormalizedMessage } from "./types.js";
 
 const tempDirs: string[] = [];
-const databases: Database.Database[] = [];
 
 class TestAgent implements AgentBackend {
   readonly messages: string[] = [];
@@ -85,8 +83,7 @@ function createSystem(
   const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-transport-pipeline-"));
   tempDirs.push(dir);
   const dbPath = path.join(dir, "niubot.db");
-  const db = initDatabase(dbPath);
-  databases.push(db);
+  const db = openTestDatabase(dbPath);
   const platform = createAdapter();
   const transport = new PersistentTransport({
     db,
@@ -112,9 +109,7 @@ function createSystem(
 
 afterEach(() => {
   vi.restoreAllMocks();
-  for (const db of databases.splice(0)) {
-    if (db.open) db.close();
-  }
+  closeTestDatabases();
   for (const dir of tempDirs.splice(0)) {
     rmSync(dir, { recursive: true, force: true });
   }

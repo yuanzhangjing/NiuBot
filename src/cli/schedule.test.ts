@@ -3,27 +3,24 @@ import os from "node:os";
 import path from "node:path";
 import type Database from "better-sqlite3";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { initDatabase } from "../database/schema.js";
+import { closeTestDatabases, openTestDatabase } from "../../test-utils/database.js";
 import { addLoopJob } from "../core/loop.js";
 import { parseArgs } from "./args.js";
 import { handleSchedule } from "./schedule.js";
 
 const dirs: string[] = [];
-const dbs: Database.Database[] = [];
 
 afterEach(() => {
   vi.restoreAllMocks();
-  for (const db of dbs) db.close();
+  closeTestDatabases();
   for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
-  dbs.length = 0;
   dirs.length = 0;
 });
 
 function fixture(): Database.Database {
   const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schedule-cli-test-"));
   dirs.push(dir);
-  const db = initDatabase(path.join(dir, "niubot.db"));
-  dbs.push(db);
+  const db = openTestDatabase(path.join(dir, "niubot.db"));
   db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u1', 'user', 'feishu', 'pu1')").run();
   db.prepare("INSERT INTO chats (id, type, platform, platform_id, user_id) VALUES ('c1', 'p2p', 'feishu', 'pc1', 'pu1')").run();
   return db;

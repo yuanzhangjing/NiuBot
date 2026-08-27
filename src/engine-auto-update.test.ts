@@ -1,16 +1,14 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type Database from "better-sqlite3";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { initDatabase } from "./database/schema.js";
+import { closeTestDatabases, openTestDatabase } from "../test-utils/database.js";
 import { EngineAutoUpdateCoordinator } from "./engine-auto-update.js";
 import type { UpgradeSafenessSource } from "./core/auto-update.js";
 import { loadConfig, writeAutoUpdateEnabledToConfig } from "./config.js";
 import { EngineLifecycleService } from "./engine-lifecycle.js";
 
 const dirs: string[] = [];
-const databases: Database.Database[] = [];
 
 function idleSource(name = "idle"): UpgradeSafenessSource {
   return {
@@ -33,8 +31,7 @@ function createFixture(enabled: boolean, participants: UpgradeSafenessSource[][]
   dirs.push(dir);
   const dbPath = path.join(dir, "NiuBot", "niubot.db");
   mkdirSync(path.dirname(dbPath), { recursive: true });
-  const db = initDatabase(dbPath);
-  databases.push(db);
+  const db = openTestDatabase(dbPath);
   db.prepare(`
     INSERT INTO users (id, name, platform, platform_id, is_admin)
     VALUES ('u2', 'admin', 'feishu', 'user-open-id', 'owner')
@@ -97,9 +94,7 @@ function createFixture(enabled: boolean, participants: UpgradeSafenessSource[][]
 afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
-  for (const db of databases.splice(0)) {
-    if (db.open) db.close();
-  }
+  closeTestDatabases();
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 

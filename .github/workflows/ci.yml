@@ -1,10 +1,11 @@
 name: CI
 
 on:
+  workflow_dispatch:
   pull_request:
   push:
-    tags-ignore:
-      - "v*"
+    branches:
+      - "**"
 
 permissions:
   contents: read

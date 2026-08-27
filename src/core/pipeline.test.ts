@@ -18,11 +18,11 @@ import {
   setScopeRuntimeConfig,
   getRecentRuntimeEvents,
   getUserIsBot,
-  initDatabase as openDatabase,
   recordRuntimeEvent,
   setBotBackendModelState,
   setUserIsBot,
 } from "../database/schema.js";
+import { closeTestDatabases, openTestDatabase } from "../../test-utils/database.js";
 import type { NormalizedMessage, PlatformAdapter } from "../im/types.js";
 import { DeliveryUncertainError } from "../transport/errors.js";
 import type { DeliveryOptions } from "../transport/types.js";
@@ -482,13 +482,6 @@ function createMessage(overrides: Partial<NormalizedMessage>): NormalizedMessage
 }
 
 const tempDirs: string[] = [];
-const openDatabases = new Set<Database.Database>();
-
-function initDatabase(filePath: string): Database.Database {
-  const db = openDatabase(filePath);
-  openDatabases.add(db);
-  return db;
-}
 
 function writeAutoUpdateTestConfig(directory: string, enabled: boolean): string {
   const configPath = path.join(directory, "config.yaml");
@@ -530,10 +523,7 @@ afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
-  for (const db of openDatabases) {
-    if (db.open) db.close();
-  }
-  openDatabases.clear();
+  closeTestDatabases();
   while (tempDirs.length > 0) {
     rmSync(tempDirs.pop()!, { recursive: true, force: true });
   }
@@ -543,7 +533,7 @@ describe("Pipeline Loop integration", () => {
   test("scheduler reuses the current Agent session and settles the run after delivery", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-loop-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const agent = new ReplyAgent("loop reply");
     const { im, sentCards } = createRecordingImStub();
     const pipeline = new Pipeline(
@@ -588,7 +578,7 @@ describe("Pipeline Loop integration", () => {
   test("keeps the Loop marker on text fallback and retries when the response body was not delivered", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-loop-fallback-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const agent = new ReplyAgent("loop reply");
     const { im, sentCards, sentTexts } = createRecordingImStub();
     const pipeline = new Pipeline(
@@ -623,7 +613,7 @@ describe("Pipeline Loop integration", () => {
   test("settles a Loop turn when card fails but the original at payload is sent as text", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-loop-at-fallback-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const agent = new ReplyAgent("loop reply");
     const { im, sentTexts } = createRecordingImStub();
     const pipeline = new Pipeline(
@@ -660,7 +650,7 @@ describe("Pipeline Loop integration", () => {
   test("keeps the Loop marker when the Agent turn throws", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-loop-error-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u2', 'admin', 'feishu', 'user-open-id')").run();
     db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c1', 'p2p', 'feishu', 'chat-open-id')").run();
     const { im, sentTexts } = createRecordingImStub();
@@ -685,7 +675,7 @@ describe("Pipeline Loop integration", () => {
   test("/new keeps chat-scoped Loop and its next run uses the new main session", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-loop-command-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const agent = new ReplyAgent("ok");
     const { im } = createRecordingImStub();
     const pipeline = new Pipeline(
@@ -720,7 +710,7 @@ describe("Pipeline Loop integration", () => {
   test("/loop and /cron natural language are translated to task + nbt schedule suggestion", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-natural-schedule-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const agent = new RecordingAgent();
     const { im } = createRecordingImStub();
     const pipeline = new Pipeline(
@@ -760,7 +750,7 @@ describe("Pipeline Loop integration", () => {
   test("group hybrid /loop keeps trailing mentions instead of stripping them", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-hybrid-mention-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const agent = new RecordingAgent();
     const { im } = createRecordingImStub();
     const pipeline = new Pipeline(
@@ -784,7 +774,7 @@ describe("Pipeline Loop integration", () => {
   test("reply-form /loop keeps quoted context and reaches the model unchanged", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-reply-schedule-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const agent = new RecordingAgent();
     const { im } = createRecordingImStub();
     const pipeline = new Pipeline(
@@ -812,7 +802,7 @@ describe("Pipeline Loop integration", () => {
   test("schedule writes use the current group turn identity instead of the session creator", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-schedule-identity-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u3', 'later user', 'feishu', 'pu3')").run();
     db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c1', 'group', 'feishu', 'pc1')").run();
     const pipeline = new Pipeline(
@@ -849,7 +839,7 @@ describe("Pipeline Loop integration", () => {
   test("create.schedule unifies triggers across loop/cron modes", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-schedule-unified-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u3', 'later user', 'feishu', 'pu3')").run();
     db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c1', 'group', 'feishu', 'pc1')").run();
     const pipeline = new Pipeline(
@@ -899,7 +889,7 @@ describe("Pipeline Loop integration", () => {
   test("disables schedule writes when one merged group turn contains multiple senders", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-multi-sender-schedule-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     let observedContext: { userTurn: boolean; userId: string } | undefined;
     let pipeline!: Pipeline;
     class InspectScheduleContextAgent extends RecordingAgent {
@@ -937,7 +927,7 @@ describe("Pipeline Loop integration", () => {
   test("stopping a Loop turn before Agent execution keeps the Session and reschedules the Loop", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-loop-stop-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const agent = new ReplyAgent("reply");
     const { im } = createRecordingImStub();
     const pipeline = new Pipeline(
@@ -975,7 +965,7 @@ describe("Pipeline.start", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const im = createImStub();
     let messageHandlerRegistered = false;
     im.onMessage = () => { messageHandlerRegistered = true; };
@@ -1009,7 +999,7 @@ describe("Pipeline.start", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const im = createImStub();
     im.getAppCreatorId = async () => new Promise<string | undefined>(() => {});
     const agent = new RecordingAgent();
@@ -1040,7 +1030,7 @@ describe("Pipeline runtime", () => {
   test("isolates topic thread messages into a scope queue and thread session columns", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-topic-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare(`
       INSERT INTO chats (id, type, platform, platform_id, chat_mode, group_message_type, chat_mode_fetched_at)
       VALUES ('c1', 'group', 'feishu', 'oc-group', 'topic', 'thread', ?)
@@ -1080,7 +1070,7 @@ describe("Pipeline runtime", () => {
   test("wakes isolated topic follow-ups after the root mentioned the bot", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-topic-followup-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare(`
       INSERT INTO chats (id, type, platform, platform_id, chat_mode, group_message_type, chat_mode_fetched_at)
       VALUES ('c1', 'group', 'feishu', 'oc-group', 'topic', 'thread', ?)
@@ -1133,7 +1123,7 @@ describe("Pipeline runtime", () => {
   test("wakes a topic follow-up while the first @ is still buffering", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-topic-followup-buffer-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare(`
       INSERT INTO chats (id, type, platform, platform_id, chat_mode, group_message_type, chat_mode_fetched_at)
       VALUES ('c1', 'group', 'feishu', 'oc-group', 'topic', 'thread', ?)
@@ -1172,7 +1162,7 @@ describe("Pipeline runtime", () => {
   test("does not trigger on an explicit other-bot target in an owned topic", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-topic-other-bot-target-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare(`
       INSERT INTO chats (id, type, platform, platform_id, chat_mode, group_message_type, chat_mode_fetched_at)
       VALUES ('c1', 'group', 'feishu', 'oc-group', 'topic', 'thread', ?)
@@ -1222,7 +1212,7 @@ describe("Pipeline runtime", () => {
   test("does not treat history-synced bot rows as topic ownership", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-topic-history-claim-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare(`
       INSERT INTO chats (id, type, platform, platform_id, chat_mode, group_message_type, chat_mode_fetched_at)
       VALUES ('c1', 'group', 'feishu', 'oc-group', 'topic', 'thread', ?)
@@ -1256,7 +1246,7 @@ describe("Pipeline runtime", () => {
   test("injects topic-isolation on a new topic session and stores help cards in the thread", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-topic-card-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare(`
       INSERT INTO chats (id, type, platform, platform_id, chat_mode, group_message_type, chat_mode_fetched_at)
       VALUES ('c1', 'group', 'feishu', 'oc-group', 'topic', 'thread', ?)
@@ -1293,7 +1283,7 @@ describe("Pipeline runtime", () => {
   test("runs two topic threads in parallel and blocks create fallback on reply failure", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-topic-parallel-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare(`
       INSERT INTO chats (id, type, platform, platform_id, chat_mode, group_message_type, chat_mode_fetched_at)
       VALUES ('c1', 'group', 'feishu', 'oc-group', 'topic', 'thread', ?)
@@ -1370,7 +1360,7 @@ describe("Pipeline runtime", () => {
     vi.stubEnv("NIUBOT_TOPIC_ISOLATION", "0");
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-topic-no-thread-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare(`
       INSERT INTO chats (id, type, platform, platform_id, chat_mode, group_message_type, chat_mode_fetched_at)
       VALUES ('c1', 'group', 'feishu', 'oc-group', 'topic', 'thread', ?)
@@ -1425,7 +1415,7 @@ describe("Pipeline runtime", () => {
   test("isolated restart wake falls back to the latest thread anchor without creating a topic", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-topic-wake-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare(`
       INSERT INTO chats (id, type, platform, platform_id, chat_mode, group_message_type, chat_mode_fetched_at)
       VALUES ('c1', 'group', 'feishu', 'oc-group', 'topic', 'thread', ?)
@@ -1472,7 +1462,7 @@ describe("Pipeline runtime", () => {
   test("p2p restart wake delivers to chat instead of creating a reply thread", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-p2p-wake-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const agent = new ReplyAgent("wake reply");
     const calls: Array<{ method: string; replyToMsgId?: string; options?: boolean }> = [];
     const im = createImStub();
@@ -1510,7 +1500,7 @@ describe("Pipeline runtime", () => {
   test("p2p restart wake replies in the thread the user spoke in", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-p2p-wake-thread-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const agent = new ReplyAgent("wake reply");
     const calls: Array<{ method: string; replyToMsgId?: string; options?: boolean }> = [];
     const im = createImStub();
@@ -1542,7 +1532,7 @@ describe("Pipeline runtime", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const agent = new ThrowingProbeAgent();
     const agentSession = await agent.createSession({ workingDirectory: dir });
     agent.markRunning(agentSession.id);
@@ -1571,7 +1561,7 @@ describe("Pipeline runtime", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const agent = new ThrowingActivityAgent();
     const agentSession = await agent.createSession({ workingDirectory: dir });
     const pipeline = new Pipeline(
@@ -1599,7 +1589,7 @@ describe("Pipeline runtime", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const { im, sentCards } = createRecordingImStub();
     const agent = new WatchdogAgent();
     const agentSession = await agent.createSession({ workingDirectory: dir });
@@ -1644,7 +1634,7 @@ describe("Pipeline runtime", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const { im, sentCards } = createRecordingImStub();
     const agent = new WatchdogAgent();
     const agentSession = await agent.createSession({ workingDirectory: dir });
@@ -1687,7 +1677,7 @@ describe("Pipeline runtime", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const { im, sentTexts, sentCards } = createRecordingImStub();
     const agent = new WatchdogAgent();
     const agentSession = await agent.createSession({ workingDirectory: dir });
@@ -1730,7 +1720,7 @@ describe("Pipeline runtime", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const { im, sentTexts, sentCards } = createRecordingImStub();
     const agent = new WatchdogAgent();
     const agentSession = await agent.createSession({ workingDirectory: dir });
@@ -1772,7 +1762,7 @@ describe("Pipeline runtime", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const { im, sentCards } = createRecordingImStub();
     const agent = new WatchdogAgent();
     const agentSession = await agent.createSession({ workingDirectory: dir });
@@ -1810,7 +1800,7 @@ describe("Pipeline runtime", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const { im, sentCards } = createRecordingImStub();
     const agent = new WatchdogAgent();
     const agentSession = await agent.createSession({ workingDirectory: dir });
@@ -1848,7 +1838,7 @@ describe("Pipeline runtime", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const { im, sentCards } = createRecordingImStub();
     const agent = new WatchdogAgent();
     const cancelSpy = vi.spyOn(agent, "cancelSession").mockResolvedValue();
@@ -1891,7 +1881,7 @@ describe("Pipeline runtime", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const { im, sentCards } = createRecordingImStub();
     const agent = new WatchdogAgent();
     const agentSession = await agent.createSession({ workingDirectory: dir });
@@ -1934,7 +1924,7 @@ describe("Pipeline runtime", () => {
   test("stops an independent task through the backend that created it", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const oldBackend = new RecordingAgent();
     const currentBackend = new RecordingAgent();
     const pipeline = new Pipeline(
@@ -1960,7 +1950,7 @@ describe("Pipeline runtime", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     recordRuntimeEvent(db, {
       botId: "NiuBot",
       chatId: "c1",
@@ -2007,7 +1997,7 @@ describe("Pipeline runtime", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare(`
       INSERT INTO users (id, name, platform, platform_id)
       VALUES ('u2', 'admin', 'feishu', 'user-open-id')
@@ -2052,7 +2042,7 @@ describe("Pipeline runtime", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare(`
       INSERT INTO users (id, name, platform, platform_id)
       VALUES ('u2', 'admin', 'feishu', 'user-open-id')
@@ -2097,7 +2087,7 @@ describe("Pipeline runtime", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare(`
       INSERT INTO users (id, name, platform, platform_id)
       VALUES ('u2', 'admin', 'feishu', 'user-open-id')
@@ -2134,7 +2124,7 @@ describe("Pipeline runtime", () => {
   test("persists the backend-native session id after the first turn, not the engine wrapper id", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-native-id-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const agent = new NativeIdAgent("ok", "grok-native");
     const pipeline = new Pipeline(
       db, createImStub(), agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "grok",
@@ -2167,7 +2157,7 @@ describe("Pipeline runtime", () => {
   test("does not re-inject recent messages when native-resuming after unload", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-resume-no-reinject-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare(`
       INSERT INTO users (id, name, platform, platform_id)
       VALUES ('u2', 'admin', 'feishu', 'user-open-id')
@@ -2209,7 +2199,7 @@ describe("Pipeline runtime", () => {
   test("archives a leftover session when the current default backend differs", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-backend-mismatch-resume-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare(`
       INSERT INTO users (id, name, platform, platform_id)
       VALUES ('u2', 'admin', 'feishu', 'user-open-id')
@@ -2249,7 +2239,7 @@ describe("Pipeline runtime", () => {
   test("does not resume an engine wrapper id after unload", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-wrapper-resume-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare(`
       INSERT INTO users (id, name, platform, platform_id)
       VALUES ('u2', 'admin', 'feishu', 'user-open-id')
@@ -2281,7 +2271,7 @@ describe("Pipeline runtime", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare(`
       INSERT INTO users (id, name, platform, platform_id)
       VALUES ('u2', 'admin', 'feishu', 'user-open-id')
@@ -2325,7 +2315,7 @@ describe("Pipeline runtime", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare(`
       INSERT INTO users (id, name, platform, platform_id)
       VALUES ('u2', 'admin', 'feishu', 'user-open-id')
@@ -2369,7 +2359,7 @@ describe("Pipeline runtime", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const agent = new RecordingAgent();
     const { im, sentCards } = createRecordingImStub();
     const pipeline = new Pipeline(
@@ -2410,7 +2400,7 @@ describe("Pipeline runtime", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare(`
       INSERT INTO messages (chat_id, sender_id, role, content_text, created_at, platform)
       VALUES ('c1', 'u2', 'user', 'hello', '2026-06-09 04:00:00', 'feishu')
@@ -2439,7 +2429,7 @@ describe("Pipeline runtime", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const agent = new RecordingAgent();
     const { im, sentTexts } = createRecordingImStub();
     const pipeline = new Pipeline(
@@ -2470,7 +2460,7 @@ bots:
     appSecret: app-secret
     workingDirectory: ${dir}/workspace
 `);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const { im, sentCards, sentTexts } = createRecordingImStub();
     const pipeline = new Pipeline(
       db, im, new RecordingAgent(), createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex",
@@ -2527,7 +2517,7 @@ bots:
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const agent = new RecordingAgent();
     const { im, sentTexts, sentCards } = createRecordingImStub();
     const pipeline = new Pipeline(
@@ -2564,7 +2554,7 @@ bots:
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const agent = new RecordingAgent();
     const pipeline = new Pipeline(
       db,
@@ -2593,7 +2583,7 @@ bots:
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const agent = new RecordingAgent();
     const { im, sentTexts } = createRecordingImStub();
     const pipeline = new Pipeline(
@@ -2634,7 +2624,7 @@ bots:
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const agent = new RecordingAgent();
     const pipeline = new Pipeline(
       db,
@@ -2673,7 +2663,7 @@ bots:
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const { im, sentTexts } = createRecordingImStub();
     const pipeline = new Pipeline(
       db,
@@ -2701,7 +2691,7 @@ bots:
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const { im } = createRecordingImStub();
     const pipeline = new Pipeline(
       db,
@@ -2739,7 +2729,7 @@ bots:
   test("manual restart delegates the resolved chat and Bot identity to EngineLifecycle", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const { im, sentTexts, sentReplies } = createRecordingImStub();
     const pipeline = new Pipeline(
       db,
@@ -2773,7 +2763,7 @@ bots:
   test("p2p restart stays in the thread the user spoke in", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const { im, sentReplies } = createRecordingImStub();
     const pipeline = new Pipeline(
       db,
@@ -2806,7 +2796,7 @@ bots:
   test("topic restart keeps the original reply anchor", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare(`
       INSERT INTO chats (id, type, platform, platform_id, chat_mode, group_message_type, chat_mode_fetched_at)
       VALUES ('c1', 'group', 'feishu', 'oc-group', 'topic', 'thread', ?)
@@ -2873,7 +2863,7 @@ bots:
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const im = createImStub();
     im.sendCard = async () => { throw new Error("feishu unavailable"); };
     const pipeline = new Pipeline(
@@ -2903,7 +2893,7 @@ bots:
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare(`
       INSERT INTO users (id, name, platform, platform_id)
       VALUES ('u2', 'admin', 'feishu', 'user-open-id')
@@ -2939,7 +2929,7 @@ bots:
     vi.setSystemTime(new Date("2026-07-20T00:00:00Z"));
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-cron-card-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u2', 'admin', 'feishu', 'user-open-id')").run();
     db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c1', 'p2p', 'feishu', 'chat-open-id')").run();
     const agent = new ReplyAgent("cron card result");
@@ -2962,7 +2952,7 @@ bots:
   test("group Cron does not inherit the creator identity or mutable recent chat messages", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-group-cron-privacy-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u2', 'creator', 'feishu', 'creator-open-id')").run();
     db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u3', 'other', 'feishu', 'other-open-id')").run();
     db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c1', 'group', 'feishu', 'group-open-id')").run();
@@ -2990,7 +2980,7 @@ bots:
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare(`
       INSERT INTO users (id, name, platform, platform_id)
       VALUES ('u2', 'admin', 'feishu', 'user-open-id')
@@ -3028,7 +3018,7 @@ bots:
   test("rejects a failed independent Cron run so the scheduler can retry it", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-cron-failure-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u2', 'admin', 'feishu', 'user-open-id')").run();
     db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c1', 'p2p', 'feishu', 'chat-open-id')").run();
     const pipeline = new Pipeline(
@@ -3052,7 +3042,7 @@ bots:
     vi.setSystemTime(new Date("2026-07-20T00:00:00Z"));
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-cron-cancel-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u2', 'admin', 'feishu', 'user-open-id')").run();
     db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c1', 'p2p', 'feishu', 'chat-open-id')").run();
     const agent = new DeferredAgent();
@@ -3075,7 +3065,7 @@ bots:
   test("does not store an assistant message when Cron final delivery fails", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-cron-delivery-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u2', 'admin', 'feishu', 'user-open-id')").run();
     db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c1', 'p2p', 'feishu', 'chat-open-id')").run();
     const im = createImStub();
@@ -3101,7 +3091,7 @@ bots:
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const pipeline = new Pipeline(
       db,
       createImStub(),
@@ -3121,7 +3111,7 @@ bots:
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const agent = new RecordingAgent();
     const { im, sentCards } = createRecordingImStub();
     const identity = createBotIdentity();
@@ -3173,7 +3163,7 @@ bots:
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare(`
       INSERT INTO users (id, name, platform, platform_id)
       VALUES ('u1', 'NiuBot', 'feishu', 'bot-open-id')
@@ -3261,7 +3251,7 @@ bots:
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const agent = new RecordingAgent();
     agent.validateModelImpl = async () => ({ valid: true });
     const { im, sentCards } = createRecordingImStub();
@@ -3301,7 +3291,7 @@ bots:
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const agent = new RecordingAgent();
     agent.validateModelImpl = async () => ({ valid: false, error: "模型不存在或无权限" });
     const { im, sentCards } = createRecordingImStub();
@@ -3331,7 +3321,7 @@ bots:
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare(
       "INSERT INTO model_history (backend, model_name, last_used_at) VALUES (?, ?, ?)",
     ).run("codex", "history-old", "2026-04-25 10:00:00");
@@ -3363,7 +3353,7 @@ bots:
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const pipeline = new Pipeline(
       db,
       createImStub(),
@@ -3387,7 +3377,7 @@ bots:
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const identity = createBotIdentity();
     identity.model = "runtime-model";
     const pipeline = new Pipeline(
@@ -3415,7 +3405,7 @@ bots:
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const configPath = writeAutoUpdateTestConfig(dir, true);
     const pipeline = new Pipeline(
       db,
@@ -3452,7 +3442,7 @@ bots:
   test("/update auto on works with default settings and /update reports it enabled", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const configPath = writeAutoUpdateTestConfig(dir, false);
     const { im, sentCards } = createRecordingImStub();
     const pipeline = new Pipeline(
@@ -3481,8 +3471,8 @@ bots:
   test("any Bot can update the shared auto-update setting and all Bots display it", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
-    const coordinatorDb = initDatabase(path.join(dir, "coordinator.db"));
-    const secondaryDb = initDatabase(path.join(dir, "secondary.db"));
+    const coordinatorDb = openTestDatabase(path.join(dir, "coordinator.db"));
+    const secondaryDb = openTestDatabase(path.join(dir, "secondary.db"));
     const configPath = writeAutoUpdateTestConfig(dir, false);
     const { im, sentCards } = createRecordingImStub();
     const coordinator = new Pipeline(
@@ -3530,7 +3520,7 @@ bots:
   test("fails closed when the shared auto-update config becomes unreadable", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const configPath = writeAutoUpdateTestConfig(dir, true);
     const pipeline = new Pipeline(
       db,
@@ -3554,7 +3544,7 @@ bots:
   test("does not enable auto update when no config file can persist it", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const { im, sentCards } = createRecordingImStub();
     const pipeline = new Pipeline(
       db,
@@ -3577,7 +3567,7 @@ bots:
   test("does not change runtime state when the config file is invalid", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const configPath = path.join(dir, "config.yaml");
     writeFileSync(configPath, "[invalid");
     const { im, sentCards } = createRecordingImStub();
@@ -3604,7 +3594,7 @@ bots:
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const identity = createBotIdentity();
     const pipeline = new Pipeline(
       db,
@@ -3644,7 +3634,7 @@ bots:
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const identity = createBotIdentity();
     const pipeline = new Pipeline(
       db,
@@ -3672,7 +3662,7 @@ bots:
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const identity = createBotIdentity();
     const pipeline = new Pipeline(
       db,
@@ -3697,7 +3687,7 @@ bots:
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const identity = createBotIdentity();
     identity.effort = "high";
     const pipeline = new Pipeline(
@@ -3725,7 +3715,7 @@ bots:
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const identity = createBotIdentity();
     const { im, sentCards } = createRecordingImStub();
     const pipeline = new Pipeline(
@@ -3755,7 +3745,7 @@ bots:
   test("keeps /model and /effort inside the current scope", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-scope-models-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const pipeline = new Pipeline(
       db,
       createImStub(),
@@ -3798,7 +3788,7 @@ bots:
   test("does not pin a topic on /model or /effort reset when it has no override", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-reset-no-override-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u2', 'Zen', 'feishu', 'ou-zen')").run();
     db.prepare("INSERT INTO chats (id, type, platform, platform_id, user_id) VALUES ('c1', 'p2p', 'feishu', 'oc-p2p', 'ou-zen')").run();
     db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c5', 'group', 'feishu', 'oc-group')").run();
@@ -3835,7 +3825,7 @@ bots:
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const identity = createBotIdentity();
     identity.model = "codex-model";
     const { im, sentCards } = createRecordingImStub();
@@ -3867,7 +3857,7 @@ bots:
   test("archives only the current scope when switching backends", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-agent-unload-archive-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare(`
       INSERT INTO sessions (id, chat_id, user_id, status, agent_session_id, backend_type, started_at, last_active_at)
       VALUES
@@ -3898,7 +3888,7 @@ bots:
   test("records /agent switch cards on the triggering thread", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-agent-thread-card-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare("INSERT INTO users (id, platform, platform_id, name) VALUES ('u2', 'feishu', 'u2p', 'Zen')").run();
     db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c5', 'group', 'feishu', 'chat-open-id')").run();
     const { im } = createRecordingImStub();
@@ -3936,7 +3926,7 @@ bots:
     tempDirs.push(dir);
     const { im, sentCards } = createRecordingImStub();
     const pipeline = new Pipeline(
-      initDatabase(path.join(dir, "niubot.db")), im, new RecordingAgent(),
+      openTestDatabase(path.join(dir, "niubot.db")), im, new RecordingAgent(),
       createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex",
     );
     (pipeline as any).getBackendCapabilities = () => [
@@ -3958,7 +3948,7 @@ bots:
     tempDirs.push(dir);
     const { im, sentCards } = createRecordingImStub();
     const pipeline = new Pipeline(
-      initDatabase(path.join(dir, "niubot.db")), im, new RecordingAgent(),
+      openTestDatabase(path.join(dir, "niubot.db")), im, new RecordingAgent(),
       createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex",
     );
     let claudeInstalled = false;
@@ -3988,7 +3978,7 @@ bots:
   test("keeps the current session when target backend validation fails", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare(`
       INSERT INTO sessions (id, chat_id, user_id, status, backend_type, started_at, last_active_at)
       VALUES ('active-session', 'c1', 'u2', 'active', 'codex', datetime('now'), datetime('now'))
@@ -4021,7 +4011,7 @@ bots:
   test("does not block another chat while a scope is switching backends", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     let resolveBackend!: (backend: AgentBackend) => void;
     const backendReady = new Promise<AgentBackend>((resolve) => { resolveBackend = resolve; });
     const pipeline = new Pipeline(
@@ -4051,7 +4041,7 @@ bots:
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
     const pipeline = new Pipeline(
-      initDatabase(path.join(dir, "niubot.db")), createImStub(), new RecordingAgent(),
+      openTestDatabase(path.join(dir, "niubot.db")), createImStub(), new RecordingAgent(),
       createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex",
     );
     let finishLocal!: () => void;
@@ -4071,7 +4061,7 @@ bots:
   test("holds a message already buffered in the queue until a global transition finishes", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare(`
       INSERT INTO sessions (id, chat_id, user_id, status, backend_type, started_at, last_active_at)
       VALUES ('old-session', 'c1', 'u2', 'active', 'codex', datetime('now'), datetime('now'))
@@ -4111,7 +4101,7 @@ bots:
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const identity = createBotIdentity();
     identity.model = "gpt-5.4";
     const { im, sentCards } = createRecordingImStub();
@@ -4145,7 +4135,7 @@ bots:
   test("keeps /agent inside the current scope and leaves the default backend elsewhere", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-scope-agent-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare(`
       INSERT INTO chats (id, type, platform, platform_id)
       VALUES ('c5', 'group', 'feishu', 'chat-open-id')
@@ -4189,7 +4179,7 @@ bots:
   test("pins the current default when /agent is repeated on a following topic", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-agent-pin-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u2', 'Zen', 'feishu', 'ou-zen')").run();
     db.prepare("INSERT INTO chats (id, type, platform, platform_id, user_id) VALUES ('c1', 'p2p', 'feishu', 'oc-p2p', 'ou-zen')").run();
     db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c5', 'group', 'feishu', 'oc-group')").run();
@@ -4225,7 +4215,7 @@ bots:
   test("pins the engine default in p2p when /agent matches and no row exists", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-agent-pin-p2p-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const { im, sentCards } = createRecordingImStub();
     const pipeline = new Pipeline(
       db, im, new RecordingAgent(), createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex",
@@ -4248,7 +4238,7 @@ bots:
   test("p2p overlays stay per chat and still update the bot default", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-p2p-per-chat-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c1', 'p2p', 'feishu', 'oc-p2p')").run();
     db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c2', 'p2p', 'feishu', 'oc-p2p-2')").run();
     db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c5', 'group', 'feishu', 'oc-group')").run();
@@ -4279,7 +4269,7 @@ bots:
   test("p2p /agent reset clears the overlay and restores the engine default globally", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-p2p-reset-default-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c1', 'p2p', 'feishu', 'oc-p2p')").run();
     db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c5', 'group', 'feishu', 'oc-group')").run();
     const pipeline = new Pipeline(
@@ -4304,7 +4294,7 @@ bots:
   test("new group and topic inherit the bot default agent and model", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-p2p-default-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u2', 'Zen', 'feishu', 'ou-zen')").run();
     db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u3', 'Other', 'feishu', 'ou-other')").run();
     db.prepare("INSERT INTO chats (id, type, platform, platform_id, user_id) VALUES ('c1', 'p2p', 'feishu', 'oc-p2p', 'ou-zen')").run();
@@ -4355,7 +4345,7 @@ bots:
   test("keeps the scope backend after /new", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-new-keeps-agent-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const pipeline = new Pipeline(
       db, createImStub(), new RecordingAgent(), createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex",
       async () => new RecordingAgent(),
@@ -4378,7 +4368,7 @@ bots:
   test("topics without an override keep the default from first session creation", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-scope-config-live-follow-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u2', 'Zen', 'feishu', 'ou-zen')").run();
     db.prepare("INSERT INTO chats (id, type, platform, platform_id, user_id) VALUES ('c1', 'p2p', 'feishu', 'oc-p2p', 'ou-zen')").run();
     db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c5', 'group', 'feishu', 'oc-group')").run();
@@ -4433,7 +4423,7 @@ bots:
   test("materializes the current default instead of a leftover session backend", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-scope-config-legacy-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u2', 'Zen', 'feishu', 'ou-zen')").run();
     db.prepare("INSERT INTO chats (id, type, platform, platform_id, user_id) VALUES ('c1', 'p2p', 'feishu', 'oc-p2p', 'ou-zen')").run();
     db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c5', 'group', 'feishu', 'oc-group')").run();
@@ -4472,7 +4462,7 @@ bots:
   test("group follows bot default when chatUserIds is empty", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-userid-recover-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u2', 'Zen', 'feishu', 'ou-zen')").run();
     db.prepare("INSERT INTO chats (id, type, platform, platform_id, user_id) VALUES ('c1', 'p2p', 'feishu', 'oc-p2p', 'ou-zen')").run();
     db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c5', 'group', 'feishu', 'oc-group')").run();
@@ -4509,7 +4499,7 @@ bots:
   test("loop dispatch remembers the human creator", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-loop-userid-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u2', 'Zen', 'feishu', 'ou-zen')").run();
     db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c5', 'group', 'feishu', 'oc-group')").run();
     const now = new Date();
@@ -4532,7 +4522,7 @@ bots:
   test("does not freeze a scope when backend creation fails", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-scope-config-failed-backend-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u2', 'Zen', 'feishu', 'ou-zen')").run();
     db.prepare("INSERT INTO chats (id, type, platform, platform_id, user_id) VALUES ('c1', 'p2p', 'feishu', 'oc-p2p', 'ou-zen')").run();
     db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c5', 'group', 'feishu', 'oc-group')").run();
@@ -4559,7 +4549,7 @@ bots:
   test("agent reset deletes the override so the topic follows the bot default", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-agent-reset-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u2', 'Zen', 'feishu', 'ou-zen')").run();
     db.prepare("INSERT INTO chats (id, type, platform, platform_id, user_id) VALUES ('c1', 'p2p', 'feishu', 'oc-p2p', 'ou-zen')").run();
     db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c5', 'group', 'feishu', 'oc-group')").run();
@@ -4593,7 +4583,7 @@ bots:
   test("agent reset restores the bot default model and effort, not the topic overlay", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-agent-reset-models-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u2', 'Zen', 'feishu', 'ou-zen')").run();
     db.prepare("INSERT INTO chats (id, type, platform, platform_id, user_id) VALUES ('c1', 'p2p', 'feishu', 'oc-p2p', 'ou-zen')").run();
     db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c5', 'group', 'feishu', 'oc-group')").run();
@@ -4635,7 +4625,7 @@ bots:
   test("switching agent restores that backend's last package, not the current model", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-agent-package-switch-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c1', 'p2p', 'feishu', 'oc-p2p')").run();
     const pipeline = new Pipeline(
       db,
@@ -4678,7 +4668,7 @@ bots:
   test("group follow-up from another bot materializes the bot default backend", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-bot-speaker-default-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u2', 'Zen', 'feishu', 'ou-zen')").run();
     db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u4', 'CowBot', 'feishu', 'ou-cow')").run();
     db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c5', 'group', 'feishu', 'oc-group')").run();
@@ -4714,7 +4704,7 @@ bots:
   test("first session materializes the botIdentity package into a scope row", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-identity-default-freeze-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u2', 'Zen', 'feishu', 'ou-zen')").run();
     db.prepare("INSERT INTO chats (id, type, platform, platform_id, user_id) VALUES ('c1', 'p2p', 'feishu', 'oc-p2p', 'ou-zen')").run();
     const identity = createBotIdentity();
@@ -4747,7 +4737,7 @@ bots:
   test("materializes the current default instead of freezing an archived session backend", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-archived-session-backfill-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u2', 'Zen', 'feishu', 'ou-zen')").run();
     db.prepare("INSERT INTO chats (id, type, platform, platform_id, user_id) VALUES ('c1', 'p2p', 'feishu', 'oc-p2p', 'ou-zen')").run();
     db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c5', 'group', 'feishu', 'oc-group')").run();
@@ -4783,7 +4773,7 @@ bots:
   test("reports /model failure when the scope backend cannot be loaded", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-model-backend-load-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u2', 'Zen', 'feishu', 'ou-zen')").run();
     db.prepare("INSERT INTO chats (id, type, platform, platform_id, user_id) VALUES ('c1', 'p2p', 'feishu', 'oc-p2p', 'ou-zen')").run();
     setBotDefault(db, { backendType: "grok" });
@@ -4817,7 +4807,7 @@ bots:
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare(`
       INSERT INTO sessions (id, chat_id, user_id, status, turn_count, backend_type, last_active_at)
       VALUES ('s1', 'c1', 'u2', 'active', 0, 'codex', datetime('now'))
@@ -4866,7 +4856,7 @@ bots:
   test("starts a new session and marks the old one archive_failed when transcript export fails", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare(`
       INSERT INTO sessions (id, chat_id, user_id, status, backend_type, started_at, last_active_at)
       VALUES ('s1', 'c1', 'u2', 'active', 'codex', datetime('now'), datetime('now'))
@@ -4894,7 +4884,7 @@ bots:
   test("archives an unloaded session from the stored native backend id", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare(`
       INSERT INTO sessions (id, chat_id, user_id, status, agent_session_id, backend_type, started_at, last_active_at)
       VALUES ('orphan', 'c1', 'u2', 'active', 'native-session-id', 'codex', datetime('now'), datetime('now'))
@@ -4915,7 +4905,7 @@ bots:
   test("discards an unloaded session whose stored id is an engine wrapper", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare(`
       INSERT INTO sessions (id, chat_id, user_id, status, agent_session_id, backend_type, started_at, last_active_at)
       VALUES ('wrapper', 'c1', 'u2', 'active', 'grok_1787630975612_af90f32a', 'grok', datetime('now'), datetime('now'))
@@ -4938,7 +4928,7 @@ bots:
   test("marks an unloaded wrapper session as archive_failed when it already has turns", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare(`
       INSERT INTO sessions (id, chat_id, user_id, status, agent_session_id, backend_type, started_at, last_active_at, turn_count, message_count)
       VALUES ('wrapper-used', 'c1', 'u2', 'active', 'grok_1787630975612_af90f32a', 'grok', datetime('now'), datetime('now'), 2, 4)
@@ -4960,7 +4950,7 @@ bots:
   test("does not change an active independent session when /new has no main session", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare(`
       INSERT INTO sessions (id, chat_id, user_id, source, status, agent_session_id, backend_type, started_at, last_active_at)
       VALUES ('cron-session', 'c1', 'u2', 'cron', 'active', 'native-cron-id', 'codex', datetime('now'), datetime('now'))
@@ -4978,7 +4968,7 @@ bots:
   test("discards a session that was cancelled before the backend assigned an id", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare(`
       INSERT INTO sessions (id, chat_id, user_id, status, backend_type, started_at, last_active_at)
       VALUES ('not-started', 'c1', 'u2', 'active', 'codex', datetime('now'), datetime('now'))
@@ -5002,7 +4992,7 @@ bots:
   test("cancels an active run before archiving on /new", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare(`INSERT INTO sessions (id, chat_id, user_id, status, backend_type, started_at, last_active_at) VALUES ('s1', 'c1', 'u2', 'active', 'codex', datetime('now'), datetime('now'))`).run();
     const agent = new RecordingAgent();
     const pipeline = new Pipeline(db, createImStub(), agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");
@@ -5020,7 +5010,7 @@ bots:
   test("waits for an asynchronously created session before handling /new", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const agent = new DeferredCreateAgent();
     const { im, sentTexts } = createRecordingImStub();
     const pipeline = new Pipeline(db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");
@@ -5045,7 +5035,7 @@ bots:
   test("waits for an asynchronously created session before changing effort", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-effort-session-order-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const agent = new DeferredCreateAgent();
     const pipeline = new Pipeline(
       db,
@@ -5086,7 +5076,7 @@ bots:
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const events: string[] = [];
     class OrderedAgent extends RecordingAgent {
       override async createSession(config: SessionConfig): Promise<AgentSession> {
@@ -5131,7 +5121,7 @@ bots:
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const sentTexts: string[] = [];
     const sentCards: string[] = [];
     const im = createImStub();
@@ -5178,7 +5168,7 @@ bots:
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const im = createImStub();
     im.sendCard = async () => { throw new Error("card failed"); };
     im.sendText = async () => { throw new Error("text failed"); };
@@ -5214,7 +5204,7 @@ bots:
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     let resolveSendCard: ((value: string) => void) | undefined;
     const im = createImStub();
     im.sendCard = async () => new Promise<string>((resolve) => {
@@ -5263,7 +5253,7 @@ bots:
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const { im, sentTexts, sentReplies } = createRecordingImStub();
     const pipeline = new Pipeline(
       db,
@@ -5299,7 +5289,7 @@ bots:
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const agent = new DeferredAgent();
     const pipeline = new Pipeline(
       db,
@@ -5344,7 +5334,7 @@ bots:
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const pipeline = new Pipeline(
       db,
       createImStub(),
@@ -5387,7 +5377,7 @@ bots:
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare("DROP TABLE runtime_events").run();
     const { im, sentCards } = createRecordingImStub();
     const pipeline = new Pipeline(
@@ -5418,7 +5408,7 @@ bots:
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const { im, sentCards } = createRecordingImStub();
     const pipeline = new Pipeline(
       db,
@@ -5454,7 +5444,7 @@ bots:
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const pipeline = new Pipeline(
       db,
       createImStub(),
@@ -5485,7 +5475,7 @@ bots:
     tempDirs.push(dir);
     writeFileSync(path.join(dir, "bot_profile.md"), "plain bot profile", "utf-8");
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const agent = new RecordingAgent();
     const pipeline = new Pipeline(
       db,
@@ -5532,7 +5522,7 @@ bots:
     tempDirs.push(dir);
     writeFileSync(path.join(dir, "bot_profile.md"), "fallback bot profile", "utf-8");
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const agent = new RecordingAgent();
     agent.needsStableUserPrefixFlag = true;
     const pipeline = new Pipeline(
@@ -5577,7 +5567,7 @@ bots:
     tempDirs.push(dir);
     writeFileSync(path.join(dir, "bot_profile.md"), "cursor rules profile", "utf-8");
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const agent = new RecordingAgent();
     agent.needsStableUserPrefixFlag = false;
     const pipeline = new Pipeline(
@@ -5621,7 +5611,7 @@ bots:
     tempDirs.push(dir);
     writeFileSync(path.join(dir, "bot_profile.md"), "workspace profile should be ignored", "utf-8");
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const agent = new RecordingAgent();
     const pipeline = new Pipeline(
       db,
@@ -5649,7 +5639,7 @@ bots:
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const agent = new CompactCountingAgent([1, undefined, 2, undefined]);
     const pipeline = new Pipeline(
       db,
@@ -5719,7 +5709,7 @@ bots:
       }],
     }), "utf-8");
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare(`
       INSERT INTO sessions (id, chat_id, user_id, source, status, summary, started_at, ended_at, start_msg_id, end_msg_id, last_active_at)
       VALUES ('archived1', 'c1', 'u2', 'user', 'archived', ?, datetime('now', '-1 hour'), datetime('now', '-30 minutes'), 1, 1, datetime('now', '-30 minutes'))
@@ -5768,7 +5758,7 @@ bots:
     tempDirs.push(dir);
     writeFileSync(path.join(dir, "bot_profile.md"), "no-system profile", "utf-8");
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const agent = new CompactCountingAgent([1, undefined]);
     agent.needsStableUserPrefixFlag = true;
     const pipeline = new Pipeline(
@@ -5814,7 +5804,7 @@ bots:
     tempDirs.push(dir);
     writeFileSync(path.join(dir, "bot_profile.md"), "cursor compact profile", "utf-8");
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const agent = new CompactCountingAgent([1, undefined]);
     agent.needsStableUserPrefixFlag = false;
     agent.needsCompactRecoveryReminderFlag = false;
@@ -5860,7 +5850,7 @@ bots:
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare(`
       INSERT INTO sessions (id, chat_id, user_id, status, turn_count, backend_type, last_active_at)
       VALUES ('s1', 'c1', 'u2', 'active', 0, 'codex', datetime('now'))
@@ -5923,7 +5913,7 @@ bots:
     vi.setSystemTime(now);
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const pipeline = new Pipeline(
       db, createImStub(), new RecordingAgent(), createBotIdentity(), dir, path.join(dir, "niubot.db"), 1000, "codex",
     );
@@ -5944,7 +5934,7 @@ bots:
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const agent = new DeferredAgent();
     const { im, reactions, removedReactions } = createRecordingImStub();
     const pipeline = new Pipeline(
@@ -5996,7 +5986,7 @@ bots:
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const { im, sentTexts } = createRecordingImStub();
     const pipeline = new Pipeline(
       db,
@@ -6020,7 +6010,7 @@ bots:
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare(`
       INSERT INTO sessions (id, chat_id, user_id, status, turn_count, backend_type, last_active_at)
       VALUES ('s1', 'c1', 'u2', 'active', 0, 'codex', datetime('now'))
@@ -6052,7 +6042,7 @@ bots:
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const agent = new DeferredAgent();
     const { im, sentTexts } = createRecordingImStub();
     const pipeline = new Pipeline(
@@ -6090,7 +6080,7 @@ bots:
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const sentCards: Array<{ header: string; content: string }> = [];
     let resolveAgentCard: ((value: string) => void) | undefined;
     const im = createImStub();
@@ -6143,7 +6133,7 @@ bots:
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const { im, sentCards } = createRecordingImStub();
     const pipeline = new Pipeline(
       db,
@@ -6174,7 +6164,7 @@ bots:
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     recordRuntimeEvent(db, {
       botId: "NiuBot",
       chatId: "c1",
@@ -6220,7 +6210,7 @@ bots:
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const agent = new WatchdogAgent();
     const { im, sentCards } = createRecordingImStub();
     const pipeline = new Pipeline(
@@ -6278,7 +6268,7 @@ bots:
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const agent = new WatchdogAgent();
     const { im, sentCards } = createRecordingImStub();
     const pipeline = new Pipeline(
@@ -6335,7 +6325,7 @@ bots:
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const agent = new DeferredAgent();
     const { im, sentTexts } = createRecordingImStub();
     const pipeline = new Pipeline(
@@ -6374,7 +6364,7 @@ bots:
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const { im, sentTexts } = createRecordingImStub();
     im.sendCard = async () => new Promise<string>(() => {});
     const pipeline = new Pipeline(
@@ -6410,7 +6400,7 @@ bots:
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const agent = new DeferredAgent();
     const { im, sentTexts, sentReplies } = createRecordingImStub();
     const pipeline = new Pipeline(
@@ -6462,7 +6452,7 @@ bots:
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const agent = new DeferredAgent();
     const { im, sentTexts } = createRecordingImStub();
     const pipeline = new Pipeline(
@@ -6507,7 +6497,7 @@ bots:
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const { im, sentCards } = createRecordingImStub();
     const pipeline = new Pipeline(
       db,
@@ -6528,7 +6518,7 @@ bots:
   test("treats group @bot /help as a builtin command", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-group-help-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const agent = new RecordingAgent();
     const { im, sentCards } = createRecordingImStub();
     const pipeline = new Pipeline(db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");
@@ -6554,7 +6544,7 @@ bots:
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const { im, sentCards } = createRecordingImStub();
     const pipeline = new Pipeline(
       db,
@@ -6581,7 +6571,7 @@ bots:
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const { im, sentTexts } = createRecordingImStub();
     const err = new Error("Command failed");
     err.stdout = [
@@ -6621,7 +6611,7 @@ bots:
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const { im, sentTexts } = createRecordingImStub();
     const err = new Error("Command failed: grok (exit 1)");
     err.stdout = [
@@ -6661,7 +6651,7 @@ bots:
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const { im, sentTexts } = createRecordingImStub();
     const err = new Error([
       "pi 回合异常结束：未收到 agent_end",
@@ -6699,7 +6689,7 @@ bots:
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const { im, sentTexts } = createRecordingImStub();
     const err = new Error("Command failed: codex exec resume thread_123");
     err.stderr = "Error: conversation not found for session thread_123";
@@ -6732,7 +6722,7 @@ bots:
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const { im, sentTexts } = createRecordingImStub();
     const err = new Error("Command failed: codex exec resume thread_123");
     err.stderr = [
@@ -6768,7 +6758,7 @@ bots:
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const platformErr = new Error("Request failed with status code 400") as Error & {
       response?: { data?: { code?: number; msg?: string } };
     };
@@ -6829,7 +6819,7 @@ bots:
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
 
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const platformErr = new Error("Request failed with status code 400") as Error & {
       response?: { data?: { code?: number; msg?: string } };
     };
@@ -6881,7 +6871,7 @@ bots:
   test("handles Loop/Cron management commands locally while creation stays on the model route", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u2', 'admin', 'feishu', 'user-open-id')").run();
     db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c1', 'p2p', 'feishu', 'chat-open-id')").run();
     const { im, sentCards } = createRecordingImStub();
@@ -6918,7 +6908,7 @@ bots:
   test("cancels Loop/Cron through their built-in management commands", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-schedule-builtin-cancel-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u2', 'admin', 'feishu', 'user-open-id')").run();
     db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c1', 'p2p', 'feishu', 'chat-open-id')").run();
     const { im, sentTexts } = createRecordingImStub();
@@ -6958,7 +6948,7 @@ bots:
   test("discards an in-flight Loop result after the built-in cancel command", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-loop-builtin-cancel-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u2', 'admin', 'feishu', 'user-open-id')").run();
     db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c1', 'p2p', 'feishu', 'chat-open-id')").run();
     const agent = new DeferredAgent();
@@ -7003,7 +6993,7 @@ bots:
   test("allows a Loop turn to cancel itself and still deliver the final reply", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-loop-self-cancel-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u2', 'admin', 'feishu', 'user-open-id')").run();
     db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c1', 'p2p', 'feishu', 'chat-open-id')").run();
     let pipeline!: Pipeline;
@@ -7047,7 +7037,7 @@ bots:
   test("lets a Loop turn create a follow-up schedule", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-loop-create-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u2', 'admin', 'feishu', 'user-open-id')").run();
     db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c1', 'p2p', 'feishu', 'chat-open-id')").run();
     const pipeline = new Pipeline(
@@ -7070,7 +7060,7 @@ bots:
   test("still rejects schedule writes outside a user turn or Loop turn", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-schedule-gate-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const pipeline = new Pipeline(
       db, createImStub(), new RecordingAgent(), createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex",
     );
@@ -7089,7 +7079,7 @@ bots:
   test("routes /task stop through the command entrypoint and scopes it to the current chat", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const backend = new RecordingAgent();
     const { im, sentTexts } = createRecordingImStub();
     const pipeline = new Pipeline(
@@ -7122,7 +7112,7 @@ bots:
   test("adds and removes an admin through the owner command path", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare(`
       INSERT INTO users (id, name, platform, platform_id, is_admin)
       VALUES ('u2', 'Owner', 'feishu', 'owner-open-id', 'owner'),
@@ -7153,7 +7143,7 @@ bots:
   test("executes an admin shell command and exposes it through /history", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const { im, sentCards } = createRecordingImStub();
     const pipeline = new Pipeline(
       db, im, new RecordingAgent(), createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex",
@@ -7179,7 +7169,7 @@ bots:
     vi.spyOn(displayStatus, "collectDisplayStatus").mockResolvedValue(undefined);
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const { im, sentCards } = createRecordingImStub();
     const pipeline = new Pipeline(
       db, im, new RecordingAgent(), createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex",
@@ -7213,7 +7203,7 @@ bots:
   test("stores silent group messages but only runs the agent when the bot is mentioned", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const agent = new ReplyAgent();
     const { im } = createRecordingImStub();
     const pipeline = new Pipeline(
@@ -7250,7 +7240,7 @@ describe("Pipeline Goal mode", () => {
   function createGoalPipeline() {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-goal-test-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const agent = new DeferredAgent();
     const { im, sentCards, sentTexts } = createRecordingImStub();
     const pipeline = new Pipeline(
@@ -7456,7 +7446,7 @@ describe("nbt send prefers the active-run reply target", () => {
   test("sendToChat replies to the active user message", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-send-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const agent = new DeferredAgent();
     const { im, sent } = createSendTrackingIm();
     const pipeline = new Pipeline(db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");
@@ -7478,7 +7468,7 @@ describe("nbt send prefers the active-run reply target", () => {
   test("sendToChat goes to the chat when no run is active", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-send-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const agent = new ReplyAgent("done");
     const { im, sent } = createSendTrackingIm();
     const pipeline = new Pipeline(db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");
@@ -7500,7 +7490,7 @@ describe("nbt send prefers the active-run reply target", () => {
   test("sendToChat replies in the thread the user spoke in", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-send-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const { im, sent } = createSendTrackingIm();
     const pipeline = new Pipeline(
       db, im, new ReplyAgent("done"), createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex",
@@ -7525,7 +7515,7 @@ describe("nbt send prefers the active-run reply target", () => {
   test("sendToChat converts other-bot short labels into Feishu at tags", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-send-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const agent = new ReplyAgent("done");
     const { im, sent } = createSendTrackingIm();
     const pipeline = new Pipeline(db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");
@@ -7544,7 +7534,7 @@ describe("nbt send prefers the active-run reply target", () => {
   test("sendCardToChat keeps cards in group chats and converts short labels", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-send-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const agent = new ReplyAgent("done");
     const { im, sent } = createSendTrackingIm();
     const pipeline = new Pipeline(db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");
@@ -7577,7 +7567,7 @@ describe("nbt send prefers the active-run reply target", () => {
   test("rewrites group bot short-ats without a Leader prompt", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-collab-leader-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const cowId = ensureUser(db, "feishu", "ou-cow", "CowBot");
     setUserIsBot(db, cowId);
     const agent = new SequenceReplyAgent([
@@ -7643,7 +7633,7 @@ describe("nbt send prefers the active-run reply target", () => {
   test("marks a first-seen isApp mention as a bot", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-collab-isapp-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const agent = new SequenceReplyAgent(["先看天气"]);
     const { im, sentCards } = createRecordingImStub();
     const pipeline = new Pipeline(db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");
@@ -7672,7 +7662,7 @@ describe("nbt send prefers the active-run reply target", () => {
   test("keeps the first turn's outbound at when a second group message arrives mid-turn", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-collab-race-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const cowId = ensureUser(db, "feishu", "ou-cow", "CowBot");
     const sheepId = ensureUser(db, "feishu", "ou-sheep", "SheepBot");
     setUserIsBot(db, cowId);
@@ -7724,7 +7714,7 @@ describe("nbt send prefers the active-run reply target", () => {
   test("bots can at each other without a Leader/participant prompt", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-collab-participant-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const cowId = ensureUser(db, "feishu", "ou-cow", "CowBot");
     setUserIsBot(db, cowId);
     const agent = new SequenceReplyAgent([
@@ -7776,7 +7766,7 @@ describe("nbt send prefers the active-run reply target", () => {
   test("does not inject group history into the agent prompt", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-group-history-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const cowId = ensureUser(db, "feishu", "ou-cow", "CowBot");
     setUserIsBot(db, cowId);
     const agent = new RecordingAgent();
@@ -7821,7 +7811,7 @@ describe("nbt send prefers the active-run reply target", () => {
   test("sendCardToChat keeps cards in p2p even when mentioning another user", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-send-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const agent = new ReplyAgent("done");
     const { im, sent } = createSendTrackingIm();
     const pipeline = new Pipeline(db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");
@@ -7845,7 +7835,7 @@ describe("nbt send prefers the active-run reply target", () => {
   test("sendCardToChat falls back to at text when the card API fails", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-send-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const agent = new ReplyAgent("done");
     const { im, sent } = createSendTrackingIm();
     const pipeline = new Pipeline(db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");
@@ -7864,7 +7854,7 @@ describe("nbt send prefers the active-run reply target", () => {
   test("sendWatchdogCard falls back to at text when the card API fails", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-send-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const agent = new ReplyAgent("done");
     const { im, sent } = createSendTrackingIm();
     const pipeline = new Pipeline(db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");
@@ -7891,7 +7881,7 @@ describe("nbt send prefers the active-run reply target", () => {
   test("watchdog card replies in an isolated topic without creating a new one", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-watchdog-topic-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare(`
       INSERT INTO chats (id, type, platform, platform_id, chat_mode, group_message_type, chat_mode_fetched_at)
       VALUES ('c1', 'group', 'feishu', 'oc-group', 'topic', 'thread', ?)
@@ -7937,7 +7927,7 @@ describe("nbt send prefers the active-run reply target", () => {
   test("sendToChat strips other-bot ats and appends the fuse notice after 20 bot turns", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-send-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const agent = new ReplyAgent("done");
     const { im, sent } = createSendTrackingIm();
     const pipeline = new Pipeline(db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");
@@ -7967,7 +7957,7 @@ describe("nbt send prefers the active-run reply target", () => {
   test("applies the scope bot-collab fuse to a topic turn", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-topic-fuse-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare(`
       INSERT INTO chats (id, type, platform, platform_id, chat_mode, group_message_type, chat_mode_fetched_at)
       VALUES ('c1', 'group', 'feishu', 'group-open-id', 'topic', 'thread', ?)
@@ -8016,7 +8006,7 @@ describe("nbt send prefers the active-run reply target", () => {
   test("does not apply a token from another chat to outbound fuse handling", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-cross-chat-fuse-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     ensureChat(db, "feishu", "group-open-id", "group");
     ensureChat(db, "feishu", "other-group-open-id", "group");
     const { im, sent } = createSendTrackingIm();
@@ -8035,7 +8025,7 @@ describe("nbt send prefers the active-run reply target", () => {
   test("marks app senders as bots and ignores bot replies that do not at the bot", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-send-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const agent = new ReplyAgent("done");
     const { im } = createSendTrackingIm();
     const pipeline = new Pipeline(db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");
@@ -8086,7 +8076,7 @@ describe("nbt send prefers the active-run reply target", () => {
   test("sendToChat stays on chat when the caller is not the current main turn", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-send-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const agent = new DeferredAgent();
     const { im, sent } = createSendTrackingIm();
     const pipeline = new Pipeline(db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");
@@ -8108,7 +8098,7 @@ describe("nbt send prefers the active-run reply target", () => {
   test("sendToChat falls back to the chat when reply fails", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-send-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const agent = new DeferredAgent();
     const { im, sent } = createSendTrackingIm();
     im.sendReply = async () => {
@@ -8133,7 +8123,7 @@ describe("nbt send prefers the active-run reply target", () => {
   test("sendToChat does not fall back when reply result is uncertain", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-send-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const agent = new DeferredAgent();
     const { im, sent } = createSendTrackingIm();
     im.sendReply = async () => {
@@ -8157,7 +8147,7 @@ describe("nbt send prefers the active-run reply target", () => {
   test("sendCardToChat and sendFileToChat pass the active-run reply target", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-send-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const agent = new DeferredAgent();
     const { im, sent } = createSendTrackingIm();
     const pipeline = new Pipeline(db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");
@@ -8184,7 +8174,7 @@ describe("nbt send prefers the active-run reply target", () => {
   test("sendCardToChat falls back to the chat when reply fails", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-send-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const agent = new DeferredAgent();
     const { im, sent } = createSendTrackingIm();
     im.sendCard = async (_chatId, header, content, footer, replyToMsgId) => {
@@ -8213,7 +8203,7 @@ describe("nbt send prefers the active-run reply target", () => {
   test("IPC sends use an explicit reply anchor even without a schedule token", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-send-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const agent = new DeferredAgent();
     const calls: Array<{ method: string; replyToMsgId?: string; options?: DeliveryOptions }> = [];
     const im = createImStub();
@@ -8245,7 +8235,7 @@ describe("nbt send prefers the active-run reply target", () => {
     vi.stubEnv("NIUBOT_TOPIC_ISOLATION", "0");
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-send-strict-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare(`
       INSERT INTO chats (id, type, platform, platform_id, chat_mode, group_message_type, chat_mode_fetched_at)
       VALUES ('c1', 'group', 'feishu', 'oc-group', 'topic', 'thread', ?)
@@ -8312,7 +8302,7 @@ describe("reply placement matrix", () => {
   async function setup(kind: "p2p" | "topic" | "conversation" = "p2p") {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-placement-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     if (kind === "topic") {
       db.prepare(`
         INSERT INTO chats (id, type, platform, platform_id, chat_mode, group_message_type, chat_mode_fetched_at)
@@ -8471,7 +8461,7 @@ describe("reply placement matrix", () => {
   test("nbt send during a p2p turn quotes the current user message", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-placement-"));
     tempDirs.push(dir);
-    const db = initDatabase(path.join(dir, "niubot.db"));
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
     const agent = new DeferredAgent();
     const { im, calls } = createPlacementIm();
     const pipeline = new Pipeline(db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");

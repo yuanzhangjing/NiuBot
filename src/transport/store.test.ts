@@ -3,24 +3,20 @@ import os from "node:os";
 import path from "node:path";
 import type Database from "better-sqlite3";
 import { afterEach, describe, expect, test } from "vitest";
-import { initDatabase } from "../database/schema.js";
+import { closeTestDatabases, openTestDatabase } from "../../test-utils/database.js";
 import { TransportStore } from "./store.js";
 
 const tempDirs: string[] = [];
-const databases: Database.Database[] = [];
 
 function createStore(): { db: Database.Database; store: TransportStore } {
   const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-transport-store-"));
   tempDirs.push(dir);
-  const db = initDatabase(path.join(dir, "niubot.db"));
-  databases.push(db);
+  const db = openTestDatabase(path.join(dir, "niubot.db"));
   return { db, store: new TransportStore(db, "NiuBot", "feishu") };
 }
 
 afterEach(() => {
-  for (const db of databases.splice(0)) {
-    if (db.open) db.close();
-  }
+  closeTestDatabases();
   for (const dir of tempDirs.splice(0)) {
     rmSync(dir, { recursive: true, force: true });
   }

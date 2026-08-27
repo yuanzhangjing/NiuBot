@@ -1,10 +1,8 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import Database from "better-sqlite3";
 import { afterEach, describe, expect, test } from "vitest";
 import {
-  initDatabase,
   ensureChat,
   ensureUser,
   getChatHistoryCursor,
@@ -12,6 +10,7 @@ import {
   getMessageByPlatformId,
   storeMessage,
 } from "../database/schema.js";
+import { closeTestDatabases, openTestDatabase } from "../../test-utils/database.js";
 import {
   cacheHistoryMessages,
   getGroupChatSyncTarget,
@@ -24,19 +23,9 @@ import {
 import type { NormalizedMessage } from "../transport/types.js";
 
 const tempDirs: string[] = [];
-const openDatabases = new Set<Database.Database>();
-
-function openTestDatabase(filePath: string): Database.Database {
-  const db = initDatabase(filePath);
-  openDatabases.add(db);
-  return db;
-}
 
 afterEach(() => {
-  for (const db of openDatabases) {
-    if (db.open) db.close();
-  }
-  openDatabases.clear();
+  closeTestDatabases();
   for (const dir of tempDirs.splice(0)) {
     rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }

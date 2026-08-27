@@ -1,9 +1,8 @@
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type Database from "better-sqlite3";
 import { afterEach, describe, expect, test } from "vitest";
-import { initDatabase } from "../database/schema.js";
+import { closeTestDatabases, openTestDatabase } from "../../test-utils/database.js";
 import type { MessageHandler, PlatformAdapter } from "../im/types.js";
 import { DeliveryUncertainError } from "./errors.js";
 import { PersistentTransport } from "./persistent-transport.js";
@@ -11,7 +10,6 @@ import { TransportStore } from "./store.js";
 import type { NormalizedMessage } from "./types.js";
 
 const tempDirs: string[] = [];
-const databases: Database.Database[] = [];
 
 function createMessage(overrides: Partial<NormalizedMessage> = {}): NormalizedMessage {
   return {
@@ -71,8 +69,7 @@ function createRuntime(
 ) {
   const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-persistent-transport-"));
   tempDirs.push(dir);
-  const db = initDatabase(path.join(dir, "niubot.db"));
-  databases.push(db);
+  const db = openTestDatabase(path.join(dir, "niubot.db"));
   const runtime = new PersistentTransport({
     db,
     botId: "NiuBot",
@@ -87,9 +84,7 @@ function createRuntime(
 }
 
 afterEach(() => {
-  for (const db of databases.splice(0)) {
-    if (db.open) db.close();
-  }
+  closeTestDatabases();
   for (const dir of tempDirs.splice(0)) {
     rmSync(dir, { recursive: true, force: true });
   }

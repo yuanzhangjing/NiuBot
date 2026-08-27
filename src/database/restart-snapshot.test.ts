@@ -5,10 +5,10 @@ import Database from "better-sqlite3";
 import { afterEach, describe, expect, test } from "vitest";
 import type { NiuBotConfig } from "../config.js";
 import {
-  initDatabase,
   LATEST_SCHEMA_VERSION,
   ROLLBACK_COMPATIBLE_SCHEMA_VERSIONS,
 } from "./schema.js";
+import { closeTestDatabases, openTestDatabase } from "../../test-utils/database.js";
 import {
   applyPreflightDatabaseManifest,
   PREFLIGHT_FULL_VALIDATION_ENV,
@@ -22,6 +22,7 @@ import {
 const tempDirectories: string[] = [];
 
 afterEach(() => {
+  closeTestDatabases();
   for (const directory of tempDirectories.splice(0)) {
     fs.rmSync(directory, { recursive: true, force: true });
   }
@@ -36,7 +37,7 @@ describe("restart database snapshot", () => {
 
   test("keeps transport schema separate from the core schema", () => {
     const root = temporaryDirectory();
-    const database = initDatabase(path.join(root, "bridge.db"));
+    const database = openTestDatabase(path.join(root, "bridge.db"));
 
     expect(LATEST_SCHEMA_VERSION).toBeGreaterThanOrEqual(31);
     expect(database.pragma("user_version", { simple: true })).toBe(LATEST_SCHEMA_VERSION);

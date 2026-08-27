@@ -1,16 +1,15 @@
-import Database from "better-sqlite3";
+import type Database from "better-sqlite3";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { initDatabase } from "../database/schema.js";
+import { closeTestDatabases, openTestDatabase } from "../../test-utils/database.js";
 import { getMessageForAccess, listContinuationMessages, listMessages, searchMessages } from "../messages/store.js";
 import { TZ, userTimeRangeToUtc, utcToLocalDateTime } from "../tz.js";
 import { parseArgs } from "./args.js";
 import { formatMessagesForList, handleMessages } from "./messages.js";
 
 const tempDirs: string[] = [];
-const openDatabases: Database.Database[] = [];
 
 beforeEach(() => {
   // 测试进程可能继承宿主的话题隔离变量；明确清除，避免把查询默认限制到
@@ -21,9 +20,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllEnvs();
-  for (const db of openDatabases.splice(0)) {
-    if (db.open) db.close();
-  }
+  closeTestDatabases();
   for (const dir of tempDirs.splice(0)) {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -32,8 +29,7 @@ afterEach(() => {
 function setupDb(): Database.Database {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-message-store-"));
   tempDirs.push(dir);
-  const db = initDatabase(path.join(dir, "niubot.db"));
-  openDatabases.push(db);
+  const db = openTestDatabase(path.join(dir, "niubot.db"));
   db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u2', 'Zen', 'feishu', 'p2')").run();
   db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c1', 'group', 'feishu', 'pc1')").run();
   db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c2', 'p2p', 'feishu', 'pc2')").run();

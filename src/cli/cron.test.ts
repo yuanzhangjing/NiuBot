@@ -1,21 +1,17 @@
-import Database from "better-sqlite3";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { initDatabase } from "../database/schema.js";
+import { closeTestDatabases, openTestDatabase } from "../../test-utils/database.js";
 import { addCronJob, deleteCronJobForAccess, describeCronSchedule, listCronJobsForAccess } from "../core/cron.js";
 import { parseArgs } from "./args.js";
 import { formatCronScheduleForDisplay, handleCron } from "./cron.js";
 
 const tempDirs: string[] = [];
-const openDatabases: Database.Database[] = [];
 
 afterEach(() => {
   vi.restoreAllMocks();
-  for (const db of openDatabases.splice(0)) {
-    if (db.open) db.close();
-  }
+  closeTestDatabases();
   for (const dir of tempDirs.splice(0)) {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -24,8 +20,7 @@ afterEach(() => {
 function setupDb() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-cron-store-"));
   tempDirs.push(dir);
-  const db = initDatabase(path.join(dir, "niubot.db"));
-  openDatabases.push(db);
+  const db = openTestDatabase(path.join(dir, "niubot.db"));
   db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c1', 'group', 'feishu', 'pc1')").run();
   db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c2', 'p2p', 'feishu', 'pc2')").run();
   const ownJob = addCronJob(db, {

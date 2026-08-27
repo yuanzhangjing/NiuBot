@@ -7,7 +7,7 @@ import Database from "better-sqlite3";
 import { x as extractTar } from "tar";
 import yaml from "yaml";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { initDatabase } from "./database/schema.js";
+import { closeTestDatabases, openTestDatabase } from "../test-utils/database.js";
 import { exportBotBundle, importBotBundle, moveBot, rollbackCompletedMove } from "./bot-transfer.js";
 import { writeProcessState } from "./process-state.js";
 
@@ -33,7 +33,7 @@ function createHome(root: string, botId: string, options: { profile?: boolean; m
   }), { mode: 0o600 });
   const botDirectory = path.join(root, botId);
   fs.mkdirSync(botDirectory);
-  const database = initDatabase(path.join(botDirectory, "niubot.db"));
+  const database = openTestDatabase(path.join(botDirectory, "niubot.db"));
   database.exec("CREATE TABLE transfer_marker (value TEXT NOT NULL)");
   database.prepare("INSERT INTO transfer_marker VALUES (?)").run(options.marker ?? botId);
   database.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u1', 'User', 'feishu', 'user-1')").run();
@@ -59,6 +59,7 @@ function readBots(home: string): Array<Record<string, unknown>> {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  closeTestDatabases();
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
 

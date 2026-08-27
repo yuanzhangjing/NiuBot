@@ -7,13 +7,14 @@ import { afterEach, describe, expect, it } from "vitest";
 import { exportBotBundle, moveBot } from "./bot-transfer.js";
 import type { BotTransferWorkerRequest } from "./bot-transfer-launcher.js";
 import { recoverStaleBotTransferLifecycles, runBotTransferWorker } from "./bot-transfer-worker.js";
-import { initDatabase } from "./database/schema.js";
+import { closeTestDatabases, openTestDatabase } from "../test-utils/database.js";
 import { acquireProcessLock } from "./process-lock.js";
 import type { RunningEngine, LaunchedEngine, LaunchEngineOptions } from "./process-manager.js";
 
 const roots: string[] = [];
 
 afterEach(() => {
+  closeTestDatabases();
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
 
@@ -345,7 +346,7 @@ function createHome(home: string, botId: string): string {
   }), { mode: 0o600 });
   const botDirectory = path.join(home, botId);
   fs.mkdirSync(botDirectory);
-  initDatabase(path.join(botDirectory, "niubot.db")).close();
+  openTestDatabase(path.join(botDirectory, "niubot.db")).close();
   fs.writeFileSync(path.join(botDirectory, "bot_profile.md"), `# ${botId}\n`, { mode: 0o600 });
   return home;
 }

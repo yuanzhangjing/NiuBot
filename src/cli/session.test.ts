@@ -4,7 +4,8 @@ import { join } from "node:path";
 import { encodeGrokSessionDir } from "../backends/grok.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentBackend, TranscriptEvent } from "../agent/types.js";
-import { initDatabase, storeMessage } from "../database/schema.js";
+import { storeMessage } from "../database/schema.js";
+import { closeTestDatabases, openTestDatabase } from "../../test-utils/database.js";
 import { archiveAgentSession } from "../session-archive/archive.js";
 import { readCodexTranscript } from "../session-archive/native-transcript.js";
 import { TZ, utcToLocalDateTime } from "../tz.js";
@@ -57,13 +58,14 @@ beforeEach(() => {
 afterEach(() => {
   vi.unstubAllEnvs();
   vi.restoreAllMocks();
+  closeTestDatabases();
   for (const dir of tempDirs.splice(0)) {
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 });
 
 async function addArchivedCodexSession(
-  db: ReturnType<typeof initDatabase>,
+  db: ReturnType<typeof openTestDatabase>,
   home: string,
   id: string,
   start: string,
@@ -223,7 +225,7 @@ describe("nbt sessions", () => {
   it("lists linked archives, searches parsed events, and gets a complete event", async () => {
     const home = mkdtempSync(join(tmpdir(), "niubot-sessions-cli-"));
     tempDirs.push(home);
-    const db = initDatabase(join(home, "niubot.db"));
+    const db = openTestDatabase(join(home, "niubot.db"));
     db.prepare("INSERT INTO users (id, platform, platform_id, name) VALUES ('u2', 'feishu', 'u2p', 'Zen')").run();
     db.prepare("INSERT INTO chats (id, platform, platform_id, type, user_id) VALUES ('c1', 'feishu', 'c1p', 'p2p', 'u2')").run();
     db.prepare(`
@@ -465,7 +467,7 @@ describe("nbt sessions", () => {
   it("filters engine injection from get but keeps raw jsonl", async () => {
     const home = mkdtempSync(join(tmpdir(), "niubot-sessions-context-message-"));
     tempDirs.push(home);
-    const db = initDatabase(join(home, "niubot.db"));
+    const db = openTestDatabase(join(home, "niubot.db"));
     db.prepare("INSERT INTO users (id, platform, platform_id, name) VALUES ('u2', 'feishu', 'u2p', 'Zen')").run();
     db.prepare("INSERT INTO chats (id, platform, platform_id, type, user_id) VALUES ('c1', 'feishu', 'c1p', 'p2p', 'u2')").run();
     db.prepare(`
@@ -528,7 +530,7 @@ describe("nbt sessions", () => {
   it("paginates session lists with a stable session cursor", async () => {
     const home = mkdtempSync(join(tmpdir(), "niubot-sessions-list-"));
     tempDirs.push(home);
-    const db = initDatabase(join(home, "niubot.db"));
+    const db = openTestDatabase(join(home, "niubot.db"));
     db.prepare("INSERT INTO users (id, platform, platform_id, name) VALUES ('u2', 'feishu', 'u2p', 'Zen')").run();
     db.prepare("INSERT INTO chats (id, platform, platform_id, type, user_id) VALUES ('c1', 'feishu', 'c1p', 'p2p', 'u2')").run();
     const insert = db.prepare(`
@@ -609,7 +611,7 @@ describe("nbt sessions", () => {
   it("keeps search pagination anchored when newer sessions are archived", async () => {
     const home = mkdtempSync(join(tmpdir(), "niubot-sessions-search-cursor-"));
     tempDirs.push(home);
-    const db = initDatabase(join(home, "niubot.db"));
+    const db = openTestDatabase(join(home, "niubot.db"));
     db.prepare("INSERT INTO users (id, platform, platform_id, name) VALUES ('u2', 'feishu', 'u2p', 'Zen')").run();
     db.prepare("INSERT INTO chats (id, platform, platform_id, type, user_id) VALUES ('c1', 'feishu', 'c1p', 'p2p', 'u2')").run();
     await addArchivedCodexSession(
@@ -654,7 +656,7 @@ describe("nbt sessions", () => {
   it("lists active topic sessions by default, scopes by thread, and reads active messages", async () => {
     const home = mkdtempSync(join(tmpdir(), "niubot-sessions-active-topic-"));
     tempDirs.push(home);
-    const db = initDatabase(join(home, "niubot.db"));
+    const db = openTestDatabase(join(home, "niubot.db"));
     db.prepare("INSERT INTO users (id, platform, platform_id, name) VALUES ('u2', 'feishu', 'u2p', 'Zen')").run();
     db.prepare("INSERT INTO chats (id, platform, platform_id, type) VALUES ('c1', 'feishu', 'c1p', 'group')").run();
     const insertActive = db.prepare(`
@@ -757,7 +759,7 @@ describe("nbt sessions", () => {
   it("falls back to the internal id when agent_session_id is missing", async () => {
     const home = mkdtempSync(join(tmpdir(), "niubot-sessions-public-id-"));
     tempDirs.push(home);
-    const db = initDatabase(join(home, "niubot.db"));
+    const db = openTestDatabase(join(home, "niubot.db"));
     db.prepare("INSERT INTO users (id, platform, platform_id, name) VALUES ('u2', 'feishu', 'u2p', 'Zen')").run();
     db.prepare("INSERT INTO chats (id, platform, platform_id, type, user_id) VALUES ('c1', 'feishu', 'c1p', 'p2p', 'u2')").run();
     db.prepare(`
@@ -786,7 +788,7 @@ describe("nbt sessions", () => {
   it("does not display leftover engine handles as the public session id", async () => {
     const home = mkdtempSync(join(tmpdir(), "niubot-sessions-wrapper-id-"));
     tempDirs.push(home);
-    const db = initDatabase(join(home, "niubot.db"));
+    const db = openTestDatabase(join(home, "niubot.db"));
     db.prepare("INSERT INTO users (id, platform, platform_id, name) VALUES ('u2', 'feishu', 'u2p', 'Zen')").run();
     db.prepare("INSERT INTO chats (id, platform, platform_id, type, user_id) VALUES ('c1', 'feishu', 'c1p', 'p2p', 'u2')").run();
     db.prepare(`
@@ -833,7 +835,7 @@ describe("nbt sessions", () => {
 
     const home = mkdtempSync(join(tmpdir(), "niubot-sessions-live-home-"));
     tempDirs.push(home);
-    const db = initDatabase(join(home, "niubot.db"));
+    const db = openTestDatabase(join(home, "niubot.db"));
     db.prepare("INSERT INTO users (id, platform, platform_id, name) VALUES ('u2', 'feishu', 'u2p', 'Zen')").run();
     db.prepare("INSERT INTO chats (id, platform, platform_id, type, user_id) VALUES ('c1', 'feishu', 'c1p', 'p2p', 'u2')").run();
     db.prepare(`
@@ -908,7 +910,7 @@ describe("nbt sessions", () => {
 
     const home = mkdtempSync(join(tmpdir(), "niubot-sessions-live-codex-"));
     tempDirs.push(home);
-    const db = initDatabase(join(home, "niubot.db"));
+    const db = openTestDatabase(join(home, "niubot.db"));
     db.prepare("INSERT INTO users (id, platform, platform_id, name) VALUES ('u2', 'feishu', 'u2p', 'Zen')").run();
     db.prepare("INSERT INTO chats (id, platform, platform_id, type, user_id) VALUES ('c1', 'feishu', 'c1p', 'p2p', 'u2')").run();
     db.prepare(`

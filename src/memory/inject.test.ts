@@ -1,10 +1,10 @@
-import Database from "better-sqlite3";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import yaml from "yaml";
 import { afterEach, describe, expect, it } from "vitest";
-import { ensureChat, ensureUser, initDatabase as openDatabase, storeMessage } from "../database/schema.js";
+import { ensureChat, ensureUser, storeMessage } from "../database/schema.js";
+import { closeTestDatabases, openTestDatabase } from "../../test-utils/database.js";
 import {
   buildImportantContext,
   buildNormalContext,
@@ -14,19 +14,9 @@ import {
 } from "./inject.js";
 
 const tempDirs: string[] = [];
-const openDatabases = new Set<Database.Database>();
-
-function initDatabase(filePath: string): Database.Database {
-  const db = openDatabase(filePath);
-  openDatabases.add(db);
-  return db;
-}
 
 afterEach(() => {
-  for (const db of openDatabases) {
-    if (db.open) db.close();
-  }
-  openDatabases.clear();
+  closeTestDatabases();
   for (const dir of tempDirs.splice(0)) {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -60,7 +50,7 @@ describe("buildNormalContext task injection", () => {
       ],
     }), "utf-8");
 
-    const db = initDatabase(path.join(workingDirectory, "niubot.db"));
+    const db = openTestDatabase(path.join(workingDirectory, "niubot.db"));
     const context = buildNormalContext(db, "c1", workingDirectory, undefined, "p2p", "u2");
 
     expect(context).toContain("own-private");
@@ -70,7 +60,7 @@ describe("buildNormalContext task injection", () => {
   it("keeps a single oversized recent message within the total budget", () => {
     const workingDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-inject-"));
     tempDirs.push(workingDirectory);
-    const db = initDatabase(path.join(workingDirectory, "niubot.db"));
+    const db = openTestDatabase(path.join(workingDirectory, "niubot.db"));
     const userId = ensureUser(db, "feishu", "user-open-id", "Zen");
     const chatId = ensureChat(db, "feishu", "chat-open-id", "p2p");
     db.prepare(`INSERT INTO sessions (id, chat_id, user_id, source, status, started_at, ended_at) VALUES ('s1', ?, ?, 'user', 'archived', datetime('now'), datetime('now'))`).run(chatId, userId);
@@ -85,7 +75,7 @@ describe("buildNormalContext task injection", () => {
   it.each(["archive_failed", "discarded"])("keeps recent messages after a %s user session", (status) => {
     const workingDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-inject-"));
     tempDirs.push(workingDirectory);
-    const db = initDatabase(path.join(workingDirectory, "niubot.db"));
+    const db = openTestDatabase(path.join(workingDirectory, "niubot.db"));
     const userId = ensureUser(db, "feishu", "user-open-id", "Zen");
     const chatId = ensureChat(db, "feishu", "chat-open-id", "p2p");
     db.prepare(`INSERT INTO sessions (id, chat_id, user_id, source, status, started_at, ended_at) VALUES ('s1', ?, ?, 'user', ?, datetime('now'), datetime('now'))`)
@@ -98,14 +88,14 @@ describe("buildNormalContext task injection", () => {
   it("does not inject session archive paths", () => {
     const workingDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-inject-"));
     tempDirs.push(workingDirectory);
-    const db = initDatabase(path.join(workingDirectory, "niubot.db"));
+    const db = openTestDatabase(path.join(workingDirectory, "niubot.db"));
     expect(buildNormalContext(db, "c1", workingDirectory, undefined, "p2p", "u2")).not.toContain("session-archives");
   });
 
   it("injects recent messages from the current thread when a cutoff is set", () => {
     const workingDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-inject-"));
     tempDirs.push(workingDirectory);
-    const db = initDatabase(path.join(workingDirectory, "niubot.db"));
+    const db = openTestDatabase(path.join(workingDirectory, "niubot.db"));
     const userId = ensureUser(db, "feishu", "user-open-id", "Zen");
     const chatId = ensureChat(db, "feishu", "chat-open-id", "group");
     db.prepare(`INSERT INTO sessions (id, chat_id, user_id, source, status, started_at, ended_at) VALUES ('s1', ?, ?, 'user', 'archived', datetime('now'), datetime('now'))`).run(chatId, userId);
@@ -124,7 +114,7 @@ describe("buildNormalContext task injection", () => {
   it("excludes topic rows from 主群 continuation", () => {
     const workingDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-inject-"));
     tempDirs.push(workingDirectory);
-    const db = initDatabase(path.join(workingDirectory, "niubot.db"));
+    const db = openTestDatabase(path.join(workingDirectory, "niubot.db"));
     const userId = ensureUser(db, "feishu", "user-open-id", "Zen");
     const chatId = ensureChat(db, "feishu", "chat-open-id", "group");
     db.prepare(`INSERT INTO sessions (id, chat_id, user_id, source, status, started_at, ended_at) VALUES ('s1', ?, ?, 'user', 'archived', datetime('now'), datetime('now'))`).run(chatId, userId);
@@ -142,7 +132,7 @@ describe("buildImportantContext", () => {
     const workingDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-inject-"));
     tempDirs.push(workingDirectory);
 
-    const db = initDatabase(path.join(workingDirectory, "niubot.db"));
+    const db = openTestDatabase(path.join(workingDirectory, "niubot.db"));
     const context = buildImportantContext(db, {
       botName: "NiuBot",
       botLabel: "U3(NiuBot)",
@@ -169,7 +159,7 @@ describe("buildImportantContext", () => {
     const workingDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-inject-"));
     tempDirs.push(workingDirectory);
 
-    const db = initDatabase(path.join(workingDirectory, "niubot.db"));
+    const db = openTestDatabase(path.join(workingDirectory, "niubot.db"));
     const context = buildImportantContext(db, {
       botName: "NiuBot",
       platform: "feishu",
@@ -188,7 +178,7 @@ describe("buildImportantContext", () => {
   it("lists group bots in the scene and does not inject collab rules", () => {
     const workingDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-inject-"));
     tempDirs.push(workingDirectory);
-    const db = initDatabase(path.join(workingDirectory, "niubot.db"));
+    const db = openTestDatabase(path.join(workingDirectory, "niubot.db"));
     db.prepare("INSERT INTO users (id, name, platform, platform_id, is_bot) VALUES ('u3', 'NiuBot', 'feishu', 'ou_bot', 1)").run();
     db.prepare("INSERT INTO users (id, name, platform, platform_id, is_bot) VALUES ('u4', 'CowBot', 'feishu', 'ou_cow', 1)").run();
     db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c4', 'group', 'feishu', 'oc4')").run();
@@ -216,7 +206,7 @@ describe("buildSpeakerContext", () => {
   it("labels bot speakers separately and skips their memories", () => {
     const workingDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-inject-"));
     tempDirs.push(workingDirectory);
-    const db = initDatabase(path.join(workingDirectory, "niubot.db"));
+    const db = openTestDatabase(path.join(workingDirectory, "niubot.db"));
     const ctx = buildSpeakerContext(db, [
       { userId: "u4", userName: "CowBot", isBot: true },
     ]);

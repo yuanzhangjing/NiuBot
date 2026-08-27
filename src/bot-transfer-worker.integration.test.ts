@@ -6,7 +6,7 @@ import yaml from "yaml";
 import { afterEach, describe, expect, it } from "vitest";
 import { launchBotTransferWorker } from "./bot-transfer-launcher.js";
 import { exportBotBundle } from "./bot-transfer.js";
-import { initDatabase } from "./database/schema.js";
+import { closeTestDatabases, openTestDatabase } from "../test-utils/database.js";
 import { waitForEngineIdentity } from "./local-api/engine-client.js";
 import { launchDetachedEngine, inspectRunningEngine } from "./process-manager.js";
 import { readProcessState } from "./process-state.js";
@@ -22,6 +22,7 @@ const workerPids: number[] = [];
 const enginePids: number[] = [];
 
 afterEach(async () => {
+  closeTestDatabases();
   // Windows: cwd/open files in the tree block rm. Kill first; skip graceful
   // stopEngine (named-pipe stall).
   const pids = new Set<number>([...workerPids.splice(0), ...enginePids.splice(0)]);
@@ -249,7 +250,7 @@ function createHome(home: string, botId: string): string {
   }), { mode: 0o600 });
   const botDirectory = path.join(home, botId);
   fs.mkdirSync(botDirectory);
-  initDatabase(path.join(botDirectory, "niubot.db")).close();
+  openTestDatabase(path.join(botDirectory, "niubot.db")).close();
   fs.writeFileSync(path.join(botDirectory, "bot_profile.md"), `# ${botId}\n`, { mode: 0o600 });
   return home;
 }
