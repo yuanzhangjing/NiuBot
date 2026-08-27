@@ -9,7 +9,7 @@ const require = createRequire(import.meta.url);
 rmSync(path.join(projectRoot, "dist"), { recursive: true, force: true });
 
 const tscEntry = require.resolve("typescript/bin/tsc");
-const result = spawnSync(process.execPath, [tscEntry, "-p", path.join(projectRoot, "tsconfig.json")], {
+const result = spawnSync(process.execPath, [tscEntry, "-p", path.join(projectRoot, "tsconfig.build.json")], {
   cwd: projectRoot,
   stdio: "inherit",
 });

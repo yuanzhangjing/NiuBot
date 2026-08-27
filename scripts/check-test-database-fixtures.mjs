@@ -1,6 +1,7 @@
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import * as ts from "typescript";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const sourceRoot = path.join(projectRoot, "src");
@@ -17,7 +18,7 @@ function visit(directory) {
 
     const source = readFileSync(entryPath, "utf8");
     const lines = source.split(/\r?\n/);
-    if (/\bopenTestDatabase\b/.test(source)) {
+    if (/\b(?:openTestDatabase|openRawTestDatabase)\b/.test(source)) {
       const closeIndex = source.search(/\bcloseTestDatabases\s*\(/);
       const removeIndex = source.search(/\b(?:fs\.)?rmSync\s*\(/);
       if (closeIndex < 0) {
@@ -26,6 +27,15 @@ function visit(directory) {
         violations.push(`${path.relative(projectRoot, entryPath)}: closeTestDatabases() must precede rmSync()`);
       }
     }
+    const sourceFile = ts.createSourceFile(entryPath, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+    function inspect(node) {
+      if (ts.isNewExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "Database") {
+        const line = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
+        violations.push(`${path.relative(projectRoot, entryPath)}:${line}: use openRawTestDatabase() instead of new Database()`);
+      }
+      ts.forEachChild(node, inspect);
+    }
+    inspect(sourceFile);
     lines.forEach((line, index) => {
       if (/\binitDatabase\b/.test(line)) {
         violations.push(`${path.relative(projectRoot, entryPath)}:${index + 1}`);
@@ -37,7 +47,7 @@ function visit(directory) {
 visit(sourceRoot);
 
 if (violations.length > 0) {
-  console.error("Test database fixture check failed. Use openTestDatabase() from test-utils/database.ts:");
+  console.error("Test database fixture check failed. Use the tracked database helpers from test-utils/database.ts:");
   for (const violation of violations) console.error(`- ${violation}`);
   process.exit(1);
 }

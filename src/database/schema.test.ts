@@ -1,7 +1,6 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import Database from "better-sqlite3";
 import { afterEach, describe, expect, test } from "vitest";
 import {
   ensureUser,
@@ -31,7 +30,7 @@ import {
   recordRuntimeEvent,
   LATEST_SCHEMA_VERSION,
 } from "./schema.js";
-import { closeTestDatabases, openTestDatabase } from "../../test-utils/database.js";
+import { closeTestDatabases, openRawTestDatabase, openTestDatabase } from "../../test-utils/database.js";
 
 const tempDirs: string[] = [];
 
@@ -726,7 +725,7 @@ describe("public upgrade rollback compatibility", () => {
 
       // 26 为破坏性迁移，user_version 已推进到 LATEST：旧二进制会被拒绝启动（而非崩溃）。
       // 这里模拟「旧代码忽略新版本号继续操作」的 SQL 兼容性（表结构仍允许旧 SQL）。
-      const rolledBack = new Database(dbPath);
+      const rolledBack = openRawTestDatabase(dbPath);
       expect(rolledBack.pragma("user_version", { simple: true })).toBe(LATEST_SCHEMA_VERSION);
       expect(() => rolledBack.prepare(`
         INSERT INTO cron_jobs (
@@ -804,7 +803,7 @@ describe("transport inbox claim schema", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-test-"));
     tempDirs.push(dir);
     const dbPath = path.join(dir, "niubot.db");
-    const legacy = new Database(dbPath);
+    const legacy = openRawTestDatabase(dbPath);
     legacy.exec(`
       CREATE TABLE transport_inbox (
         id INTEGER PRIMARY KEY AUTOINCREMENT,

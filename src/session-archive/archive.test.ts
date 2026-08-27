@@ -1,15 +1,16 @@
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AgentBackend, AgentSession, SessionTranscript } from "../agent/types.js";
 import { archiveAgentSession, buildArchiveDirectoryName, getSessionArchiveDirectory } from "./archive.js";
 import { findSessionArchive, loadArchivedTranscript } from "./reader.js";
+import { closeTestDatabases, openRawTestDatabase } from "../../test-utils/database.js";
 
 const tempDirs: string[] = [];
 
 afterEach(() => {
+  closeTestDatabases();
   for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
@@ -79,7 +80,7 @@ describe("session archive", () => {
     const home = mkdtempSync(join(tmpdir(), "niubot-archive-opencode-"));
     tempDirs.push(home);
     const databaseFile = join(home, "opencode.db");
-    const db = new Database(databaseFile);
+    const db = openRawTestDatabase(databaseFile);
     db.exec(`
       CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, data TEXT, time_created INTEGER);
       CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, data TEXT, time_created INTEGER);

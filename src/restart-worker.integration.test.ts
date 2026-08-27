@@ -11,7 +11,7 @@ import { runRestartWorker } from "./restart-worker.js";
 import { readProcessState } from "./process-state.js";
 import { readEngineIdentity, waitForEngineIdentity } from "./local-api/engine-client.js";
 import { endpointFromAddress } from "./platform/ipc.js";
-import Database from "better-sqlite3";
+import { closeTestDatabases, openRawTestDatabase } from "../test-utils/database.js";
 import { createRestartDatabaseSnapshot } from "./database/restart-snapshot.js";
 import { RecommendedReleaseStore } from "./recommended-release.js";
 
@@ -32,6 +32,7 @@ beforeEach(() => {
 
 afterEach(async () => {
   vi.unstubAllEnvs();
+  closeTestDatabases();
   for (const directory of tempDirs.splice(0)) {
     try { await stopEngine(path.join(directory, "home")); } catch { /* test may fail before launch */ }
     fs.rmSync(directory, { recursive: true, force: true });
@@ -211,14 +212,14 @@ describe("restart worker integration", () => {
       `    dbPath: ${JSON.stringify(databasePath)}`,
       "",
     ].join("\n"));
-    const database = new Database(databasePath);
+    const database = openRawTestDatabase(databasePath);
     database.exec("CREATE TABLE marker (value TEXT); INSERT INTO marker VALUES ('before')");
     database.close();
     const snapshot = await createRestartDatabaseSnapshot({
       rootDirectory: path.join(home, "TestBot", "restart", "database-snapshots", "dead-tx"),
       databasePaths: [databasePath],
     });
-    const migrated = new Database(databasePath);
+    const migrated = openRawTestDatabase(databasePath);
     migrated.exec("UPDATE marker SET value='migrated'");
     migrated.close();
     const sharedStore = new SharedReleaseStore(path.join(root, "shared-store"));
@@ -246,7 +247,7 @@ describe("restart worker integration", () => {
       NIUBOT_SOURCE_DIR: runtime,
       NIUBOT_ENV: "production",
     });
-    const restored = new Database(databasePath, { readonly: true });
+    const restored = openRawTestDatabase(databasePath, { readonly: true });
     expect(restored.prepare("SELECT value FROM marker").pluck().get()).toBe("before");
     restored.close();
     expect(homeStore.readState().transaction).toBeUndefined();
@@ -470,11 +471,11 @@ describe("restart worker integration", () => {
     fs.mkdirSync(home, { recursive: true });
     const databasePath = path.join(home, "TestBot", "niubot.db");
     fs.mkdirSync(path.dirname(databasePath), { recursive: true });
-    const database = new Database(databasePath);
+    const database = openRawTestDatabase(databasePath);
     database.exec("CREATE TABLE marker (value TEXT); INSERT INTO marker VALUES ('before')");
     database.close();
     const databaseDuringPreflightPath = path.join(root, "during-preflight.db");
-    const databaseDuringPreflight = new Database(databaseDuringPreflightPath);
+    const databaseDuringPreflight = openRawTestDatabase(databaseDuringPreflightPath);
     databaseDuringPreflight.exec("CREATE TABLE marker (value TEXT); INSERT INTO marker VALUES ('during-preflight')");
     databaseDuringPreflight.close();
     fs.writeFileSync(path.join(source, "dist", "index.js"), fakeEngineSource());
@@ -539,7 +540,7 @@ describe("restart worker integration", () => {
       "utf-8",
     )) as { phase: string };
     expect(restartState.phase).toBe("rollback_success");
-    const restored = new Database(databasePath, { readonly: true });
+    const restored = openRawTestDatabase(databasePath, { readonly: true });
     expect(restored.prepare("SELECT value FROM marker").pluck().get()).toBe("during-preflight");
     restored.close();
     await expect(stopEngine(home)).resolves.toMatchObject({ stopped: true });
@@ -556,7 +557,7 @@ describe("restart worker integration", () => {
     fs.mkdirSync(path.join(source, "src"), { recursive: true });
     fs.mkdirSync(path.join(oldRuntime, "dist"), { recursive: true });
     fs.mkdirSync(path.dirname(databasePath), { recursive: true });
-    const database = new Database(databasePath);
+    const database = openRawTestDatabase(databasePath);
     database.exec("CREATE TABLE marker (value TEXT); INSERT INTO marker VALUES ('before')");
     database.close();
     fs.writeFileSync(path.join(oldRuntime, "package.json"), `${JSON.stringify({
@@ -619,7 +620,7 @@ describe("restart worker integration", () => {
     const running = await inspectRunningEngine(home);
     expect(running?.state.pid).toBe(initial.state.pid);
     expect(fs.realpathSync.native(running!.state.runtimePath)).toBe(fs.realpathSync.native(oldRuntime));
-    const live = new Database(databasePath, { readonly: true });
+    const live = openRawTestDatabase(databasePath, { readonly: true });
     expect(live.prepare("SELECT value FROM marker").pluck().get()).toBe("before");
     live.close();
     expect(fs.existsSync(path.join(home, "TestBot", "restart", "database-snapshots")))
@@ -642,7 +643,7 @@ describe("restart worker integration", () => {
     fs.mkdirSync(path.join(source, "src"), { recursive: true });
     fs.mkdirSync(path.join(oldRuntime, "dist"), { recursive: true });
     fs.mkdirSync(path.dirname(databasePath), { recursive: true });
-    const database = new Database(databasePath);
+    const database = openRawTestDatabase(databasePath);
     database.exec("CREATE TABLE marker (value TEXT); INSERT INTO marker VALUES ('before')");
     database.close();
     const oldPackage = { name: "@yuanzhangjing/niubot", version: "0.9.0", type: "module" };

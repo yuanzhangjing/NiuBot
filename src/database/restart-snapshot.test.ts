@@ -1,14 +1,13 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import Database from "better-sqlite3";
 import { afterEach, describe, expect, test } from "vitest";
 import type { NiuBotConfig } from "../config.js";
 import {
   LATEST_SCHEMA_VERSION,
   ROLLBACK_COMPATIBLE_SCHEMA_VERSIONS,
 } from "./schema.js";
-import { closeTestDatabases, openTestDatabase } from "../../test-utils/database.js";
+import { closeTestDatabases, openRawTestDatabase, openTestDatabase } from "../../test-utils/database.js";
 import {
   applyPreflightDatabaseManifest,
   PREFLIGHT_FULL_VALIDATION_ENV,
@@ -55,7 +54,7 @@ describe("restart database snapshot", () => {
     const root = temporaryDirectory();
     const databasePath = path.join(root, "live", "bot.db");
     fs.mkdirSync(path.dirname(databasePath), { recursive: true });
-    const live = new Database(databasePath);
+    const live = openRawTestDatabase(databasePath);
     live.pragma("journal_mode = WAL");
     live.exec("CREATE TABLE items (value TEXT); INSERT INTO items VALUES ('before')");
 
@@ -67,7 +66,7 @@ describe("restart database snapshot", () => {
       .toBe(false);
     const mapped = applyPreflightDatabaseManifest(config(databasePath), snapshot.manifestPath);
     expect(mapped.bots[0]?.dbPath).not.toBe(databasePath);
-    const preflight = new Database(mapped.bots[0]!.dbPath);
+    const preflight = openRawTestDatabase(mapped.bots[0]!.dbPath);
     preflight.exec("INSERT INTO items VALUES ('preflight')");
     preflight.close();
     expect(live.prepare("SELECT value FROM items ORDER BY rowid").pluck().all()).toEqual(["before"]);
@@ -75,7 +74,7 @@ describe("restart database snapshot", () => {
     live.exec("INSERT INTO items VALUES ('candidate')");
     live.close();
     restoreRestartDatabaseSnapshot(snapshot);
-    const restored = new Database(databasePath, { readonly: true });
+    const restored = openRawTestDatabase(databasePath, { readonly: true });
     expect(restored.prepare("SELECT value FROM items ORDER BY rowid").pluck().all()).toEqual(["before"]);
     restored.close();
     cleanupRestartDatabaseSnapshot(snapshot);
@@ -96,7 +95,7 @@ describe("restart database snapshot", () => {
     }, snapshot.manifestPath);
     expect(mapped.bots[0]?.dbPath).toBe(mapped.bots[1]?.dbPath);
     fs.mkdirSync(path.dirname(missingPath), { recursive: true });
-    const created = new Database(missingPath);
+    const created = openRawTestDatabase(missingPath);
     created.exec("CREATE TABLE candidate_data (value TEXT)");
     created.close();
     fs.writeFileSync(`${missingPath}-journal`, "candidate");
@@ -128,7 +127,7 @@ describe("restart database snapshot", () => {
   test("only allows legacy preflight for rollback-compatible core schemas", () => {
     const root = temporaryDirectory();
     const databasePath = path.join(root, "bot.db");
-    const database = new Database(databasePath);
+    const database = openRawTestDatabase(databasePath);
     database.pragma(`user_version = ${LATEST_SCHEMA_VERSION}`);
     database.close();
 
@@ -141,7 +140,7 @@ describe("restart database snapshot", () => {
 
     // 兼容列表内的版本作为 candidate 时仍可走 legacy preflight（candidate 必须 ∈ 兼容列表）
     for (const version of ROLLBACK_COMPATIBLE_SCHEMA_VERSIONS) {
-      const legacy = new Database(databasePath);
+      const legacy = openRawTestDatabase(databasePath);
       legacy.pragma(`user_version = ${version}`);
       legacy.close();
       expect(() => assertDatabasesAtCompatibleSchemaVersion(
@@ -151,7 +150,7 @@ describe("restart database snapshot", () => {
       )).not.toThrow();
     }
 
-    const unsupported = new Database(databasePath);
+    const unsupported = openRawTestDatabase(databasePath);
     unsupported.pragma("user_version = 9");
     unsupported.close();
     expect(() => assertDatabasesAtCompatibleSchemaVersion(
@@ -178,7 +177,7 @@ describe("restart database snapshot", () => {
   test("preserves the snapshot directory when restore cannot proceed", async () => {
     const root = temporaryDirectory();
     const databasePath = path.join(root, "bot.db");
-    const database = new Database(databasePath);
+    const database = openRawTestDatabase(databasePath);
     database.exec("CREATE TABLE marker (value TEXT)");
     database.close();
     const snapshot = await createRestartDatabaseSnapshot({

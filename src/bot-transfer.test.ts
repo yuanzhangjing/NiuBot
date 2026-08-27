@@ -3,11 +3,10 @@ import { execFileSync, spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import Database from "better-sqlite3";
 import { x as extractTar } from "tar";
 import yaml from "yaml";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { closeTestDatabases, openTestDatabase } from "../test-utils/database.js";
+import { closeTestDatabases, openRawTestDatabase, openTestDatabase } from "../test-utils/database.js";
 import { exportBotBundle, importBotBundle, moveBot, rollbackCompletedMove } from "./bot-transfer.js";
 import { writeProcessState } from "./process-state.js";
 
@@ -135,7 +134,7 @@ describe("Bot transfer bundle", () => {
       workingDirectory: path.join(root, "new-workspace"),
     });
     expect(imported).not.toHaveProperty("dbPath");
-    const database = new Database(result.databasePath, { readonly: true });
+    const database = openRawTestDatabase(result.databasePath, { readonly: true });
     expect(database.prepare("SELECT value FROM transfer_marker").pluck().get()).toBe("kept");
     expect(database.prepare("SELECT agent_session_id FROM sessions WHERE id = 's1'").pluck().get()).toBeNull();
     database.close();
@@ -319,7 +318,7 @@ describe("Bot transfer bundle", () => {
       bots: [{ id: "Legacy", backend: "codex", appId: "id", appSecret: "secret" }],
     }), { mode: 0o600 });
     fs.writeFileSync(path.join(source, "Legacy", "bot_profile.md"), "# Legacy\n", { mode: 0o600 });
-    const legacy = new Database(path.join(source, "Legacy", "niubot.db"));
+    const legacy = openRawTestDatabase(path.join(source, "Legacy", "niubot.db"));
     legacy.exec("CREATE TABLE sessions (id TEXT PRIMARY KEY); PRAGMA user_version = 2;");
     legacy.close();
     const target = createEmptyTarget(path.join(root, "target"));
@@ -358,7 +357,7 @@ describe("same-device Bot move", () => {
     expect(readBots(target).map((bot) => bot.id)).toEqual(["Existing", "Mover"]);
     expect(fs.existsSync(path.join(source, "Mover", "niubot.db"))).toBe(false);
     expect(fs.existsSync(path.join(moved.recoveryDirectory!, "niubot.db"))).toBe(true);
-    const database = new Database(path.join(target, "Mover", "niubot.db"), { readonly: true });
+    const database = openRawTestDatabase(path.join(target, "Mover", "niubot.db"), { readonly: true });
     expect(database.prepare("SELECT value FROM transfer_marker").pluck().get()).toBe("move-me");
     expect(database.prepare("SELECT agent_session_id FROM sessions WHERE id = 's1'").pluck().get())
       .toBe("device-local-session");
@@ -406,13 +405,13 @@ describe("same-device Bot move", () => {
       sourceVersion: "1",
       apply: true,
     });
-    const targetDatabase = new Database(path.join(target, "Mover", "niubot.db"));
+    const targetDatabase = openRawTestDatabase(path.join(target, "Mover", "niubot.db"));
     targetDatabase.prepare("UPDATE transfer_marker SET value = ?").run("written-after-target-start");
     targetDatabase.close();
 
     await rollbackCompletedMove(moved);
 
-    const restoredDatabase = new Database(path.join(source, "Mover", "niubot.db"), { readonly: true });
+    const restoredDatabase = openRawTestDatabase(path.join(source, "Mover", "niubot.db"), { readonly: true });
     expect(restoredDatabase.prepare("SELECT value FROM transfer_marker").pluck().get())
       .toBe("written-after-target-start");
     restoredDatabase.close();
@@ -445,7 +444,7 @@ describe("same-device Bot move", () => {
 
     await rollbackCompletedMove(moved);
 
-    const restored = new Database(path.join(source, "Mover", "niubot.db"), { readonly: true });
+    const restored = openRawTestDatabase(path.join(source, "Mover", "niubot.db"), { readonly: true });
     expect(restored.prepare("SELECT value FROM transfer_marker").pluck().get()).toBe("wal-only");
     restored.close();
   });

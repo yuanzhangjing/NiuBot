@@ -38,7 +38,7 @@
     "test": "npm run test:database-fixtures && vitest run --testTimeout=30000",
     "test:database-fixtures": "node scripts/check-test-database-fixtures.mjs",
     "test:public-upgrades": "node scripts/check-public-upgrades.mjs",
-    "test:watch": "vitest",
+    "test:watch": "npm run test:database-fixtures && vitest",
     "pack:check": "node scripts/check-package.mjs",
     "pack:smoke": "node scripts/smoke-package.mjs",
     "release:check": "npm test && npm run build && npm run pack:check && npm run pack:smoke",

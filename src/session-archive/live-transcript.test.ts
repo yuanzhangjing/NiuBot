@@ -1,12 +1,12 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { encodeGrokSessionDir } from "../backends/grok.js";
 import { encodePiSessionDir } from "../backends/pi.js";
 import { claudeProjectKey, cursorProjectKey } from "../platform/workspace-path.js";
 import { loadLiveTranscript } from "./live-transcript.js";
+import { closeTestDatabases, openRawTestDatabase } from "../../test-utils/database.js";
 
 vi.mock("../backends/opencode.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../backends/opencode.js")>();
@@ -44,6 +44,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllEnvs();
+  closeTestDatabases();
   for (const dir of tempDirs.splice(0)) {
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
@@ -100,7 +101,7 @@ describe("loadLiveTranscript", () => {
 
     const dbFile = join(xdg, "opencode", "opencode.db");
     mkdirSync(join(dbFile, ".."), { recursive: true });
-    const db = new Database(dbFile);
+    const db = openRawTestDatabase(dbFile);
     db.exec(`
       CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, data TEXT, time_created INTEGER);
       CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, data TEXT, time_created INTEGER);
