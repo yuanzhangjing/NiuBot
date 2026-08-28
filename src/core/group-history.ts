@@ -14,9 +14,14 @@ import {
   setThreadHistoryCursor,
   setUserIsBot,
   storeMessage,
+  updateMessageContent,
 } from "../database/schema.js";
 import { utcDateTimeForSql } from "../tz.js";
-import type { NormalizedMessage, TransportClient } from "../transport/types.js";
+import {
+  isUnresolvedInteractiveContent,
+  type NormalizedMessage,
+  type TransportClient,
+} from "../transport/types.js";
 
 export const GROUP_HISTORY_LIST_LIMIT = 50;
 /** 增量同步最多入库条数（飞书单页 50，适配器会翻页）。 */
@@ -80,6 +85,16 @@ export function cacheHistoryMessages(
       if (!platformMsgId) continue;
       const existing = getMessageByPlatformId(db, platform, platformMsgId);
       if (existing) {
+        // 历史同步可能把实时入口留下的降级卡片补成原文；不能因 platform_msg_id
+        // 去重而把已有的 [卡片消息] 永久保留下来。
+        if (
+          existing.contentType === "interactive"
+          && msg.contentType === "interactive"
+          && isUnresolvedInteractiveContent(existing.contentText ?? "")
+          && !isUnresolvedInteractiveContent(msg.contentText)
+        ) {
+          updateMessageContent(db, existing.id, msg.contentText);
+        }
         ids.push(existing.id);
         continue;
       }

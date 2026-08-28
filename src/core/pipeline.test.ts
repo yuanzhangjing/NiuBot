@@ -799,6 +799,36 @@ describe("Pipeline Loop integration", () => {
     expect(db.prepare("SELECT COUNT(*) AS count FROM loop_jobs").get()).toEqual({ count: 0 });
   });
 
+  test("does not use an unresolved interactive placeholder as reply context", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-card-quote-test-"));
+    tempDirs.push(dir);
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
+    const senderId = ensureUser(db, "feishu", "ou-cow", "CowBot", "bot_sender");
+    const chatId = ensureChat(db, "feishu", "oc-group", "group", "bots");
+    storeMessage(db, {
+      chatId,
+      senderId,
+      role: "assistant",
+      contentText: "[卡片消息]",
+      contentType: "interactive",
+      platform: "feishu",
+      platformMsgId: "om-card-placeholder",
+    });
+
+    const im = createImStub();
+    im.getMessageContent = async () => "补取的引用正文";
+    const pipeline = new Pipeline(
+      db, im, new RecordingAgent(), createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex",
+    );
+
+    expect((pipeline as any).buildReplyQuoted("feishu", "om-card-placeholder")).toBe("");
+    await vi.waitFor(() => {
+      expect(db.prepare(
+        "SELECT content_text FROM messages WHERE platform_msg_id = ?",
+      ).get("om-card-placeholder")).toEqual({ content_text: "补取的引用正文" });
+    });
+  });
+
   test("schedule writes use the current group turn identity instead of the session creator", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-schedule-identity-test-"));
     tempDirs.push(dir);
@@ -960,7 +990,7 @@ describe("Pipeline Loop integration", () => {
 });
 
 describe("Pipeline.start", () => {
-  test("starts Engine logic without registering a platform callback", async () => {
+  test("refuses to start and does not create a user when platform identity lookup times out", async () => {
     vi.useFakeTimers();
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-test-"));
     tempDirs.push(dir);
@@ -983,14 +1013,40 @@ describe("Pipeline.start", () => {
       10,
       "codex",
     );
-    let resolved = false;
-    void pipeline.start().then(() => { resolved = true; });
+    const started = pipeline.start();
+    const rejected = expect(started).rejects.toThrow(/bot identity lookup timed out/);
 
     await Promise.resolve();
     await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(15_000);
 
-    expect(resolved).toBe(true);
+    await rejected;
     expect(messageHandlerRegistered).toBe(false);
+    expect(db.prepare("SELECT COUNT(*) AS n FROM users").get()).toEqual({ n: 0 });
+  });
+
+  test("uses the real platform identity before creating the Bot user", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-identity-test-"));
+    tempDirs.push(dir);
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
+    const im = createImStub();
+    im.getBotOpenId = async () => "ou-real-bot";
+    const pipeline = new Pipeline(
+      db,
+      im,
+      new RecordingAgent(),
+      { name: "NiuBot", platform: "feishu", legacyPlatformBotIds: ["_bot_NiuBot_"] },
+      dir,
+      path.join(dir, "niubot.db"),
+      10,
+      "codex",
+    );
+
+    await pipeline.start();
+
+    expect(db.prepare("SELECT platform_id, is_bot FROM users").all()).toEqual([
+      { platform_id: "ou-real-bot", is_bot: 1 },
+    ]);
     pipeline.stop();
   });
 

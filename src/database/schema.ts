@@ -1850,6 +1850,193 @@ const NAME_SOURCE_PRIORITY: Record<string, number> = {
   manual: 6,
 };
 
+/**
+ * 本地用户表里的 Bot 身份合并结果。
+ *
+ * `promoted` 表示没有真实身份行时，把一个旧占位行直接改成真实 platform_id；
+ * `mergedUserIds` 则是被合并并删除的重复行。
+ */
+export interface BotIdentityReconciliation {
+  canonicalUserId?: string;
+  promoted: boolean;
+  mergedUserIds: string[];
+  migratedReferenceCount: number;
+}
+
+interface BotIdentityUserRow {
+  id: string;
+  name: string | null;
+  name_source: string | null;
+  is_bot: number | null;
+  is_admin: string | number | null;
+}
+
+/**
+ * 这些字段保存的是 users.id。不要把 chats.user_id 放进来：它保存的是
+ * p2p 对端的 platform_id，而不是本地 users.id。
+ */
+const USER_ID_REFERENCE_COLUMNS: ReadonlyArray<readonly [string, string]> = [
+  ["messages", "sender_id"],
+  ["sessions", "user_id"],
+  ["user_memory", "user_id"],
+  ["cron_jobs", "creator_user_id"],
+  ["loop_jobs", "creator_user_id"],
+  ["worker_works", "owner_user_id"],
+  ["team_config_versions", "applied_by"],
+  ["team_config_drafts", "created_by"],
+];
+
+function getBotIdentityUser(db: Database.Database, userId: string): BotIdentityUserRow | undefined {
+  return db.prepare(
+    "SELECT id, name, name_source, is_bot, is_admin FROM users WHERE id = ?",
+  ).get(userId) as BotIdentityUserRow | undefined;
+}
+
+function adminRoleRank(role: string | number | null): number {
+  switch (String(role ?? "").toLowerCase()) {
+    case "owner":
+    case "2":
+      return 2;
+    case "admin":
+    case "1":
+    case "true":
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+function adminRoleFromRank(rank: number): "none" | "admin" | "owner" {
+  return rank >= 2 ? "owner" : rank === 1 ? "admin" : "none";
+}
+
+function migrateUserReferences(
+  db: Database.Database,
+  fromUserId: string,
+  toUserId: string,
+): number {
+  let count = 0;
+  for (const [table, column] of USER_ID_REFERENCE_COLUMNS) {
+    if (!tableColumns(db, table).has(column)) continue;
+    const result = db.prepare(`UPDATE ${table} SET ${column} = ? WHERE ${column} = ?`)
+      .run(toUserId, fromUserId);
+    count += result.changes;
+  }
+  return count;
+}
+
+function mergeBotIdentityMetadata(
+  db: Database.Database,
+  canonical: BotIdentityUserRow,
+  duplicate: BotIdentityUserRow,
+): void {
+  const canonicalPriority = NAME_SOURCE_PRIORITY[canonical.name_source ?? "platform"] ?? 0;
+  const duplicatePriority = NAME_SOURCE_PRIORITY[duplicate.name_source ?? "platform"] ?? 0;
+  const useDuplicateName = Boolean(duplicate.name) && (
+    !canonical.name || duplicatePriority > canonicalPriority
+  );
+  const name = useDuplicateName ? duplicate.name : canonical.name;
+  const nameSource = useDuplicateName ? duplicate.name_source : canonical.name_source;
+  const adminRole = adminRoleFromRank(Math.max(
+    adminRoleRank(canonical.is_admin),
+    adminRoleRank(duplicate.is_admin),
+  ));
+
+  db.prepare(`
+    UPDATE users
+    SET name = ?, name_source = ?, is_bot = 1, is_admin = ?
+    WHERE id = ?
+  `).run(name, nameSource ?? "platform", adminRole, canonical.id);
+}
+
+/**
+ * 把当前 Bot 的真实平台身份与历史占位身份合并。
+ *
+ * 这不是一次性脚本：每次拿到真实 open_id 都会调用，重复执行不会产生变化。
+ * 旧 ID 必须由启动装配层明确传入，避免按显示名或模糊匹配误合并真实用户。
+ */
+export function reconcileBotIdentity(
+  db: Database.Database,
+  platform: string,
+  realPlatformId: string,
+  legacyPlatformIds: readonly string[] = [],
+): BotIdentityReconciliation {
+  const canonicalPlatform = platform.trim();
+  const canonicalPlatformId = realPlatformId.trim();
+  if (!canonicalPlatform) throw new Error("Bot identity platform is empty");
+  if (!canonicalPlatformId) throw new Error("Bot identity platform ID is empty");
+
+  const legacyIds = [...new Set(
+    legacyPlatformIds
+      .map((platformId) => platformId.trim())
+      .filter((platformId) => platformId && platformId !== canonicalPlatformId),
+  )];
+  if (legacyIds.length === 0) {
+    const canonical = db.prepare(
+      "SELECT id FROM users WHERE platform = ? AND platform_id = ?",
+    ).get(canonicalPlatform, canonicalPlatformId) as { id: string } | undefined;
+    return {
+      canonicalUserId: canonical?.id,
+      promoted: false,
+      mergedUserIds: [],
+      migratedReferenceCount: 0,
+    };
+  }
+
+  const placeholders = legacyIds.map(() => "?").join(", ");
+  const reconcile = db.transaction((): BotIdentityReconciliation => {
+    let canonical = db.prepare(
+      "SELECT id, name, name_source, is_bot, is_admin FROM users WHERE platform = ? AND platform_id = ?",
+    ).get(canonicalPlatform, canonicalPlatformId) as BotIdentityUserRow | undefined;
+    const legacyRows = db.prepare(`
+      SELECT id, name, name_source, is_bot, is_admin
+      FROM users
+      WHERE platform = ? AND platform_id IN (${placeholders})
+      ORDER BY CAST(SUBSTR(id, 2) AS INTEGER), id
+    `).all(canonicalPlatform, ...legacyIds) as BotIdentityUserRow[];
+
+    let promoted = false;
+    const mergedUserIds: string[] = [];
+    let migratedReferenceCount = 0;
+
+    // 首次启动还没有真实行时，直接提升旧行，保留它的历史引用。
+    if (!canonical && legacyRows.length > 0) {
+      const promotedRow = legacyRows.shift()!;
+      db.prepare("UPDATE users SET platform_id = ? WHERE id = ?")
+        .run(canonicalPlatformId, promotedRow.id);
+      canonical = { ...promotedRow };
+      promoted = true;
+    }
+
+    if (!canonical) {
+      return {
+        canonicalUserId: undefined,
+        promoted,
+        mergedUserIds,
+        migratedReferenceCount,
+      };
+    }
+
+    for (const duplicate of legacyRows) {
+      if (duplicate.id === canonical.id) continue;
+      migratedReferenceCount += migrateUserReferences(db, duplicate.id, canonical.id);
+      mergeBotIdentityMetadata(db, canonical, duplicate);
+      db.prepare("DELETE FROM users WHERE id = ?").run(duplicate.id);
+      mergedUserIds.push(duplicate.id);
+      canonical = getBotIdentityUser(db, canonical.id) ?? canonical;
+    }
+
+    return {
+      canonicalUserId: canonical.id,
+      promoted,
+      mergedUserIds,
+      migratedReferenceCount,
+    };
+  });
+
+  return reconcile();
+}
+
 /** 确保用户存在，返回内部 ID。事务保护防止并发 ID 冲突 */
 export function ensureUser(
   db: Database.Database,

@@ -8,9 +8,15 @@ import path from "node:path";
 import type { NormalizedMessage, MessageHandler, PlatformAdapter, MentionInfo, MessageNode } from "../types.js";
 import type { ChatMetadata, DeliveryOptions } from "../../transport/types.js";
 import { renderMessageNodes } from "../render.js";
-import { hasFeishuAtTag, mapFeishuAtTags, toCardAtTags } from "../mentions.js";
+import { hasFeishuAtTag, toCardAtTags } from "../mentions.js";
 import { classifyFetchedMessage, type ClassifiedMessageIdentity } from "./message-identity.js";
-import { parseFeishuHistoryItem } from "./history.js";
+import { parseFeishuHistoryItemWithCardResolver } from "./history.js";
+import {
+  extractInteractiveCardContent,
+  FEISHU_CARD_PLACEHOLDER,
+  isDegradedCardText,
+  resolveInteractiveCardContent,
+} from "./card-content.js";
 import { createLogger } from "../../logger.js";
 
 const log = createLogger("feishu");
@@ -577,7 +583,13 @@ export class FeishuAdapter implements PlatformAdapter {
         const data = resp?.data as { items?: unknown[]; has_more?: boolean; page_token?: string } | undefined;
         const items = Array.isArray(data?.items) ? data.items : [];
         for (const item of items) {
-          const msg = parseFeishuHistoryItem(item, chatId, this.botOpenId, this.appId);
+          const msg = await parseFeishuHistoryItemWithCardResolver(
+            item,
+            chatId,
+            this.botOpenId,
+            this.appId,
+            (messageId) => this.fetchOriginalCardContent(messageId),
+          );
           if (!msg) continue;
           collected.push(msg);
           if (collected.length >= maxTotal) break;
@@ -611,14 +623,14 @@ export class FeishuAdapter implements PlatformAdapter {
         }
 
         if (parsed.schema === "2.0" || parsed.header || parsed.body?.elements || parsed.elements) {
-          const card = this.extractInteractiveText(parsed);
-          return card === "[卡片消息]" ? undefined : card;
+          const card = extractInteractiveCardContent(body);
+          return isDegradedCardText(card) ? undefined : card;
         }
       } catch {
         // Keep the original body for non-JSON message content.
       }
 
-      return body;
+      return isDegradedCardText(body) ? undefined : body;
     } catch (err) {
       log.warn("getMessageContent failed", { msgId, error: String(err) });
       return undefined;
@@ -663,12 +675,11 @@ export class FeishuAdapter implements PlatformAdapter {
       }
       this.emitIdentity();
     } catch (err) {
-      log.warn("failed to fetch bot open_id, will use app_id as fallback", { error: String(err) });
-      // Fallback: construct a placeholder. Real bot_id will be detected from first mention.
+      log.warn("failed to fetch bot open_id; Bot identity remains unavailable", { error: String(err) });
     }
 
-    // Also try to get app creator
-    await this.getAppCreatorId().catch(() => {});
+    // app creator 不是 Bot 身份的一部分，后台探测，不能拖慢 open_id 获取。
+    void this.getAppCreatorId();
   }
 
   private emitIdentity(): void {
@@ -699,7 +710,11 @@ export class FeishuAdapter implements PlatformAdapter {
     };
 
     const msg = event?.message;
-    if (!msg?.chat_id || !msg?.content) return null;
+    if (!msg?.chat_id) return null;
+    const msgType = msg.message_type ?? "text";
+    const rawContent = typeof msg.content === "string" ? msg.content : "";
+    // 卡片事件偶尔没有 body，仍可用 message_id 调 message.get 取原卡片。
+    if (!rawContent && msgType !== "interactive") return null;
 
     const senderId = event.sender?.sender_id?.open_id;
     if (!senderId) {
@@ -707,7 +722,6 @@ export class FeishuAdapter implements PlatformAdapter {
       return null;
     }
 
-    const msgType = msg.message_type ?? "text";
     const rawChatType = msg.chat_type ?? "p2p";
     const chatType = (rawChatType === "group" || rawChatType === "topic_group")
       ? "group" as const
@@ -727,8 +741,8 @@ export class FeishuAdapter implements PlatformAdapter {
       log.info("non-text message", {
         msgType,
         messageId: msg.message_id,
-        contentLength: msg.content?.length,
-        contentPreview: msg.content?.slice(0, 100),
+        contentLength: rawContent.length,
+        contentPreview: rawContent.slice(0, 100),
       });
     }
 
@@ -768,7 +782,7 @@ export class FeishuAdapter implements PlatformAdapter {
     }
 
     // Parse content based on message type (async: may download resources)
-    let { text, contentType, downloadError } = await this.parseContent(msgType, msg.content, mentions, msg.message_id);
+    let { text, contentType, downloadError } = await this.parseContent(msgType, rawContent, mentions, msg.message_id);
 
     if (downloadError) {
       log.info("file download error, notifying user", { downloadError, messageId: msg.message_id, chatId: msg.chat_id });
@@ -833,8 +847,16 @@ export class FeishuAdapter implements PlatformAdapter {
     try {
       parsed = JSON.parse(rawContent);
     } catch {
+      if (msgType === "interactive") {
+        const text = await resolveInteractiveCardContent(
+          rawContent,
+          mentions,
+          messageId ? () => this.fetchOriginalCardContent(messageId) : undefined,
+        );
+        return { text, contentType: "interactive" };
+      }
       // JSON 解析失败时保留原始 msgType（已知类型映射为对应 contentType）
-      const knownTypes = new Set(["image", "audio", "file", "media", "post", "interactive"]);
+      const knownTypes = new Set(["image", "audio", "file", "media", "post"]);
       const contentType: NormalizedMessage["contentType"] = knownTypes.has(msgType) ? msgType as any : "text";
       return { text: rawContent, contentType };
     }
@@ -854,13 +876,11 @@ export class FeishuAdapter implements PlatformAdapter {
       }
 
       case "interactive": {
-        let text = this.extractInteractiveText(parsed);
-        if (this.isDegradedCardText(text) && messageId) {
-          const original = await this.fetchOriginalCardParsed(messageId);
-          if (original) text = this.extractInteractiveText(original);
-        }
-        if (this.isDegradedCardText(text)) text = "[卡片消息]";
-        text = this.replaceCardMentions(text, mentions);
+        const text = await resolveInteractiveCardContent(
+          rawContent,
+          mentions,
+          messageId ? () => this.fetchOriginalCardContent(messageId) : undefined,
+        );
         return { text, contentType: "interactive" };
       }
 
@@ -1010,24 +1030,13 @@ export class FeishuAdapter implements PlatformAdapter {
     return parts.join("\n");
   }
 
-  /** 事件/默认 GET 里的 schema 2.0 卡片是「请升级客户端」占位，不是原文。 */
-  private isDegradedCardText(text: string): boolean {
-    if (!text || text === "[卡片消息]") return true;
-    return text.includes("请升级至最新版本客户端") || text.includes("请升级客户端");
-  }
-
-  private async fetchOriginalCardParsed(messageId: string): Promise<any | null> {
+  /** 取得卡片原始 body；失败时保留入站占位，后续历史同步还可以重试。 */
+  private async fetchOriginalCardContent(messageId: string): Promise<string | undefined> {
     try {
-      const raw = await this.fetchMessageBody(messageId, true);
-      if (!raw) return null;
-      try {
-        return JSON.parse(raw);
-      } catch {
-        return null;
-      }
+      return await this.fetchMessageBody(messageId, true);
     } catch (err) {
       log.warn("fetch original card failed", { messageId, error: String(err) });
-      return null;
+      return undefined;
     }
   }
 
@@ -1112,48 +1121,6 @@ export class FeishuAdapter implements PlatformAdapter {
     }
   }
 
-  private replaceCardMentions(text: string, mentions: MentionInfo[]): string {
-    let out = this.replaceMentions(text, mentions);
-    out = mapFeishuAtTags(out, (platformId, inner) => {
-      const mention = mentions.find((m) => m.platformUserId === platformId);
-      const name = mention?.name?.trim() || inner.trim();
-      return name ? `@${name}` : "";
-    });
-    return out;
-  }
-
-  /** Extract text from interactive card messages */
-  private extractInteractiveText(parsed: any): string {
-    const parts: string[] = [];
-
-    const take = (el: any): void => {
-      if (!el) return;
-      if (Array.isArray(el)) {
-        for (const child of el) take(child);
-        return;
-      }
-      if (typeof el !== "object") return;
-      if (el.tag === "markdown" || el.tag === "lark_md") {
-        parts.push(el.content ?? el.text?.content ?? "");
-      } else if (el.tag === "div" && el.text?.content) {
-        parts.push(el.text.content);
-      } else if (el.tag === "text" && typeof el.text === "string" && el.text) {
-        parts.push(el.text);
-      }
-      if (el.body?.elements) take(el.body.elements);
-      if (el.elements) take(el.elements);
-    };
-
-    take(parsed.body?.elements);
-    if (parsed.header?.title?.content) {
-      parts.unshift(parsed.header.title.content);
-    }
-    if (parts.length === 0) take(parsed.elements);
-
-    const text = parts.map((part) => part.trim()).filter(Boolean).join("\n");
-    return text || "[卡片消息]";
-  }
-
   /** Fetch and render merge_forward message content via API (recursive) */
   private async parseMergeForward(messageId: string): Promise<{ nodes: MessageNode[]; rendered: string }> {
     const visited = new Set<string>();
@@ -1205,7 +1172,7 @@ export class FeishuAdapter implements PlatformAdapter {
       }
 
       // Leaf message: extract content
-      const text = this.extractChildMessageText(msgType, item);
+      const text = await this.extractChildMessageText(msgType, item);
       const content = text || `[${msgType || "unknown"}]`;
       const contentType = msgType || "unknown";
 
@@ -1270,19 +1237,30 @@ export class FeishuAdapter implements PlatformAdapter {
     return "用户";
   }
 
-  /** Fetch child message content: DB cache → API item body → type fallback */
-  private extractChildMessageText(msgType: string, item: any): string {
+  /** Fetch child message content: DB cache → API item body → type fallback. */
+  private async extractChildMessageText(msgType: string, item: any): Promise<string> {
     const childId: string = item.message_id ?? "";
 
     // DB 优先：查已缓存的消息内容
+    let cachedContent: string | undefined;
     if (childId && this.contentResolver) {
       const cached = this.contentResolver(childId);
-      if (cached) return cached;
+      if (cached && !(msgType === "interactive" && isDegradedCardText(cached))) return cached;
+      cachedContent = cached;
     }
 
     // Fallback: 从 API 响应体解析
-    const raw = item.body?.content;
-    if (!raw) return "";
+    const bodyContent = item.body?.content;
+    const raw = typeof bodyContent === "string" ? bodyContent : item.content;
+    if (!raw) return cachedContent ?? (msgType === "interactive" ? FEISHU_CARD_PLACEHOLDER : "");
+
+    if (msgType === "interactive") {
+      return resolveInteractiveCardContent(
+        raw,
+        [],
+        childId ? () => this.fetchOriginalCardContent(childId) : undefined,
+      );
+    }
 
     try {
       const parsed = JSON.parse(raw);
@@ -1293,9 +1271,6 @@ export class FeishuAdapter implements PlatformAdapter {
           break;
         case "post":
           text = this.extractPostText(parsed, []);
-          break;
-        case "interactive":
-          text = this.extractInteractiveText(parsed);
           break;
         case "image":
           return "[图片]";

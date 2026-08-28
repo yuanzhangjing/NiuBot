@@ -5,7 +5,7 @@ import type Database from "better-sqlite3";
 import { renderForward, renderMsg, renderQuotedText } from "../im/render.js";
 import { wrapInjectedUserMessage } from "../session-archive/native-transcript.js";
 import type { InboundDelivery, NormalizedMessage, TransportClient } from "../transport/types.js";
-import { mentionMarksApp } from "../transport/types.js";
+import { isUnresolvedInteractiveContent, mentionMarksApp } from "../transport/types.js";
 import { isDeliveryUncertainError } from "../transport/errors.js";
 import { ERROR_DISPLAY_MAX_LEN } from "../agent/types.js";
 import { AgentSessionNotStartedError, type AgentBackend, type AgentResponse, type AgentSession, type AgentSessionActivity, type SessionConfig } from "../agent/types.js";
@@ -33,6 +33,7 @@ import {
   getUserShortLabel, getChatShortLabel, getMessageByPlatformId, updateMessageContent, updateMessagePlatformId,
   markMessagesAgentSeen,
   setUserIsBot, getUserIsBot,
+  reconcileBotIdentity,
   setUserAdminRole, getAdminUserIds, getUserAdminRole, type AdminRole,
   getScopeRuntimeConfig, setScopeRuntimeConfig, ensureScopeRuntimeConfig, deleteScopeRuntimeConfig,
   getBotRuntimeState, setBotRuntimeState,
@@ -196,7 +197,7 @@ const AGENT_LONG_RUNNING_REPEAT_NOTIFY_MS = 3_600_000; // 1 小时：主会话�
 const INDEPENDENT_IDLE_KILL_MS = 3_600_000;    // 1 小时：独立 session 无活动自动 kill
 const INDEPENDENT_LONG_RUNNING_NOTIFY_MS = 3_600_000;  // 1 小时：独立 session 仍活跃时提醒
 const LOOP_TASK_PREVIEW_MAX_CHARS = 80;
-const STARTUP_PLATFORM_TIMEOUT_MS = 5_000;      // 平台启动探测超时后降级继续启动
+const STARTUP_PLATFORM_TIMEOUT_MS = 15_000;     // 真实 Bot 身份必须在此时间内拿到
 
 /** 关闭阶段取消/关闭 backend session 的超时保护：后端卡住时不让 shutdown 永久阻塞。 */
 function withShutdownTimeout<T>(promise: Promise<T>, ms: number): Promise<T | undefined> {
@@ -276,8 +277,10 @@ export interface BotIdentity {
   name: string;
   /** IM 平台标识（如 "feishu"） */
   platform: string;
-  /** Bot 在平台上的唯一标识（用于 DB 中的 bot 用户记录） */
-  platformBotId: string;
+  /** Bot 在平台上的唯一标识（用于 DB 中的 bot 用户记录）；启动前尚未解析时为空。 */
+  platformBotId?: string;
+  /** 此 Bot 过去使用过的本地占位 platform_id，只用于启动时清洗旧数据。 */
+  legacyPlatformBotIds?: readonly string[];
   /** 主模型 ID（可选，覆盖 backend 默认值） */
   model?: string;
   /** 推理强度运行时选择（low/medium/high/xhigh/max），backend 支持时生效 */
@@ -561,15 +564,31 @@ export class Pipeline {
 
   /** 启动 Engine 管道；Transport 入站入口由装配层连接。 */
   async start(): Promise<void> {
-    // 先用配置里的占位 bot id 建立本地身份，平台真实身份放后台补齐。
+    const { platformBotId, platformBotName } = await this.resolveBotIdentity();
+    this.botIdentity.platformBotId = platformBotId;
+
+    const reconciliation = reconcileBotIdentity(
+      this.db,
+      this.botIdentity.platform,
+      platformBotId,
+      this.botIdentity.legacyPlatformBotIds,
+    );
     this.botUserId = ensureUser(
       this.db,
       this.botIdentity.platform,
-      this.botIdentity.platformBotId,
-      this.botIdentity.name,
+      platformBotId,
+      platformBotName ?? this.botIdentity.name,
       "bot_info",
     );
     setUserIsBot(this.db, this.botUserId);
+
+    if (reconciliation.promoted || reconciliation.mergedUserIds.length > 0) {
+      this.log.info("historical bot identities reconciled", {
+        promoted: reconciliation.promoted,
+        mergedCount: reconciliation.mergedUserIds.length,
+        migratedReferenceCount: reconciliation.migratedReferenceCount,
+      });
+    }
 
     this.markUnfinishedRuntimeRunsFailedByRestart();
     this.restoreAdminsFromDb();
@@ -581,7 +600,7 @@ export class Pipeline {
 
     this.log.info("pipeline started", {
       botUserId: this.botUserId,
-      botPlatformId: this.botIdentity.platformBotId,
+      botPlatformId: platformBotId,
       adminCount: this.adminRoles.size,
       backend: this.backendType,
       model: this.botIdentity.model ?? "default",
@@ -589,45 +608,42 @@ export class Pipeline {
 
   }
 
+  private async resolveBotIdentity(): Promise<{ platformBotId: string; platformBotName?: string }> {
+    const rawPlatformBotId = await withTimeout({
+      label: "bot identity lookup",
+      timeoutMs: STARTUP_PLATFORM_TIMEOUT_MS,
+      fn: async () => this.transport.getBotOpenId(),
+    });
+    const platformBotId = rawPlatformBotId?.trim() ?? "";
+    if (!platformBotId) {
+      throw new Error("bot identity lookup returned an empty platform ID; refusing to start without a real Bot identity");
+    }
+
+    let platformBotName: string | undefined;
+    try {
+      platformBotName = (await withTimeout({
+        label: "bot name lookup",
+        timeoutMs: STARTUP_PLATFORM_TIMEOUT_MS,
+        fn: async () => this.transport.getBotName(),
+      }))?.trim() || undefined;
+    } catch (err) {
+      // 名称只是展示信息，真实 open_id 已经拿到时不应阻塞 Bot 启动。
+      this.log.warn("failed to fetch bot name; using configured name", { error: String(err) });
+    }
+
+    return { platformBotId, platformBotName };
+  }
+
   private runStartupPlatformProbes(): void {
-    void this.refreshBotIdentityFromPlatform();
     void this.detectAppCreatorAdmin();
   }
 
-  private async refreshBotIdentityFromPlatform(): Promise<void> {
-    let platformBotName: string | undefined;
-    try {
-      const [realBotId, name] = await withTimeout({
-        label: "bot identity lookup",
-        timeoutMs: STARTUP_PLATFORM_TIMEOUT_MS,
-        fn: async () => Promise.all([
-          this.transport.getBotOpenId(),
-          this.transport.getBotName(),
-        ]),
-      });
-      if (realBotId) {
-        this.botIdentity.platformBotId = realBotId;
-      }
-      platformBotName = name ?? undefined;
-    } catch (err) {
-      this.log.warn("failed to fetch bot identity", { error: String(err) });
-      return;
+  private requireBotPlatformId(): string {
+    const platformBotId = this.botIdentity.platformBotId?.trim();
+    if (!platformBotId) {
+      throw new Error("Bot platform identity is not initialized");
     }
-
-    // 平台显示名写入 DB user 记录（用于 whoami 等场景），但不覆盖 botIdentity.name（config name，用于路径）
-    this.botUserId = ensureUser(
-      this.db,
-      this.botIdentity.platform,
-      this.botIdentity.platformBotId,
-      platformBotName ?? this.botIdentity.name,
-      "bot_info",
-    );
-    setUserIsBot(this.db, this.botUserId);
-    this.log.info("bot identity refreshed", {
-      botUserId: this.botUserId,
-      botPlatformId: this.botIdentity.platformBotId,
-      botPlatformName: platformBotName ?? null,
-    });
+    return platformBotId;
   }
 
   /** 停止管道：清除队列计时器 */
@@ -1843,9 +1859,14 @@ export class Pipeline {
   /** 被回复的那条：`<quoted speaker="...">正文</quoted>`，找不到则空。 */
   private buildReplyQuoted(platform: string, parentPlatformMsgId: string): string {
     const dbMsg = getMessageByPlatformId(this.db, platform, parentPlatformMsgId);
-    if (dbMsg?.contentText) {
+    const cachedContent = dbMsg?.contentText;
+    if (
+      dbMsg
+      && cachedContent
+      && !(dbMsg.contentType === "interactive" && isUnresolvedInteractiveContent(cachedContent))
+    ) {
       const label = getUserShortLabel(this.db, dbMsg.senderId);
-      return renderQuotedText(label, dbMsg.contentText);
+      return renderQuotedText(label, cachedContent);
     }
 
     // Fallback: try API (async — cache result for next time)
@@ -3221,7 +3242,7 @@ export class Pipeline {
       threadId,
       chatType,
       dbPath: this.dbPath,
-      botId: this.botIdentity.platformBotId,
+      botId: this.requireBotPlatformId(),
       botName: this.botIdentity.name,
       platform: this.botIdentity.platform,
       model: cronModels.model,
@@ -4551,7 +4572,7 @@ export class Pipeline {
       replyToMsgId,
       chatType: chatType as "p2p" | "group",
       dbPath: this.dbPath,
-      botId: this.botIdentity.platformBotId,
+      botId: this.requireBotPlatformId(),
       botName: this.botIdentity.name,
       platform: this.botIdentity.platform,
       isAdmin: true,
@@ -5343,7 +5364,7 @@ export class Pipeline {
         replyToMsgId: activeRun?.replyToPlatformMsgId,
         chatType,
         dbPath: this.dbPath,
-        botId: this.botIdentity.platformBotId,
+        botId: this.requireBotPlatformId(),
         botName: this.botIdentity.name,
         platform: this.botIdentity.platform,
         model: resumeModels.model,
@@ -5405,7 +5426,7 @@ export class Pipeline {
         replyToMsgId: activeRun?.replyToPlatformMsgId,
         chatType,
       dbPath: this.dbPath,
-      botId: this.botIdentity.platformBotId,
+      botId: this.requireBotPlatformId(),
       botName: this.botIdentity.name,
       platform: this.botIdentity.platform,
       model: newModels.model,
@@ -5633,7 +5654,7 @@ cap=4 只限制本群同时跑的主 session，不含 /task。
           scopeKey,
           threadId: resolvedThreadId,
           dbPath: this.dbPath,
-          botId: this.botIdentity.platformBotId,
+          botId: this.requireBotPlatformId(),
           botName: this.botIdentity.name,
           platform: this.botIdentity.platform,
           model: archiveModels.model,

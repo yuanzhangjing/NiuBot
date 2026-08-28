@@ -88,6 +88,36 @@ describe("group history sync", () => {
     expect(stored.created_at).toBe(stored.platform_ts);
   });
 
+  test("backfills an existing degraded card when history later returns its text", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "group-history-card-"));
+    tempDirs.push(dir);
+    const db = openTestDatabase(path.join(dir, "t.db"));
+    const chatId = ensureChat(db, "feishu", "oc-group", "group", "bots");
+    const senderId = ensureUser(db, "feishu", "ou-cow", "CowBot", "bot_sender");
+    storeMessage(db, {
+      chatId,
+      senderId,
+      role: "assistant",
+      contentText: "[卡片消息]",
+      contentType: "interactive",
+      platform: "feishu",
+      platformMsgId: "om-card",
+    });
+
+    const result = cacheHistoryMessages(db, chatId, "feishu", [historyMsg({
+      platformMsgId: "om-card",
+      contentText: "卡片原文",
+      contentType: "interactive",
+    })]);
+
+    expect(result.inserted).toBe(0);
+    expect(getMessageByPlatformId(db, "feishu", "om-card")?.contentText).toBe("卡片原文");
+    const fts = db.prepare(
+      "SELECT content_text FROM messages_fts WHERE rowid = (SELECT id FROM messages WHERE platform_msg_id = ?)",
+    ).get("om-card") as { content_text: string };
+    expect(fts.content_text).toBe("卡片原文");
+  });
+
   test("sync writes unseen messages and skips the already stored trigger", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "group-history-sync-"));
     tempDirs.push(dir);

@@ -14,6 +14,7 @@ import {
   getUserIsBot,
   getUserIdentityByPlatformId,
   listChatBots,
+  reconcileBotIdentity,
   getBotRuntimeState,
   setBotRuntimeState,
   clearBotRuntimeModels,
@@ -963,5 +964,108 @@ describe("bot identity helpers", () => {
     expect(getUserIdentityByPlatformId(db, "feishu", "ou-missing")).toBeUndefined();
     expect(getUserIdentityByPlatformId(db, "feishu", "ou-zen")).toEqual({ id: humanId, isBot: false });
     expect(getUserIdentityByPlatformId(db, "feishu", "ou-cow")).toEqual({ id: cowId, isBot: true });
+  });
+
+  test("merges a legacy placeholder into the real Bot and migrates every local user reference", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-bot-reconcile-"));
+    tempDirs.push(dir);
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
+    const legacyId = ensureUser(db, "feishu", "_bot_NiuBot_", "Old Bot", "manual");
+    const realId = ensureUser(db, "feishu", "ou-real-bot", "NiuBot", "bot_info");
+    const appAliasId = ensureUser(db, "feishu", "cli_NiuBot_app", "App Alias", "bot_sender");
+    db.prepare("UPDATE users SET is_bot = 1, is_admin = 'owner' WHERE id = ?").run(legacyId);
+    db.prepare("UPDATE users SET is_bot = 1, is_admin = 'admin' WHERE id = ?").run(realId);
+    setUserIsBot(db, appAliasId);
+    const chatId = ensureChat(db, "feishu", "oc-group", "group", "Bots");
+
+    storeMessage(db, {
+      chatId,
+      senderId: legacyId,
+      role: "user",
+      contentText: "from old identity",
+      platform: "feishu",
+    });
+    db.prepare(`
+      INSERT INTO sessions (id, chat_id, user_id, status)
+      VALUES ('session-old-bot', ?, ?, 'archived')
+    `).run(chatId, legacyId);
+    db.prepare(`
+      INSERT INTO user_memory (user_id, summary)
+      VALUES (?, 'old bot memory')
+    `).run(legacyId);
+    db.prepare(`
+      INSERT INTO cron_jobs (chat_id, creator_user_id, prompt)
+      VALUES (?, ?, 'old cron')
+    `).run(chatId, legacyId);
+    db.prepare(`
+      INSERT INTO loop_jobs (
+        chat_id, creator_user_id, interval_seconds, prompt, until_time, next_run_at
+      ) VALUES (?, ?, 300, 'old loop', '2026-08-30 12:00:00', '2026-08-29 12:00:00')
+    `).run(chatId, legacyId);
+    db.prepare(`
+      INSERT INTO worker_works (id, bot_id, owner_user_id, source_chat_id, request)
+      VALUES ('old-work', 'NiuBot', ?, ?, 'old work')
+    `).run(legacyId, chatId);
+    db.prepare(`
+      INSERT INTO team_config_versions (version, bot_id, config_yaml, config_hash, applied_by)
+      VALUES ('old-version', 'NiuBot', '{}', 'hash', ?)
+    `).run(legacyId);
+    db.prepare(`
+      INSERT INTO team_config_drafts (id, bot_id, config_yaml, created_by)
+      VALUES ('old-draft', 'NiuBot', '{}', ?)
+    `).run(legacyId);
+
+    const first = reconcileBotIdentity(db, "feishu", "ou-real-bot", ["_bot_NiuBot_", "cli_NiuBot_app"]);
+
+    expect(first).toEqual({
+      canonicalUserId: realId,
+      promoted: false,
+      mergedUserIds: [legacyId, appAliasId],
+      migratedReferenceCount: 8,
+    });
+    expect(db.prepare("SELECT COUNT(*) AS n FROM users WHERE platform = 'feishu'").get()).toEqual({ n: 1 });
+    expect(db.prepare("SELECT name, name_source, is_bot, is_admin FROM users WHERE id = ?").get(realId)).toEqual({
+      name: "Old Bot",
+      name_source: "manual",
+      is_bot: 1,
+      is_admin: "owner",
+    });
+    expect(db.prepare("SELECT sender_id FROM messages").pluck().all()).toEqual([realId]);
+    expect(db.prepare("SELECT user_id FROM sessions").pluck().all()).toEqual([realId]);
+    expect(db.prepare("SELECT user_id FROM user_memory").pluck().all()).toEqual([realId]);
+    expect(db.prepare("SELECT creator_user_id FROM cron_jobs").pluck().all()).toEqual([realId]);
+    expect(db.prepare("SELECT creator_user_id FROM loop_jobs").pluck().all()).toEqual([realId]);
+    expect(db.prepare("SELECT owner_user_id FROM worker_works").pluck().all()).toEqual([realId]);
+    expect(db.prepare("SELECT applied_by FROM team_config_versions").pluck().all()).toEqual([realId]);
+    expect(db.prepare("SELECT created_by FROM team_config_drafts").pluck().all()).toEqual([realId]);
+    expect(listChatBots(db, chatId, realId)).toEqual([{ id: realId, name: "Old Bot" }]);
+
+    expect(reconcileBotIdentity(db, "feishu", "ou-real-bot", ["_bot_NiuBot_", "cli_NiuBot_app"])).toEqual({
+      canonicalUserId: realId,
+      promoted: false,
+      mergedUserIds: [],
+      migratedReferenceCount: 0,
+    });
+  });
+
+  test("promotes the only legacy placeholder when the real row does not exist yet", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-bot-promote-"));
+    tempDirs.push(dir);
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
+    const legacyId = ensureUser(db, "feishu", "_bot-NiuBot_", "NiuBot", "bot_info");
+    setUserIsBot(db, legacyId);
+
+    expect(reconcileBotIdentity(db, "feishu", "ou-real-bot", ["_bot-NiuBot_"])).toMatchObject({
+      canonicalUserId: legacyId,
+      promoted: true,
+      mergedUserIds: [],
+      migratedReferenceCount: 0,
+    });
+    expect(db.prepare("SELECT platform_id FROM users WHERE id = ?").pluck().get(legacyId)).toBe("ou-real-bot");
+    expect(reconcileBotIdentity(db, "feishu", "ou-real-bot", ["_bot-NiuBot_"])).toMatchObject({
+      canonicalUserId: legacyId,
+      promoted: false,
+      mergedUserIds: [],
+    });
   });
 });

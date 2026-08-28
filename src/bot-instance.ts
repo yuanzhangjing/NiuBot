@@ -137,7 +137,10 @@ export async function createBotInstance(
   const botIdentity: BotIdentity = {
     name: botConfig.id,
     platform: "feishu",
-    platformBotId: `_bot_${botConfig.id}_`,
+    legacyPlatformBotIds: [
+      `_bot_${botConfig.id}_`,
+      ...(botConfig.appId.trim() ? [botConfig.appId] : []),
+    ],
     model: runtimeConfig?.model,
     effort: runtimeConfig?.effort,
   };

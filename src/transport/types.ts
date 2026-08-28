@@ -21,6 +21,17 @@ export function mentionMarksApp(mention: MentionInfo): boolean {
   return mention.isApp === true || mention.isBot;
 }
 
+/** 交互消息还没有拿到可读正文时使用的统一占位。 */
+export const UNRESOLVED_INTERACTIVE_CONTENT = "[卡片消息]";
+
+export function isUnresolvedInteractiveContent(text: string): boolean {
+  const normalized = text.trim();
+  return !normalized
+    || normalized === UNRESOLVED_INTERACTIVE_CONTENT
+    || normalized.includes("请升级至最新版本客户端")
+    || normalized.includes("请升级客户端");
+}
+
 export interface NormalizedMessage {
   senderPlatformId: string;
   senderName?: string;

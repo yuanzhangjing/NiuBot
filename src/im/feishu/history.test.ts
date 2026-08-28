@@ -1,5 +1,9 @@
-import { describe, expect, test } from "vitest";
-import { feishuTimeToUnixSec, parseFeishuHistoryItem } from "./history.js";
+import { describe, expect, test, vi } from "vitest";
+import {
+  feishuTimeToUnixSec,
+  parseFeishuHistoryItem,
+  parseFeishuHistoryItemWithCardResolver,
+} from "./history.js";
 
 describe("feishu history parse", () => {
   test("converts millisecond timestamps to seconds", () => {
@@ -50,6 +54,23 @@ describe("feishu history parse", () => {
       rootId: "om-root",
       parentPlatformMsgId: "om-root",
     });
+  });
+
+  test("resolves a card when the history item has no body", async () => {
+    const fetchOriginal = vi.fn(async (messageId: string) => {
+      expect(messageId).toBe("om-card-no-body");
+      return JSON.stringify({ body: { elements: [{ tag: "markdown", content: "补取的卡片正文" }] } });
+    });
+
+    const item = await parseFeishuHistoryItemWithCardResolver({
+      message_id: "om-card-no-body",
+      msg_type: "interactive",
+      sender: { id: "ou-cow", sender_type: "app" },
+    }, "oc-group", undefined, undefined, fetchOriginal);
+
+    expect(item?.contentText).toBe("补取的卡片正文");
+    expect(item?.contentType).toBe("interactive");
+    expect(fetchOriginal).toHaveBeenCalledTimes(1);
   });
 
   test("skips items without sender or body", () => {

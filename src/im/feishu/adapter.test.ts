@@ -14,6 +14,23 @@ afterEach(() => {
 });
 
 describe("FeishuAdapter", () => {
+  test("does not block Bot identity on the app creator request", async () => {
+    const adapter = new FeishuAdapter("app-id", "app-secret");
+    let releaseCreator: ((value: unknown) => void) | undefined;
+    const creatorRequest = new Promise<unknown>((resolve) => { releaseCreator = resolve; });
+    (adapter as any).client = {
+      request: async () => ({ bot: { open_id: "ou-self", app_name: "NiuBot" } }),
+      application: {
+        application: {
+          get: async () => creatorRequest,
+        },
+      },
+    };
+
+    await expect(adapter.getBotOpenId()).resolves.toBe("ou-self");
+    releaseCreator?.({ data: { app: { owner: { open_id: "ou-owner" } } } });
+  });
+
   test("sends text over 10 KB as a markdown file", async () => {
     const adapter = new FeishuAdapter("app-id", "app-secret");
     const sentMessages: Array<{ msgType: string; content: string }> = [];
@@ -121,6 +138,46 @@ describe("FeishuAdapter", () => {
       sort_type: "ByCreateTimeDesc",
     });
     expect(messages.map((msg) => msg.contentText)).toEqual(["first", "second"]);
+  });
+
+  test("resolves degraded cards while listing history", async () => {
+    const adapter = new FeishuAdapter("app-id", "app-secret");
+    const gets: unknown[] = [];
+    (adapter as any).botOpenId = "ou-self";
+    (adapter as any).client = {
+      im: {
+        message: {
+          list: async () => ({
+            data: {
+              items: [{
+                message_id: "om-history-card",
+                msg_type: "interactive",
+                create_time: "2000",
+                sender: { id: "ou-cow", sender_type: "app", id_type: "open_id" },
+                body: { content: JSON.stringify({
+                  elements: [[{ tag: "text", text: "请升级至最新版本客户端，以查看内容" }]],
+                }) },
+              }],
+            },
+          }),
+          get: async (args: any) => {
+            gets.push(args);
+            return { data: { items: [{ body: { content: JSON.stringify({
+              schema: "2.0",
+              body: { elements: [{ tag: "markdown", content: "历史卡片原文" }] },
+            }) } }] } };
+          },
+        },
+      },
+    };
+
+    const messages = await adapter.listChatMessages("oc-group", { limit: 20 });
+
+    expect(messages[0]?.contentText).toBe("历史卡片原文");
+    expect(gets).toEqual([{
+      path: { message_id: "om-history-card" },
+      params: { card_msg_content_type: "user_card_content" },
+    }]);
   });
 
   test("lists thread history with container_id_type=thread", async () => {
@@ -990,6 +1047,111 @@ describe("FeishuAdapter", () => {
       botMentioned: true,
       senderIsBot: true,
     });
+  });
+
+  test("fetches original card JSON when the event content is not JSON", async () => {
+    const adapter = new FeishuAdapter("app-id", "app-secret");
+    const gets: unknown[] = [];
+    (adapter as any).client = {
+      im: {
+        message: {
+          get: async (args: any) => {
+            gets.push(args);
+            return { data: { items: [{ body: { content: JSON.stringify({
+              body: { elements: [{ tag: "markdown", content: "非 JSON 事件的原文" }] },
+            }) } }] } };
+          },
+        },
+      },
+    };
+
+    const message = await (adapter as any).normalize({
+      message: {
+        chat_id: "group-id",
+        chat_type: "group",
+        message_id: "om-card-plain",
+        message_type: "interactive",
+        content: "[卡片消息]",
+      },
+      sender: { sender_id: { open_id: "ou-cow" }, sender_type: "app" },
+    });
+
+    expect(message.contentText).toBe("非 JSON 事件的原文");
+    expect(gets).toEqual([{
+      path: { message_id: "om-card-plain" },
+      params: { card_msg_content_type: "user_card_content" },
+    }]);
+  });
+
+  test("fetches the original card when the event has no card body", async () => {
+    const adapter = new FeishuAdapter("app-id", "app-secret");
+    const gets: unknown[] = [];
+    (adapter as any).client = {
+      im: {
+        message: {
+          get: async (args: any) => {
+            gets.push(args);
+            return { data: { items: [{ body: { content: JSON.stringify({
+              body: { elements: [{ tag: "markdown", content: "无 body 事件的原文" }] },
+            }) } }] } };
+          },
+        },
+      },
+    };
+
+    const message = await (adapter as any).normalize({
+      message: {
+        chat_id: "group-id",
+        chat_type: "group",
+        message_id: "om-card-empty",
+        message_type: "interactive",
+      },
+      sender: { sender_id: { open_id: "ou-cow" }, sender_type: "app" },
+    });
+
+    expect(message.contentText).toBe("无 body 事件的原文");
+    expect(gets).toEqual([{
+      path: { message_id: "om-card-empty" },
+      params: { card_msg_content_type: "user_card_content" },
+    }]);
+  });
+
+  test("resolves interactive cards nested in merge-forward messages", async () => {
+    const adapter = new FeishuAdapter("app-id", "app-secret");
+    const gets: unknown[] = [];
+    (adapter as any).client = {
+      im: {
+        message: {
+          get: async ({ path, params }: any) => {
+            gets.push({ path, params });
+            if (path.message_id === "om-forward") {
+              return { data: { items: [{
+                message_id: "om-card-child",
+                msg_type: "interactive",
+                sender: { id: "ou-cow", sender_type: "app" },
+                body: { content: JSON.stringify({
+                  elements: [[{ tag: "text", text: "请升级客户端" }]],
+                }) },
+              }] } };
+            }
+            return { data: { items: [{ body: { content: JSON.stringify({
+              body: { elements: [{ tag: "markdown", content: "转发卡片原文" }] },
+            }) } }] } };
+          },
+        },
+      },
+    };
+
+    const result = await (adapter as any).parseMergeForward("om-forward");
+
+    expect(result.nodes[0]?.content).toBe("转发卡片原文");
+    expect(gets).toEqual([
+      { path: { message_id: "om-forward" }, params: undefined },
+      {
+        path: { message_id: "om-card-child" },
+        params: { card_msg_content_type: "user_card_content" },
+      },
+    ]);
   });
 
   test("does not refetch when the event already has schema 2.0 card text", async () => {
