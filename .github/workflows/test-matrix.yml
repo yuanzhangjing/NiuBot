@@ -49,8 +49,12 @@ jobs:
         run: npx tsc --noEmit
 
       - name: Test
-        if: matrix.run-tests
+        if: matrix.run-tests && matrix.os != 'windows-latest'
         run: npm test
+
+      - name: Test (Windows)
+        if: matrix.run-tests && matrix.os == 'windows-latest'
+        run: npm test -- --maxWorkers=1
 
       - name: Build and package check
         run: npm run build && npm run pack:check && npm run pack:smoke
