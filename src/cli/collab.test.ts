@@ -45,6 +45,7 @@ describe("nbt collab", () => {
     });
 
     vi.stubEnv("NIUBOT_API_SOCKET", endpoint.address);
+    vi.stubEnv("NIUBOT_HOME", root);
     vi.stubEnv("NIUBOT_CHAT_ID", "c1");
     vi.stubEnv("NIUBOT_SCOPE_KEY", "c1#omt_topic");
     vi.stubEnv("NIUBOT_THREAD_ID", "omt_topic");
