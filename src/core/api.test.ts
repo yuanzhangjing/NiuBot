@@ -93,6 +93,49 @@ test("/schedule 在 API 边界拒绝未知操作和非法字段", async () => {
   expect(executeScheduleCommand).not.toHaveBeenCalled();
 });
 
+test("/collab/turn 只把合法的结构化动作交给当前 Pipeline", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "niubot-collab-api-"));
+  tempDirs.push(root);
+  const endpoint = resolveBotEndpoint(root, "test-bot");
+  const executeCollabTurn = vi.fn(async () => ({ output: "协作动作已记录。" }));
+  const handler: ApiHandler = {
+    sendMessage: async () => {}, sendCard: async () => {}, sendFile: async () => {},
+    resolveChatPlatformId: () => undefined, getDefaultPlatformChatId: () => undefined,
+    executeCollabTurn,
+  };
+  const server = new ApiServer(endpoint, handler);
+  servers.push(server);
+  await server.start();
+
+  const response = await localApiRequest(endpoint, "/collab/turn", {
+    method: "POST",
+    body: {
+      chat_id: "chat-1",
+      decision: { action: "handoff", to: "ou-cow" },
+      collab_token: "turn-token",
+      scope_key: "chat-1#omt-topic",
+      thread_id: "omt-topic",
+      reply_to_msg_id: "om-trigger",
+    },
+  });
+
+  expect(response.statusCode).toBe(200);
+  expect(JSON.parse(response.body)).toEqual({ output: "协作动作已记录。" });
+  expect(executeCollabTurn).toHaveBeenCalledWith(
+    "chat-1",
+    { action: "handoff", to: "ou-cow" },
+    "turn-token",
+    { scopeKey: "chat-1#omt-topic", threadId: "omt-topic", replyToMsgId: "om-trigger" },
+  );
+
+  const invalid = await localApiRequest(endpoint, "/collab/turn", {
+    method: "POST",
+    body: { chat_id: "chat-1", decision: { action: "handoff", to: 42 } },
+  });
+  expect(invalid.statusCode).toBe(400);
+  expect(executeCollabTurn).toHaveBeenCalledTimes(1);
+});
+
 test("/timezone lets the agent apply a resolved zone", async () => {
   const root = mkdtempSync(path.join(os.tmpdir(), "niubot-timezone-api-"));
   tempDirs.push(root);

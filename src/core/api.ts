@@ -13,6 +13,7 @@ import {
   type LocalIpcEndpoint,
 } from "../platform/ipc.js";
 import type { GoalCommandResult, GoalFinishCommand } from "./goal.js";
+import type { CollabTurnDecision } from "./collab-loop.js";
 import {
   parseScheduleAgentCommand,
   type ScheduleAgentCommand,
@@ -82,6 +83,13 @@ export interface ApiHandler {
     prompt: string,
     scope?: { scopeKey?: string; threadId?: string; replyToMsgId?: string },
   ): Promise<GoalCommandResult>;
+  /** 当前协作 Agent 回合提交一次 handoff/finish 动作。 */
+  executeCollabTurn?(
+    chatId: string,
+    decision: CollabTurnDecision,
+    token?: string,
+    scope?: { scopeKey?: string; threadId?: string; replyToMsgId?: string },
+  ): Promise<{ output: string }>;
   getTimezone?(): string;
   setTimezone?(raw: string): string;
 }
@@ -304,6 +312,37 @@ export class ApiServer {
         threadId: typeof data.thread_id === "string" ? data.thread_id : undefined,
         replyToMsgId: typeof data.reply_to_msg_id === "string" ? data.reply_to_msg_id : undefined,
       });
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(result));
+    } else if (url === "/collab/turn" && req.method === "POST") {
+      if (!this.handler.executeCollabTurn) {
+        res.writeHead(503);
+        res.end(JSON.stringify({ error: "Collab command API unavailable" }));
+        return;
+      }
+      const chatId = data.chat_id;
+      const decision = data.decision;
+      if (typeof chatId !== "string" || !decision || typeof decision !== "object") {
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: "Missing chat_id or decision" }));
+        return;
+      }
+      if (decision.action !== "finish"
+        && (decision.action !== "handoff" || typeof decision.to !== "string")) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: "Invalid collaboration decision" }));
+        return;
+      }
+      const result = await this.handler.executeCollabTurn(
+        chatId,
+        decision as CollabTurnDecision,
+        typeof data.collab_token === "string" ? data.collab_token : undefined,
+        {
+          scopeKey: typeof data.scope_key === "string" ? data.scope_key : undefined,
+          threadId: typeof data.thread_id === "string" ? data.thread_id : undefined,
+          replyToMsgId: typeof data.reply_to_msg_id === "string" ? data.reply_to_msg_id : undefined,
+        },
+      );
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(result));
     } else if (url === "/timezone" && req.method === "GET") {

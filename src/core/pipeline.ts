@@ -32,7 +32,7 @@ import {
   ensureUser, ensureChat, storeMessage, updateChatName,
   getUserShortLabel, getChatShortLabel, getMessageByPlatformId, updateMessageContent, updateMessagePlatformId,
   markMessagesAgentSeen,
-  setUserIsBot, getUserIsBot,
+  setUserIsBot, getUserIsBot, getUserIdentityByPlatformId, listChatBots,
   reconcileBotIdentity,
   setUserAdminRole, getAdminUserIds, getUserAdminRole, type AdminRole,
   getScopeRuntimeConfig, setScopeRuntimeConfig, ensureScopeRuntimeConfig, deleteScopeRuntimeConfig,
@@ -40,10 +40,12 @@ import {
   getBotBackendModelState, setBotBackendModelState,
   type ScopeRuntimeConfig,
   getRecentRuntimeEvents,
+  hasRuntimeEventForMessage,
   getChatMetadata as getStoredChatMetadata,
   updateChatMetadata,
   markUnfinishedRuntimeRunsFailedByRestart,
   recordRuntimeEvent,
+  getBotCollabState, setBotCollabState,
 } from "../database/schema.js";
 import {
   AUTO_UPDATE_DEFAULTS,
@@ -120,6 +122,8 @@ import { withTimeout } from "./timeout.js";
 import { RuntimeStateStore, type RunStage, type RuntimeStateEvent } from "./runtime-state.js";
 import { RunManager, type RunAgentResult } from "./run-manager.js";
 import { archiveAgentSession } from "../session-archive/archive.js";
+import { syncGroupChatToDb } from "./group-history.js";
+import { classifyCollabInbound, type CollabInboundRoute } from "./collab-inbound.js";
 
 import type { EngineLifecycle } from "../engine-lifecycle.js";
 import {
@@ -128,15 +132,33 @@ import {
   hasFeishuAtTag,
   invertFeishuAtsToShortLabels,
   rewriteOutboundMentions,
+  supplementMissingBotMention,
   extractBuiltinCommandText,
   stripLeadingAtMentions,
   type MentionUser,
 } from "../im/mentions.js";
+import {
+  appendCollabProtocolMessage,
+  applyCollabDecision,
+  buildCollabTurnContext,
+  collectCollabParticipants,
+  createCollabState,
+  parseCollabProtocol,
+  rebuildCollabState,
+  stripCollabProtocols,
+  validateCollabTurnDecision,
+  type CollabHistoryMessage,
+  type CollabState,
+  type CollabTurnDecision,
+} from "./collab-loop.js";
 
 export { resolveUpdateCommandCwd } from "../update-command.js";
 
 const PROCESSING_EMOJI = "Get";
 const MERGED_EMOJI = "Pin";
+// 协作观察者已经同步协议、但不是本回合执行者。用思考中与当前执行的 Get 区分。
+const COLLAB_OBSERVED_EMOJI = "Typing";
+const COLLAB_FINISHED_EMOJI = "DONE";
 const EMPTY_RESPONSE_FALLBACK = "（处理完成，但未生成回复。如果没收到预期结果，请重试）";
 const UPDATE_CONFIRM_COMMAND = "/update 1";
 /** /effort 可选级别（与 claude --effort 值域一致） */
@@ -212,6 +234,7 @@ function stripInternalTags(text: string): string {
   return text
     .replace(/<schedule-skill>[\s\S]*?<\/schedule-skill>/g, "")
     .replace(/<loop-continuation>[\s\S]*?<\/loop-continuation>/g, "")
+    .replace(/<bot-collab-loop>[\s\S]*?<\/bot-collab-loop>/g, "")
     .replace(/<\/?(?:schedule|loop)-[a-z-]+>/g, "")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
@@ -338,6 +361,17 @@ interface ActiveScheduleAgentCommandContext {
   token: string;
 }
 
+interface ActiveCollabTurnContext {
+  runId: string;
+  scopeKey: string;
+  chatId: string;
+  token: string;
+  state: CollabState;
+  decision?: CollabTurnDecision;
+}
+
+type CollabPreparation = "none" | "turn" | "observe" | "unsupported" | "duplicate";
+
 type SessionEndStatus = "archived" | "archive_failed" | "discarded";
 
 export class Pipeline {
@@ -386,6 +420,9 @@ export class Pipeline {
   /** 每个 session scope 连续被 Bot 触发并跑 Agent 的回合数（人入站清零） */
   private botTurnCounts = new Map<string, number>();
 
+  /** 当前进程里本群被 at 过的 Bot；补交棒时与数据库里的 Bot 发言合并。 */
+  private chatMentionedBotIds = new Map<string, Set<string>>();
+
   /** admin 角色映射：userId → role */
   private adminRoles = new Map<string, AdminRole>();
 
@@ -426,6 +463,10 @@ export class Pipeline {
   /** 已加过 Get 的消息，避免重复加 reaction */
   private processingMsgIds = new Set<string>();
 
+  /** 协作消息的最终反应；同一 Bot 对同一条协议消息只保留一个表情。 */
+  private collabReactionEmojis = new Map<string, string>();
+  private collabReactionTasks = new Map<string, Promise<void>>();
+
   /** 每个 backend 的模型配置快照，切换时保存/恢复 */
   private backendModelCache = new Map<string, { model?: string; effort?: string }>();
 
@@ -448,6 +489,9 @@ export class Pipeline {
   private archiveHome: string;
 
   private activeScheduleAgentCommands = new Map<string, ActiveScheduleAgentCommandContext>();
+
+  /** 当前协作回合的能力令牌和动作；只存在于本进程当前 Agent 回合。 */
+  private activeCollabTurns = new Map<string, ActiveCollabTurnContext>();
 
   /** chatId → 主会话调度令牌：随主 Agent 环境注入，独立 session 拿不到，防跨进程身份借用。 */
   private chatScheduleTokens = new Map<string, string>();
@@ -861,6 +905,43 @@ export class Pipeline {
     throw new Error(`未知调度操作: ${String((command as { type?: unknown }).type)}`);
   }
 
+  /**
+   * 协作 Agent 的唯一写入口。动作只写入当前回合的内存上下文，
+   * 真实出站消息仍由 process() 统一发送。
+   */
+  async executeCollabTurn(
+    chatId: string,
+    decision: CollabTurnDecision,
+    token?: string,
+    scope?: { scopeKey?: string; threadId?: string; replyToMsgId?: string },
+  ): Promise<{ output: string }> {
+    const scopeKey = scope?.scopeKey ?? chatId;
+    const context = this.activeCollabTurns.get(scopeKey);
+    const activeRun = this.runtimeState.getActiveRunForScope(scopeKey);
+    if (!context || context.chatId !== chatId || !activeRun
+      || activeRun.runId !== context.runId || activeRun.stage !== "agent_running") {
+      throw new Error("协作动作必须在当前主会话的活动 Agent 回合内执行");
+    }
+    if (!token || token !== context.token) {
+      throw new Error("协作请求缺少或携带错误的能力令牌");
+    }
+    const parsed = parseScopeKey(scopeKey);
+    if (scope?.threadId && scope.threadId !== parsed.threadId) {
+      throw new Error("协作请求的话题不属于当前回合");
+    }
+    if (context.decision) {
+      throw new Error("当前协作回合已经提交过动作");
+    }
+    const validation = validateCollabTurnDecision(
+      decision,
+      context.state,
+      this.currentCollabParticipantId(context.state),
+    );
+    if (!validation.ok) throw new Error(validation.message);
+    context.decision = validation.decision;
+    return { output: "协作动作已记录。" };
+  }
+
   /** 获取 bot 用户 ID */
   getBotUserId(): string | null {
     return this.botUserId;
@@ -1078,10 +1159,596 @@ export class Pipeline {
     }));
   }
 
+  private rememberMentionedBots(chatId: string, msg: NormalizedMessage, platform: string): void {
+    if (msg.chatType !== "group" || !msg.mentions?.length) return;
+    let botIds = this.chatMentionedBotIds.get(chatId);
+    if (!botIds) {
+      botIds = new Set<string>();
+      this.chatMentionedBotIds.set(chatId, botIds);
+    }
+    for (const mention of msg.mentions) {
+      if (!mention.platformUserId) continue;
+      const identity = getUserIdentityByPlatformId(this.db, platform, mention.platformUserId);
+      if (!mentionMarksApp(mention) && !identity?.isBot) continue;
+      const userId = identity?.id ?? ensureUser(
+        this.db,
+        platform,
+        mention.platformUserId,
+        mention.name || undefined,
+        "bot_info",
+      );
+      setUserIsBot(this.db, userId);
+      botIds.add(userId);
+    }
+  }
+
+  private chatBotMentionCandidates(chatId: string): string[] {
+    const ids = new Set(listChatBots(this.db, chatId, this.botUserId).map((bot) => bot.id));
+    for (const id of this.chatMentionedBotIds.get(chatId) ?? []) ids.add(id);
+    return [...ids];
+  }
+
+  private isBotMention(platform: string, mention: NonNullable<NormalizedMessage["mentions"]>[number]): boolean {
+    if (mentionMarksApp(mention)) return true;
+    if (!mention.platformUserId) return false;
+    return getUserIdentityByPlatformId(this.db, platform, mention.platformUserId)?.isBot === true;
+  }
+
+  private isCurrentBotMention(mention: NonNullable<NormalizedMessage["mentions"]>[number]): boolean {
+    return this.isCurrentBotPlatformId(mention.platformUserId);
+  }
+
+  private isCurrentBotPlatformId(platformId?: string): boolean {
+    // `isBot` 在适配层表示“这是本 Bot”，但跨设备恢复时不能只信布尔标记；
+    // 稳定平台 ID 才是最终判断依据。没有 ID 的旧消息无法参与协作。
+    if (!platformId) return false;
+    if (platformId === this.botIdentity.platformBotId) return true;
+    if (this.botIdentity.legacyPlatformBotIds?.includes(platformId)) return true;
+    const identity = getUserIdentityByPlatformId(this.db, this.botIdentity.platform, platformId);
+    return identity?.id === this.botUserId;
+  }
+
+  /**
+   * 协作状态保存的是消息中出现的参与者 ID。Bot 身份迁移后，这个 ID 可能是旧 ID；
+   * 执行和动作校验必须继续使用同一个参与者 ID，不能混用当前的新 ID。
+   */
+  private currentCollabParticipantId(state: CollabState): string {
+    return state.participants.find((participant) => this.isCurrentBotPlatformId(participant.platformId))?.platformId
+      ?? this.requireBotPlatformId();
+  }
+
+  /** finish 时提醒协作启动消息的提问者；找不到根消息则宁可少 @，不猜身份。 */
+  private collabRequester(state: CollabState): { platformId: string; name?: string } | undefined {
+    const row = this.db.prepare(`
+      SELECT u.platform_id AS platformId, u.name AS name, u.is_bot AS isBot
+      FROM messages m
+      JOIN users u ON u.id = m.sender_id
+      WHERE m.chat_id = ? AND m.platform_msg_id = ?
+      LIMIT 1
+    `).get(state.chatId, state.startPlatformMsgId) as {
+      platformId: string;
+      name: string | null;
+      isBot: number;
+    } | undefined;
+    if (!row || row.isBot === 1 || !row.platformId) return undefined;
+    return { platformId: row.platformId, name: row.name ?? undefined };
+  }
+
+  private firstBotMention(msg: NormalizedMessage, platform: string): NonNullable<NormalizedMessage["mentions"]>[number] | undefined {
+    return msg.mentions?.find((mention) => this.isBotMention(platform, mention));
+  }
+
+  private backendSupportsCollab(scopeKey: string, userId?: string): boolean {
+    return this.backendForScope(scopeKey, userId).supportsCollabTurns?.() === true;
+  }
+
+  private sameCollabProjection(left: CollabState, right: CollabState): boolean {
+    return left.scopeKey === right.scopeKey
+      && left.chatId === right.chatId
+      && left.threadId === right.threadId
+      && left.startPlatformMsgId === right.startPlatformMsgId
+      && left.currentBotId === right.currentBotId
+      && left.turn === right.turn
+      && left.participants.length === right.participants.length
+      && left.participants.every((participant, index) => {
+        const other = right.participants[index];
+        return other?.platformId === participant.platformId && other.name === participant.name;
+      })
+      && (left.lastPlatformMsgId ?? undefined) === (right.lastPlatformMsgId ?? undefined);
+  }
+
+  private isCurrentCollabProjection(scopeKey: string, state: CollabState): boolean {
+    const current = getBotCollabState(this.db, scopeKey);
+    return current?.status === "running" && this.sameCollabProjection(current, state);
+  }
+
+  private hasCollabRuntimeEvent(scopeKey: string, platformMsgId?: string): boolean {
+    if (!platformMsgId) return false;
+    const { chatId, threadId } = parseScopeKey(scopeKey);
+    const message = getMessageByPlatformId(this.db, this.botIdentity.platform, platformMsgId);
+    if (!message) return false;
+    if (threadId ? message.threadId !== threadId : message.threadId !== null) return false;
+    return hasRuntimeEventForMessage(this.db, {
+      botId: this.botIdentity.name,
+      chatId,
+      threadId,
+      messageId: message.id,
+    });
+  }
+
+  private isCollabRunForState(
+    scopeKey: string,
+    state: CollabState,
+    run: { runId: string; triggerPlatformMsgIds: string[] },
+  ): boolean {
+    const activeContext = this.activeCollabTurns.get(scopeKey);
+    if (activeContext?.runId === run.runId && this.sameCollabProjection(activeContext.state, state)) {
+      return true;
+    }
+    const triggerIds = new Set([state.startPlatformMsgId, state.lastPlatformMsgId].filter(
+      (id): id is string => !!id,
+    ));
+    return run.triggerPlatformMsgIds.some((id) => triggerIds.has(id));
+  }
+
+  /** 安装新的显式协作起点，并取消仍在执行的旧协作回合。 */
+  private installCollabStart(state: CollabState): void {
+    const existing = getBotCollabState(this.db, state.scopeKey);
+    let cancelledRunId: string | undefined;
+    let dropped = 0;
+    if (existing?.status === "running" && existing.startPlatformMsgId !== state.startPlatformMsgId) {
+      this.activeCollabTurns.delete(state.scopeKey);
+      const activeRun = this.runtimeState.getActiveRunForScope(state.scopeKey);
+      const oldCollabRun = activeRun && this.isCollabRunForState(state.scopeKey, existing, activeRun);
+      if (oldCollabRun) {
+        cancelledRunId = activeRun.runId;
+        this.markRuntimeRun(activeRun.runId, "stopped", "collaboration replaced by a new explicit start");
+        this.queue.cancel(state.scopeKey);
+        const session = this.chatSessions.get(state.scopeKey);
+        if (session) {
+          void this.backendForSession(session).cancelSession(session.agentSession).catch((error) => {
+            this.log.warn("failed to cancel replaced collaboration session", {
+              scopeKey: state.scopeKey,
+              error: String(error),
+            });
+          });
+        }
+      }
+      dropped = this.queue.drain(state.scopeKey, (message) => message.collabTurn === true);
+      this.log.info("multi-Bot collaboration replaced", {
+        scopeKey: state.scopeKey,
+        oldStartPlatformMsgId: existing.startPlatformMsgId,
+        newStartPlatformMsgId: state.startPlatformMsgId,
+        cancelledRunId: cancelledRunId ?? null,
+        dropped,
+      });
+    }
+    setBotCollabState(this.db, state);
+  }
+
+  /**
+   * 为当前入站消息准备协作状态。
+   * 启动消息和后续协议消息都会 @ 全部参与者；@ 列表第一个 Bot 才是唯一执行者。
+   */
+  private prepareCollabTurn(
+    msg: NormalizedMessage,
+    chatId: string,
+    scopeKey: string,
+    userId: string,
+    route: CollabInboundRoute,
+    recoverLate = false,
+  ): CollabPreparation | Promise<CollabPreparation> {
+    if (route !== "start" && route !== "protocol") return "none";
+    const participants = collectCollabParticipants(msg.mentions);
+    const currentBotId = participants.find((participant) => this.isCurrentBotPlatformId(participant.platformId))?.platformId;
+    if (!currentBotId) return "none";
+    if (recoverLate) return this.recoverLateCollabTurn(msg, scopeKey, currentBotId, userId, route);
+    if (route === "start") {
+      const initialExecutor = participants[0]?.platformId;
+      const start = !initialExecutor ? undefined : createCollabState({
+        scopeKey,
+        chatId,
+        threadId: parseScopeKey(scopeKey).threadId,
+        startPlatformMsgId: msg.platformMsgId,
+        mentions: msg.mentions,
+        currentBotId: initialExecutor,
+      });
+      if (!start) return "none";
+      // 所有参与 Bot 都保留同一投影，只有首位 Bot 需要具备动作能力并真正执行。
+      if (start.currentBotId === currentBotId && !this.backendSupportsCollab(scopeKey, userId)) {
+        setBotCollabState(this.db, { ...start, status: "blocked" });
+        return "unsupported";
+      }
+      const existing = getBotCollabState(this.db, scopeKey);
+      if (existing?.startPlatformMsgId === start.startPlatformMsgId) {
+        const canRetryUnstarted = existing.status === "running"
+          && existing.currentBotId === start.currentBotId
+          && existing.turn === 1
+          && !existing.lastPlatformMsgId
+          && !this.hasCollabRuntimeEvent(scopeKey, start.startPlatformMsgId);
+        if (!canRetryUnstarted) return "duplicate";
+      } else {
+        this.installCollabStart(start);
+      }
+      this.log.info("multi-Bot collaboration started", {
+        chatId,
+        scopeKey,
+        participants: start.participants.length,
+        startPlatformMsgId: start.startPlatformMsgId,
+        currentBotId: start.currentBotId,
+        observer: start.currentBotId !== currentBotId,
+      });
+      return start.currentBotId === currentBotId ? "turn" : "observe";
+    }
+
+    if (!msg.platformMsgId) return "none";
+    return this.prepareProtocolCollabTurn(msg, scopeKey, currentBotId);
+  }
+
+  /** 活跃协作期间，所有人类消息都是补充材料；只有 /stop 才会打断协作。 */
+  private isActiveHumanCollabContext(msg: NormalizedMessage, scopeKey: string): boolean {
+    if (msg.chatType !== "group" || msg.senderIsBot) return false;
+    return getBotCollabState(this.db, scopeKey)?.status === "running";
+  }
+
+  /**
+   * 取本 Bot 尚未见过、且发生在本次协作启动之后的人类补充消息。
+   * 每台设备各自持久化 seen 标记，下一棒无论在哪台设备都能看到同一批消息一次。
+   */
+  private buildCollabSupplementContext(
+    state: CollabState,
+    excludeMessageIds: readonly number[],
+  ): { text: string; messageIds: number[] } {
+    const start = getMessageByPlatformId(this.db, this.botIdentity.platform, state.startPlatformMsgId);
+    if (!start) return { text: "", messageIds: [] };
+    const rows = this.db.prepare(`
+      SELECT m.id, m.content_text AS contentText, u.name AS senderName
+      FROM messages m
+      JOIN users u ON u.id = m.sender_id
+      WHERE m.chat_id = ?
+        AND ((? IS NULL AND m.thread_id IS NULL) OR m.thread_id = ?)
+        AND m.id > ?
+        AND m.agent_seen = 0
+        AND u.is_bot = 0
+      ORDER BY m.id ASC
+      LIMIT 20
+    `).all(
+      state.chatId,
+      state.threadId ?? null,
+      state.threadId ?? null,
+      start.id,
+    ) as Array<{ id: number; contentText: string | null; senderName: string | null }>;
+    const excluded = new Set(excludeMessageIds);
+    const included = rows.filter((row) => !excluded.has(row.id) && row.contentText?.trim());
+    if (included.length === 0) return { text: "", messageIds: [] };
+    const lines = included.map((row) => `${row.senderName?.trim() || "用户"}：${row.contentText!.trim()}`);
+    return {
+      text: `<collab-supplement>\n协作进行中收到以下用户补充信息。它们不改变回合顺序；结合处理即可。\n\n${lines.join("\n")}\n</collab-supplement>`,
+      messageIds: included.map((row) => row.id),
+    };
+  }
+
+  /**
+   * 飞书晚投递的协作事件不能照普通过期消息直接抛弃，也不能直接执行。
+   * 用话题历史重建后，只有这条消息仍是当前链最后一个有效触发点才允许入队。
+   */
+  private async recoverLateCollabTurn(
+    msg: NormalizedMessage,
+    scopeKey: string,
+    currentBotId: string,
+    userId: string,
+    route: "start" | "protocol",
+  ): Promise<CollabPreparation> {
+    const listChatMessages = this.transport.listChatMessages;
+    if (!listChatMessages || !msg.platformMsgId) return "duplicate";
+    const parsed = parseScopeKey(scopeKey);
+    try {
+      await syncGroupChatToDb(this.db, parsed.chatId, {
+        transport: { listChatMessages },
+        selfUserId: this.botUserId,
+        threadId: parsed.threadId,
+      });
+    } catch (error) {
+      this.log.warn("failed to recover late collaboration message", {
+        scopeKey,
+        platformMsgId: msg.platformMsgId,
+        error: String(error),
+      });
+      return "duplicate";
+    }
+
+    const history = this.readCollabHistory(scopeKey);
+    const hasCurrentMessage = history.some((entry) => entry.platformMsgId === msg.platformMsgId);
+    const state = rebuildCollabState({
+      scopeKey,
+      chatId: parsed.chatId,
+      threadId: parsed.threadId,
+      messages: hasCurrentMessage ? history : [...history, this.toCollabHistoryMessage(msg)],
+    });
+    if (!state) return "duplicate";
+    // 历史可能显示这条迟到消息已被更新的显式协作取代。复用启动安装逻辑，
+    // 让仍在跑的旧回合立即取消，而不是等它返回后才因投影不匹配丢弃结果。
+    this.installCollabStart(state);
+
+    const protocol = route === "protocol" ? parseCollabProtocol(msg.contentText) : undefined;
+    const matchesCurrentChain = route === "start"
+      ? state.startPlatformMsgId === msg.platformMsgId
+      : protocol?.chainId === state.chainId;
+    if (!matchesCurrentChain) return "duplicate";
+    if (route === "start" && state.lastPlatformMsgId) return "duplicate";
+    if (route === "protocol" && state.lastPlatformMsgId !== msg.platformMsgId) return "duplicate";
+    if (state.status === "finished" && route === "protocol") return "observe";
+    if (state.status !== "running") return "duplicate";
+    if (state.currentBotId !== currentBotId) return "observe";
+    if (!this.backendSupportsCollab(scopeKey, userId)) {
+      setBotCollabState(this.db, { ...state, status: "blocked" });
+      return "unsupported";
+    }
+    return this.hasCollabRuntimeEvent(scopeKey, msg.platformMsgId) ? "duplicate" : "turn";
+  }
+
+  /**
+   * 全员协议消息只更新投影；@ 列表首位等于自身时，才把本轮放入 Agent 队列。
+   */
+  private prepareProtocolCollabTurn(
+    msg: NormalizedMessage,
+    scopeKey: string,
+    currentBotId: string,
+  ): CollabPreparation | Promise<CollabPreparation> {
+    const protocol = parseCollabProtocol(msg.contentText);
+    if (!protocol) return "none";
+    const state = getBotCollabState(this.db, scopeKey);
+    if (!state) return this.recoverProtocolCollabState(msg, scopeKey, protocol, currentBotId);
+    return this.applyProtocolCollabTurn(msg, scopeKey, currentBotId, protocol, state);
+  }
+
+  /**
+   * 设备离线或刚启动时，本地没有投影也可以从飞书话题历史重建。
+   * 当前入站消息尚未入库，因此显式补在历史末尾参与重放。
+   */
+  private async recoverProtocolCollabState(
+    msg: NormalizedMessage,
+    scopeKey: string,
+    protocol: NonNullable<ReturnType<typeof parseCollabProtocol>>,
+    currentBotId: string,
+  ): Promise<CollabPreparation> {
+    const parsed = parseScopeKey(scopeKey);
+    const listChatMessages = this.transport.listChatMessages;
+    if (!listChatMessages) return "none";
+    try {
+      await syncGroupChatToDb(this.db, parsed.chatId, {
+        transport: { listChatMessages },
+        selfUserId: this.botUserId,
+        threadId: parsed.threadId,
+      });
+    } catch (error) {
+      this.log.warn("failed to recover collaboration history", {
+        scopeKey,
+        platformMsgId: msg.platformMsgId,
+        error: String(error),
+      });
+      return "none";
+    }
+    const state = rebuildCollabState({
+      scopeKey,
+      chatId: parsed.chatId,
+      threadId: parsed.threadId,
+      messages: [...this.readCollabHistory(scopeKey), this.toCollabHistoryMessage(msg)],
+    });
+    if (!state || state.chainId !== protocol.chainId) return "none";
+    setBotCollabState(this.db, state);
+    // 历史已经包含当前消息时，重放结果已是“消息处理后”的状态；不要再推进一次。
+    if (state.lastPlatformMsgId === msg.platformMsgId) {
+      if (state.status === "finished") return "observe";
+      if (state.currentBotId !== currentBotId) return "observe";
+      if (!this.backendSupportsCollab(scopeKey)) {
+        setBotCollabState(this.db, { ...state, status: "blocked" });
+        return "unsupported";
+      }
+      return this.hasCollabRuntimeEvent(scopeKey, msg.platformMsgId) ? "duplicate" : "turn";
+    }
+    return this.applyProtocolCollabTurn(msg, scopeKey, currentBotId, protocol, state);
+  }
+
+  private applyProtocolCollabTurn(
+    msg: NormalizedMessage,
+    scopeKey: string,
+    currentBotId: string,
+    protocol: NonNullable<ReturnType<typeof parseCollabProtocol>>,
+    state: CollabState,
+  ): CollabPreparation {
+    if (state.status !== "running") return "none";
+    if (protocol.chainId !== state.chainId || msg.senderPlatformId !== state.currentBotId) return "duplicate";
+    const participants = collectCollabParticipants(msg.mentions);
+    const participantIds = new Set(participants.map((participant) => participant.platformId));
+    if (participantIds.size !== state.participants.length
+      || !state.participants.every((participant) => participantIds.has(participant.platformId))) {
+      return "duplicate";
+    }
+    if (protocol.finished) {
+      if (protocol.turn !== state.turn) return "duplicate";
+      const next = applyCollabDecision(state, { action: "finish" }, msg.platformMsgId);
+      setBotCollabState(this.db, next);
+      this.log.info("multi-Bot collaboration state synchronized", {
+        scopeKey,
+        chainId: protocol.chainId,
+        action: "finish",
+        turn: next.turn,
+        status: next.status,
+        platformMsgId: msg.platformMsgId,
+        observer: true,
+      });
+      return "observe";
+    }
+    if (protocol.turn !== state.turn + 1) return "duplicate";
+    const executor = participants[0]?.platformId;
+    if (!executor || executor === state.currentBotId) return "duplicate";
+    const next = applyCollabDecision(state, { action: "handoff", to: executor }, msg.platformMsgId);
+    setBotCollabState(this.db, next);
+    this.log.info("multi-Bot collaboration state synchronized", {
+      scopeKey,
+      chainId: protocol.chainId,
+      action: "handoff",
+      turn: next.turn,
+      currentBotId: next.currentBotId,
+      platformMsgId: msg.platformMsgId,
+      observer: executor !== currentBotId,
+    });
+    if (executor !== currentBotId) return "observe";
+    if (!this.backendSupportsCollab(scopeKey)) {
+      setBotCollabState(this.db, { ...next, status: "blocked" });
+      return "unsupported";
+    }
+    if (this.hasCollabRuntimeEvent(scopeKey, msg.platformMsgId)) return "duplicate";
+    return "turn";
+  }
+
+  private toCollabHistoryMessage(msg: NormalizedMessage): CollabHistoryMessage {
+    return {
+      senderPlatformId: msg.senderPlatformId,
+      senderIsBot: msg.senderIsBot,
+      platformMsgId: msg.platformMsgId,
+      contentText: msg.contentText,
+      mentions: msg.mentions,
+    };
+  }
+
+  private readCollabHistory(scopeKey: string): CollabHistoryMessage[] {
+    const { chatId, threadId } = parseScopeKey(scopeKey);
+    const rows = this.db.prepare(`
+      SELECT m.platform_msg_id AS platformMsgId,
+             m.content_text AS contentText,
+             m.platform_raw AS platformRaw,
+             u.platform_id AS senderPlatformId,
+             u.is_bot AS senderIsBot
+      FROM messages m
+      JOIN users u ON u.id = m.sender_id
+      WHERE m.chat_id = ? AND (
+        (? IS NULL AND m.thread_id IS NULL) OR m.thread_id = ?
+      )
+      -- 历史同步可能倒序返回，且实时消息会先于补取的旧消息入库；
+      -- 自增 id 不是平台消息顺序，必须按平台时间重建协作链。
+      ORDER BY COALESCE(m.platform_ts, m.created_at) ASC, m.id ASC
+    `).all(chatId, threadId ?? null, threadId ?? null) as Array<{
+      platformMsgId: string | null;
+      contentText: string | null;
+      platformRaw: string | null;
+      senderPlatformId: string;
+      senderIsBot: number;
+    }>;
+    return rows.map((row) => ({
+      senderPlatformId: row.senderPlatformId,
+      senderIsBot: row.senderIsBot === 1,
+      platformMsgId: row.platformMsgId ?? undefined,
+      contentText: row.contentText ?? undefined,
+      mentions: this.extractCollabMentions(row.platformRaw),
+    }));
+  }
+
+  private extractCollabMentions(platformRaw: string | null): CollabHistoryMessage["mentions"] {
+    if (!platformRaw) return undefined;
+    let raw: unknown;
+    try {
+      raw = JSON.parse(platformRaw);
+    } catch {
+      return undefined;
+    }
+    if (!raw || typeof raw !== "object") return undefined;
+    const value = raw as {
+      mentions?: unknown;
+      message?: { mentions?: unknown };
+      event?: { message?: { mentions?: unknown } };
+    };
+    const list = Array.isArray(value.mentions)
+      ? value.mentions
+      : value.message && Array.isArray(value.message.mentions)
+        ? value.message.mentions
+        : value.event?.message && Array.isArray(value.event.message.mentions)
+          ? value.event.message.mentions
+          : [];
+    const result: NonNullable<CollabHistoryMessage["mentions"]> = [];
+    for (const item of list) {
+      if (!item || typeof item !== "object") continue;
+      const mention = item as {
+        platformUserId?: unknown;
+        id?: unknown;
+        name?: unknown;
+        isBot?: unknown;
+        isApp?: unknown;
+        id_type?: unknown;
+      };
+      const rawId = mention.platformUserId ?? mention.id;
+      const platformId = typeof rawId === "string"
+        ? rawId
+        : rawId && typeof rawId === "object"
+          ? String(
+            (rawId as { open_id?: unknown; app_id?: unknown }).open_id
+              ?? (rawId as { open_id?: unknown; app_id?: unknown }).app_id
+              ?? "",
+          )
+          : "";
+      if (!platformId) continue;
+      const identity = getUserIdentityByPlatformId(this.db, this.botIdentity.platform, platformId);
+      const isBot = mention.isBot === true || identity?.isBot === true;
+      const isApp = mention.isApp === true
+        || mention.id_type === "app_id"
+        || platformId.startsWith("cli_")
+        || isBot;
+      result.push({
+        platformUserId: platformId,
+        name: typeof mention.name === "string" ? mention.name : undefined,
+        isBot,
+        isApp,
+      });
+    }
+    return result.length > 0 ? result : undefined;
+  }
+
+  private blockCollabState(state: CollabState, runId?: string, reason?: string): void {
+    setBotCollabState(this.db, {
+      ...state,
+      status: "blocked",
+      lastRunId: runId ?? state.lastRunId,
+    });
+    this.log.warn("multi-Bot collaboration blocked", {
+      scopeKey: state.scopeKey,
+      turn: state.turn,
+      reason: reason ?? "unknown",
+    });
+  }
+
+  private stopCollabState(scopeKey: string): void {
+    const state = getBotCollabState(this.db, scopeKey);
+    if (state?.status === "running") {
+      setBotCollabState(this.db, { ...state, status: "stopped" });
+    }
+    this.activeCollabTurns.delete(scopeKey);
+  }
+
+  /** 参与者没有用全员协议交棒时，不能让旧协作投影继续占住话题。 */
+  private stopBrokenCollabFromBot(
+    msg: NormalizedMessage,
+    scopeKey: string,
+    route: CollabInboundRoute,
+  ): boolean {
+    if (msg.chatType !== "group" || !msg.senderIsBot || route === "protocol") return false;
+    const state = getBotCollabState(this.db, scopeKey);
+    if (state?.status !== "running"
+      || !state.participants.some((participant) => participant.platformId === msg.senderPlatformId)) return false;
+    this.stopCollabState(scopeKey);
+    this.log.warn("multi-Bot collaboration stopped by incomplete participant message", {
+      scopeKey,
+      senderPlatformId: msg.senderPlatformId,
+      platformMsgId: msg.platformMsgId,
+    });
+    return true;
+  }
+
   private prepareOutboundText(
     platformChatId: string,
     text: string,
     scopeKey?: string,
+    options: { collabTurn?: boolean; stripAllBotAts?: boolean } = {},
   ): {
     text: string;
     historyText: string;
@@ -1092,13 +1759,23 @@ export class Pipeline {
     const isGroup = chatRow?.type === "group";
     const resolvedScopeKey = scopeKey ?? chatId;
     const botTurnCount = resolvedScopeKey ? (this.botTurnCounts.get(resolvedScopeKey) ?? 0) : 0;
-    const fuseTripped = isGroup && !!resolvedScopeKey && botTurnCount > BOT_COLLAB_FUSE_LIMIT;
+    const fuseTripped = !options.collabTurn && isGroup && !!resolvedScopeKey && botTurnCount > BOT_COLLAB_FUSE_LIMIT;
     const users = this.loadMentionUsers();
     const result = rewriteOutboundMentions(text, users, {
       selfUserId: this.botUserId,
-      stripAllBotAts: fuseTripped,
+      stripAllBotAts: fuseTripped || options.stripAllBotAts,
     });
     let out = result.text;
+    if (isGroup && chatId && !fuseTripped && !options.collabTurn) {
+      const supplemented = supplementMissingBotMention(out, users, {
+        selfUserId: this.botUserId,
+        candidateBotIds: this.chatBotMentionCandidates(chatId),
+      });
+      if (supplemented !== out) {
+        this.log.debug("supplemented missing Bot at in outbound message", { chatId });
+        out = supplemented;
+      }
+    }
     if (fuseTripped) {
       this.log.info("bot-collab fuse tripped", { chatId, scopeKey: resolvedScopeKey, count: botTurnCount });
       out = appendFuseNotice(out);
@@ -1121,9 +1798,12 @@ export class Pipeline {
       signal?: AbortSignal;
       textFallback?: string | ((error: unknown) => string);
       scopeKey?: string;
+      collabTurn?: boolean;
     },
   ): Promise<SendResult & { historyText: string; sentText: string }> {
-    const prepared = this.prepareOutboundText(platformChatId, options.content, options.scopeKey);
+    const prepared = this.prepareOutboundText(platformChatId, options.content, options.scopeKey, {
+      collabTurn: options.collabTurn,
+    });
     const result = await this.responseSender.sendFinalResponse({
       chatId: platformChatId,
       header: options.header,
@@ -1237,6 +1917,59 @@ export class Pipeline {
     this.processingMsgIds.add(msgId);
     this.log.info("reaction request", { chatPlatformId, msgId, emoji: PROCESSING_EMOJI, phase: "processing" });
     this.transport.addReaction(chatPlatformId, msgId, PROCESSING_EMOJI).catch(() => {});
+  }
+
+  /**
+   * 协作反应按消息串行发送。完成优先于思考中和处理中；升级时先移除旧表情，
+   * 避免同一 Bot 在同一轮留下多个状态标记。
+   */
+  private setCollabReaction(chatPlatformId: string, msgId: string | undefined, emoji: string): void {
+    if (!msgId) return;
+    const key = `${chatPlatformId}:${msgId}`;
+    const previous = this.collabReactionEmojis.get(key);
+    if (previous === emoji || previous === COLLAB_FINISHED_EMOJI) return;
+    if (this.collabReactionEmojis.size >= Pipeline.MAX_PROCESSED_IDS) {
+      this.collabReactionEmojis.clear();
+    }
+    this.collabReactionEmojis.set(key, emoji);
+
+    const previousTask = this.collabReactionTasks.get(key) ?? Promise.resolve();
+    let task: Promise<void>;
+    task = previousTask.then(async () => {
+      if (previous) {
+        try {
+          await this.transport.removeReaction(chatPlatformId, msgId, previous);
+        } catch {
+          // 删除失败时仍尝试写入优先级更高的新状态；适配层会保留失败日志。
+        }
+      }
+      await this.transport.addReaction(chatPlatformId, msgId, emoji);
+    }).catch(() => {}).finally(() => {
+      if (this.collabReactionTasks.get(key) === task) this.collabReactionTasks.delete(key);
+    });
+    this.collabReactionTasks.set(key, task);
+  }
+
+  /**
+   * 协作协议会 @ 全部参与 Bot。非当前轮次的 Bot 以思考中确认已同步，
+   * 但不进入队列，也不表示正在执行。
+   */
+  private acknowledgeObservedCollabMessage(
+    chatPlatformId: string,
+    scopeKey: string,
+    msgId?: string,
+    finished = false,
+  ): void {
+    if (!msgId) return;
+    const emoji = finished ? COLLAB_FINISHED_EMOJI : COLLAB_OBSERVED_EMOJI;
+    this.log.info("multi-Bot collaboration observed", {
+      chatPlatformId,
+      scopeKey,
+      platformMsgId: msgId,
+      emoji,
+      reason: finished ? "finished" : "not_current_turn",
+    });
+    this.setCollabReaction(chatPlatformId, msgId, emoji);
   }
 
   /**
@@ -1512,41 +2245,47 @@ export class Pipeline {
       }
     }
 
-    // 过期消息检测（>2min 丢弃）
+    const collabInboundRoute = classifyCollabInbound(
+      msg,
+      (platformId) => this.isCurrentBotPlatformId(platformId),
+    );
+
+    // 过期消息检测（>2min 丢弃）。协作消息不能直接丢：不同设备可能晚收到，
+    // 必须先从话题历史确认它仍是当前链的当前回合，避免旧消息复活旧协作。
+    let recoverLateCollab = false;
     if (!replayedAfterTransition && msg.platformTs) {
       const delay = Date.now() - msg.platformTs;
       if (delay > STALE_MESSAGE_THRESHOLD_MS) {
-        this.log.warn("stale message, dropping", {
-          chatId: msg.chatPlatformId,
-          delayMs: delay,
-          msgId: msg.platformMsgId,
-        });
-        if (msg.platformMsgId) {
-          this.transport.addReaction(msg.chatPlatformId, msg.platformMsgId, "Alarm").catch(() => {});
+        if (collabInboundRoute === "start" || collabInboundRoute === "protocol") {
+          recoverLateCollab = true;
+          this.log.info("late collaboration message will recover from history", {
+            chatId: msg.chatPlatformId,
+            delayMs: delay,
+            msgId: msg.platformMsgId,
+            route: collabInboundRoute,
+          });
+        } else {
+          this.log.warn("stale message, dropping", {
+            chatId: msg.chatPlatformId,
+            delayMs: delay,
+            msgId: msg.platformMsgId,
+          });
+          if (msg.platformMsgId) {
+            this.transport.addReaction(msg.chatPlatformId, msg.platformMsgId, "Alarm").catch(() => {});
+          }
+          if (inboxId != null && claimToken) {
+            this.transport.markInboundTerminal?.(inboxId, claimToken, "discarded", "stale message");
+          }
+          return;
         }
-        if (inboxId != null && claimToken) {
-          this.transport.markInboundTerminal?.(inboxId, claimToken, "discarded", "stale message");
-        }
-        return;
       }
     }
-
-    // 群聊触发：@bot、回复本 Bot，或已请过本 Bot 的隔离话题里的人跟帖。
-    // 明确 @ 了其他应用时，以被 @ 的 Bot 为目标，不能被下面两个兜底条件带起。
-    if (msg.chatType === "group" && !msg.botMentioned) {
-      const explicitlyTargetsOtherBot = msg.mentions?.some((mention) => mention.isApp === true) ?? false;
-      const isReplyToBot = msg.parentPlatformMsgId
-        ? this.isMessageFromBot(platform, msg.parentPlatformMsgId)
-        : false;
-      const chatIdForTrigger = ensureChat(this.db, platform, msg.chatPlatformId, msg.chatType, msg.chatName);
-      const isTopicFollowUp = !msg.senderIsBot
-        && Boolean(msg.threadId)
-        && this.isIsolatedTopicChat(chatIdForTrigger)
-        && this.topicThreadBelongsToBot(chatIdForTrigger, msg.threadId!, msg.rootId);
-
-      if (explicitlyTargetsOtherBot || (!isReplyToBot && !isTopicFollowUp) || msg.senderIsBot) {
-        // 群聊中未 @ bot 也未回复 bot，只存消息不触发。
-        // Bot 只回复不 at：飞书通常不推；即便推到也不当触发。
+    if (msg.chatType === "group") {
+      if (collabInboundRoute === "unrelated") {
+        this.log.info("group collaboration skipped: current Bot is not a participant", {
+          chatId: msg.chatPlatformId,
+          msgId: msg.platformMsgId,
+        });
         this.persistInboundMessage({
           inboxId,
           claimToken,
@@ -1583,6 +2322,7 @@ export class Pipeline {
     // For p2p chats, link user_id
     const chatUserId = msg.chatType === "p2p" ? msg.senderPlatformId : undefined;
     const chatId = ensureChat(this.db, platform, msg.chatPlatformId, msg.chatType, msg.chatName, chatUserId);
+    this.rememberMentionedBots(chatId, msg, platform);
     const scope = this.resolveMessageScope(chatId, msg.chatPlatformId, msg);
     this.noteHumanInbound(scope.scopeKey, msg.senderIsBot);
 
@@ -1617,7 +2357,7 @@ export class Pipeline {
       : undefined;
 
     const sessionId = this.chatSessions.get(scope.scopeKey)?.sessionId;
-    const persistIncomingMessage = (state: "queued" | "processing"): number => this.persistInboundMessage({
+    const persistIncomingMessage = (state: "queued" | "processing" | "completed"): number => this.persistInboundMessage({
       inboxId,
       claimToken,
       recoveredMessageId,
@@ -1636,6 +2376,49 @@ export class Pipeline {
         platformRaw: JSON.stringify(msg.raw),
       }),
     });
+
+    const brokenCollabMessage = this.stopBrokenCollabFromBot(msg, scope.scopeKey, collabInboundRoute);
+    const activeHumanCollabContext = this.isActiveHumanCollabContext(msg, scope.scopeKey);
+
+    // 群聊触发：@bot、回复本 Bot，或已请过本 Bot 的隔离话题里的人跟帖。
+    // 明确 @ 了其他应用时，以被 @ 的 Bot 为目标，不能被下面两个兜底条件带起。
+    const currentBotMentioned = msg.chatType === "group"
+      && (msg.mentions?.some((mention) => this.isCurrentBotMention(mention)) ?? false);
+    const firstBotMention = msg.chatType === "group" ? this.firstBotMention(msg, platform) : undefined;
+    if (!activeHumanCollabContext && firstBotMention && !this.isCurrentBotMention(firstBotMention)
+      && collabInboundRoute === "none") {
+      this.persistInboundMessage({
+        inboxId,
+        claimToken,
+        recoveredMessageId,
+        state: "completed",
+        store: () => this.storeMessageOnly(msg, platform),
+      });
+      return;
+    }
+    if (msg.chatType === "group" && !msg.botMentioned && !currentBotMentioned && !activeHumanCollabContext) {
+      const explicitlyTargetsOtherBot = msg.mentions?.some((mention) => mention.isApp === true) ?? false;
+      const isReplyToBot = msg.parentPlatformMsgId
+        ? this.isMessageFromBot(platform, msg.parentPlatformMsgId)
+        : false;
+      const isTopicFollowUp = !msg.senderIsBot
+        && Boolean(msg.threadId)
+        && this.isIsolatedTopicChat(chatId)
+        && this.topicThreadBelongsToBot(chatId, msg.threadId!, msg.rootId);
+
+      if (explicitlyTargetsOtherBot || (!isReplyToBot && !isTopicFollowUp) || msg.senderIsBot) {
+        // 群聊中未 @ bot 也未回复 bot，只存消息不触发。
+        // Bot 只回复不 at：飞书通常不推；即便推到也不当触发。
+        this.persistInboundMessage({
+          inboxId,
+          claimToken,
+          recoveredMessageId,
+          state: "completed",
+          store: () => this.storeMessageOnly(msg, platform),
+        });
+        return;
+      }
+    }
 
     this.log.info("message received", {
       chatId, userId,
@@ -1678,6 +2461,7 @@ export class Pipeline {
     // 短词打断检测（不清空队列，只 kill 当前进程，与 /stop 行为一致）
     const trimmedText = msg.contentText.trim().toLowerCase();
     if (INTERRUPT_WORDS.has(trimmedText) && this.chatSessions.has(scope.scopeKey)) {
+      this.stopCollabState(scope.scopeKey);
       persistIncomingMessage("processing");
       this.log.info("interrupt word detected", { chatId, scopeKey: scope.scopeKey, word: trimmedText });
       const activeRun = this.runtimeState.getActiveRunForScope(scope.scopeKey);
@@ -1735,34 +2519,131 @@ export class Pipeline {
       return;
     }
 
-    const incomingMsgId = persistIncomingMessage("queued");
-
-    // Reaction 策略：收到即二选一；pending 先 Pin，非 pending 先 Get；pending 开始处理后再补 Get
-    const isPending = this.queue.push({
-      chatId,
-      scopeKey: scope.scopeKey,
-      threadId: msg.threadId ?? scope.threadId,
-      strict: scope.strict,
-      text: agentText,
-      senderLabel: label,
-      senderId: userId,
-      dbMsgId: incomingMsgId,
-      timestamp: Date.now(),
-      platformMsgId: msg.platformMsgId,
-      scheduleCommand: /^\/(?:loop|cron)(?:\s|$)/i.test(commandText),
-    });
-    this.log.info("reaction decision", {
-      chatId,
-      scopeKey: scope.scopeKey,
-      msgId: msg.platformMsgId,
-      isPending,
-      initialEmoji: isPending ? MERGED_EMOJI : PROCESSING_EMOJI,
-    });
-    if (isPending) {
-      this.markQueuedMessage(msg.chatPlatformId, msg.platformMsgId);
-    } else {
-      this.moveMessageToProcessing(msg.chatPlatformId, msg.platformMsgId);
+    if (activeHumanCollabContext) {
+      // 协作未结束时，所有参与 Bot 都收到并保存人类输入；当前执行者还要把它送进
+      // 自己的协作队列。不能依赖“远端是否正在运行”，那在分布式设备上不可知。
+      const collabState = getBotCollabState(this.db, scope.scopeKey);
+      const currentExecutor = collabState?.status === "running"
+        && this.isCurrentBotPlatformId(collabState.currentBotId);
+      const incomingMsgId = persistIncomingMessage(currentExecutor ? "queued" : "completed");
+      if (currentExecutor) {
+        this.queue.push({
+          chatId,
+          scopeKey: scope.scopeKey,
+          threadId: msg.threadId ?? scope.threadId,
+          strict: scope.strict,
+          text: agentText,
+          senderLabel: label,
+          senderId: userId,
+          dbMsgId: incomingMsgId,
+          timestamp: Date.now(),
+          platformMsgId: msg.platformMsgId,
+          collabTurn: true,
+        });
+        this.setCollabReaction(msg.chatPlatformId, msg.platformMsgId, PROCESSING_EMOJI);
+        this.log.info("multi-Bot collaboration human input queued for current executor", {
+          scopeKey: scope.scopeKey,
+          platformMsgId: msg.platformMsgId,
+        });
+      } else {
+        this.log.info("multi-Bot collaboration human context buffered for next executor", {
+          scopeKey: scope.scopeKey,
+          platformMsgId: msg.platformMsgId,
+        });
+      }
+      return;
     }
+
+    const enqueueAfterCollabPreparation = (collabPreparation: CollabPreparation): void => {
+      if (collabPreparation === "duplicate") {
+        persistIncomingMessage("completed");
+        this.log.info("duplicate collaboration message ignored", {
+          chatId,
+          scopeKey: scope.scopeKey,
+          platformMsgId: msg.platformMsgId,
+        });
+        return;
+      }
+
+      if (collabPreparation === "unsupported") {
+        // 已经存在协作链但当前 backend 无结构化动作能力时，保存消息并停在这里，
+        // 不能退回普通 Agent 回合，否则会产生没有协议状态的半截交棒。
+        persistIncomingMessage("completed");
+        return;
+      }
+
+      if (collabPreparation === "observe") {
+        // 协作状态消息会 @ 全部参与 Bot；观察者只持久化和更新投影，绝不运行 Agent。
+        persistIncomingMessage("completed");
+        this.acknowledgeObservedCollabMessage(
+          msg.chatPlatformId,
+          scope.scopeKey,
+          msg.platformMsgId,
+          parseCollabProtocol(msg.contentText)?.finished === true,
+        );
+        return;
+      }
+
+      if (brokenCollabMessage) {
+        // 这条残缺交棒已经终止协作，也不能再作为普通 Bot @ 落入 Agent。
+        persistIncomingMessage("completed");
+        return;
+      }
+
+      if (msg.senderIsBot && msg.chatType === "group" && collabPreparation !== "turn"
+        && this.backendSupportsCollab(scope.scopeKey, userId)) {
+        // Bot 发言只有在消息链明确证明它是交棒时才可触发；孤立的 Bot at 只保存。
+        persistIncomingMessage("completed");
+        return;
+      }
+
+      const incomingMsgId = persistIncomingMessage("queued");
+      const isCollabTurn = collabPreparation === "turn";
+
+      // Reaction 策略：收到即二选一；pending 先 Pin，非 pending 先 Get；pending 开始处理后再补 Get
+      const isPending = this.queue.push({
+        chatId,
+        scopeKey: scope.scopeKey,
+        threadId: msg.threadId ?? scope.threadId,
+        strict: scope.strict,
+        text: agentText,
+        senderLabel: label,
+        senderId: userId,
+        dbMsgId: incomingMsgId,
+        timestamp: Date.now(),
+        platformMsgId: msg.platformMsgId,
+        scheduleCommand: /^(?:\/loop|\/cron)(?:\s|$)/i.test(commandText),
+        collabTurn: isCollabTurn,
+      });
+      this.log.info("reaction decision", {
+        chatId,
+        scopeKey: scope.scopeKey,
+        msgId: msg.platformMsgId,
+        isPending,
+        initialEmoji: isPending ? MERGED_EMOJI : PROCESSING_EMOJI,
+      });
+      if (isCollabTurn) {
+        // 协作轮不展示普通队列的 Pin → Get 双阶段；每条协议消息只保留一个状态表情。
+        this.setCollabReaction(msg.chatPlatformId, msg.platformMsgId, PROCESSING_EMOJI);
+      } else if (isPending) {
+        this.markQueuedMessage(msg.chatPlatformId, msg.platformMsgId);
+      } else {
+        this.moveMessageToProcessing(msg.chatPlatformId, msg.platformMsgId);
+      }
+    };
+
+    const collabPreparation = this.prepareCollabTurn(
+      msg,
+      chatId,
+      scope.scopeKey,
+      userId,
+      collabInboundRoute,
+      recoverLateCollab,
+    );
+    if (collabPreparation instanceof Promise) {
+      return collabPreparation.then(enqueueAfterCollabPreparation);
+    }
+    enqueueAfterCollabPreparation(collabPreparation);
   }
 
   /** Store a bot-sent message in DB */
@@ -1823,6 +2704,7 @@ export class Pipeline {
         }
       }
     }
+    this.rememberMentionedBots(chatId, msg, platform);
     return messageId;
   }
 
@@ -2103,6 +2985,7 @@ export class Pipeline {
       }
       case "/stop": {
         this.log.info("builtin command: stop", { userId, chatId });
+        this.stopCollabState(effectiveScopeKey);
         const activeRun = this.runtimeState.getActiveRunForScope(effectiveScopeKey);
         const hasActiveRun = !!activeRun;
         const pendingBefore = this.queue.pendingCount(effectiveScopeKey);
@@ -3169,6 +4052,16 @@ export class Pipeline {
       "不要复述或展示 loop-continuation 标签、内部字段和本段说明。";
   }
 
+  private buildCollabActionRetryPrompt(state: CollabState, reason: string): string {
+    const safeReason = reason.replace(/[<>]/g, "").slice(0, 240);
+    return `${buildCollabTurnContext(state, this.currentCollabParticipantId(state))}
+
+<bot-collab-correction>
+上一条输出没有形成有效协作动作：${safeReason}
+不要重复长篇报告，只补交一次有效动作。提交后引擎会使用上一条报告完成本回合。
+</bot-collab-correction>`;
+  }
+
   private async processIndependentSession(
     chatId: string, userId: string, prompt: string, description: string,
     source: "cron" | "task",
@@ -3460,6 +4353,7 @@ export class Pipeline {
     msgId?: string,
     threadId?: string,
   ): Promise<void> {
+    this.stopCollabState(scopeKey);
     await this.stopActiveRunForSessionTransition(scopeKey, chatId);
     await this.waitForSessionCreation(scopeKey);
     await this.archiveSession(scopeKey, chatId)
@@ -4888,6 +5782,19 @@ export class Pipeline {
 
     const platformChatId = this.chatSessions.get(scopeKey)?.platformChatId
       ?? this.platformChatIds.get(chatId);
+    const isCollabTurn = messages.length === 1 && messages[0]?.collabTurn === true;
+    const collabState = isCollabTurn ? getBotCollabState(this.db, scopeKey) : undefined;
+    const collabParticipantId = collabState ? this.currentCollabParticipantId(collabState) : undefined;
+    const collabToken = collabState?.status === "running" ? randomUUID() : undefined;
+    let activeCollabContext: ActiveCollabTurnContext | undefined;
+    const discardStaleCollabRun = (reason: string): boolean => {
+      if (!isCollabTurn || !collabState || this.isCurrentCollabProjection(scopeKey, collabState)) {
+        return false;
+      }
+      this.log.info("stale collaboration run discarded", { chatId, scopeKey, reason });
+      this.markRuntimeRun(runId, "stopped", `collaboration projection changed: ${reason}`);
+      return true;
+    };
 
     // 用户当前这句话：主会话也引用这一句；已经在话题里才 reply_in_thread。
     // 重启唤醒没有当前用户消息：在话题里才回原帖，否则发到会话。
@@ -4906,10 +5813,16 @@ export class Pipeline {
 
     if (platformChatId) {
       for (const msgId of reactionMsgIds) {
-        this.moveMessageToProcessing(platformChatId, msgId);
+        if (isCollabTurn) {
+          this.setCollabReaction(platformChatId, msgId, PROCESSING_EMOJI);
+        } else {
+          this.moveMessageToProcessing(platformChatId, msgId);
+        }
       }
-      for (const msgId of reactionMsgIds) {
-        this.processingMsgIds.delete(msgId);
+      if (!isCollabTurn) {
+        for (const msgId of reactionMsgIds) {
+          this.processingMsgIds.delete(msgId);
+        }
       }
     }
 
@@ -4923,10 +5836,29 @@ export class Pipeline {
 
       const msgIds = messages.map((m) => m.dbMsgId).filter((id): id is number => id != null);
       const firstMsgId = msgIds.length > 0 ? Math.min(...msgIds) : undefined;
-      const chatSession = await this.getOrCreateSession(scopeKey, chatId, threadId, firstMsgId, signal);
+      if (isCollabTurn && (!collabState || collabState.status !== "running")) {
+        this.log.warn("collaboration queue item has no runnable state", { chatId, scopeKey });
+        this.markRuntimeRun(runId, "failed", "collaboration state unavailable");
+        return;
+      }
+      if (isCollabTurn && collabState && !this.isCurrentBotPlatformId(collabState.currentBotId)) {
+        // 人类输入可能在本机排队期间被上一棒交给了别的 Bot；不能因为队列
+        // 仍有这条消息就越权执行。消息保留在本地历史，等真正的执行者消费。
+        this.log.info("collaboration queue item belongs to another Bot", {
+          chatId,
+          scopeKey,
+          currentBotId: collabState.currentBotId,
+        });
+        this.markRuntimeRun(runId, "stopped", "collaboration turn belongs to another Bot");
+        return;
+      }
+      if (discardStaleCollabRun("before session creation")) return;
+      const chatSession = await this.getOrCreateSession(scopeKey, chatId, threadId, firstMsgId, signal, collabToken);
+      if (discardStaleCollabRun("after session creation")) return;
       this.backendForSession(chatSession).refreshSessionEnv?.(chatSession.agentSession, {
         threadId: lastMsg?.threadId,
         replyToMsgId: lastMsg?.platformMsgId ?? lastMsg?.replyToMsgId,
+        collabTurnToken: collabToken,
       });
       const chatTypeRow = this.db.prepare("SELECT type FROM chats WHERE id = ?").get(chatId) as { type: string } | undefined;
       const processChatType = (chatTypeRow?.type ?? "p2p") as "p2p" | "group";
@@ -4980,6 +5912,17 @@ export class Pipeline {
         messageToSend = `${parts.join("\n\n")}\n\n${payload}`;
       }
 
+      if (isCollabTurn && collabState) {
+        messageToSend = `${buildCollabTurnContext(collabState, collabParticipantId!)}\n\n${messageToSend}`;
+      }
+
+      const collabSupplement = isCollabTurn && collabState
+        ? this.buildCollabSupplementContext(collabState, msgIds)
+        : { text: "", messageIds: [] as number[] };
+      if (collabSupplement.text) {
+        messageToSend = `${collabSupplement.text}\n\n${messageToSend}`;
+      }
+
       // 群聊：消息级 speaker 注入；内部 Loop 回合没有当前发言者。
       if (!isLoopTurn && processChatType === "group" && messages.length > 0) {
         const senderIds = [...new Set(messages.map((m) => m.senderId).filter((id): id is string => !!id))];
@@ -5000,7 +5943,7 @@ export class Pipeline {
         }
       }
 
-      markMessagesAgentSeen(this.db, msgIds);
+      markMessagesAgentSeen(this.db, [...msgIds, ...collabSupplement.messageIds]);
 
       if (signal?.aborted) {
         this.log.info("process cancelled before sending to agent", { chatId });
@@ -5025,6 +5968,17 @@ export class Pipeline {
 
       this.noteBotCollabTurn(scopeKey, processChatType, messages);
 
+      if (isCollabTurn && collabState && collabToken) {
+        activeCollabContext = {
+          runId: runId!,
+          scopeKey,
+          chatId,
+          token: collabToken,
+          state: collabState,
+        };
+        this.activeCollabTurns.set(scopeKey, activeCollabContext);
+      }
+
       this.log.info("sending to agent", {
         chatId,
         sessionId: chatSession.sessionId,
@@ -5036,7 +5990,7 @@ export class Pipeline {
         .map((message) => message.senderId)
         .filter((senderId): senderId is string => !!senderId))];
       const commandUserId = latestSenderId ?? activeLoopJob?.creatorUserId ?? chatSession.userId;
-      const agentResult = await (async () => {
+      const runAgent = async (prompt: string): Promise<RunAgentResult> => (async () => {
         this.activeScheduleAgentCommands.set(scopeKey, {
           runId: runId!,
           userId: uniqueSenderIds.length === 1 ? uniqueSenderIds[0]! : commandUserId,
@@ -5050,7 +6004,7 @@ export class Pipeline {
             chatId,
             agent: this.backendForSession(chatSession),
             session: chatSession.agentSession,
-            message: messageToSend,
+            message: prompt,
             signal,
           });
         } finally {
@@ -5058,6 +6012,7 @@ export class Pipeline {
           if (scheduleContext?.runId === runId) this.activeScheduleAgentCommands.delete(scopeKey);
         }
       })();
+      const agentResult = await runAgent(messageToSend);
       if (agentResult.status === "stopped") {
         this.log.info("prompt cancelled, no response to send", { chatId });
         // 本回合若刚通过 nbt goal start 创建了 Goal：以 stopped 结算并清理，避免孤儿 Goal 吞后续消息
@@ -5071,7 +6026,50 @@ export class Pipeline {
         this.markRuntimeRun(runId, "stopped");
         return;
       }
-      const response = agentResult.response;
+      let response = agentResult.response;
+      let collabDecision: CollabTurnDecision | undefined;
+
+      if (isCollabTurn && collabState) {
+        if (discardStaleCollabRun("after agent response")) return;
+        if (!activeCollabContext) {
+          this.blockCollabState(collabState, runId, "active collaboration context missing");
+          this.markRuntimeRun(runId, "failed", "collaboration context missing");
+          return;
+        }
+
+        let validation = validateCollabTurnDecision(
+          activeCollabContext.decision ?? response.collabDecision,
+          collabState,
+          collabParticipantId!,
+        );
+        if (!validation.ok) {
+          this.log.warn("collaboration action missing or invalid; requesting one retry", {
+            chatId,
+            scopeKey,
+            code: validation.code,
+          });
+          const retry = await runAgent(this.buildCollabActionRetryPrompt(collabState, validation.message));
+          if (retry.status === "stopped") {
+            if (!signal?.aborted) this.blockCollabState(collabState, runId, "action retry stopped");
+            this.markRuntimeRun(runId, signal?.aborted ? "stopped" : "failed", "collaboration action retry stopped");
+            return;
+          }
+          validation = validateCollabTurnDecision(
+            activeCollabContext.decision ?? retry.response.collabDecision,
+            collabState,
+            collabParticipantId!,
+          );
+        }
+        if (discardStaleCollabRun("after action validation")) return;
+        if (!validation.ok) {
+          this.blockCollabState(collabState, runId, validation.message);
+          this.markRuntimeRun(runId, "failed", `collaboration action rejected: ${validation.message}`);
+          return;
+        }
+        collabDecision = validation.decision;
+      }
+
+      if (discardStaleCollabRun("before response delivery")) return;
 
       // Goal 主动进入：本回合 Agent 调用了 nbt goal start → 本回合计入第 1 轮，runGoalLoop 接管
       // （本轮不再按普通回合交付，由 Goal 流程处理：finish 则结算，否则静默继续下一轮）
@@ -5140,7 +6138,7 @@ export class Pipeline {
       const loopFullMarker = isLoopTurn && activeLoopJob ? buildLoopDeliveryMarker(activeLoopJob) : undefined;
       const addLoopTaskQuote = (text: string): string => loopTaskQuote ? `${loopTaskQuote}\n\n${text}` : text;
       const addLoopFullMarker = (text: string): string => loopFullMarker ? `${loopFullMarker}\n\n${text}` : text;
-      let displayText = stripInternalTags(response.text);
+      let displayText = stripCollabProtocols(stripInternalTags(response.text));
       let deliveredText = displayText;
       displayText = addLoopTaskQuote(displayText);
       if (isMerged) {
@@ -5149,6 +6147,22 @@ export class Pipeline {
           return `• ${brief}`;
         });
         displayText = `> 📌 回复 ${messages.length} 条消息：\n${lines.map((l) => `> ${l}`).join("\n")}\n\n${displayText}`;
+      }
+
+      if (isCollabTurn) {
+        // 协作消息只允许由 Engine 产生唯一的下一棒 at；Agent 报告里的 Bot at
+        // 即使是无意回显，也不能成为第二个唤醒信号。
+        displayText = this.prepareOutboundText(chatSession.platformChatId, displayText, scopeKey, {
+          collabTurn: true,
+          stripAllBotAts: true,
+        }).text;
+      }
+
+      if (isCollabTurn && collabState && collabDecision) {
+        // Engine 统一追加全部参与 Bot 的真实 @ 和可见协议；@ 列表首位是唯一下一棒。
+        displayText = appendCollabProtocolMessage(displayText, collabState, collabDecision, {
+          requester: collabDecision.action === "finish" ? this.collabRequester(collabState) : undefined,
+        });
       }
 
       deliveredText = displayText;
@@ -5169,6 +6183,7 @@ export class Pipeline {
         allowChatFallback: !strict,
         signal,
         textFallback: (sendErr) => addLoopFullMarker(`发送失败：${extractPlatformErrorDetail(sendErr)}`),
+        collabTurn: isCollabTurn,
       });
       if (sendResult.ok) {
         sentPlatformMsgId = sendResult.platformMsgId;
@@ -5196,6 +6211,38 @@ export class Pipeline {
           updateMessageContent(this.db, replyMsgId, deliveredText);
         }
         updateMessagePlatformId(this.db, replyMsgId, sentPlatformMsgId);
+      }
+
+      if (isCollabTurn && collabState && collabDecision) {
+        if (sentPlatformMsgId && deliveredResponseBody) {
+          if (this.isCurrentCollabProjection(scopeKey, collabState)) {
+            setBotCollabState(this.db, applyCollabDecision(collabState, collabDecision, sentPlatformMsgId, runId));
+            if (collabDecision.action === "finish") {
+              this.log.info("multi-Bot collaboration finished", {
+                chatId,
+                scopeKey,
+                platformMsgId: sentPlatformMsgId,
+              });
+            }
+            this.log.info("multi-Bot collaboration state advanced", {
+              chatId,
+              scopeKey,
+              action: collabDecision.action,
+              target: collabDecision.action === "handoff" ? collabDecision.to : undefined,
+              turn: collabState.turn,
+            });
+          } else {
+            this.log.info("delivered stale collaboration result without advancing state", { chatId, scopeKey });
+            this.markRuntimeRun(runId, "stopped", "collaboration projection changed during delivery");
+          }
+        } else {
+          this.log.warn("multi-Bot collaboration state not advanced because delivery failed", {
+            chatId,
+            scopeKey,
+            uncertain: sendResult.ok ? false : !!sendResult.uncertain,
+            error: sendResult.ok ? undefined : sendResult.error,
+          });
+        }
       }
 
       if (isLoopTurn) {
@@ -5265,6 +6312,10 @@ export class Pipeline {
           this.storeBotResponse(chatId, errorText, pmid, "text", lastMsg?.threadId ?? threadId);
         } catch { /* give up */ }
       }
+    } finally {
+      if (activeCollabContext && this.activeCollabTurns.get(scopeKey) === activeCollabContext) {
+        this.activeCollabTurns.delete(scopeKey);
+      }
     }
   }
 
@@ -5274,6 +6325,7 @@ export class Pipeline {
     threadId?: string,
     beforeMsgId?: number,
     signal?: AbortSignal,
+    collabTurnToken?: string,
   ): Promise<ChatSession> {
     const resolvedChatId = chatId ?? parseScopeKey(scopeKey).chatId;
     const existing = this.chatSessions.get(scopeKey);
@@ -5287,6 +6339,7 @@ export class Pipeline {
       threadId,
       beforeMsgId,
       signal,
+      collabTurnToken,
     ).finally(() => {
       if (this.sessionCreations.get(scopeKey) === creation) this.sessionCreations.delete(scopeKey);
     });
@@ -5300,6 +6353,7 @@ export class Pipeline {
     threadId?: string,
     beforeMsgId?: number,
     signal?: AbortSignal,
+    collabTurnToken?: string,
   ): Promise<ChatSession> {
     const isolated = Boolean(threadId);
     const strict = this.isStrictTopicChat(chatId);
@@ -5372,6 +6426,7 @@ export class Pipeline {
         botProfilePath: this.stableContextOptions.botProfilePath,
         agentSessionId: canResume ? nativeId : undefined,
         scheduleToken: this.chatScheduleTokens.get(scopeKey),
+        collabTurnToken,
       }, sessionBackend);
       this.materializeScopeConfig(scopeKey, scopeConfig);
       this.db.prepare(`
@@ -5433,6 +6488,7 @@ export class Pipeline {
       isAdmin,
       botProfilePath: this.stableContextOptions.botProfilePath,
       scheduleToken: this.chatScheduleTokens.get(scopeKey),
+      collabTurnToken,
     }, sessionBackend);
     if (sessionBackend.needsStableUserPrefix() && stableContext) {
       this.pendingStableContext.set(scopeKey, stableContext);

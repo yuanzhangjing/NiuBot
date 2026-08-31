@@ -192,6 +192,7 @@ export async function createBotInstance(
     executeGoalStartCommand: (chatId, objective, token, scope) => pipeline.executeGoalStartCommand(chatId, objective, token, scope),
     executeGoalProgressCommand: (chatId, content, status, scope) => pipeline.executeGoalProgressCommand(chatId, content, status, scope),
     executeWakeCommand: (chatId, prompt, scope) => pipeline.executeWakeCommand(chatId, prompt, scope),
+    executeCollabTurn: (chatId, decision, token, scope) => pipeline.executeCollabTurn(chatId, decision, token, scope),
     getTimezone: () => TZ,
     setTimezone: (raw) => pipeline.setEngineTimezone(raw),
     resolveChatPlatformId: (input: string) => {

@@ -7,6 +7,7 @@ import {
   mapFeishuAtTags,
   mapOutsideAtTags,
   rewriteOutboundMentions,
+  supplementMissingBotMention,
   extractBuiltinCommandText,
   stripLeadingAtMentions,
   toCardAtTags,
@@ -54,6 +55,11 @@ describe("rewriteOutboundMentions", () => {
       .toBe('hi <at user_id="ou_cow">CowBot</at>');
     expect(rewriteOutboundMentions("hi @u4", users, { selfUserId: "u3" }).text)
       .toBe('hi <at user_id="ou_cow">CowBot</at>');
+  });
+
+  test("converts a unique display-name at into a Feishu at tag", () => {
+    expect(rewriteOutboundMentions("请 @CowBot review", users, { selfUserId: "u3" }).text)
+      .toBe('请 <at user_id="ou_cow">CowBot</at> review');
   });
 
   test("does not wrap existing Feishu at tags", () => {
@@ -116,6 +122,53 @@ describe("rewriteOutboundMentions", () => {
     expect(result.stripped).toBe(true);
     expect(result.mentionedOtherBot).toBe(true);
     expect(result.text).toBe("CowBot and NiuBot and <at user_id=\"ou_zen\">Zen</at>");
+  });
+});
+
+describe("supplementMissingBotMention", () => {
+  const sheep: MentionUser = { id: "u5", platformId: "ou_sheep", name: "SheepBot", isBot: true };
+
+  test("supplements one clear handoff in the same outbound message", () => {
+    expect(supplementMissingBotMention("请 CowBot review 这版", users, {
+      selfUserId: "u3",
+      candidateBotIds: ["u4"],
+    })).toBe('请 <at user_id="ou_cow">CowBot</at> review 这版');
+    expect(supplementMissingBotMention("CowBot，请 review 这版", users, {
+      selfUserId: "u3",
+      candidateBotIds: ["u4"],
+    })).toBe('<at user_id="ou_cow">CowBot</at>，请 review 这版');
+    expect(supplementMissingBotMention("交给 CowBot", users, {
+      selfUserId: "u3",
+      candidateBotIds: ["u4"],
+    })).toBe('交给 <at user_id="ou_cow">CowBot</at>');
+  });
+
+  test("does not guess when the target or intent is unclear", () => {
+    expect(supplementMissingBotMention("CowBot 已完成", users, {
+      selfUserId: "u3",
+      candidateBotIds: ["u4"],
+    })).toBe("CowBot 已完成");
+    expect(supplementMissingBotMention("请看一下", users, {
+      selfUserId: "u3",
+      candidateBotIds: ["u4"],
+    })).toBe("请看一下");
+    expect(supplementMissingBotMention("请 CowBot review，随后 SheepBot 检查", [...users, sheep], {
+      selfUserId: "u3",
+      candidateBotIds: ["u4", "u5"],
+    })).toBe("请 CowBot review，随后 SheepBot 检查");
+  });
+
+  test("ignores code, quoted text, and an existing other-Bot at", () => {
+    const source = [
+      "> 请 CowBot review",
+      "`请 CowBot review`",
+      '<quoted speaker="U2(Zen)">请 CowBot review</quoted>',
+      '请 CowBot review <at user_id="ou_sheep">SheepBot</at>',
+    ].join("\n");
+    expect(supplementMissingBotMention(source, [...users, sheep], {
+      selfUserId: "u3",
+      candidateBotIds: ["u4", "u5"],
+    })).toBe(source);
   });
 });
 

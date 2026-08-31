@@ -18,7 +18,9 @@ import {
   setScopeRuntimeConfig,
   getRecentRuntimeEvents,
   getUserIsBot,
+  getBotCollabState,
   recordRuntimeEvent,
+  setBotCollabState,
   setBotBackendModelState,
   setUserIsBot,
 } from "../database/schema.js";
@@ -30,7 +32,7 @@ import { COMPACT_RECOVERY_REMINDER } from "../memory/inject.js";
 import { loadConfig } from "../config.js";
 import { SYSTEM_RULES } from "../system-rules.js";
 import { addCronJob, claimDueCronJobs, deleteCronJob, describeCronExpr } from "./cron.js";
-import { applyDisplayTimezone, isValidTimeZone, TZ, userDateTimeToUtcSql } from "../tz.js";
+import { applyDisplayTimezone, isValidTimeZone, TZ, userDateTimeToUtcSql, utcDateTimeForSql } from "../tz.js";
 import * as displayStatus from "../platform/display-status.js";
 import { addLoopJob, claimDueLoopJobs, getLoopJob, LoopScheduler } from "./loop.js";
 import {
@@ -421,6 +423,46 @@ class SequenceReplyAgent extends RecordingAgent {
   override async sendMessage(_session: AgentSession, message: string): Promise<AgentResponse> {
     this.sendMessageCalls.push(message);
     return { text: this.replies.shift() ?? "" };
+  }
+}
+
+class CollabSequenceAgent extends RecordingAgent {
+  constructor(private readonly replies: AgentResponse[]) {
+    super();
+  }
+
+  override supportsCollabTurns(): boolean {
+    return true;
+  }
+
+  override async sendMessage(_session: AgentSession, message: string): Promise<AgentResponse> {
+    this.sendMessageCalls.push(message);
+    return this.replies.shift() ?? { text: "" };
+  }
+}
+
+class DeferredCollabSequenceAgent extends RecordingAgent {
+  private readonly pendingResolvers: Array<(response: AgentResponse) => void> = [];
+
+  constructor(private readonly replies: AgentResponse[]) {
+    super();
+  }
+
+  override supportsCollabTurns(): boolean {
+    return true;
+  }
+
+  override async sendMessage(_session: AgentSession, message: string): Promise<AgentResponse> {
+    this.sendMessageCalls.push(message);
+    return new Promise((resolve) => {
+      this.pendingResolvers.push((response) => resolve(response));
+    });
+  }
+
+  resolveNext(): void {
+    const resolve = this.pendingResolvers.shift();
+    if (!resolve) throw new Error("no pending collaboration response");
+    resolve(this.replies.shift() ?? { text: "" });
   }
 }
 
@@ -7585,9 +7627,77 @@ describe("nbt send prefers the active-run reply target", () => {
       method: "text",
       payload: 'ping <at user_id="ou-cow">CowBot</at>',
     }]);
+
+    sent.length = 0;
+    await pipeline.sendToChat("chat-open-id", "ping @CowBot");
+    expect(sent).toEqual([{
+      method: "text",
+      payload: 'ping <at user_id="ou-cow">CowBot</at>',
+    }]);
   });
 
-  test("sendCardToChat keeps cards in group chats and converts short labels", async () => {
+  test("supplements a clear group handoff with a real Bot at", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-handoff-at-"));
+    tempDirs.push(dir);
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
+    const cowId = ensureUser(db, "feishu", "ou-cow", "CowBot");
+    setUserIsBot(db, cowId);
+    const chatId = ensureChat(db, "feishu", "group-open-id", "group");
+    storeMessage(db, {
+      chatId,
+      senderId: cowId,
+      role: "assistant",
+      contentText: "上一棒完成了",
+      platform: "feishu",
+    });
+    const { im, sent } = createSendTrackingIm();
+    const pipeline = new Pipeline(db, im, new ReplyAgent("done"), createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");
+    await pipeline.start();
+
+    await pipeline.sendToChat("group-open-id", "请 CowBot review 这版");
+
+    expect(sent).toEqual([{
+      method: "text",
+      payload: '请 <at user_id="ou-cow">CowBot</at> review 这版',
+    }]);
+    const stored = db.prepare(
+      "SELECT content_text FROM messages WHERE role = 'assistant' ORDER BY id DESC LIMIT 1",
+    ).get() as { content_text: string };
+    expect(stored.content_text).toBe(`请 @${cowId.toUpperCase()}(CowBot) review 这版`);
+    pipeline.stop();
+  });
+
+  test("only the first Bot at receives a multi-Bot group turn", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-first-bot-at-"));
+    tempDirs.push(dir);
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
+    const cowId = ensureUser(db, "feishu", "ou-cow", "CowBot");
+    setUserIsBot(db, cowId);
+    const agent = new ReplyAgent("should not run");
+    const { im } = createRecordingImStub();
+    const pipeline = new Pipeline(db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");
+    await pipeline.start();
+    const selfId = pipeline.getBotUserId()!;
+
+    (pipeline as any).handleMessage(createMessage({
+      chatPlatformId: "group-open-id",
+      chatType: "group",
+      contentText: `@${cowId.toUpperCase()} @${selfId.toUpperCase()} 讨论天气`,
+      platformMsgId: "human-cow-first",
+      botMentioned: true,
+      mentions: [
+        { platformUserId: "ou-cow", name: "CowBot", isBot: false, isApp: true, key: "cow" },
+        { platformUserId: "bot-open-id", name: "NiuBot", isBot: true, key: "self" },
+      ],
+    }));
+
+    expect(agent.sendMessageCalls).toHaveLength(0);
+    expect(db.prepare("SELECT platform_msg_id FROM messages WHERE platform_msg_id = ?").get("human-cow-first"))
+      .toEqual({ platform_msg_id: "human-cow-first" });
+    pipeline.stop();
+  });
+
+  test("sendCardToChat keeps cards in group chats and converts display-name ats", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-send-"));
     tempDirs.push(dir);
     const db = openTestDatabase(path.join(dir, "niubot.db"));
@@ -7607,7 +7717,7 @@ describe("nbt send prefers the active-run reply target", () => {
     const cowId = ensureUser(db, "feishu", "ou-cow", "CowBot");
     sent.length = 0;
 
-    await pipeline.sendCardToChat("group-open-id", "Header", `ping @${cowId.toUpperCase()}`);
+    await pipeline.sendCardToChat("group-open-id", "Header", "ping @CowBot");
 
     expect(getUserIsBot(db, cowId)).toBe(false);
     expect(sent[0]?.method).toBe("card");
@@ -7690,7 +7800,7 @@ describe("nbt send prefers the active-run reply target", () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-collab-isapp-"));
     tempDirs.push(dir);
     const db = openTestDatabase(path.join(dir, "niubot.db"));
-    const agent = new SequenceReplyAgent(["先看天气"]);
+    const agent = new CollabSequenceAgent([{ text: "先看天气", collabDecision: { action: "finish" } }]);
     const { im, sentCards } = createRecordingImStub();
     const pipeline = new Pipeline(db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");
     await pipeline.start();
@@ -7785,12 +7895,12 @@ describe("nbt send prefers the active-run reply target", () => {
     (pipeline as any).handleMessage(createMessage({
       chatPlatformId: "group-open-id",
       chatType: "group",
-      contentText: `@${cowId.toUpperCase()} @${selfId.toUpperCase()} 讨论天气`,
+      contentText: `@${selfId.toUpperCase()} @${cowId.toUpperCase()} 讨论天气`,
       platformMsgId: "human-weather-start-participant",
       botMentioned: true,
       mentions: [
-        { platformUserId: "ou-cow", name: "CowBot", isBot: false, key: "cow" },
         { platformUserId: "bot-open-id", name: "NiuBot", isBot: true, key: "self" },
+        { platformUserId: "ou-cow", name: "CowBot", isBot: false, key: "cow" },
       ],
     }));
     await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(1));
@@ -7817,6 +7927,1033 @@ describe("nbt send prefers the active-run reply target", () => {
 
     expect(agent.sendMessageCalls[1]).not.toContain("Leader 已经委托你处理一个子问题");
     expect(sentCards[1]!.content).toContain('<at user_id="ou-cow">CowBot</at>');
+  });
+
+  test("runs one structured handoff turn and lets the Engine add the real at", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-collab-loop-start-"));
+    tempDirs.push(dir);
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
+    const agent = new CollabSequenceAgent([
+      {
+        text: '<bot-collab-loop>不要回显</bot-collab-loop>首轮报告 <at user_id="ou-cow">CowBot</at>',
+        collabDecision: { action: "handoff", to: "ou-cow" },
+      },
+    ]);
+    const { im, sentCards } = createRecordingImStub();
+    const pipeline = new Pipeline(db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");
+    await pipeline.start();
+
+    (pipeline as any).handleMessage(createMessage({
+      chatPlatformId: "group-open-id",
+      chatType: "group",
+      contentText: "@NiuBot @CowBot 请先分析，再 review",
+      platformMsgId: "collab-start-1",
+      botMentioned: true,
+      mentions: [
+        { platformUserId: "bot-open-id", name: "NiuBot", isBot: true, isApp: true, key: "self" },
+        { platformUserId: "ou-cow", name: "CowBot", isBot: false, isApp: true, key: "cow" },
+      ],
+    }));
+
+    await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(1));
+    await vi.waitFor(() => expect(sentCards).toHaveLength(1));
+    const state = getBotCollabState(db, "c1");
+    expect(state).toMatchObject({
+      currentBotId: "ou-cow",
+      turn: 2,
+      status: "running",
+      startPlatformMsgId: "collab-start-1",
+    });
+    expect(agent.createSessionCalls[0]?.collabTurnToken).toEqual(expect.any(String));
+    expect(agent.sendMessageCalls[0]).toContain("<bot-collab-loop>");
+    expect(agent.sendMessageCalls[0]).toContain("ou-cow");
+    expect(sentCards[0]!.content).toBe(
+      "首轮报告 CowBot\n\n<at user_id=\"ou-cow\">CowBot</at> <at user_id=\"bot-open-id\">NiuBot</at>\n\n〔协作 #2387D5BE · 第 2 回合〕",
+    );
+    expect(sentCards[0]!.content).not.toContain("bot-collab-loop");
+    expect(sentCards[0]!.content).not.toContain("@CowBot");
+  });
+
+  test("keeps a legacy Bot ID consistent through a collaboration turn", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-collab-legacy-id-"));
+    tempDirs.push(dir);
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
+    const agent = new CollabSequenceAgent([
+      { text: "旧身份回合完成", collabDecision: { action: "finish" } },
+    ]);
+    const { im, sentCards } = createRecordingImStub();
+    const pipeline = new Pipeline(db, im, agent, {
+      ...createBotIdentity(),
+      legacyPlatformBotIds: ["legacy-bot-open-id"],
+    }, dir, path.join(dir, "niubot.db"), 0, "codex");
+    await pipeline.start();
+
+    (pipeline as any).handleMessage(createMessage({
+      chatPlatformId: "group-open-id",
+      chatType: "group",
+      contentText: "@旧 NiuBot @CowBot 旧身份协作",
+      platformMsgId: "collab-legacy-id-start",
+      botMentioned: true,
+      mentions: [
+        { platformUserId: "legacy-bot-open-id", name: "旧 NiuBot", isBot: true, isApp: true, key: "legacy-self" },
+        { platformUserId: "ou-cow", name: "CowBot", isBot: false, isApp: true, key: "cow" },
+      ],
+    }));
+
+    await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(1));
+    await vi.waitFor(() => expect(sentCards).toHaveLength(1));
+    expect(agent.sendMessageCalls[0]).toContain("当前执行者：legacy-bot-open-id");
+    expect(getBotCollabState(db, "c1")).toMatchObject({
+      currentBotId: "legacy-bot-open-id",
+      status: "finished",
+      turn: 1,
+    });
+    pipeline.stop();
+  });
+
+  test("finish sends one report and closes the local collaboration projection", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-collab-loop-finish-"));
+    tempDirs.push(dir);
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
+    const agent = new CollabSequenceAgent([
+      { text: '<at user_id="ou-cow">CowBot</at>讨论到此结束', collabDecision: { action: "finish" } },
+    ]);
+    const { im, sentCards } = createRecordingImStub();
+    const pipeline = new Pipeline(db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");
+    await pipeline.start();
+
+    (pipeline as any).handleMessage(createMessage({
+      chatPlatformId: "group-open-id",
+      chatType: "group",
+      contentText: "@NiuBot @CowBot 直接给结论",
+      platformMsgId: "collab-finish-1",
+      botMentioned: true,
+      mentions: [
+        { platformUserId: "bot-open-id", name: "NiuBot", isBot: true, isApp: true, key: "self" },
+        { platformUserId: "ou-cow", name: "CowBot", isBot: false, isApp: true, key: "cow" },
+      ],
+    }));
+
+    await vi.waitFor(() => expect(sentCards).toHaveLength(1));
+    expect(sentCards[0]!.content).toBe(
+      "CowBot讨论到此结束\n\n<at user_id=\"user-open-id\">admin</at>\n\n<at user_id=\"bot-open-id\">NiuBot</at> <at user_id=\"ou-cow\">CowBot</at>\n\n〔协作 #9AC036C3 · 第 1 回合 · 完成〕",
+    );
+    expect(getBotCollabState(db, "c1")).toMatchObject({ status: "finished", turn: 1 });
+  });
+
+  test("retries a missing action once, then delivers the validated report", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-collab-loop-retry-"));
+    tempDirs.push(dir);
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
+    const agent = new CollabSequenceAgent([
+      { text: "报告正文" },
+      { text: "补交动作", collabDecision: { action: "finish" } },
+    ]);
+    const { im, sentCards } = createRecordingImStub();
+    const pipeline = new Pipeline(db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");
+    await pipeline.start();
+
+    (pipeline as any).handleMessage(createMessage({
+      chatPlatformId: "group-open-id",
+      chatType: "group",
+      contentText: "@NiuBot @CowBot 缺少动作测试",
+      platformMsgId: "collab-retry-1",
+      botMentioned: true,
+      mentions: [
+        { platformUserId: "bot-open-id", name: "NiuBot", isBot: true, isApp: true, key: "self" },
+        { platformUserId: "ou-cow", name: "CowBot", isBot: false, isApp: true, key: "cow" },
+      ],
+    }));
+
+    await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(2));
+    await vi.waitFor(() => expect(sentCards).toHaveLength(1));
+    expect(agent.sendMessageCalls[1]).toContain("没有形成有效协作动作");
+    expect(sentCards[0]!.content).toContain("报告正文");
+    expect(sentCards[0]!.content).toContain("〔协作 #CED506D4 · 第 1 回合 · 完成〕");
+    expect(getBotCollabState(db, "c1")).toMatchObject({ status: "finished" });
+  });
+
+  test("blocks the chain after the single action retry also fails", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-collab-loop-blocked-"));
+    tempDirs.push(dir);
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
+    const agent = new CollabSequenceAgent([
+      { text: "不能直接发" },
+      { text: "仍然没有动作" },
+    ]);
+    const { im, sentCards, sentTexts } = createRecordingImStub();
+    const pipeline = new Pipeline(db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");
+    await pipeline.start();
+
+    (pipeline as any).handleMessage(createMessage({
+      chatPlatformId: "group-open-id",
+      chatType: "group",
+      contentText: "@NiuBot @CowBot 非法动作测试",
+      platformMsgId: "collab-blocked-1",
+      botMentioned: true,
+      mentions: [
+        { platformUserId: "bot-open-id", name: "NiuBot", isBot: true, isApp: true, key: "self" },
+        { platformUserId: "ou-cow", name: "CowBot", isBot: false, isApp: true, key: "cow" },
+      ],
+    }));
+
+    await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(2));
+    await vi.waitFor(() => expect(getBotCollabState(db, "c1")?.status).toBe("blocked"));
+    expect(sentCards).toHaveLength(0);
+    expect(sentTexts).toHaveLength(0);
+  });
+
+  test("buffers a new explicit multi-Bot request while collaboration is running", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-collab-loop-replace-"));
+    tempDirs.push(dir);
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
+    const agent = new DeferredCollabSequenceAgent([
+      { text: "旧协作报告", collabDecision: { action: "handoff", to: "ou-cow" } },
+      { text: "新协作报告", collabDecision: { action: "finish" } },
+    ]);
+    const { im, sentCards } = createRecordingImStub();
+    const pipeline = new Pipeline(db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");
+    await pipeline.start();
+
+    (pipeline as any).handleMessage(createMessage({
+      chatPlatformId: "group-open-id",
+      chatType: "group",
+      contentText: "@NiuBot @CowBot 旧协作",
+      platformMsgId: "collab-replace-old",
+      botMentioned: true,
+      mentions: [
+        { platformUserId: "bot-open-id", name: "NiuBot", isBot: true, isApp: true, key: "self" },
+        { platformUserId: "ou-cow", name: "CowBot", isBot: false, isApp: true, key: "cow" },
+      ],
+    }));
+    await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(1));
+
+    (pipeline as any).handleMessage(createMessage({
+      chatPlatformId: "group-open-id",
+      chatType: "group",
+      contentText: "@NiuBot @CowBot 新协作",
+      platformMsgId: "collab-replace-new",
+      botMentioned: true,
+      mentions: [
+        { platformUserId: "bot-open-id", name: "NiuBot", isBot: true, isApp: true, key: "self" },
+        { platformUserId: "ou-cow", name: "CowBot", isBot: false, isApp: true, key: "cow" },
+      ],
+    }));
+    await vi.waitFor(() => expect(db.prepare("SELECT agent_seen FROM messages WHERE platform_msg_id = ?")
+      .get("collab-replace-new")).toEqual(expect.objectContaining({ agent_seen: 0 })));
+    expect(getBotCollabState(db, "c1")).toMatchObject({
+      status: "running",
+      turn: 1,
+      startPlatformMsgId: "collab-replace-old",
+    });
+    expect(agent.cancelSessionCalls).toHaveLength(0);
+    expect(agent.sendMessageCalls).toHaveLength(1);
+    expect(sentCards).toHaveLength(0);
+    pipeline.stop();
+  });
+
+  test("ignores a replayed collaboration start after the chain has advanced", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-collab-loop-replay-"));
+    tempDirs.push(dir);
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
+    const agent = new CollabSequenceAgent([
+      { text: "已经交棒", collabDecision: { action: "handoff", to: "ou-cow" } },
+    ]);
+    const { im, sentCards } = createRecordingImStub();
+    const pipeline = new Pipeline(db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");
+    await pipeline.start();
+    const start = createMessage({
+      chatPlatformId: "group-open-id",
+      chatType: "group",
+      contentText: "@NiuBot @CowBot 重放测试",
+      platformMsgId: "collab-replay-start",
+      botMentioned: true,
+      mentions: [
+        { platformUserId: "bot-open-id", name: "NiuBot", isBot: true, isApp: true, key: "self" },
+        { platformUserId: "ou-cow", name: "CowBot", isBot: false, isApp: true, key: "cow" },
+      ],
+    });
+
+    (pipeline as any).handleMessage(start);
+    await vi.waitFor(() => expect(sentCards).toHaveLength(1));
+    expect(getBotCollabState(db, "c1")).toMatchObject({ turn: 2, status: "running" });
+
+    (pipeline as any).processedMsgIds.clear();
+    await (pipeline as any).handleMessage({ ...start, timestamp: new Date() });
+    expect(agent.sendMessageCalls).toHaveLength(1);
+    expect(sentCards).toHaveLength(1);
+    expect(getBotCollabState(db, "c1")).toMatchObject({ turn: 2, status: "running" });
+  });
+
+  test("recovers a handoff from platform history on a separate Bot pipeline", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-collab-loop-recovery-"));
+    tempDirs.push(dir);
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
+    const agent = new CollabSequenceAgent([
+      { text: "CowBot 已复核", collabDecision: { action: "finish" } },
+    ]);
+    const recorder = createRecordingImStub();
+    recorder.im.getBotOpenId = async () => "ou-cow";
+    recorder.im.getBotName = async () => "CowBot";
+    let listCalls = 0;
+    recorder.im.listChatMessages = async () => {
+      listCalls += 1;
+      return [
+        createMessage({
+          senderPlatformId: "bot-open-id",
+          senderName: "NiuBot",
+          senderIsBot: true,
+          chatPlatformId: "group-open-id",
+          chatType: "group",
+          contentText: "首轮报告\n\n@CowBot @NiuBot\n\n〔协作 #A3D4D864 · 第 2 回合〕",
+          platformMsgId: "collab-history-handoff",
+          botMentioned: false,
+          mentions: [
+            { platformUserId: "ou-cow", name: "CowBot", isBot: false, isApp: true, key: "second" },
+          ],
+          raw: {
+            event: { message: { mentions: [
+              { id: { open_id: "ou-cow" }, name: "CowBot", id_type: "open_id" },
+              { id: { open_id: "bot-open-id" }, name: "NiuBot", id_type: "open_id" },
+            ] } },
+          },
+        }),
+        createMessage({
+          senderPlatformId: "user-open-id",
+          senderName: "Zen",
+          chatPlatformId: "group-open-id",
+          chatType: "group",
+          contentText: "@NiuBot @CowBot 请协作",
+          platformMsgId: "collab-history-start",
+          botMentioned: true,
+          mentions: [
+            { platformUserId: "bot-open-id", name: "NiuBot", isBot: false, isApp: true, key: "first" },
+            { platformUserId: "ou-cow", name: "CowBot", isBot: true, isApp: true, key: "second" },
+          ],
+          raw: {
+            event: { message: { mentions: [
+              { id: { open_id: "bot-open-id" }, name: "NiuBot", id_type: "open_id" },
+              { id: { open_id: "ou-cow" }, name: "CowBot", id_type: "open_id" },
+            ] } },
+          },
+        }),
+      ];
+    };
+    const pipeline = new Pipeline(
+      db,
+      recorder.im,
+      agent,
+      { name: "CowBot", platform: "feishu", platformBotId: "ou-cow" },
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+    await pipeline.start();
+
+    await (pipeline as any).handleMessage(createMessage({
+      senderPlatformId: "bot-open-id",
+      senderName: "NiuBot",
+      senderIsBot: true,
+      chatPlatformId: "group-open-id",
+      chatType: "group",
+      contentText: "首轮报告\n\n@CowBot @NiuBot\n\n〔协作 #A3D4D864 · 第 2 回合〕",
+      platformMsgId: "collab-history-handoff",
+      botMentioned: true,
+      mentions: [
+        { platformUserId: "ou-cow", name: "CowBot", isBot: true, isApp: true, key: "second" },
+        { platformUserId: "bot-open-id", name: "NiuBot", isBot: false, isApp: true, key: "first" },
+      ],
+    }));
+
+    await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(1));
+    await vi.waitFor(() => expect(recorder.sentCards).toHaveLength(1));
+    expect(listCalls).toBe(1);
+    expect(agent.sendMessageCalls[0]).toContain("首轮报告");
+    expect(recorder.sentCards[0]!.content).toContain("CowBot 已复核");
+    expect(recorder.sentCards[0]!.content).toContain("〔协作 #A3D4D864 · 第 2 回合 · 完成〕");
+    expect(getBotCollabState(db, "c1")).toMatchObject({
+      currentBotId: "ou-cow",
+      turn: 2,
+      status: "finished",
+    });
+  });
+
+  test("orders recovered collaboration messages by platform time, not local insert id", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-collab-history-order-"));
+    tempDirs.push(dir);
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
+    const agent = new CollabSequenceAgent([
+      { text: "CowBot 已复核", collabDecision: { action: "finish" } },
+    ]);
+    const recorder = createRecordingImStub();
+    recorder.im.getBotOpenId = async () => "ou-cow";
+    recorder.im.getBotName = async () => "CowBot";
+    const startTs = Date.now() - 4 * 60 * 1000;
+    const handoffTs = Date.now() - 3 * 60 * 1000;
+    const handoff = createMessage({
+      senderPlatformId: "bot-open-id",
+      senderName: "NiuBot",
+      senderIsBot: true,
+      chatPlatformId: "group-open-id",
+      chatType: "group",
+      contentText: "首轮报告\n\n@CowBot @NiuBot\n\n〔协作 #0BA1A9DD · 第 2 回合〕",
+      platformMsgId: "collab-order-handoff",
+      platformTs: handoffTs,
+      botMentioned: true,
+      mentions: [
+        { platformUserId: "ou-cow", name: "CowBot", isBot: true, isApp: true, key: "second" },
+        { platformUserId: "bot-open-id", name: "NiuBot", isBot: false, isApp: true, key: "first" },
+      ],
+      raw: {
+        event: { message: { mentions: [
+          { id: { open_id: "ou-cow" }, name: "CowBot", id_type: "open_id" },
+          { id: { open_id: "bot-open-id" }, name: "NiuBot", id_type: "open_id" },
+        ] } },
+      },
+    });
+    const start = createMessage({
+      senderPlatformId: "user-open-id",
+      senderName: "Zen",
+      chatPlatformId: "group-open-id",
+      chatType: "group",
+      contentText: "@NiuBot @CowBot 请协作",
+      platformMsgId: "collab-order-start",
+      platformTs: startTs,
+      botMentioned: true,
+      mentions: [
+        { platformUserId: "bot-open-id", name: "NiuBot", isBot: false, isApp: true, key: "first" },
+        { platformUserId: "ou-cow", name: "CowBot", isBot: true, isApp: true, key: "second" },
+      ],
+      raw: {
+        event: { message: { mentions: [
+          { id: { open_id: "bot-open-id" }, name: "NiuBot", id_type: "open_id" },
+          { id: { open_id: "ou-cow" }, name: "CowBot", id_type: "open_id" },
+        ] } },
+      },
+    });
+    // 模拟历史接口返回倒序，同时当前交棒已在实时入口先落库。
+    recorder.im.listChatMessages = async () => [handoff, start];
+
+    const pipeline = new Pipeline(
+      db,
+      recorder.im,
+      agent,
+      { name: "CowBot", platform: "feishu", platformBotId: "ou-cow" },
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+    await pipeline.start();
+    const chatId = ensureChat(db, "feishu", "group-open-id", "group", "bots");
+    const senderId = ensureUser(db, "feishu", "bot-open-id", "NiuBot", "bot_sender");
+    setUserIsBot(db, senderId);
+    const currentMessageId = storeMessage(db, {
+      chatId,
+      senderId,
+      role: "user",
+      contentText: handoff.contentText,
+      contentType: "text",
+      platform: "feishu",
+      platformMsgId: handoff.platformMsgId,
+      threadId: handoff.threadId,
+      platformTs: utcDateTimeForSql(new Date(handoffTs)),
+      platformRaw: JSON.stringify(handoff.raw),
+    });
+    expect(currentMessageId).toBeGreaterThan(0);
+
+    await (pipeline as any).handleMessage(handoff);
+
+    await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(1));
+    await vi.waitFor(() => expect(recorder.sentCards).toHaveLength(1));
+    expect(agent.sendMessageCalls[0]).toContain("首轮报告");
+    expect(getBotCollabState(db, "c1")).toMatchObject({
+      currentBotId: "ou-cow",
+      turn: 2,
+      status: "finished",
+    });
+  });
+
+  test("recovers a late collaboration start after checking history", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-collab-late-start-"));
+    tempDirs.push(dir);
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
+    const agent = new CollabSequenceAgent([
+      { text: "CowBot 已完成", collabDecision: { action: "finish" } },
+    ]);
+    const recorder = createRecordingImStub();
+    recorder.im.getBotOpenId = async () => "ou-cow";
+    recorder.im.getBotName = async () => "CowBot";
+    const start = createMessage({
+      senderPlatformId: "user-open-id",
+      senderName: "Zen",
+      chatPlatformId: "group-open-id",
+      chatType: "group",
+      contentText: "@CowBot @NiuBot 请协作",
+      platformMsgId: "collab-late-start",
+      platformTs: Date.now() - (3 * 60 * 1000),
+      botMentioned: true,
+      mentions: [
+        { platformUserId: "ou-cow", name: "CowBot", isBot: true, isApp: true, key: "first" },
+        { platformUserId: "bot-open-id", name: "NiuBot", isBot: false, isApp: true, key: "second" },
+      ],
+      raw: {
+        event: { message: { mentions: [
+          { id: { open_id: "ou-cow" }, name: "CowBot", id_type: "open_id" },
+          { id: { open_id: "bot-open-id" }, name: "NiuBot", id_type: "open_id" },
+        ] } },
+      },
+    });
+    let listCalls = 0;
+    recorder.im.listChatMessages = async () => {
+      listCalls += 1;
+      return [start];
+    };
+    const pipeline = new Pipeline(
+      db,
+      recorder.im,
+      agent,
+      { name: "CowBot", platform: "feishu", platformBotId: "ou-cow" },
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+    await pipeline.start();
+
+    await (pipeline as any).handleMessage(start);
+
+    await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(1));
+    await vi.waitFor(() => expect(recorder.sentCards).toHaveLength(1));
+    expect(listCalls).toBe(1);
+    expect(recorder.reactions).not.toContainEqual(expect.objectContaining({ emoji: "Alarm" }));
+    expect(getBotCollabState(db, "c1")).toMatchObject({
+      startPlatformMsgId: "collab-late-start",
+      status: "finished",
+    });
+  });
+
+  test("does not revive a late start superseded by a newer collaboration", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-collab-late-old-"));
+    tempDirs.push(dir);
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
+    const agent = new CollabSequenceAgent([]);
+    const recorder = createRecordingImStub();
+    recorder.im.getBotOpenId = async () => "ou-cow";
+    recorder.im.getBotName = async () => "CowBot";
+    const oldStart = createMessage({
+      senderPlatformId: "user-open-id",
+      senderName: "Zen",
+      chatPlatformId: "group-open-id",
+      chatType: "group",
+      contentText: "@CowBot @NiuBot 旧协作",
+      platformMsgId: "collab-late-old",
+      platformTs: Date.now() - (3 * 60 * 1000),
+      botMentioned: true,
+      mentions: [
+        { platformUserId: "ou-cow", name: "CowBot", isBot: true, isApp: true, key: "first" },
+        { platformUserId: "bot-open-id", name: "NiuBot", isBot: false, isApp: true, key: "second" },
+      ],
+      raw: {
+        event: { message: { mentions: [
+          { id: { open_id: "ou-cow" }, name: "CowBot", id_type: "open_id" },
+          { id: { open_id: "bot-open-id" }, name: "NiuBot", id_type: "open_id" },
+        ] } },
+      },
+    });
+    const newStart = createMessage({
+      senderPlatformId: "user-open-id",
+      senderName: "Zen",
+      chatPlatformId: "group-open-id",
+      chatType: "group",
+      contentText: "@NiuBot @CowBot 新协作",
+      platformMsgId: "collab-late-new",
+      botMentioned: true,
+      mentions: [
+        { platformUserId: "bot-open-id", name: "NiuBot", isBot: true, isApp: true, key: "first" },
+        { platformUserId: "ou-cow", name: "CowBot", isBot: false, isApp: true, key: "second" },
+      ],
+      raw: {
+        event: { message: { mentions: [
+          { id: { open_id: "bot-open-id" }, name: "NiuBot", id_type: "open_id" },
+          { id: { open_id: "ou-cow" }, name: "CowBot", id_type: "open_id" },
+        ] } },
+      },
+    });
+    recorder.im.listChatMessages = async () => [oldStart, newStart];
+    const pipeline = new Pipeline(
+      db,
+      recorder.im,
+      agent,
+      { name: "CowBot", platform: "feishu", platformBotId: "ou-cow" },
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+    await pipeline.start();
+
+    await (pipeline as any).handleMessage(oldStart);
+
+    expect(agent.sendMessageCalls).toHaveLength(0);
+    expect(recorder.reactions).not.toContainEqual(expect.objectContaining({ emoji: "Alarm" }));
+    expect(getBotCollabState(db, "c1")).toMatchObject({
+      startPlatformMsgId: "collab-late-new",
+      currentBotId: "bot-open-id",
+      status: "running",
+    });
+  });
+
+  test("buffers a late explicit multi-Bot message while collaboration is running", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-collab-late-replace-"));
+    tempDirs.push(dir);
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
+    const agent = new DeferredCollabSequenceAgent([
+      { text: "旧协作不应发送", collabDecision: { action: "handoff", to: "bot-open-id" } },
+    ]);
+    const recorder = createRecordingImStub();
+    recorder.im.getBotOpenId = async () => "ou-cow";
+    recorder.im.getBotName = async () => "CowBot";
+    const oldStart = createMessage({
+      senderPlatformId: "user-open-id",
+      senderName: "Zen",
+      chatPlatformId: "group-open-id",
+      chatType: "group",
+      contentText: "@CowBot @NiuBot 旧协作",
+      platformMsgId: "collab-late-replace-old",
+      botMentioned: true,
+      mentions: [
+        { platformUserId: "ou-cow", name: "CowBot", isBot: true, isApp: true, key: "first" },
+        { platformUserId: "bot-open-id", name: "NiuBot", isBot: false, isApp: true, key: "second" },
+      ],
+      raw: {
+        event: { message: { mentions: [
+          { id: { open_id: "ou-cow" }, name: "CowBot", id_type: "open_id" },
+          { id: { open_id: "bot-open-id" }, name: "NiuBot", id_type: "open_id" },
+        ] } },
+      },
+    });
+    const newStart = createMessage({
+      senderPlatformId: "user-open-id",
+      senderName: "Zen",
+      chatPlatformId: "group-open-id",
+      chatType: "group",
+      contentText: "@NiuBot @CowBot 新协作",
+      platformMsgId: "collab-late-replace-new",
+      platformTs: Date.now() - (3 * 60 * 1000),
+      botMentioned: true,
+      mentions: [
+        { platformUserId: "bot-open-id", name: "NiuBot", isBot: true, isApp: true, key: "first" },
+        { platformUserId: "ou-cow", name: "CowBot", isBot: false, isApp: true, key: "second" },
+      ],
+      raw: {
+        event: { message: { mentions: [
+          { id: { open_id: "bot-open-id" }, name: "NiuBot", id_type: "open_id" },
+          { id: { open_id: "ou-cow" }, name: "CowBot", id_type: "open_id" },
+        ] } },
+      },
+    });
+    recorder.im.listChatMessages = async () => [oldStart, newStart];
+    const pipeline = new Pipeline(
+      db,
+      recorder.im,
+      agent,
+      { name: "CowBot", platform: "feishu", platformBotId: "ou-cow" },
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+    await pipeline.start();
+
+    (pipeline as any).handleMessage(oldStart);
+    await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(1));
+    await (pipeline as any).handleMessage(newStart);
+
+    await vi.waitFor(() => expect(db.prepare("SELECT agent_seen FROM messages WHERE platform_msg_id = ?")
+      .get("collab-late-replace-new")).toEqual(expect.objectContaining({ agent_seen: 0 })));
+    expect(agent.cancelSessionCalls).toHaveLength(0);
+    expect(getBotCollabState(db, "c1")).toMatchObject({
+      startPlatformMsgId: "collab-late-replace-old",
+      currentBotId: "ou-cow",
+      status: "running",
+    });
+    expect(recorder.sentCards).toHaveLength(0);
+    pipeline.stop();
+  });
+
+  test("end to end: participants synchronize protocol turns; an unmentioned Bot stays out", async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-collab-e2e-"));
+    tempDirs.push(root);
+    const aDb = openTestDatabase(path.join(root, "a.db"));
+    const bDb = openTestDatabase(path.join(root, "b.db"));
+    const cDb = openTestDatabase(path.join(root, "c.db"));
+    const dDb = openTestDatabase(path.join(root, "d.db"));
+    const aAgent = new CollabSequenceAgent([
+      { text: "A 已完成分析", collabDecision: { action: "handoff", to: "ou-cow" } },
+    ]);
+    const bAgent = new CollabSequenceAgent([
+      { text: "B 已复核，结论成立", collabDecision: { action: "finish" } },
+    ]);
+    const cAgent = new CollabSequenceAgent([]);
+    const dAgent = new CollabSequenceAgent([]);
+    const a = createRecordingImStub();
+    const b = createRecordingImStub();
+    const c = createRecordingImStub();
+    const d = createRecordingImStub();
+    b.im.getBotOpenId = async () => "ou-cow";
+    b.im.getBotName = async () => "CowBot";
+    c.im.getBotOpenId = async () => "ou-sheep";
+    c.im.getBotName = async () => "SheepBot";
+    d.im.getBotOpenId = async () => "ou-horse";
+    d.im.getBotName = async () => "HorseBot";
+    const aPipeline = new Pipeline(aDb, a.im, aAgent, createBotIdentity(), root, path.join(root, "a.db"), 0, "codex");
+    const bPipeline = new Pipeline(bDb, b.im, bAgent, { name: "CowBot", platform: "feishu", platformBotId: "ou-cow" }, root, path.join(root, "b.db"), 0, "codex");
+    const cPipeline = new Pipeline(cDb, c.im, cAgent, { name: "SheepBot", platform: "feishu", platformBotId: "ou-sheep" }, root, path.join(root, "c.db"), 0, "codex");
+    const dPipeline = new Pipeline(dDb, d.im, dAgent, { name: "HorseBot", platform: "feishu", platformBotId: "ou-horse" }, root, path.join(root, "d.db"), 0, "codex");
+    await Promise.all([aPipeline.start(), bPipeline.start(), cPipeline.start(), dPipeline.start()]);
+
+    const participants = [
+      { platformUserId: "bot-open-id", name: "NiuBot", isBot: true, isApp: true, key: "a" },
+      { platformUserId: "ou-cow", name: "CowBot", isBot: true, isApp: true, key: "b" },
+      { platformUserId: "ou-sheep", name: "SheepBot", isBot: true, isApp: true, key: "c" },
+    ];
+    const start = createMessage({
+      chatPlatformId: "group-open-id",
+      chatType: "group",
+      contentText: "@NiuBot @CowBot @SheepBot 请协作 review",
+      platformMsgId: "collab-e2e-start",
+      botMentioned: true,
+      mentions: participants,
+    });
+    await Promise.all([
+      (aPipeline as any).handleMessage({ ...start }),
+      (bPipeline as any).handleMessage({ ...start }),
+      (cPipeline as any).handleMessage({ ...start }),
+      (dPipeline as any).handleMessage({ ...start }),
+    ]);
+    await vi.waitFor(() => expect(aAgent.sendMessageCalls).toHaveLength(1));
+    expect(bAgent.sendMessageCalls).toHaveLength(0);
+    expect(cAgent.sendMessageCalls).toHaveLength(0);
+    expect(dAgent.sendMessageCalls).toHaveLength(0);
+    expect(b.reactions).toContainEqual({ chatId: "group-open-id", msgId: "collab-e2e-start", emoji: "Typing" });
+    expect(c.reactions).toContainEqual({ chatId: "group-open-id", msgId: "collab-e2e-start", emoji: "Typing" });
+    expect(d.reactions).toEqual([]);
+    expect(getBotCollabState(dDb, "c1")).toBeUndefined();
+    await vi.waitFor(() => expect(a.sentCards).toHaveLength(1));
+    expect(a.sentCards[0]!.content).toContain('<at user_id="ou-cow">CowBot</at> <at user_id="bot-open-id">NiuBot</at> <at user_id="ou-sheep">SheepBot</at>');
+    expect(a.sentCards[0]!.content).toContain("〔协作 #");
+    expect(a.sentCards[0]!.content).toContain("第 2 回合〕");
+
+    const handoff = createMessage({
+      senderPlatformId: "bot-open-id",
+      senderName: "NiuBot",
+      senderIsBot: true,
+      chatPlatformId: "group-open-id",
+      chatType: "group",
+      contentText: a.sentCards[0]!.content,
+      platformMsgId: "collab-e2e-handoff",
+      botMentioned: true,
+      mentions: [participants[1]!, participants[0]!, participants[2]!],
+    });
+    await Promise.all([
+      (aPipeline as any).handleMessage({ ...handoff }),
+      (bPipeline as any).handleMessage({ ...handoff }),
+      (cPipeline as any).handleMessage({ ...handoff }),
+      (dPipeline as any).handleMessage({ ...handoff }),
+    ]);
+    await vi.waitFor(() => expect(bAgent.sendMessageCalls).toHaveLength(1));
+    expect(aAgent.sendMessageCalls).toHaveLength(1);
+    expect(cAgent.sendMessageCalls).toHaveLength(0);
+    expect(dAgent.sendMessageCalls).toHaveLength(0);
+    expect(c.reactions).toContainEqual({ chatId: "group-open-id", msgId: "collab-e2e-handoff", emoji: "Typing" });
+    expect(d.reactions).toEqual([]);
+    await vi.waitFor(() => expect(b.sentCards).toHaveLength(1));
+    expect(b.sentCards[0]!.content).toContain('<at user_id="user-open-id">admin</at>');
+    expect(b.sentCards[0]!.content).toContain('<at user_id="bot-open-id">NiuBot</at> <at user_id="ou-cow">CowBot</at> <at user_id="ou-sheep">SheepBot</at>');
+    expect(b.sentCards[0]!.content).toContain("第 2 回合 · 完成〕");
+
+    const finish = createMessage({
+      senderPlatformId: "ou-cow",
+      senderName: "CowBot",
+      senderIsBot: true,
+      chatPlatformId: "group-open-id",
+      chatType: "group",
+      contentText: b.sentCards[0]!.content,
+      platformMsgId: "collab-e2e-finish",
+      botMentioned: true,
+      mentions: participants,
+    });
+    await Promise.all([
+      (aPipeline as any).handleMessage({ ...finish }),
+      (bPipeline as any).handleMessage({ ...finish }),
+      (cPipeline as any).handleMessage({ ...finish }),
+      (dPipeline as any).handleMessage({ ...finish }),
+    ]);
+    await vi.waitFor(() => {
+      expect(getBotCollabState(aDb, "c1")?.status).toBe("finished");
+      expect(getBotCollabState(bDb, "c1")?.status).toBe("finished");
+      expect(getBotCollabState(cDb, "c1")?.status).toBe("finished");
+    });
+    expect(aAgent.sendMessageCalls).toHaveLength(1);
+    expect(bAgent.sendMessageCalls).toHaveLength(1);
+    expect(cAgent.sendMessageCalls).toHaveLength(0);
+    expect(dAgent.sendMessageCalls).toHaveLength(0);
+    expect(a.reactions).toContainEqual({ chatId: "group-open-id", msgId: "collab-e2e-finish", emoji: "DONE" });
+    expect(c.reactions).toContainEqual({ chatId: "group-open-id", msgId: "collab-e2e-finish", emoji: "DONE" });
+    expect(b.reactions.filter((reaction) => reaction.emoji === "DONE")).toHaveLength(0);
+    expect(a.reactions.filter((reaction) => reaction.msgId === "collab-e2e-finish")).toEqual([
+      { chatId: "group-open-id", msgId: "collab-e2e-finish", emoji: "DONE" },
+    ]);
+    expect(c.reactions.filter((reaction) => reaction.msgId === "collab-e2e-finish")).toEqual([
+      { chatId: "group-open-id", msgId: "collab-e2e-finish", emoji: "DONE" },
+    ]);
+    expect(d.reactions).toEqual([]);
+    expect(getBotCollabState(dDb, "c1")).toBeUndefined();
+  });
+
+  test("stops a collaboration when a participant sends an incomplete Bot handoff", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-collab-broken-handoff-"));
+    tempDirs.push(dir);
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
+    const agent = new ReplyAgent("普通回复");
+    const { im, sentCards } = createRecordingImStub();
+    const pipeline = new Pipeline(db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");
+    await pipeline.start();
+
+    const state = {
+      chainId: "A1B2C3D4",
+      scopeKey: "c1",
+      chatId: "c1",
+      participants: [
+        { platformId: "bot-open-id", name: "NiuBot" },
+        { platformId: "ou-cow", name: "CowBot" },
+      ],
+      currentBotId: "bot-open-id",
+      turn: 3,
+      status: "running" as const,
+      startPlatformMsgId: "collab-continuation-start",
+      lastPlatformMsgId: "collab-continuation-handoff",
+    };
+    setBotCollabState(db, state);
+
+    await (pipeline as any).handleMessage(createMessage({
+      senderPlatformId: "ou-cow",
+      senderName: "CowBot",
+      senderIsBot: true,
+      chatPlatformId: "group-open-id",
+      chatType: "group",
+      contentText: "@NiuBot 你来收一波",
+      platformMsgId: "collab-broken-handoff",
+      parentPlatformMsgId: "collab-continuation-handoff",
+      botMentioned: true,
+      mentions: [{ platformUserId: "bot-open-id", name: "NiuBot", isBot: true, isApp: true }],
+    }));
+
+    expect(getBotCollabState(db, "c1")?.status).toBe("stopped");
+    expect(agent.sendMessageCalls).toHaveLength(0);
+
+    (pipeline as any).handleMessage(createMessage({
+      chatPlatformId: "group-open-id",
+      chatType: "group",
+      contentText: "@NiuBot 新问题",
+      platformMsgId: "after-collab-reset",
+      botMentioned: true,
+      mentions: [{ platformUserId: "bot-open-id", name: "NiuBot", isBot: true, isApp: true }],
+    }));
+    await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(1));
+    await vi.waitFor(() => expect(sentCards).toHaveLength(1));
+    expect(sentCards[0]!.content).toBe("普通回复");
+    pipeline.stop();
+  });
+
+  test("buffers every human message during collaboration and supplies it to the next executor", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-collab-supplement-"));
+    tempDirs.push(dir);
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
+    const agent = new CollabSequenceAgent([{ text: "已结合补充信息", collabDecision: { action: "finish" } }]);
+    const { im, sentCards } = createRecordingImStub();
+    im.getBotOpenId = async () => "ou-cow";
+    im.getBotName = async () => "CowBot";
+    const pipeline = new Pipeline(db, im, agent, { name: "CowBot", platform: "feishu", platformBotId: "ou-cow" }, dir, path.join(dir, "niubot.db"), 0, "codex");
+    await pipeline.start();
+    const chatId = ensureChat(db, "feishu", "group-open-id", "group");
+    const requesterId = ensureUser(db, "feishu", "user-open-id", "admin");
+    storeMessage(db, {
+      chatId,
+      senderId: requesterId,
+      role: "user",
+      contentText: "@NiuBot @CowBot 开始协作",
+      platform: "feishu",
+      platformMsgId: "collab-supplement-start",
+    });
+    setBotCollabState(db, {
+      chainId: "ignored-by-storage",
+      scopeKey: chatId,
+      chatId,
+      participants: [
+        { platformId: "bot-open-id", name: "NiuBot" },
+        { platformId: "ou-cow", name: "CowBot" },
+      ],
+      currentBotId: "bot-open-id",
+      turn: 1,
+      status: "running",
+      startPlatformMsgId: "collab-supplement-start",
+    });
+    const state = getBotCollabState(db, chatId)!;
+
+    await (pipeline as any).handleMessage(createMessage({
+      chatPlatformId: "group-open-id",
+      chatType: "group",
+      contentText: "@CowBot 补充：重点看错误信息是否可操作",
+      platformMsgId: "collab-supplement-human",
+      botMentioned: true,
+      mentions: [{ platformUserId: "ou-cow", name: "CowBot", isBot: true, isApp: true }],
+    }));
+    expect(agent.sendMessageCalls).toHaveLength(0);
+    expect(getBotCollabState(db, chatId)?.status).toBe("running");
+
+    await (pipeline as any).handleMessage(createMessage({
+      chatPlatformId: "group-open-id",
+      chatType: "group",
+      contentText: "还有一点：默认值要在 help 里写清楚",
+      platformMsgId: "collab-supplement-human-no-at",
+    }));
+    expect(agent.sendMessageCalls).toHaveLength(0);
+    expect(getBotCollabState(db, chatId)?.status).toBe("running");
+
+    await (pipeline as any).handleMessage(createMessage({
+      senderPlatformId: "bot-open-id",
+      senderName: "NiuBot",
+      senderIsBot: true,
+      chatPlatformId: "group-open-id",
+      chatType: "group",
+      contentText: `NiuBot 报告\n\n〔协作 #${state.chainId} · 第 2 回合〕`,
+      platformMsgId: "collab-supplement-handoff",
+      botMentioned: true,
+      mentions: [
+        { platformUserId: "ou-cow", name: "CowBot", isBot: true, isApp: true },
+        { platformUserId: "bot-open-id", name: "NiuBot", isBot: true, isApp: true },
+      ],
+    }));
+    await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(1));
+    expect(agent.sendMessageCalls[0]).toContain("补充：重点看错误信息是否可操作");
+    expect(agent.sendMessageCalls[0]).toContain("默认值要在 help 里写清楚");
+    await vi.waitFor(() => expect(sentCards).toHaveLength(1));
+    const supplement = db.prepare("SELECT agent_seen FROM messages WHERE platform_msg_id = ?")
+      .get("collab-supplement-human") as { agent_seen: number };
+    expect(supplement.agent_seen).toBe(1);
+    expect(db.prepare("SELECT agent_seen FROM messages WHERE platform_msg_id = ?")
+      .get("collab-supplement-human-no-at")).toEqual({ agent_seen: 1 });
+    pipeline.stop();
+  });
+
+  test("queues human input for the current collaboration executor", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-collab-current-input-"));
+    tempDirs.push(dir);
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
+    const agent = new CollabSequenceAgent([
+      { text: "继续后的结论", collabDecision: { action: "finish" } },
+    ]);
+    const recorder = createRecordingImStub();
+    recorder.im.getBotOpenId = async () => "ou-cow";
+    recorder.im.getBotName = async () => "CowBot";
+    const pipeline = new Pipeline(
+      db,
+      recorder.im,
+      agent,
+      { name: "CowBot", platform: "feishu", platformBotId: "ou-cow" },
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+    await pipeline.start();
+    const chatId = ensureChat(db, "feishu", "group-open-id", "group");
+    const requesterId = ensureUser(db, "feishu", "user-open-id", "admin");
+    storeMessage(db, {
+      chatId,
+      senderId: requesterId,
+      role: "user",
+      contentText: "@NiuBot @CowBot 开始协作",
+      platform: "feishu",
+      platformMsgId: "collab-current-input-start",
+    });
+    setBotCollabState(db, {
+      chainId: "ignored-by-storage",
+      scopeKey: chatId,
+      chatId,
+      participants: [
+        { platformId: "bot-open-id", name: "NiuBot" },
+        { platformId: "ou-cow", name: "CowBot" },
+      ],
+      currentBotId: "ou-cow",
+      turn: 2,
+      status: "running",
+      startPlatformMsgId: "collab-current-input-start",
+      lastPlatformMsgId: "collab-current-input-handoff",
+    });
+
+    await (pipeline as any).handleMessage(createMessage({
+      chatPlatformId: "group-open-id",
+      chatType: "group",
+      contentText: "继续",
+      platformMsgId: "collab-current-input-human",
+      botMentioned: false,
+    }));
+
+    await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(1));
+    expect(agent.sendMessageCalls[0]).toContain("继续");
+    await vi.waitFor(() => expect(recorder.sentCards).toHaveLength(1));
+    expect(getBotCollabState(db, chatId)?.status).toBe("finished");
+    expect(db.prepare("SELECT agent_seen FROM messages WHERE platform_msg_id = ?")
+      .get("collab-current-input-human")).toEqual({ agent_seen: 1 });
+    pipeline.stop();
+  });
+
+  test("does not invent a collaboration chain when history recovery fails", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-collab-loop-no-history-"));
+    tempDirs.push(dir);
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
+    const agent = new CollabSequenceAgent([{ text: "不应执行", collabDecision: { action: "finish" } }]);
+    const recorder = createRecordingImStub();
+    recorder.im.listChatMessages = async () => { throw new Error("history unavailable"); };
+    recorder.im.getBotOpenId = async () => "ou-cow";
+    recorder.im.getBotName = async () => "CowBot";
+    const pipeline = new Pipeline(
+      db,
+      recorder.im,
+      agent,
+      { name: "CowBot", platform: "feishu", platformBotId: "ou-cow" },
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+    await pipeline.start();
+
+    await (pipeline as any).handleMessage(createMessage({
+      senderPlatformId: "bot-open-id",
+      senderName: "NiuBot",
+      senderIsBot: true,
+      chatPlatformId: "group-open-id",
+      chatType: "group",
+      contentText: "孤立报告\n\n@CowBot @NiuBot\n\n〔协作 #DEADBEEF · 第 2 回合〕",
+      platformMsgId: "collab-no-history",
+      botMentioned: true,
+      mentions: [
+        { platformUserId: "ou-cow", name: "CowBot", isBot: true, isApp: true, key: "self" },
+        { platformUserId: "bot-open-id", name: "NiuBot", isBot: false, isApp: true, key: "other" },
+      ],
+    }));
+
+    expect(agent.sendMessageCalls).toHaveLength(0);
+    expect(recorder.sentTexts).toHaveLength(0);
+    expect(recorder.sentReplies).toHaveLength(0);
+    expect(getBotCollabState(db, "c1")).toBeUndefined();
+    expect(db.prepare("SELECT platform_msg_id FROM messages WHERE platform_msg_id = ?").get("collab-no-history"))
+      .toEqual({ platform_msg_id: "collab-no-history" });
   });
 
   test("does not inject group history into the agent prompt", async () => {

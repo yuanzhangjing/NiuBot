@@ -171,8 +171,8 @@ export class ChatManager {
     return pending;
   }
 
-  drain(chatId: string): number {
-    const dropped = this.queue.drain(chatId);
+  drain(chatId: string, shouldDiscard?: (message: QueuedMessage) => boolean): number {
+    const dropped = this.queue.drain(chatId, shouldDiscard);
     log.info("drain chat requested", { chatId, dropped });
     return dropped;
   }

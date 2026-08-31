@@ -144,3 +144,29 @@ describe("MessageQueue schedule command isolation", () => {
     resolvers.shift()?.();
   });
 });
+
+describe("MessageQueue collaboration turn isolation", () => {
+  test("never merges a collaboration turn with another user or collaboration turn", async () => {
+    const queue = new MessageQueue(0);
+    const seen: Array<Array<{ text: string; collabTurn?: boolean }>> = [];
+    const resolvers: Array<() => void> = [];
+    queue.onProcess(async (_chatId, _text, messages) => {
+      seen.push(messages.map(({ text, collabTurn }) => ({ text, collabTurn })));
+      await new Promise<void>((resolve) => resolvers.push(resolve));
+    });
+
+    queue.push(message({ text: "handoff-1", collabTurn: true }));
+    queue.push(message({ text: "ordinary" }));
+    queue.push(message({ text: "handoff-2", collabTurn: true }));
+    expect(seen).toEqual([[{ text: "handoff-1", collabTurn: true }]]);
+
+    resolvers.shift()?.();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(seen[1]).toEqual([{ text: "ordinary", collabTurn: undefined }]);
+
+    resolvers.shift()?.();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(seen[2]).toEqual([{ text: "handoff-2", collabTurn: true }]);
+    resolvers.shift()?.();
+  });
+});

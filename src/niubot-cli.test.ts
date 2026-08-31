@@ -148,6 +148,14 @@ describe("niubot CLI path helpers", () => {
     expect(env["NIUBOT_WAKE_REPLY_TO"]).toBe("om-root");
   });
 
+  it("passes the collaboration capability token only when the session has one", () => {
+    const active = buildNiubotEnv({ collabTurnToken: "turn-token" });
+    const ordinary = buildNiubotEnv({});
+
+    expect(active["NIUBOT_COLLAB_TOKEN"]).toBe("turn-token");
+    expect(ordinary["NIUBOT_COLLAB_TOKEN"]).toBe("");
+  });
+
   it("does not pass a restart reply anchor in p2p chats", () => {
     const env = buildNiubotEnv({
       chatId: "c1",

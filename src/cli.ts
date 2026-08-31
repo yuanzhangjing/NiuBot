@@ -43,6 +43,7 @@ import { handleSessions } from "./cli/session.js";
 import { handleGoal } from "./cli/goal.js";
 import { handleFeishu } from "./cli/feishu.js";
 import { handleTimezoneCli } from "./cli/timezone.js";
+import { handleCollab } from "./cli/collab.js";
 import { parseArgs } from "./cli/args.js";
 import { formatLocalDateTimeWithTZ } from "./tz.js";
 
@@ -66,6 +67,7 @@ const sessionCommands = new Set([
   "tz",
   "restart",
   "goal",
+  "collab",
 ]);
 const publicCommands = new Set([
   undefined,
@@ -191,6 +193,9 @@ async function main(): Promise<void> {
       break;
     case "goal":
       await handleGoal(args.slice(1));
+      break;
+    case "collab":
+      await handleCollab(args.slice(1));
       break;
     case "restart":
       await handleRestart(args.slice(1));
@@ -544,6 +549,7 @@ Commands:
   task          create|list|update|delete   Manage task projects
   restart                                   Restart the Engine (safe pipeline, notifies current chat)
   goal          finish                      End the current Goal (token-protected)
+  collab        turn                       Submit the current multi-Bot turn action
   system-rules                             Show NiuBot Engine system rules
   whoami                                    Show current scene info
   feishu-creds                              Show this Bot's Feishu appId/appSecret

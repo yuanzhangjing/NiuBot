@@ -83,6 +83,21 @@ export function cacheHistoryMessages(
     for (const msg of messages) {
       const platformMsgId = msg.platformMsgId;
       if (!platformMsgId) continue;
+
+      // 历史消息的正文稍后可能只从 platform_raw 重建，但参与者身份不能丢。
+      // 先把带有结构化 app/bot 标记的 mention 写入本地目录，供协作路由校验。
+      for (const mention of msg.mentions ?? []) {
+        if (!mention.platformUserId || (!mention.isApp && !mention.isBot)) continue;
+        const mentionUserId = ensureUser(
+          db,
+          platform,
+          mention.platformUserId,
+          mention.name || undefined,
+          "bot_info",
+        );
+        setUserIsBot(db, mentionUserId);
+      }
+
       const existing = getMessageByPlatformId(db, platform, platformMsgId);
       if (existing) {
         // 历史同步可能把实时入口留下的降级卡片补成原文；不能因 platform_msg_id

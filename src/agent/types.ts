@@ -1,3 +1,5 @@
+import type { CollabTurnDecision } from "../core/collab-loop.js";
+
 /**
  * Agent 后端适配层接口。
  * 换 agent 只需实现 AgentBackend，不改 Core。
@@ -47,6 +49,8 @@ export interface SessionConfig {
   agentSessionId?: string;
   /** 主会话调度能力令牌：仅主 Agent 回合注入，独立 session 不注入，防止身份借用 */
   scheduleToken?: string;
+  /** 多 Bot 协作回合能力令牌：仅当前协作 Agent 回合注入。 */
+  collabTurnToken?: string;
 }
 
 export interface AgentSession {
@@ -99,6 +103,8 @@ export interface AgentResponse {
   model?: string;
   /** 累计 compact 次数 */
   compactCount?: number;
+  /** 测试/原生后端可直接返回的结构化协作动作；普通文本不具备此语义。 */
+  collabDecision?: CollabTurnDecision;
 }
 
 export interface AgentBackend {
@@ -112,7 +118,10 @@ export interface AgentBackend {
   createSession(config: SessionConfig): Promise<AgentSession>;
 
   /** 按当前用户消息刷新子进程环境（话题 id 跟着这一句走）。 */
-  refreshSessionEnv?(session: AgentSession, env: { threadId?: string; replyToMsgId?: string }): void;
+  refreshSessionEnv?(session: AgentSession, env: { threadId?: string; replyToMsgId?: string; collabTurnToken?: string }): void;
+
+  /** 当前 backend 是否能在 Agent 回合内提交结构化协作动作。 */
+  supportsCollabTurns?(): boolean;
 
   /** 发送消息，等待完整响应（非流式） */
   sendMessage(

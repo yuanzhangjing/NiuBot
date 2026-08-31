@@ -154,6 +154,7 @@ export function buildImportantContext(
       sceneLines.push(`本群 Bot：${bots.map((bot) => formatShortLabel(bot.id, bot.name)).join("、")}`);
     }
     sceneLines.push("要通知其他人或 Bot，用 @ 加短号即可，例如 U2。");
+    sceneLines.push("Bot 之间交棒时，必须在同一条消息里 @ 对方；只写名字不算通知。");
   } else if (scene.userId) {
     // 私聊：在 session 级注入用户身份和记忆
     const userDisplay = formatShortLabel(scene.userId, scene.userName);

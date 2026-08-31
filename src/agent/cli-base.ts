@@ -248,13 +248,19 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
     return { id: handle };
   }
 
-  refreshSessionEnv(session: AgentSession, env: { threadId?: string; replyToMsgId?: string }): void {
+  /** CLI session 可通过 nbt collab turn 提交结构化协作动作。 */
+  supportsCollabTurns(): boolean {
+    return true;
+  }
+
+  refreshSessionEnv(session: AgentSession, env: { threadId?: string; replyToMsgId?: string; collabTurnToken?: string }): void {
     const current = this.sessions.get(session.id);
     if (!current) return;
     current.extraEnv = {
       ...current.extraEnv,
       NIUBOT_THREAD_ID: env.threadId ?? "",
       NIUBOT_WAKE_REPLY_TO: env.threadId && env.replyToMsgId ? env.replyToMsgId : "",
+      NIUBOT_COLLAB_TOKEN: env.collabTurnToken ?? "",
     };
   }
 
@@ -961,6 +967,8 @@ export function buildNiubotEnv(config: SessionConfig): Record<string, string> {
   if (config.isAdmin && config.botProfilePath) env["NIUBOT_BOT_PROFILE_PATH"] = config.botProfilePath;
   if (config.workingDirectory) env["NIUBOT_WORK_DIR"] = config.workingDirectory;
   if (config.scheduleToken) env["NIUBOT_SCHEDULE_TOKEN"] = config.scheduleToken;
+  // 显式覆盖父进程残留，避免前一回合的协作动作令牌被复用。
+  env["NIUBOT_COLLAB_TOKEN"] = config.collabTurnToken ?? "";
   env["NIUBOT_TZ"] = TZ;
   env["NIUBOT_AGENT_SESSION"] = "1";
   return env;

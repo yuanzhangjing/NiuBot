@@ -28,6 +28,8 @@ export interface QueuedMessage {
   loopJobId?: number;
   /** 原始用户文本是否以 /loop 或 /cron 开头；回复渲染后仍保留调度意图。 */
   scheduleCommand?: boolean;
+  /** 这条消息是否是严格多 Bot 协作回合；普通群消息不能借用协作状态。 */
+  collabTurn?: boolean;
 }
 
 interface ChatQueue {
@@ -155,7 +157,8 @@ export class MessageQueue {
 
     q.buffer.push(msg);
     this.emitState(key, q);
-    if (msg.triggerKind === "loop_continuation" || msg.triggerKind === "restart_wake" || msg.scheduleCommand) {
+    if (msg.triggerKind === "loop_continuation" || msg.triggerKind === "restart_wake"
+      || msg.scheduleCommand || msg.collabTurn) {
       void this.flush(q, key).catch((err) => {
         log.error("flush failed", { chatId: key, error: String(err) });
       });
@@ -185,27 +188,41 @@ export class MessageQueue {
     return this.stopped;
   }
 
-  /** 清空指定 chat 的等待队列（buffer + pending），返回丢弃的消息数 */
-  drain(scopeKey: string): number {
+  /** 清空指定 chat 的等待队列（buffer + pending），返回丢弃的消息数。 */
+  drain(scopeKey: string, shouldDiscard: (message: QueuedMessage) => boolean = () => true): number {
     const q = this.queues.get(scopeKey);
     if (!q) return 0;
-    const discarded = [...q.buffer, ...q.pending];
+    const discarded: QueuedMessage[] = [];
+    const retain = (messages: QueuedMessage[]): QueuedMessage[] => {
+      const retained: QueuedMessage[] = [];
+      for (const message of messages) {
+        if (shouldDiscard(message)) discarded.push(message);
+        else retained.push(message);
+      }
+      return retained;
+    };
+    const retainedBuffer = retain(q.buffer);
+    const retainedPending = retain(q.pending);
     const dropped = discarded.length;
-    q.buffer = [];
-    q.pending = [];
-    if (q.bufferTimer) {
+    if (dropped === 0) return 0;
+    q.buffer = retainedBuffer;
+    q.pending = retainedPending;
+    if (q.buffer.length === 0 && q.bufferTimer) {
       clearTimeout(q.bufferTimer);
       q.bufferTimer = null;
     }
-    if (dropped > 0) {
-      log.info("drain", { chatId: scopeKey, dropped });
-      try {
-        this.discardFn?.(discarded);
-      } catch (err) {
-        log.warn("discard callback failed", { chatId: scopeKey, error: String(err) });
-      }
+    log.info("drain", { chatId: scopeKey, dropped });
+    try {
+      this.discardFn?.(discarded);
+    } catch (err) {
+      log.warn("discard callback failed", { chatId: scopeKey, error: String(err) });
     }
     this.emitState(scopeKey, q);
+    // 过滤式 drain 可能只移除了当前 buffer，保留的 pending 仍需继续推进，
+    // 否则一个旧的协作回合被替换后，普通消息会卡在等待队列里。
+    if (!q.busy && q.buffer.length === 0 && q.pending.length > 0) {
+      this.processNext(q, scopeKey);
+    }
     return dropped;
   }
 
@@ -281,13 +298,14 @@ export class MessageQueue {
       let count = 1;
       // 用户消息仍可合并；内部续接事件保持独立。
       // Loop 每轮必须保持独立，避免多个任务共用一次结算和回复。
-      if (kind !== "loop_continuation" && kind !== "schedule_command") {
+      if (kind === "user") {
         while (count < q.pending.length && queueKind(q.pending[count]!) === kind) count++;
       }
       const next = q.pending.splice(0, count);
       q.buffer = next;
       this.emitState(scopeKey, q);
-      if (kind === "loop_continuation" || kind === "restart_wake" || kind === "schedule_command") {
+      if (kind === "loop_continuation" || kind === "restart_wake"
+        || kind === "schedule_command" || kind === "collab_turn") {
         void this.flush(q, scopeKey).catch((err) => {
           log.error("flush failed", { chatId: scopeKey, error: String(err) });
         });
@@ -364,9 +382,10 @@ function keyOf(message: QueuedMessage): string {
   return message.scopeKey ?? message.chatId;
 }
 
-function queueKind(message: QueuedMessage): "user" | "schedule_command" | "loop_continuation" | "restart_wake" {
+function queueKind(message: QueuedMessage): "user" | "schedule_command" | "loop_continuation" | "restart_wake" | "collab_turn" {
   if (message.triggerKind === "loop_continuation") return "loop_continuation";
-    if (message.triggerKind === "restart_wake") return "restart_wake";
+  if (message.triggerKind === "restart_wake") return "restart_wake";
+  if (message.collabTurn) return "collab_turn";
   if (message.scheduleCommand) return "schedule_command";
   return "user";
 }

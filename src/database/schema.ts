@@ -3,6 +3,7 @@ import Database from "better-sqlite3";
 import type { AgentBackendType } from "../config.js";
 import { normalizeBackend } from "../config.js";
 import { createLogger } from "../logger.js";
+import { collabChainId, type CollabParticipant, type CollabState, type CollabStatus } from "../core/collab-loop.js";
 
 const log = createLogger("database");
 
@@ -940,6 +941,30 @@ const migrations: Migration[] = [
       ensureScopeRuntimeConfigsTable(db);
     },
   },
+  {
+    version: 39,
+    description: "Persist local multi-Bot collaboration chain projection",
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS bot_collab_chains (
+          scope_key              TEXT PRIMARY KEY,
+          chat_id                TEXT NOT NULL,
+          thread_id              TEXT,
+          participants_json      TEXT NOT NULL,
+          current_bot_id         TEXT NOT NULL,
+          turn                   INTEGER NOT NULL,
+          status                 TEXT NOT NULL
+                                 CHECK(status IN ('running', 'finished', 'stopped', 'blocked')),
+          start_platform_msg_id  TEXT NOT NULL,
+          last_platform_msg_id   TEXT,
+          last_run_id            TEXT,
+          updated_at             TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_bot_collab_chains_chat
+          ON bot_collab_chains(chat_id, thread_id);
+      `);
+    },
+  },
 ];
 
 const transportMigrations: Migration[] = [
@@ -1340,6 +1365,102 @@ export function deleteScopeRuntimeConfig(
   ).run(botName, scopeKey);
 }
 
+/** 本地 Bot 的协作链投影。真实消息链仍来自 IM，不能把这张表当成跨设备事实源。 */
+export function getBotCollabState(
+  db: Database.Database,
+  scopeKey: string,
+): CollabState | undefined {
+  const row = db.prepare(`
+    SELECT scope_key, chat_id, thread_id, participants_json, current_bot_id, turn,
+           status, start_platform_msg_id, last_platform_msg_id, last_run_id
+    FROM bot_collab_chains
+    WHERE scope_key = ?
+  `).get(scopeKey) as {
+    scope_key: string;
+    chat_id: string;
+    thread_id: string | null;
+    participants_json: string;
+    current_bot_id: string;
+    turn: number;
+    status: string;
+    start_platform_msg_id: string;
+    last_platform_msg_id: string | null;
+    last_run_id: string | null;
+  } | undefined;
+  if (!row || !isCollabStatus(row.status)) return undefined;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(row.participants_json);
+  } catch {
+    return undefined;
+  }
+  if (!Array.isArray(parsed)) return undefined;
+  const participants: CollabParticipant[] = [];
+  for (const item of parsed) {
+    if (!item || typeof item !== "object") return undefined;
+    const value = item as { platformId?: unknown; name?: unknown };
+    if (typeof value.platformId !== "string" || !value.platformId) return undefined;
+    participants.push({
+      platformId: value.platformId,
+      name: typeof value.name === "string" && value.name ? value.name : undefined,
+    });
+  }
+  if (participants.length < 2 || !row.current_bot_id || !row.start_platform_msg_id) return undefined;
+  return {
+    chainId: collabChainId(row.start_platform_msg_id),
+    scopeKey: row.scope_key,
+    chatId: row.chat_id,
+    threadId: row.thread_id ?? undefined,
+    participants,
+    currentBotId: row.current_bot_id,
+    turn: row.turn,
+    status: row.status,
+    startPlatformMsgId: row.start_platform_msg_id,
+    lastPlatformMsgId: row.last_platform_msg_id ?? undefined,
+    lastRunId: row.last_run_id ?? undefined,
+  };
+}
+
+export function setBotCollabState(db: Database.Database, state: CollabState): void {
+  db.prepare(`
+    INSERT INTO bot_collab_chains (
+      scope_key, chat_id, thread_id, participants_json, current_bot_id, turn, status,
+      start_platform_msg_id, last_platform_msg_id, last_run_id, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+    ON CONFLICT(scope_key) DO UPDATE SET
+      chat_id = excluded.chat_id,
+      thread_id = excluded.thread_id,
+      participants_json = excluded.participants_json,
+      current_bot_id = excluded.current_bot_id,
+      turn = excluded.turn,
+      status = excluded.status,
+      start_platform_msg_id = excluded.start_platform_msg_id,
+      last_platform_msg_id = excluded.last_platform_msg_id,
+      last_run_id = excluded.last_run_id,
+      updated_at = excluded.updated_at
+  `).run(
+    state.scopeKey,
+    state.chatId,
+    state.threadId ?? null,
+    JSON.stringify(state.participants),
+    state.currentBotId,
+    state.turn,
+    state.status,
+    state.startPlatformMsgId,
+    state.lastPlatformMsgId ?? null,
+    state.lastRunId ?? null,
+  );
+}
+
+export function deleteBotCollabState(db: Database.Database, scopeKey: string): void {
+  db.prepare("DELETE FROM bot_collab_chains WHERE scope_key = ?").run(scopeKey);
+}
+
+function isCollabStatus(value: string): value is CollabStatus {
+  return value === "running" || value === "finished" || value === "stopped" || value === "blocked";
+}
+
 export function loadPersistedBotBackend(dbPath: string, botName: string): AgentBackendType | undefined {
   if (!existsSync(dbPath)) return undefined;
 
@@ -1447,6 +1568,26 @@ export function getRecentRuntimeEvents(db: Database.Database, query: RuntimeEven
     elapsedMs: row.elapsed_ms ?? undefined,
     createdAt: row.created_at,
   }));
+}
+
+/** 判断一个入站消息是否已经进入过本 Bot 的 Agent 回合。 */
+export function hasRuntimeEventForMessage(
+  db: Database.Database,
+  query: { botId: string; chatId: string; threadId?: string; messageId: number },
+): boolean {
+  const rows = db.prepare(`
+    SELECT message_ids_json
+    FROM runtime_events
+    WHERE bot_id = ? AND chat_id = ? AND (
+      (? IS NULL AND thread_id IS NULL) OR thread_id = ?
+    )
+  `).all(
+    query.botId,
+    query.chatId,
+    query.threadId ?? null,
+    query.threadId ?? null,
+  ) as Array<{ message_ids_json: string }>;
+  return rows.some((row) => parseMessageIds(row.message_ids_json).includes(query.messageId));
 }
 
 export interface RestartFailedRunInfo {
