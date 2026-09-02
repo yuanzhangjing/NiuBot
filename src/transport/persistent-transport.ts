@@ -15,6 +15,7 @@ import type {
   DeliveryOptions,
   InboundHandler,
   InboundTerminalStatus,
+  MessageReadError,
   NormalizedMessage,
   OutboundRequest,
   TransportClient,
@@ -76,6 +77,10 @@ export class PersistentTransport implements TransportClient {
 
   onInbound(handler: InboundHandler): void {
     this.inboundHandler = handler;
+  }
+
+  onMessageReadError(handler: (event: MessageReadError) => void): void {
+    this.adapter.onMessageReadError?.(handler);
   }
 
   async start(): Promise<void> {
@@ -254,13 +259,13 @@ export class PersistentTransport implements TransportClient {
     return this.adapter.getChatMetadata(chatId);
   }
 
-  getMessageContent(msgId: string): Promise<string | undefined> {
-    return this.adapter.getMessageContent(msgId);
+  getMessageContent(msgId: string, context?: { chatPlatformId?: string; threadId?: string }): Promise<string | undefined> {
+    return this.adapter.getMessageContent(msgId, context);
   }
 
-  getMessageThreadId(messageId: string): Promise<string | undefined> {
+  getMessageThreadId(messageId: string, context?: { chatPlatformId?: string }): Promise<string | undefined> {
     if (!this.adapter.getMessageThreadId) return Promise.resolve(undefined);
-    return this.adapter.getMessageThreadId(messageId);
+    return this.adapter.getMessageThreadId(messageId, context);
   }
 
   listChatMessages(

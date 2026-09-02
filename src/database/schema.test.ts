@@ -29,6 +29,7 @@ import {
   getRecentRuntimeEvents,
   markUnfinishedRuntimeRunsFailedByRestart,
   recordRuntimeEvent,
+  claimDailyBotPermissionWarning,
   LATEST_SCHEMA_VERSION,
 } from "./schema.js";
 import { closeTestDatabases, openRawTestDatabase, openTestDatabase } from "../../test-utils/database.js";
@@ -40,6 +41,19 @@ afterEach(() => {
   for (const dir of tempDirs.splice(0)) {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+describe("Bot permission warning schema", () => {
+  test("allows one warning per Bot and permission on each date", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-permission-warning-test-"));
+    tempDirs.push(dir);
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
+
+    expect(claimDailyBotPermissionWarning(db, "feishu:bot-1", "scope", "2026-09-01")).toBe(true);
+    expect(claimDailyBotPermissionWarning(db, "feishu:bot-1", "scope", "2026-09-01")).toBe(false);
+    expect(claimDailyBotPermissionWarning(db, "feishu:bot-1", "scope", "2026-09-02")).toBe(true);
+    expect(claimDailyBotPermissionWarning(db, "feishu:bot-2", "scope", "2026-09-01")).toBe(true);
+  });
 });
 
 describe("loop schema", () => {

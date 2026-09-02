@@ -6,14 +6,18 @@ import { pipeline } from "node:stream/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { NormalizedMessage, MessageHandler, PlatformAdapter, MentionInfo, MessageNode } from "../types.js";
-import type { ChatMetadata, DeliveryOptions } from "../../transport/types.js";
+import type {
+  BotAtPermissionStatus,
+  ChatMetadata,
+  DeliveryOptions,
+  MessageReadError,
+} from "../../transport/types.js";
 import { renderMessageNodes } from "../render.js";
 import { hasFeishuAtTag, toCardAtTags } from "../mentions.js";
 import { classifyFetchedMessage, type ClassifiedMessageIdentity } from "./message-identity.js";
 import { parseFeishuHistoryItemWithCardResolver } from "./history.js";
 import {
   extractInteractiveCardContent,
-  FEISHU_CARD_PLACEHOLDER,
   isDegradedCardText,
   resolveInteractiveCardContent,
 } from "./card-content.js";
@@ -34,6 +38,8 @@ const IMAGE_MAX_BYTES = 10 * 1024 * 1024;
 const FEISHU_MESSAGE_PAGE_SIZE = 50;
 /** 增量同步最多翻页数，避免 has_more 异常时打爆接口。 */
 const FEISHU_MESSAGE_MAX_PAGES = 20;
+const BOT_AT_PERMISSION_SCOPE = "im:message.group_at_msg.include_bot:readonly";
+const BOT_AT_PERMISSION_CACHE_TTL_MS = 5 * 60 * 1000;
 
 function describeDownloadError(code: number | undefined, status: number | string | undefined): string | null {
   switch (code) {
@@ -55,6 +61,8 @@ function isTopicReplyUnsupported(err: unknown): boolean {
   return /230071|不支持以话题形式回复/.test(message);
 }
 
+type MessageReadContext = Pick<MessageReadError, "chatPlatformId" | "threadId">;
+
 export class FeishuAdapter implements PlatformAdapter {
   private client: lark.Client;
   private wsClient: lark.WSClient | null = null;
@@ -70,6 +78,12 @@ export class FeishuAdapter implements PlatformAdapter {
 
   /** App creator open_id（用于 admin 检测） */
   private appCreatorId: string | null = null;
+
+  /** 当前线上版本的 Bot→Bot @ 接收权限；失败时保留 unknown，下一次仍可重试。 */
+  private botAtPermissionStatus: BotAtPermissionStatus | null = null;
+  private botAtPermissionCheckedAt = 0;
+  private botAtPermissionRequest: Promise<BotAtPermissionStatus> | null = null;
+  private messageReadErrorHandler: ((event: MessageReadError) => void) | null = null;
 
   /** 可选：通过 platform ID 查询发送者显示名称（只读，注入自 DB） */
   private nameLookup: ((platformId: string) => string | undefined) | null = null;
@@ -119,6 +133,10 @@ export class FeishuAdapter implements PlatformAdapter {
   /** 注入消息内容缓存查询（DB 查询），用于 merge_forward 等场景 */
   setContentResolver(fn: (platformMsgId: string) => string | undefined): void {
     this.contentResolver = fn;
+  }
+
+  onMessageReadError(handler: (event: MessageReadError) => void): void {
+    this.messageReadErrorHandler = handler;
   }
 
   /** 注入本地用户身份查询，用于决定要不要 GET 消息补标 Bot。 */
@@ -527,11 +545,9 @@ export class FeishuAdapter implements PlatformAdapter {
     }
   }
 
-  async getMessageThreadId(messageId: string): Promise<string | undefined> {
+  async getMessageThreadId(messageId: string, _context?: MessageReadContext): Promise<string | undefined> {
     try {
-      const resp = await this.client.im.message.get({
-        path: { message_id: messageId },
-      });
+      const resp = await this.getMessage({ path: { message_id: messageId } });
       const data = resp?.data as any;
       const item = data?.items?.[0] ?? data?.message;
       if (typeof item?.thread_id === "string" && item.thread_id) return item.thread_id;
@@ -561,25 +577,31 @@ export class FeishuAdapter implements PlatformAdapter {
     let pageToken: string | undefined;
     try {
       for (let page = 0; page < FEISHU_MESSAGE_MAX_PAGES && collected.length < maxTotal; page += 1) {
-        const resp = await this.client.im.message.list({
-          params: {
-            container_id_type: options?.threadId ? "thread" : "chat",
-            container_id: options?.threadId ?? chatId,
-            page_size: FEISHU_MESSAGE_PAGE_SIZE,
-            sort_type: sortType,
-            ...(incremental ? { start_time: String(sinceUnixSec) } : {}),
-            ...(pageToken ? { page_token: pageToken } : {}),
-            // SDK 类型未声明，运行时带上以便 mention 能区分 Bot
-            user_id_type: "open_id",
-          } as {
-            container_id_type: string;
-            container_id: string;
-            start_time?: string;
-            page_token?: string;
-            sort_type?: "ByCreateTimeAsc" | "ByCreateTimeDesc";
-            page_size?: number;
-          },
-        });
+        let resp;
+        try {
+          resp = await this.client.im.message.list({
+            params: {
+              container_id_type: options?.threadId ? "thread" : "chat",
+              container_id: options?.threadId ?? chatId,
+              page_size: FEISHU_MESSAGE_PAGE_SIZE,
+              sort_type: sortType,
+              ...(incremental ? { start_time: String(sinceUnixSec) } : {}),
+              ...(pageToken ? { page_token: pageToken } : {}),
+              // SDK 类型未声明，运行时带上以便 mention 能区分 Bot
+              user_id_type: "open_id",
+            } as {
+              container_id_type: string;
+              container_id: string;
+              start_time?: string;
+              page_token?: string;
+              sort_type?: "ByCreateTimeAsc" | "ByCreateTimeDesc";
+              page_size?: number;
+            },
+          });
+        } catch (err) {
+          this.reportMessageReadError({ chatPlatformId: chatId, threadId: options?.threadId }, err);
+          throw err;
+        }
         const data = resp?.data as { items?: unknown[]; has_more?: boolean; page_token?: string } | undefined;
         const items = Array.isArray(data?.items) ? data.items : [];
         for (const item of items) {
@@ -588,9 +610,24 @@ export class FeishuAdapter implements PlatformAdapter {
             chatId,
             this.botOpenId,
             this.appId,
-            (messageId) => this.fetchOriginalCardContent(messageId),
+            (messageId) => this.fetchOriginalCardContent(messageId, {
+              chatPlatformId: chatId,
+              threadId: options?.threadId,
+            }),
           );
-          if (!msg) continue;
+          if (!msg) {
+            const historyItem = item as any;
+            const msgType = historyItem?.msg_type ?? historyItem?.message_type ?? "text";
+            const hasBody = typeof historyItem?.body?.content === "string"
+              || typeof historyItem?.content === "string";
+            if (historyItem?.message_id && msgType !== "interactive" && !hasBody) {
+              this.reportMessageReadError(
+                { messageId: historyItem.message_id, chatPlatformId: chatId, threadId: options?.threadId },
+                new Error("message body missing"),
+              );
+            }
+            continue;
+          }
           collected.push(msg);
           if (collected.length >= maxTotal) break;
         }
@@ -608,9 +645,9 @@ export class FeishuAdapter implements PlatformAdapter {
     return collected;
   }
 
-  async getMessageContent(msgId: string): Promise<string | undefined> {
+  async getMessageContent(msgId: string, context?: MessageReadContext): Promise<string | undefined> {
     try {
-      const body = await this.fetchMessageBody(msgId, true);
+      const body = await this.fetchMessageBody(msgId, true, context);
       if (!body) return undefined;
 
       try {
@@ -654,6 +691,59 @@ export class FeishuAdapter implements PlatformAdapter {
     } catch (err) {
       log.warn("getAppCreatorId failed", { error: String(err) });
       return undefined;
+    }
+  }
+
+  async getBotAtPermissionStatus(): Promise<BotAtPermissionStatus> {
+    const now = Date.now();
+    if (
+      this.botAtPermissionStatus === "granted"
+      && now - this.botAtPermissionCheckedAt < BOT_AT_PERMISSION_CACHE_TTL_MS
+    ) {
+      return "granted";
+    }
+    if (this.botAtPermissionRequest) return this.botAtPermissionRequest;
+
+    this.botAtPermissionRequest = this.fetchBotAtPermissionStatus();
+    try {
+      const status = await this.botAtPermissionRequest;
+      this.botAtPermissionStatus = status;
+      this.botAtPermissionCheckedAt = Date.now();
+      return status;
+    } finally {
+      this.botAtPermissionRequest = null;
+    }
+  }
+
+  private async fetchBotAtPermissionStatus(): Promise<BotAtPermissionStatus> {
+    try {
+      const appResp = await this.client.application.application.get({
+        path: { app_id: this.appId },
+        params: { lang: "zh_cn" },
+      } as any);
+      const app = (appResp?.data?.app ?? {}) as { online_version_id?: unknown };
+      const versionId = typeof app.online_version_id === "string" ? app.online_version_id.trim() : "";
+      if (!versionId) {
+        log.warn("cannot check Bot @ permission: no online application version");
+        return "unknown";
+      }
+
+      const versionResp = await (this.client.application as any).applicationAppVersion.get({
+        path: { app_id: this.appId, version_id: versionId },
+        params: { lang: "zh_cn" },
+      });
+      const scopes = (versionResp?.data?.app_version as { scopes?: unknown } | undefined)?.scopes;
+      if (!Array.isArray(scopes)) {
+        log.warn("cannot check Bot @ permission: online application version has no scopes");
+        return "unknown";
+      }
+      const granted = scopes.some((entry) => (
+        entry && typeof entry === "object" && (entry as { scope?: unknown }).scope === BOT_AT_PERMISSION_SCOPE
+      ));
+      return granted ? "granted" : "missing";
+    } catch (err) {
+      log.warn("failed to check Bot @ permission", { error: String(err) });
+      return "unknown";
     }
   }
 
@@ -770,7 +860,7 @@ export class FeishuAdapter implements PlatformAdapter {
       if (isBot) senderIsBot = true;
     });
     if (msg.message_id && this.needsIdentityFetch(chatType, senderId, senderIsBot, event.sender?.sender_type, mentions)) {
-      const fetched = await this.fetchMessageIdentity(msg.message_id);
+      const fetched = await this.fetchMessageIdentity(msg.message_id, msg.chat_id, msg.thread_id);
       if (fetched) {
         if (fetched.senderIsApp) senderIsBot = true;
         else this.rememberHuman(senderId);
@@ -782,7 +872,13 @@ export class FeishuAdapter implements PlatformAdapter {
     }
 
     // Parse content based on message type (async: may download resources)
-    let { text, contentType, downloadError } = await this.parseContent(msgType, rawContent, mentions, msg.message_id);
+    let { text, contentType, downloadError } = await this.parseContent(
+      msgType,
+      rawContent,
+      mentions,
+      msg.message_id,
+      { chatPlatformId: msg.chat_id, threadId: msg.thread_id },
+    );
 
     if (downloadError) {
       log.info("file download error, notifying user", { downloadError, messageId: msg.message_id, chatId: msg.chat_id });
@@ -796,7 +892,10 @@ export class FeishuAdapter implements PlatformAdapter {
     // For merge_forward, parse into structured tree + render to text
     let children: MessageNode[] | undefined;
     if (contentType === "merge_forward" && msg.message_id) {
-      const { nodes, rendered } = await this.parseMergeForward(msg.message_id);
+      const { nodes, rendered } = await this.parseMergeForward(
+        msg.message_id,
+        { chatPlatformId: msg.chat_id, threadId: msg.thread_id },
+      );
       text = rendered;
       children = nodes.length > 0 ? nodes : undefined;
     }
@@ -837,6 +936,7 @@ export class FeishuAdapter implements PlatformAdapter {
     rawContent: string,
     mentions: MentionInfo[],
     messageId?: string,
+    context?: MessageReadContext,
   ): Promise<{ text: string; contentType: NormalizedMessage["contentType"]; downloadError?: string }> {
     // merge_forward: content 是纯文本占位符（非 JSON），须在 JSON.parse 前处理
     if (msgType === "merge_forward") {
@@ -851,7 +951,7 @@ export class FeishuAdapter implements PlatformAdapter {
         const text = await resolveInteractiveCardContent(
           rawContent,
           mentions,
-          messageId ? () => this.fetchOriginalCardContent(messageId) : undefined,
+          messageId ? () => this.fetchOriginalCardContent(messageId, context) : undefined,
         );
         return { text, contentType: "interactive" };
       }
@@ -879,7 +979,7 @@ export class FeishuAdapter implements PlatformAdapter {
         const text = await resolveInteractiveCardContent(
           rawContent,
           mentions,
-          messageId ? () => this.fetchOriginalCardContent(messageId) : undefined,
+          messageId ? () => this.fetchOriginalCardContent(messageId, context) : undefined,
         );
         return { text, contentType: "interactive" };
       }
@@ -1031,24 +1131,69 @@ export class FeishuAdapter implements PlatformAdapter {
   }
 
   /** 取得卡片原始 body；失败时保留入站占位，后续历史同步还可以重试。 */
-  private async fetchOriginalCardContent(messageId: string): Promise<string | undefined> {
+  private async fetchOriginalCardContent(
+    messageId: string,
+    context?: MessageReadContext,
+  ): Promise<string | undefined> {
     try {
-      return await this.fetchMessageBody(messageId, true);
+      return await this.fetchMessageBody(messageId, true, context);
     } catch (err) {
       log.warn("fetch original card failed", { messageId, error: String(err) });
       return undefined;
     }
   }
 
-  private async fetchMessageBody(messageId: string, originalCardContent: boolean): Promise<string | undefined> {
+  private async fetchMessageBody(
+    messageId: string,
+    originalCardContent: boolean,
+    context?: MessageReadContext,
+  ): Promise<string | undefined> {
     const request: any = { path: { message_id: messageId } };
     if (originalCardContent) {
       request.params = { card_msg_content_type: "user_card_content" };
     }
-    const resp = await this.client.im.message.get(request);
+    const resp = await this.getMessageForContent(request, messageId, context);
     const msg = (resp?.data as any)?.items?.[0] ?? (resp?.data as any);
     const body = msg?.body?.content;
-    return typeof body === "string" ? body : undefined;
+    if (typeof body !== "string" || !body.trim()) {
+      this.reportMessageReadError({ messageId, ...context }, new Error("message body missing"));
+      return undefined;
+    }
+    if (isDegradedCardText(body)) {
+      this.reportMessageReadError({ messageId, ...context }, new Error("message body degraded"));
+      return undefined;
+    }
+    return body;
+  }
+
+  private async getMessage(
+    request: any,
+  ): Promise<any> {
+    return this.client.im.message.get(request);
+  }
+
+  private async getMessageForContent(
+    request: any,
+    messageId: string,
+    context?: MessageReadContext,
+  ): Promise<any> {
+    try {
+      return await this.getMessage(request);
+    } catch (error) {
+      this.reportMessageReadError({ messageId, ...context }, error);
+      throw error;
+    }
+  }
+
+  private reportMessageReadError(
+    context: Omit<MessageReadError, "error">,
+    error: unknown,
+  ): void {
+    try {
+      this.messageReadErrorHandler?.({ ...context, error });
+    } catch (handlerError) {
+      log.warn("message read error handler failed", { error: String(handlerError) });
+    }
   }
 
   private rememberHuman(platformId: string): void {
@@ -1095,13 +1240,19 @@ export class FeishuAdapter implements PlatformAdapter {
     });
   }
 
-  private async fetchMessageIdentity(messageId: string): Promise<ClassifiedMessageIdentity | null> {
+  private async fetchMessageIdentity(
+    messageId: string,
+    chatPlatformId?: string,
+    threadId?: string,
+  ): Promise<ClassifiedMessageIdentity | null> {
     try {
       // 必须带 user_id_type。缺省时 Bot mention 会收成 open_id，带上后才是 app_id。
-      const resp = await this.client.im.message.get({
-        path: { message_id: messageId },
-        params: { user_id_type: "open_id" },
-      });
+      const resp = await this.getMessage(
+        {
+          path: { message_id: messageId },
+          params: { user_id_type: "open_id" },
+        },
+      );
       const item = (resp?.data as any)?.items?.[0] ?? (resp?.data as any);
       if (!item) return null;
       const classified = classifyFetchedMessage({
@@ -1122,9 +1273,12 @@ export class FeishuAdapter implements PlatformAdapter {
   }
 
   /** Fetch and render merge_forward message content via API (recursive) */
-  private async parseMergeForward(messageId: string): Promise<{ nodes: MessageNode[]; rendered: string }> {
+  private async parseMergeForward(
+    messageId: string,
+    context?: MessageReadContext,
+  ): Promise<{ nodes: MessageNode[]; rendered: string }> {
     const visited = new Set<string>();
-    const nodes = await this.parseForwardNodes(messageId, visited, 0);
+    const nodes = await this.parseForwardNodes(messageId, visited, 0, context);
     if (nodes.length === 0) return { nodes, rendered: "[merge_forward]" };
     return { nodes, rendered: "【合并转发消息】\n" + renderMessageNodes(nodes, 0) };
   }
@@ -1134,17 +1288,23 @@ export class FeishuAdapter implements PlatformAdapter {
     messageId: string,
     visited: Set<string>,
     depth: number,
+    context?: MessageReadContext,
   ): Promise<MessageNode[]> {
     if (depth > 5 || visited.has(messageId)) return [];
     visited.add(messageId);
 
     let items: any[];
     try {
-      const resp = await this.client.im.message.get({
-        path: { message_id: messageId },
-      });
+      const resp = await this.getMessageForContent(
+        { path: { message_id: messageId } },
+        messageId,
+        context,
+      );
       items = (resp?.data as any)?.items ?? [];
-      if (!Array.isArray(items) || items.length === 0) return [];
+      if (!Array.isArray(items) || items.length === 0) {
+        this.reportMessageReadError({ messageId, ...context }, new Error("message body missing"));
+        return [];
+      }
     } catch (err) {
       log.warn("parseForwardNodes fetch failed", { messageId, depth, error: String(err) });
       return [];
@@ -1163,7 +1323,7 @@ export class FeishuAdapter implements PlatformAdapter {
 
       // Nested merge_forward: recurse
       if (msgType === "merge_forward") {
-        const children = await this.parseForwardNodes(childId, visited, depth + 1);
+        const children = await this.parseForwardNodes(childId, visited, depth + 1, context);
         if (children.length > 0) {
           const node: MessageNode = { sender: senderName, contentType: "forward", children };
           nodes.push(node);
@@ -1172,7 +1332,7 @@ export class FeishuAdapter implements PlatformAdapter {
       }
 
       // Leaf message: extract content
-      const text = await this.extractChildMessageText(msgType, item);
+      const text = await this.extractChildMessageText(msgType, item, context);
       const content = text || `[${msgType || "unknown"}]`;
       const contentType = msgType || "unknown";
 
@@ -1238,7 +1398,11 @@ export class FeishuAdapter implements PlatformAdapter {
   }
 
   /** Fetch child message content: DB cache → API item body → type fallback. */
-  private async extractChildMessageText(msgType: string, item: any): Promise<string> {
+  private async extractChildMessageText(
+    msgType: string,
+    item: any,
+    context?: MessageReadContext,
+  ): Promise<string> {
     const childId: string = item.message_id ?? "";
 
     // DB 优先：查已缓存的消息内容
@@ -1252,13 +1416,25 @@ export class FeishuAdapter implements PlatformAdapter {
     // Fallback: 从 API 响应体解析
     const bodyContent = item.body?.content;
     const raw = typeof bodyContent === "string" ? bodyContent : item.content;
-    if (!raw) return cachedContent ?? (msgType === "interactive" ? FEISHU_CARD_PLACEHOLDER : "");
+    if (!raw) {
+      if (msgType === "interactive") {
+        return resolveInteractiveCardContent(
+          "",
+          [],
+          childId ? () => this.fetchOriginalCardContent(childId, context) : undefined,
+        );
+      }
+      if (!cachedContent && childId) {
+        this.reportMessageReadError({ messageId: childId, ...context }, new Error("message body missing"));
+      }
+      return cachedContent ?? "";
+    }
 
     if (msgType === "interactive") {
       return resolveInteractiveCardContent(
         raw,
         [],
-        childId ? () => this.fetchOriginalCardContent(childId) : undefined,
+        childId ? () => this.fetchOriginalCardContent(childId, context) : undefined,
       );
     }
 

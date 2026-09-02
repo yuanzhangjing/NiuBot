@@ -27,7 +27,11 @@ import {
 import { closeTestDatabases, openTestDatabase } from "../../test-utils/database.js";
 import type { NormalizedMessage, PlatformAdapter } from "../im/types.js";
 import { DeliveryUncertainError } from "../transport/errors.js";
-import type { DeliveryOptions } from "../transport/types.js";
+import type {
+  BotAtPermissionStatus,
+  DeliveryOptions,
+  MessageReadError,
+} from "../transport/types.js";
 import { COMPACT_RECOVERY_REMINDER } from "../memory/inject.js";
 import { loadConfig } from "../config.js";
 import { SYSTEM_RULES } from "../system-rules.js";
@@ -239,13 +243,14 @@ function createImStub(): PlatformAdapter {
   };
 }
 
-function createRecordingImStub() {
+function createRecordingImStub(options: { botAtPermissionStatus?: BotAtPermissionStatus } = {}) {
   const sentTexts: string[] = [];
   const sentReplies: Array<{ text: string; replyToMsgId: string }> = [];
   const sentCards: Array<{ header: string; content: string; footer?: string; replyToMsgId?: string }> = [];
   const reactions: Array<{ chatId: string; msgId: string; emoji: string }> = [];
   const removedReactions: Array<{ chatId: string; msgId: string; emoji: string }> = [];
   let messageHandler: ((msg: NormalizedMessage) => void) | undefined;
+  let messageReadErrorHandler: ((event: MessageReadError) => void) | undefined;
   const nextId = uniqueSendId("pmid");
 
   const im: PlatformAdapter = {
@@ -272,6 +277,8 @@ function createRecordingImStub() {
     async getChatName() { return "Admin"; },
     async getMessageContent() { return undefined; },
     async getAppCreatorId() { return undefined; },
+    async getBotAtPermissionStatus() { return options.botAtPermissionStatus ?? "granted"; },
+    onMessageReadError(handler) { messageReadErrorHandler = handler; },
   };
 
   const dispatchMessage = (msg: NormalizedMessage) => {
@@ -279,7 +286,21 @@ function createRecordingImStub() {
     messageHandler(msg);
   };
 
-  return { im, sentTexts, sentReplies, sentCards, reactions, removedReactions, dispatchMessage };
+  const notifyMessageReadError = (event: MessageReadError) => {
+    if (!messageReadErrorHandler) throw new Error("message read error handler not registered");
+    messageReadErrorHandler(event);
+  };
+
+  return {
+    im,
+    sentTexts,
+    sentReplies,
+    sentCards,
+    reactions,
+    removedReactions,
+    dispatchMessage,
+    notifyMessageReadError,
+  };
 }
 
 function createImStubWithSendFailures(options: {
@@ -7929,6 +7950,154 @@ describe("nbt send prefers the active-run reply target", () => {
     expect(sentCards[1]!.content).toContain('<at user_id="ou-cow">CowBot</at>');
   });
 
+  test("sends a separate warning when the online Bot @ permission is missing", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-collab-permission-missing-"));
+    tempDirs.push(dir);
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
+    const agent = new CollabSequenceAgent([
+      { text: "首轮报告", collabDecision: { action: "finish" } },
+      { text: "第二次报告", collabDecision: { action: "finish" } },
+    ]);
+    const { im, sentTexts, sentCards } = createRecordingImStub({ botAtPermissionStatus: "missing" });
+    const pipeline = new Pipeline(db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");
+    await pipeline.start();
+
+    (pipeline as any).handleMessage(createMessage({
+      chatPlatformId: "group-open-id",
+      chatType: "group",
+      contentText: "@NiuBot @CowBot 请协作",
+      platformMsgId: "collab-permission-missing",
+      botMentioned: true,
+      mentions: [
+        { platformUserId: "bot-open-id", name: "NiuBot", isBot: true, isApp: true, key: "self" },
+        { platformUserId: "ou-cow", name: "CowBot", isBot: false, isApp: true, key: "cow" },
+      ],
+    }));
+
+    await vi.waitFor(() => expect(sentTexts).toHaveLength(1));
+    expect(sentTexts[0]).toContain("未开启飞书权限 im:message.group_at_msg.include_bot:readonly");
+    await vi.waitFor(() => expect(sentCards).toHaveLength(1));
+    pipeline.stop();
+
+    const restartedPipeline = new Pipeline(db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");
+    await restartedPipeline.start();
+    (restartedPipeline as any).handleMessage(createMessage({
+      chatPlatformId: "group-open-id",
+      chatType: "group",
+      contentText: "@NiuBot @CowBot 再次协作",
+      platformMsgId: "collab-permission-missing-next-message",
+      botMentioned: true,
+      mentions: [
+        { platformUserId: "bot-open-id", name: "NiuBot", isBot: true, isApp: true, key: "self" },
+        { platformUserId: "ou-cow", name: "CowBot", isBot: false, isApp: true, key: "cow" },
+      ],
+    }));
+    await vi.waitFor(() => expect(sentCards).toHaveLength(2));
+    expect(sentTexts).toHaveLength(1);
+    expect(agent.sendMessageCalls).toHaveLength(2);
+    restartedPipeline.stop();
+  });
+
+  test("sends a separate warning when the online Bot @ permission cannot be confirmed", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-collab-permission-unknown-"));
+    tempDirs.push(dir);
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
+    const agent = new CollabSequenceAgent([
+      { text: "首轮报告", collabDecision: { action: "finish" } },
+    ]);
+    const { im, sentTexts, sentCards } = createRecordingImStub({ botAtPermissionStatus: "unknown" });
+    const pipeline = new Pipeline(db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");
+    await pipeline.start();
+
+    (pipeline as any).handleMessage(createMessage({
+      chatPlatformId: "group-open-id",
+      chatType: "group",
+      contentText: "@NiuBot @CowBot 请协作",
+      platformMsgId: "collab-permission-unknown",
+      botMentioned: true,
+      mentions: [
+        { platformUserId: "bot-open-id", name: "NiuBot", isBot: true, isApp: true, key: "self" },
+        { platformUserId: "ou-cow", name: "CowBot", isBot: false, isApp: true, key: "cow" },
+      ],
+    }));
+
+    await vi.waitFor(() => expect(sentTexts).toHaveLength(1));
+    expect(sentTexts[0]).toContain("当前无法确认此 Bot（NiuBot）是否已开启飞书权限 im:message.group_at_msg.include_bot:readonly");
+    await vi.waitFor(() => expect(sentCards).toHaveLength(1));
+    expect(agent.sendMessageCalls).toHaveLength(1);
+    pipeline.stop();
+  });
+
+  test("uses an error-specific warning for each message read failure", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-message-read-permission-"));
+    tempDirs.push(dir);
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
+    const { im, sentTexts, notifyMessageReadError } = createRecordingImStub();
+    const pipeline = new Pipeline(db, im, new RecordingAgent(), createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");
+    await pipeline.start();
+
+    notifyMessageReadError({
+      messageId: "read-permission-error-1",
+      chatPlatformId: "group-open-id",
+      error: { code: "permission_denied" },
+    });
+    await vi.waitFor(() => expect(sentTexts).toHaveLength(1));
+    expect(sentTexts[0]).toContain("im:message:readonly");
+
+    notifyMessageReadError({
+      messageId: "read-rate-limit-error",
+      chatPlatformId: "group-open-id",
+      error: { status: 429, message: "Too Many Requests" },
+    });
+    await vi.waitFor(() => expect(sentTexts).toHaveLength(2));
+    expect(sentTexts[1]).toContain("暂时限流");
+
+    notifyMessageReadError({
+      messageId: "read-not-found-error",
+      chatPlatformId: "group-open-id",
+      error: { status: 404, message: "message not found" },
+    });
+    await vi.waitFor(() => expect(sentTexts).toHaveLength(3));
+    expect(sentTexts[2]).toContain("消息不存在");
+
+    notifyMessageReadError({
+      messageId: "read-empty-error",
+      chatPlatformId: "group-open-id",
+      error: new Error("message body missing"),
+    });
+    await vi.waitFor(() => expect(sentTexts).toHaveLength(4));
+    expect(sentTexts[3]).toContain("消息原文为空");
+
+    notifyMessageReadError({
+      messageId: "read-degraded-error",
+      chatPlatformId: "group-open-id",
+      error: new Error("message body degraded"),
+    });
+    await vi.waitFor(() => expect(sentTexts).toHaveLength(5));
+    expect(sentTexts[4]).toContain("不可读的降级卡片内容");
+    pipeline.stop();
+  });
+
+  test("does not fall back outside a topic when a message read warning reply fails", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-message-read-topic-"));
+    tempDirs.push(dir);
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
+    const { im, sentTexts, notifyMessageReadError } = createRecordingImStub();
+    im.sendReply = async () => { throw new Error("reply unavailable"); };
+    const pipeline = new Pipeline(db, im, new RecordingAgent(), createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");
+    await pipeline.start();
+
+    notifyMessageReadError({
+      messageId: "topic-read-error",
+      chatPlatformId: "group-open-id",
+      threadId: "thread-1",
+      error: { code: "permission_denied" },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(sentTexts).toEqual([]);
+    pipeline.stop();
+  });
+
   test("runs one structured handoff turn and lets the Engine add the real at", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-collab-loop-start-"));
     tempDirs.push(dir);
@@ -7939,7 +8108,7 @@ describe("nbt send prefers the active-run reply target", () => {
         collabDecision: { action: "handoff", to: "ou-cow" },
       },
     ]);
-    const { im, sentCards } = createRecordingImStub();
+    const { im, sentCards, sentTexts } = createRecordingImStub();
     const pipeline = new Pipeline(db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");
     await pipeline.start();
 
@@ -7972,6 +8141,7 @@ describe("nbt send prefers the active-run reply target", () => {
     );
     expect(sentCards[0]!.content).not.toContain("bot-collab-loop");
     expect(sentCards[0]!.content).not.toContain("@CowBot");
+    expect(sentTexts).toHaveLength(0);
   });
 
   test("keeps a legacy Bot ID consistent through a collaboration turn", async () => {

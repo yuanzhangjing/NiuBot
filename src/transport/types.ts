@@ -74,6 +74,15 @@ export type ChatMetadata = {
   fetchedAt?: number;
 };
 
+export type BotAtPermissionStatus = "granted" | "missing" | "unknown";
+
+export type MessageReadError = {
+  messageId?: string;
+  chatPlatformId?: string;
+  threadId?: string;
+  error: unknown;
+};
+
 export type InboundTerminalStatus = "completed" | "failed" | "stopped" | "discarded";
 
 export type InboundDelivery = {
@@ -112,9 +121,13 @@ export interface TransportClient {
   getBotName(): Promise<string | undefined>;
   getChatName(chatId: string): Promise<string | undefined>;
   getChatMetadata?(chatId: string): Promise<ChatMetadata | undefined>;
-  getMessageThreadId?(messageId: string): Promise<string | undefined>;
-  getMessageContent(msgId: string): Promise<string | undefined>;
+  getMessageThreadId?(messageId: string, context?: { chatPlatformId?: string }): Promise<string | undefined>;
+  getMessageContent(msgId: string, context?: { chatPlatformId?: string; threadId?: string }): Promise<string | undefined>;
   getAppCreatorId(): Promise<string | undefined>;
+  /** 查询当前 Bot 的线上版本是否能接收其他 Bot 的群聊 @。 */
+  getBotAtPermissionStatus?(): Promise<BotAtPermissionStatus>;
+  /** 消息原文读取失败通知；没有事件订阅能力的平台可以不实现。 */
+  onMessageReadError?(handler: (event: MessageReadError) => void): void;
   /**
    * 拉群会话历史。没有该能力的平台可以不实现。
    * sinceUnixSec：只取该秒之后（含）的消息，用于增量缓存；飞书实现会 ASC 翻页。

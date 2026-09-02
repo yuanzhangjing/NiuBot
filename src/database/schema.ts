@@ -965,6 +965,20 @@ const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 40,
+    description: "Persist daily Bot @ permission warnings",
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS bot_permission_warnings (
+          bot_name     TEXT NOT NULL,
+          permission   TEXT NOT NULL,
+          warned_date  TEXT NOT NULL,
+          PRIMARY KEY (bot_name, permission)
+        );
+      `);
+    },
+  },
 ];
 
 const transportMigrations: Migration[] = [
@@ -1121,6 +1135,23 @@ export function initDatabase(dbPath: string): Database.Database {
 
 export function getBotRuntimeBackend(db: Database.Database, botName: string): AgentBackendType | undefined {
   return getBotRuntimeState(db, botName)?.backendType;
+}
+
+/** 原子地领取某个 Bot 某项权限在某个自然日的一次提示额度。 */
+export function claimDailyBotPermissionWarning(
+  db: Database.Database,
+  botName: string,
+  permission: string,
+  warnedDate: string,
+): boolean {
+  const result = db.prepare(`
+    INSERT INTO bot_permission_warnings (bot_name, permission, warned_date)
+    VALUES (?, ?, ?)
+    ON CONFLICT(bot_name, permission) DO UPDATE SET
+      warned_date = excluded.warned_date
+    WHERE bot_permission_warnings.warned_date <> excluded.warned_date
+  `).run(botName, permission, warnedDate);
+  return result.changes > 0;
 }
 
 export interface BotRuntimeState {

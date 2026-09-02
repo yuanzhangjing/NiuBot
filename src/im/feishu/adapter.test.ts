@@ -31,6 +31,185 @@ describe("FeishuAdapter", () => {
     releaseCreator?.({ data: { app: { owner: { open_id: "ou-owner" } } } });
   });
 
+  test("checks the Bot @ permission on the online application version", async () => {
+    const adapter = new FeishuAdapter("app-id", "app-secret");
+    const calls: string[] = [];
+    (adapter as any).client = {
+      application: {
+        application: {
+          get: async () => ({ data: { app: { online_version_id: "version-1" } } }),
+        },
+        applicationAppVersion: {
+          get: async ({ path }: any) => {
+            calls.push(path.version_id);
+            return {
+              data: {
+                app_version: {
+                  scopes: [
+                    { scope: "im:message.group_at_msg.include_bot:readonly" },
+                  ],
+                },
+              },
+            };
+          },
+        },
+      },
+    };
+
+    await expect(adapter.getBotAtPermissionStatus()).resolves.toBe("granted");
+    await expect(adapter.getBotAtPermissionStatus()).resolves.toBe("granted");
+    expect(calls).toEqual(["version-1"]);
+  });
+
+  test("reports a missing Bot @ permission from the online application version", async () => {
+    const adapter = new FeishuAdapter("app-id", "app-secret");
+    (adapter as any).client = {
+      application: {
+        application: {
+          get: async () => ({ data: { app: { online_version_id: "version-1" } } }),
+        },
+        applicationAppVersion: {
+          get: async () => ({ data: { app_version: { scopes: [] } } }),
+        },
+      },
+    };
+
+    await expect(adapter.getBotAtPermissionStatus()).resolves.toBe("missing");
+  });
+
+  test("reports unknown when the online application permission query fails", async () => {
+    const adapter = new FeishuAdapter("app-id", "app-secret");
+    (adapter as any).client = {
+      application: {
+        application: {
+          get: async () => { throw new Error("permission denied"); },
+        },
+      },
+    };
+
+    await expect(adapter.getBotAtPermissionStatus()).resolves.toBe("unknown");
+  });
+
+  test("reports message read errors from quote fetches", async () => {
+    const adapter = new FeishuAdapter("app-id", "app-secret");
+    const errors: Array<{ messageId?: string; chatPlatformId?: string }> = [];
+    adapter.onMessageReadError((event) => {
+      errors.push({ messageId: event.messageId, chatPlatformId: event.chatPlatformId });
+    });
+    (adapter as any).client = {
+      im: {
+        message: {
+          get: async () => { throw { code: 99991400, message: "Lack of necessary permissions" }; },
+        },
+      },
+    };
+
+    await expect(adapter.getMessageContent("message-1", { chatPlatformId: "chat-1" })).resolves.toBeUndefined();
+    expect(errors).toHaveLength(1);
+  });
+
+  test("reports message read errors when the message body is missing", async () => {
+    const adapter = new FeishuAdapter("app-id", "app-secret");
+    const errors: Array<{ messageId?: string; chatPlatformId?: string }> = [];
+    adapter.onMessageReadError((event) => {
+      errors.push({ messageId: event.messageId, chatPlatformId: event.chatPlatformId });
+    });
+    (adapter as any).client = {
+      im: {
+        message: {
+          get: async () => ({ data: { items: [] } }),
+        },
+      },
+    };
+
+    await expect(adapter.getMessageContent("message-1", { chatPlatformId: "chat-1" })).resolves.toBeUndefined();
+    expect(errors).toEqual([{ messageId: "message-1", chatPlatformId: "chat-1" }]);
+  });
+
+  test("does not report message read errors from thread probes", async () => {
+    const adapter = new FeishuAdapter("app-id", "app-secret");
+    const errors: Array<{ messageId?: string; chatPlatformId?: string }> = [];
+    adapter.onMessageReadError((event) => {
+      errors.push({ messageId: event.messageId, chatPlatformId: event.chatPlatformId });
+    });
+    (adapter as any).client = {
+      im: {
+        message: {
+          get: async () => { throw { code: 99991400, message: "Lack of necessary permissions" }; },
+        },
+      },
+    };
+
+    await expect(adapter.getMessageThreadId("message-1", { chatPlatformId: "chat-1" })).resolves.toBeUndefined();
+    expect(errors).toEqual([]);
+  });
+
+  test("reports degraded card bodies as message read errors", async () => {
+    const adapter = new FeishuAdapter("app-id", "app-secret");
+    const errors: Array<{ messageId?: string; chatPlatformId?: string }> = [];
+    adapter.onMessageReadError((event) => {
+      errors.push({ messageId: event.messageId, chatPlatformId: event.chatPlatformId });
+    });
+    (adapter as any).client = {
+      im: {
+        message: {
+          get: async () => ({ data: { items: [{ body: { content: "[卡片消息]" } }] } }),
+        },
+      },
+    };
+
+    await expect(adapter.getMessageContent("message-1", { chatPlatformId: "chat-1" })).resolves.toBeUndefined();
+    expect(errors).toEqual([{ messageId: "message-1", chatPlatformId: "chat-1" }]);
+  });
+
+  test("reports empty merge-forward responses as message read errors", async () => {
+    const adapter = new FeishuAdapter("app-id", "app-secret");
+    const errors: Array<{ messageId?: string; chatPlatformId?: string }> = [];
+    adapter.onMessageReadError((event) => {
+      errors.push({ messageId: event.messageId, chatPlatformId: event.chatPlatformId });
+    });
+    (adapter as any).client = {
+      im: {
+        message: {
+          get: async () => ({ data: { items: [] } }),
+        },
+      },
+    };
+
+    await expect((adapter as any).parseMergeForward("message-1", { chatPlatformId: "chat-1" }))
+      .resolves.toMatchObject({ rendered: "[merge_forward]" });
+    expect(errors).toEqual([{ messageId: "message-1", chatPlatformId: "chat-1" }]);
+  });
+
+  test("reports message read errors from card resolution", async () => {
+    const adapter = new FeishuAdapter("app-id", "app-secret");
+    const errors: Array<{ messageId?: string; chatPlatformId?: string }> = [];
+    adapter.onMessageReadError((event) => {
+      errors.push({ messageId: event.messageId, chatPlatformId: event.chatPlatformId });
+    });
+    (adapter as any).client = {
+      im: {
+        message: {
+          get: async () => { throw { code: 99991400, message: "Lack of necessary permissions" }; },
+        },
+      },
+    };
+
+    const message = await (adapter as any).normalize({
+      message: {
+        chat_id: "chat-1",
+        chat_type: "group",
+        message_id: "message-1",
+        message_type: "interactive",
+        content: "[卡片消息]",
+      },
+      sender: { sender_id: { open_id: "ou-user" }, sender_type: "user" },
+    });
+
+    expect(message.contentText).toBe("[卡片消息]");
+    expect(errors).toEqual([{ messageId: "message-1", chatPlatformId: "chat-1" }]);
+  });
+
   test("sends text over 10 KB as a markdown file", async () => {
     const adapter = new FeishuAdapter("app-id", "app-secret");
     const sentMessages: Array<{ msgType: string; content: string }> = [];
@@ -371,6 +550,48 @@ describe("FeishuAdapter", () => {
       },
     };
     await expect(adapter.listChatMessages("oc-group")).rejects.toThrow("429");
+  });
+
+  test("reports message read errors from history sync", async () => {
+    const adapter = new FeishuAdapter("app-id", "app-secret");
+    const errors: Array<{ chatPlatformId?: string }> = [];
+    adapter.onMessageReadError((event) => {
+      errors.push({ chatPlatformId: event.chatPlatformId });
+    });
+    (adapter as any).client = {
+      im: {
+        message: {
+          list: async () => {
+            throw { code: 99991400, message: "Lack of necessary permissions" };
+          },
+        },
+      },
+    };
+
+    await expect(adapter.listChatMessages("oc-group")).rejects.toMatchObject({ code: 99991400 });
+    expect(errors).toEqual([{ chatPlatformId: "oc-group" }]);
+  });
+
+  test("reports missing non-card bodies from history sync", async () => {
+    const adapter = new FeishuAdapter("app-id", "app-secret");
+    const errors: Array<{ messageId?: string; chatPlatformId?: string }> = [];
+    adapter.onMessageReadError((event) => {
+      errors.push({ messageId: event.messageId, chatPlatformId: event.chatPlatformId });
+    });
+    (adapter as any).client = {
+      im: {
+        message: {
+          list: async () => ({
+            data: {
+              items: [{ message_id: "message-1", msg_type: "text", sender: { id: "ou-user" } }],
+            },
+          }),
+        },
+      },
+    };
+
+    await expect(adapter.listChatMessages("oc-group")).resolves.toEqual([]);
+    expect(errors).toEqual([{ messageId: "message-1", chatPlatformId: "oc-group" }]);
   });
 
   test("sends image files as image messages and keeps other files as file messages", async () => {

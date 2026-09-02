@@ -4,7 +4,13 @@ import path from "node:path";
 import type Database from "better-sqlite3";
 import { renderForward, renderMsg, renderQuotedText } from "../im/render.js";
 import { wrapInjectedUserMessage } from "../session-archive/native-transcript.js";
-import type { InboundDelivery, NormalizedMessage, TransportClient } from "../transport/types.js";
+import type {
+  BotAtPermissionStatus,
+  InboundDelivery,
+  MessageReadError,
+  NormalizedMessage,
+  TransportClient,
+} from "../transport/types.js";
 import { isUnresolvedInteractiveContent, mentionMarksApp } from "../transport/types.js";
 import { isDeliveryUncertainError } from "../transport/errors.js";
 import { ERROR_DISPLAY_MAX_LEN } from "../agent/types.js";
@@ -46,6 +52,7 @@ import {
   markUnfinishedRuntimeRunsFailedByRestart,
   recordRuntimeEvent,
   getBotCollabState, setBotCollabState,
+  claimDailyBotPermissionWarning,
 } from "../database/schema.js";
 import {
   AUTO_UPDATE_DEFAULTS,
@@ -73,6 +80,7 @@ import {
   resolveSystemTimeZone,
   timezoneCommandIsResolved,
   TZ,
+  localToday,
   userDateTimeToUtcSql,
   utcDateTimeForSql,
 } from "../tz.js";
@@ -182,6 +190,52 @@ const BUILTIN_COMMANDS = new Set([
   "/admin", "/help", "/stop", "/clear", "/flush", "/task", "/status", "/history", "/awake",
   "/timezone", "/tz",
 ]);
+
+function formatMessageReadError(error: unknown): string {
+  const raw = error as {
+    code?: unknown;
+    status?: unknown;
+    message?: unknown;
+    response?: { status?: unknown; data?: { code?: unknown; msg?: unknown; message?: unknown } };
+    data?: { code?: unknown; msg?: unknown; message?: unknown };
+  } | null;
+  const code = raw?.code ?? raw?.response?.data?.code ?? raw?.data?.code;
+  const status = Number(raw?.status ?? raw?.response?.status);
+  const detail = [
+    raw?.message,
+    raw?.response?.data?.msg,
+    raw?.response?.data?.message,
+    raw?.data?.msg,
+    raw?.data?.message,
+  ].filter((value): value is string => typeof value === "string").join(" ").toLowerCase();
+  const codeText = String(code ?? "");
+
+  if (
+    codeText === "permission_denied"
+    || codeText === "99991400"
+    || codeText === "99991401"
+    || codeText === "99991663"
+    || status === 401
+    || status === 403
+    || /im:message:readonly|permission denied|lack of necessary permissions|access denied|forbidden|not authorized|权限/.test(detail)
+  ) {
+    return "当前无法读取这条飞书消息的原文：应用缺少飞书权限 im:message:readonly。请开启权限并发布最新版本。";
+  }
+  if (/message body degraded|消息原文降级/.test(detail)) {
+    return "当前无法读取这条飞书消息的原文：飞书接口返回了不可读的降级卡片内容，请稍后重试。";
+  }
+  if (/message body missing|消息原文为空/.test(detail)) {
+    return "当前无法读取这条飞书消息的原文：飞书接口返回的消息原文为空，请稍后重试。";
+  }
+  if (status === 429 || /rate limit|too many requests|限流|请求过于频繁/.test(detail)) {
+    return "当前无法读取这条飞书消息的原文：飞书接口暂时限流，请稍后重试。";
+  }
+  if (status === 404 || /not found|message.*not exist|消息.*不存在|消息.*删除|找不到消息/.test(detail)) {
+    return "当前无法读取这条飞书消息的原文：消息不存在、已删除，或已无法访问。";
+  }
+  return "当前无法读取这条飞书消息的原文：飞书接口暂时不可用，请稍后重试。";
+}
+
 const HYBRID_SCHEDULE_COMMANDS = new Set(["/loop", "/cron"]);
 const SCHEDULE_BUILTIN_SUBCOMMANDS = new Set([
   "list", "ls", "help", "--help", "cancel", "stop", "del", "delete", "rm",
@@ -556,6 +610,11 @@ export class Pipeline {
     this.queue = new ChatManager(bufferMs, this.runtimeState);
     this.responseSender = new ResponseSender(transport);
     this.runManager = new RunManager(this.runtimeState, this.responseSender);
+    this.transport.onMessageReadError?.((event) => {
+      void this.warnAboutMessageReadError(event).catch((error) => {
+        this.log.warn("message read warning handler failed", { error: String(error) });
+      });
+    });
 
     // 初始 backend 的模型配置入缓存，确保切走再切回来能恢复
     this.backendModelCache.set(backendType, {
@@ -1391,6 +1450,122 @@ export class Pipeline {
     return getBotCollabState(this.db, scopeKey)?.status === "running";
   }
 
+  /** 多 Bot 起点先确认当前 Bot 的线上接收权限，提示独立发送，不混入协作报告。 */
+  private async warnAboutCollabBotAtPermission(
+    msg: NormalizedMessage,
+    chatId: string,
+    scope: SessionScope,
+  ): Promise<void> {
+    const checkPermission = this.transport.getBotAtPermissionStatus;
+    if (!checkPermission) return;
+
+    let status: BotAtPermissionStatus;
+    try {
+      status = await checkPermission.call(this.transport);
+    } catch (error) {
+      status = "unknown";
+      this.log.warn("Bot @ permission check rejected", {
+        chatId: msg.chatPlatformId,
+        msgId: msg.platformMsgId,
+        error: String(error),
+      });
+    }
+    if (status === "granted") return;
+
+    const botKey = `${this.botIdentity.platform}:${this.botIdentity.platformBotId ?? this.botIdentity.name}`;
+    if (!claimDailyBotPermissionWarning(
+      this.db,
+      botKey,
+      "im:message.group_at_msg.include_bot:readonly",
+      localToday(),
+    )) return;
+
+    const botName = this.botIdentity.name?.trim() || "当前 Bot";
+    const text = status === "missing"
+      ? `当前 Bot（${botName}）未开启飞书权限 im:message.group_at_msg.include_bot:readonly。请开启该权限并发布最新版本，否则可能收不到其他 Bot 的 @ 消息。`
+      : `当前无法确认此 Bot（${botName}）是否已开启飞书权限 im:message.group_at_msg.include_bot:readonly。请检查应用权限，并确认已发布最新版本，否则可能收不到其他 Bot 的 @ 消息。`;
+    try {
+      const platformMsgId = await this.sendPreferringReply(
+        msg.chatPlatformId,
+        "collaboration permission warning",
+        (replyToMsgId) => this.transport.sendReply(
+          msg.chatPlatformId,
+          text,
+          replyToMsgId,
+          { replyInThread: scope.strict },
+        ),
+        () => this.transport.sendText(msg.chatPlatformId, text),
+        msg.platformMsgId,
+        { allowChatFallback: !scope.strict, replyInThread: scope.strict },
+      );
+      this.storeBotResponse(chatId, text, platformMsgId, "text", scope.threadId);
+      this.log.info("sent Bot @ permission warning", {
+        chatId: msg.chatPlatformId,
+        msgId: msg.platformMsgId,
+        status,
+      });
+    } catch (error) {
+      this.log.warn("failed to send Bot @ permission warning", {
+        chatId: msg.chatPlatformId,
+        msgId: msg.platformMsgId,
+        status,
+        error: String(error),
+      });
+    }
+  }
+
+  /** 消息原文读取失败时立即单独提示，不受协作提示的按日限频影响。 */
+  private async warnAboutMessageReadError(event: MessageReadError): Promise<void> {
+    try {
+      const stored = event.messageId
+        ? this.db.prepare(`
+            SELECT c.platform_id AS platformId, m.thread_id AS threadId
+            FROM messages m
+            JOIN chats c ON c.id = m.chat_id
+            WHERE m.platform = ? AND m.platform_msg_id = ?
+            LIMIT 1
+          `).get(this.botIdentity.platform, event.messageId) as {
+            platformId?: string;
+            threadId?: string | null;
+          } | undefined
+        : undefined;
+      const chatPlatformId = event.chatPlatformId ?? stored?.platformId;
+      if (!chatPlatformId) {
+        this.log.warn("message read error has no chat target", {
+          messageId: event.messageId,
+          error: String(event.error),
+        });
+        return;
+      }
+
+      const text = formatMessageReadError(event.error);
+      const inThread = Boolean(event.threadId ?? stored?.threadId);
+      await this.sendPreferringReply(
+        chatPlatformId,
+        "message read warning",
+        (replyToMsgId) => this.transport.sendReply(
+          chatPlatformId,
+          text,
+          replyToMsgId,
+          { replyInThread: inThread },
+        ),
+        () => this.transport.sendText(chatPlatformId, text),
+        event.messageId,
+        { allowChatFallback: !inThread, replyInThread: inThread },
+      );
+      this.log.info("sent message read warning", {
+        chatId: chatPlatformId,
+        messageId: event.messageId,
+      });
+    } catch (error) {
+      this.log.warn("failed to send message read warning", {
+        chatId: event.chatPlatformId,
+        messageId: event.messageId,
+        error: String(error),
+      });
+    }
+  }
+
   /**
    * 取本 Bot 尚未见过、且发生在本次协作启动之后的人类补充消息。
    * 每台设备各自持久化 seen 标记，下一棒无论在哪台设备都能看到同一批消息一次。
@@ -2180,7 +2355,10 @@ export class Pipeline {
         groupMessageType: metadata?.groupMessageType,
       });
       if (shouldIsolate && !delivery.message.threadId && delivery.message.platformMsgId) {
-        const probed = await this.transport.getMessageThreadId?.(delivery.message.platformMsgId);
+        const probed = await this.transport.getMessageThreadId?.(
+          delivery.message.platformMsgId,
+          { chatPlatformId: delivery.message.chatPlatformId },
+        );
         if (probed) {
           delivery.message.threadId = probed;
           this.log.info("topic thread id probed from message.get", {
@@ -2348,7 +2526,7 @@ export class Pipeline {
 
     let replyQuoted = "";
     if (msg.parentPlatformMsgId) {
-      replyQuoted = this.buildReplyQuoted(platform, msg.parentPlatformMsgId);
+      replyQuoted = this.buildReplyQuoted(platform, msg.parentPlatformMsgId, msg.chatPlatformId, msg.threadId);
     }
 
     // Store platform_ts as ISO string
@@ -2632,7 +2810,7 @@ export class Pipeline {
       }
     };
 
-    const collabPreparation = this.prepareCollabTurn(
+    const prepareCollab = (): CollabPreparation | Promise<CollabPreparation> => this.prepareCollabTurn(
       msg,
       chatId,
       scope.scopeKey,
@@ -2640,6 +2818,10 @@ export class Pipeline {
       collabInboundRoute,
       recoverLateCollab,
     );
+    if (collabInboundRoute === "start") {
+      void this.warnAboutCollabBotAtPermission(msg, chatId, scope);
+    }
+    const collabPreparation = prepareCollab();
     if (collabPreparation instanceof Promise) {
       return collabPreparation.then(enqueueAfterCollabPreparation);
     }
@@ -2739,7 +2921,12 @@ export class Pipeline {
   }
 
   /** 被回复的那条：`<quoted speaker="...">正文</quoted>`，找不到则空。 */
-  private buildReplyQuoted(platform: string, parentPlatformMsgId: string): string {
+  private buildReplyQuoted(
+    platform: string,
+    parentPlatformMsgId: string,
+    chatPlatformId?: string,
+    threadId?: string,
+  ): string {
     const dbMsg = getMessageByPlatformId(this.db, platform, parentPlatformMsgId);
     const cachedContent = dbMsg?.contentText;
     if (
@@ -2752,7 +2939,7 @@ export class Pipeline {
     }
 
     // Fallback: try API (async — cache result for next time)
-    this.transport.getMessageContent(parentPlatformMsgId).then((content) => {
+    this.transport.getMessageContent(parentPlatformMsgId, { chatPlatformId, threadId }).then((content) => {
       if (content && dbMsg) {
         // Update the existing message's content for future lookups
         updateMessageContent(this.db, dbMsg.id, content);
