@@ -61,7 +61,10 @@ function isTopicReplyUnsupported(err: unknown): boolean {
   return /230071|不支持以话题形式回复/.test(message);
 }
 
-type MessageReadContext = Pick<MessageReadError, "chatPlatformId" | "threadId">;
+type MessageReadContext = Pick<MessageReadError, "chatPlatformId" | "threadId"> & {
+  outerMessageId?: string;
+  readErrors?: Map<string, unknown>;
+};
 
 export class FeishuAdapter implements PlatformAdapter {
   private client: lark.Client;
@@ -84,6 +87,8 @@ export class FeishuAdapter implements PlatformAdapter {
   private botAtPermissionCheckedAt = 0;
   private botAtPermissionRequest: Promise<BotAtPermissionStatus> | null = null;
   private messageReadErrorHandler: ((event: MessageReadError) => void) | null = null;
+  // 同一外层转发的重复解析在一分钟内只提示一次；惰性过期，无后台计时器。
+  private forwardReadWarnings = new Map<string, number>();
 
   /** 可选：通过 platform ID 查询发送者显示名称（只读，注入自 DB） */
   private nameLookup: ((platformId: string) => string | undefined) | null = null;
@@ -250,6 +255,7 @@ export class FeishuAdapter implements PlatformAdapter {
 
   async stop(): Promise<void> {
     this.handler = null;
+    this.forwardReadWarnings.clear();
     if (this.wsClient) {
       try { (this.wsClient as any).close?.(); } catch { /* SDK 可能不暴露 close */ }
       this.wsClient = null;
@@ -1178,7 +1184,11 @@ export class FeishuAdapter implements PlatformAdapter {
     context?: MessageReadContext,
   ): Promise<any> {
     try {
-      return await this.getMessage(request);
+      const response = await this.getMessage(request);
+      if (response?.code != null && Number(response.code) !== 0) {
+        throw { data: { code: response.code, msg: response.msg } };
+      }
+      return response;
     } catch (error) {
       this.reportMessageReadError({ messageId, ...context }, error);
       throw error;
@@ -1186,11 +1196,41 @@ export class FeishuAdapter implements PlatformAdapter {
   }
 
   private reportMessageReadError(
-    context: Omit<MessageReadError, "error">,
+    context: Omit<MessageReadError, "error"> & MessageReadContext,
     error: unknown,
   ): void {
+    if (context.readErrors) {
+      const raw = error as any;
+      const data = raw?.response?.data ?? raw?.data;
+      const code = data?.code ?? raw?.code;
+      const msg = data ? data.msg : raw?.message;
+      const scalar = (value: unknown) => typeof value === "string" || typeof value === "number" ? String(value) : "";
+      const key = JSON.stringify([scalar(code).slice(0, 64), scalar(msg).slice(0, 2000)]);
+      if (!context.readErrors.has(key)) {
+        if (context.readErrors.size < 4) context.readErrors.set(key, error);
+        else context.readErrors.set("omitted", new Error("更多读取错误已省略"));
+      }
+      return;
+    }
+    if (context.outerMessageId) {
+      const now = Date.now();
+      for (const [key, expiry] of this.forwardReadWarnings) {
+        if (expiry <= now) this.forwardReadWarnings.delete(key);
+      }
+      const key = JSON.stringify([context.chatPlatformId, context.threadId, context.outerMessageId]);
+      if (this.forwardReadWarnings.has(key)) return;
+      if (this.forwardReadWarnings.size >= 256) {
+        this.forwardReadWarnings.delete(this.forwardReadWarnings.keys().next().value!);
+      }
+      this.forwardReadWarnings.set(key, now + 60_000);
+    }
     try {
-      this.messageReadErrorHandler?.({ ...context, error });
+      this.messageReadErrorHandler?.({
+        messageId: context.outerMessageId ?? context.messageId,
+        chatPlatformId: context.chatPlatformId,
+        threadId: context.threadId,
+        error,
+      });
     } catch (handlerError) {
       log.warn("message read error handler failed", { error: String(handlerError) });
     }
@@ -1278,7 +1318,16 @@ export class FeishuAdapter implements PlatformAdapter {
     context?: MessageReadContext,
   ): Promise<{ nodes: MessageNode[]; rendered: string }> {
     const visited = new Set<string>();
-    const nodes = await this.parseForwardNodes(messageId, visited, 0, context);
+    const readErrors = new Map<string, unknown>();
+    const nodes = await this.parseForwardNodes(messageId, visited, 0, {
+      ...context, outerMessageId: context?.outerMessageId ?? messageId, readErrors,
+    });
+    if (readErrors.size) {
+      this.reportMessageReadError({
+        ...context, readErrors: undefined,
+        outerMessageId: context?.outerMessageId ?? messageId,
+      }, { readErrors: [...readErrors.values()] });
+    }
     if (nodes.length === 0) return { nodes, rendered: "[merge_forward]" };
     return { nodes, rendered: "【合并转发消息】\n" + renderMessageNodes(nodes, 0) };
   }

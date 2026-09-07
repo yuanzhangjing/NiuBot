@@ -8098,6 +8098,49 @@ describe("nbt send prefers the active-run reply target", () => {
     });
     await vi.waitFor(() => expect(sentTexts).toHaveLength(5));
     expect(sentTexts[4]).toContain("不可读的降级卡片内容");
+    notifyMessageReadError({
+      messageId: "outer-forward",
+      chatPlatformId: "group-open-id",
+      threadId: "topic-id",
+      error: {
+        code: "ERR_BAD_REQUEST", message: "unsafe axios message",
+        config: { secret: "CONFIG_SECRET" }, request: { secret: "REQUEST_SECRET" },
+        response: { headers: { secret: "HEADER_SECRET" }, data: {
+          code: 230002, msg: "Bot/User can NOT be out of the chat.", secret: "DATA_SECRET",
+        } },
+      },
+    });
+    await vi.waitFor(() => expect(sentTexts).toHaveLength(6));
+    expect(sentTexts[5]).toContain("机器人不在原会话中");
+    expect(sentTexts[5]).toContain("code=230002; msg=Bot/User can NOT be out of the chat.");
+    expect(sentTexts[5]).not.toMatch(/ERR_BAD_REQUEST|SECRET|unsafe axios|暂时不可用/);
+    notifyMessageReadError({
+      messageId: "safe-error", chatPlatformId: "group-open-id",
+      error: new Error("Bearer secret-value appSecret=secret-value https://secret.test/token user@secret.test " + "x".repeat(1000)),
+    });
+    await vi.waitFor(() => expect(sentTexts).toHaveLength(7));
+    expect(sentTexts[6]).not.toMatch(/secret-value|secret.test/);
+    expect(sentTexts[6].length).toBeLessThan(650);
+    const reply = vi.spyOn(im, "sendReply");
+    notifyMessageReadError({
+      messageId: "outer-aggregate", chatPlatformId: "group-open-id", threadId: "topic-id",
+      error: { readErrors: [
+        { response: { data: { code: 230002, msg: "Bot/User can NOT be out of the chat." } } },
+        { data: { code: 429, msg: "Too Many Requests" } },
+      ] },
+    });
+    await vi.waitFor(() => expect(sentTexts).toHaveLength(8));
+    expect(sentTexts[7]).toContain("这份转发中部分消息无法读取");
+    expect(sentTexts[7]).toContain("code=230002");
+    expect(sentTexts[7]).toContain("code=429; msg=Too Many Requests");
+    expect(reply).toHaveBeenCalledWith("group-open-id", sentTexts[7], "outer-aggregate", { replyInThread: true });
+    notifyMessageReadError({
+      messageId: "outer-many", chatPlatformId: "group-open-id",
+      error: { readErrors: Array.from({ length: 20 }, (_, n) => ({ data: { code: n + 1, msg: "x".repeat(2000) } })) },
+    });
+    await vi.waitFor(() => expect(sentTexts).toHaveLength(9));
+    expect(sentTexts[8]).toContain("更多读取错误已省略");
+    expect(sentTexts[8].length).toBeLessThan(2600);
     pipeline.stop();
   });
 

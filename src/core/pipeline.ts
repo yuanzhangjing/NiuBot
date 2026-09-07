@@ -191,7 +191,7 @@ const BUILTIN_COMMANDS = new Set([
   "/timezone", "/tz",
 ]);
 
-function formatMessageReadError(error: unknown): string {
+function messageReadErrorSummary(error: unknown): string {
   const raw = error as {
     code?: unknown;
     status?: unknown;
@@ -199,7 +199,7 @@ function formatMessageReadError(error: unknown): string {
     response?: { status?: unknown; data?: { code?: unknown; msg?: unknown; message?: unknown } };
     data?: { code?: unknown; msg?: unknown; message?: unknown };
   } | null;
-  const code = raw?.code ?? raw?.response?.data?.code ?? raw?.data?.code;
+  const code = raw?.response?.data?.code ?? raw?.data?.code ?? raw?.code;
   const status = Number(raw?.status ?? raw?.response?.status);
   const detail = [
     raw?.message,
@@ -209,6 +209,10 @@ function formatMessageReadError(error: unknown): string {
     raw?.data?.message,
   ].filter((value): value is string => typeof value === "string").join(" ").toLowerCase();
   const codeText = String(code ?? "");
+
+  if (codeText === "230002") {
+    return "当前无法读取部分飞书消息的原文：机器人不在原会话中，无权访问。转发消息不会授予原会话的读取权限。";
+  }
 
   if (
     codeText === "permission_denied"
@@ -233,7 +237,37 @@ function formatMessageReadError(error: unknown): string {
   if (status === 404 || /not found|message.*not exist|消息.*不存在|消息.*删除|找不到消息/.test(detail)) {
     return "当前无法读取这条飞书消息的原文：消息不存在、已删除，或已无法访问。";
   }
-  return "当前无法读取这条飞书消息的原文：飞书接口暂时不可用，请稍后重试。";
+  return "当前无法读取部分飞书消息的原文：飞书接口读取失败。";
+}
+
+function formatMessageReadError(error: unknown): string {
+  const errors = (error as { readErrors?: unknown[] } | null)?.readErrors;
+  if (Array.isArray(errors)) {
+    const details = errors.slice(0, 4).map(item => formatMessageReadError(item));
+    const omitted = errors.length > 4 ? "\n更多读取错误已省略。" : "";
+    return "这份转发中部分消息无法读取，已保留可读内容。\n\n" + details.join("\n\n") + omitted;
+  }
+  const raw = error as {
+    code?: unknown; message?: unknown;
+    response?: { data?: { code?: unknown; msg?: unknown } };
+    data?: { code?: unknown; msg?: unknown };
+  } | null;
+  const data = raw?.response?.data ?? raw?.data;
+  // 只读取业务 code/msg，绝不序列化 Axios 对象及其请求、配置或响应头。
+  const safe = (value: unknown, limit: number): string => {
+    if (typeof value !== "string" && typeof value !== "number") return "";
+    return String(value)
+      .replace(/Bearer\s+[^\s,;]+/gi, "Bearer [redacted]")
+      .replace(/((?:app[_-]?secret|access[_-]?token|refresh[_-]?token|authorization|api[_-]?key|password)["']?\s*[=:]\s*["']?)[^\s,;"'}]+/gi, "$1[redacted]")
+      .replace(/https?:\/\/[^\s]+/gi, "[URL]")
+      .replace(/[\w.+-]+@[\w.-]+\.[a-z]{2,}/gi, "[email]")
+      .replace(/[\x00-\x1f\x7f]/g, " ")
+      .slice(0, limit);
+  };
+  const code = safe(data?.code ?? raw?.code, 64);
+  const message = safe(data ? data.msg : raw?.message, 500);
+  const note = [code && `code=${code}`, message && `msg=${message}`].filter(Boolean).join("; ");
+  return messageReadErrorSummary(error) + (note ? `\n\n接口附注：${note}` : "");
 }
 
 const HYBRID_SCHEDULE_COMMANDS = new Set(["/loop", "/cron"]);
@@ -1514,7 +1548,7 @@ export class Pipeline {
     }
   }
 
-  /** 消息原文读取失败时立即单独提示，不受协作提示的按日限频影响。 */
+  /** 转发读取错误由适配器按外层消息合并，此处保留其回复锚点。 */
   private async warnAboutMessageReadError(event: MessageReadError): Promise<void> {
     try {
       const stored = event.messageId

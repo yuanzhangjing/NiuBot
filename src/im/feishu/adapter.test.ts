@@ -14,6 +14,49 @@ afterEach(() => {
 });
 
 describe("FeishuAdapter", () => {
+  test("coalesces repeated child failures by outer forward and keeps readable content", async () => {
+    const adapter = new FeishuAdapter("app-id", "app-secret");
+    const errors: any[] = [];
+    adapter.onMessageReadError(event => errors.push(event));
+    (adapter as any).client = { im: { message: { get: async (request: any) => {
+      if (request.path.message_id.startsWith("outer")) return { data: { items: [
+        { message_id: "nested", msg_type: "merge_forward" },
+      ] } };
+      if (request.path.message_id === "nested") return { data: { items: [
+        { message_id: "text", msg_type: "text", body: { content: '{"text":"readable"}' } },
+        { message_id: "card-readable", msg_type: "interactive", body: { content: JSON.stringify({ elements: [{ tag: "markdown", content: "readable card" }] }) } },
+        ...[1, 2, 3].map(n => ({ message_id: `child-${n}`, msg_type: "interactive" })),
+      ] } };
+      if (request.path.message_id === "child-3") return { code: 429, msg: "Too Many Requests" };
+      throw { code: "ERR_BAD_REQUEST", response: { data: { code: 230002, msg: "Bot/User can NOT be out of the chat." } } };
+    } } } };
+    const context = { chatPlatformId: "chat", threadId: "thread" };
+    for (let n = 0; n < 2; n++) {
+      const result = await (adapter as any).parseMergeForward("outer-1", context);
+      expect(result.rendered).toContain("readable");
+      expect(result.rendered).toContain("readable card");
+      expect(result.nodes[0].children).toHaveLength(5);
+    }
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({ messageId: "outer-1", ...context });
+    expect(errors[0].error.readErrors).toHaveLength(2);
+    expect(errors[0].error.readErrors[1]).toEqual({ data: { code: 429, msg: "Too Many Requests" } });
+    await (adapter as any).parseMergeForward("outer-2", context);
+    expect(errors).toHaveLength(2);
+    // 过期在下次读取时清理；容量上限与无定时器实现互相独立。
+    for (const key of (adapter as any).forwardReadWarnings.keys()) (adapter as any).forwardReadWarnings.set(key, 0);
+    await (adapter as any).parseMergeForward("outer-1", context);
+    expect(errors).toHaveLength(3);
+    for (let n = 0; n < 260; n++) (adapter as any).reportMessageReadError({ ...context, outerMessageId: `other-${n}` }, new Error("missing"));
+    expect((adapter as any).forwardReadWarnings.size).toBe(256);
+    const readErrors = new Map<string, unknown>();
+    for (let n = 0; n < 100; n++) (adapter as any).reportMessageReadError({ ...context, readErrors }, { data: { code: n, msg: `error-${n}` } });
+    expect(readErrors.size).toBe(5);
+    expect(readErrors.has("omitted")).toBe(true);
+    await adapter.stop();
+    expect((adapter as any).forwardReadWarnings.size).toBe(0);
+  });
+
   test("does not block Bot identity on the app creator request", async () => {
     const adapter = new FeishuAdapter("app-id", "app-secret");
     let releaseCreator: ((value: unknown) => void) | undefined;
