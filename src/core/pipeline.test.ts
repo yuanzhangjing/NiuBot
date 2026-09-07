@@ -3043,29 +3043,52 @@ bots:
     expect(sentCards[0]?.content).toBe("（处理完成，但未生成回复。如果没收到预期结果，请重试）");
   });
 
-  test("Cron result card shows fixed header with type, id and schedule plus task quote", async () => {
+  test.each([
+    ["p2p", false, undefined],
+    ["group", false, undefined],
+    ["group", true, "thread-root"],
+    ["group", false, "thread-root"],
+  ] as const)("Cron result uses a readable title and routes %s (topic=%s, thread=%s)", async (chatType, topic, threadId) => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-20T00:00:00Z"));
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-cron-card-test-"));
     tempDirs.push(dir);
     const db = openTestDatabase(path.join(dir, "niubot.db"));
     db.prepare("INSERT INTO users (id, name, platform, platform_id) VALUES ('u2', 'admin', 'feishu', 'user-open-id')").run();
-    db.prepare("INSERT INTO chats (id, type, platform, platform_id) VALUES ('c1', 'p2p', 'feishu', 'chat-open-id')").run();
+    db.prepare("INSERT INTO chats (id, type, platform, platform_id, chat_mode, group_message_type, chat_mode_fetched_at) VALUES ('c1', ?, 'feishu', 'chat-open-id', ?, ?, ?)").run(chatType, topic ? "topic" : "group", topic ? "thread" : "chat", Date.now());
     const agent = new ReplyAgent("cron card result");
-    const { im, sentCards } = createRecordingImStub();
+    const { im, sentCards, sentReplies } = createRecordingImStub();
+    const sendCard = vi.spyOn(im, "sendCard");
     const pipeline = new Pipeline(db, im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "codex");
     await pipeline.start();
 
     const id = addCronJob(db, {
-      chatId: "c1", creatorUserId: "u2", cronExpr: "*/5 * * * *", timeZone: "UTC", prompt: "check weather",
+      chatId: "c1", creatorUserId: "u2", cronExpr: "*/5 * * * *", timeZone: "UTC", prompt: "internal weather instructions", threadId, replyToMsgId: "creation-message",
     });
     const claimed = claimDueCronJobs(db)[0]!;
-    await pipeline.processCronJob("c1", "u2", claimed.prompt, "check weather", id, claimed.claimToken!);
+    await pipeline.processCronJob("c1", "u2", claimed.prompt, "每日天气", id, claimed.claimToken!, threadId);
 
     expect(sentCards).toHaveLength(1);
-    expect(sentCards[0]?.header).toBe(`⏰ 独立会话 cron:${id} · 每 5 分钟`);
-    expect(sentCards[0]?.content).toContain("> 任务：check weather");
-    expect(sentCards[0]?.content).toContain("cron card result");
+    expect(sentCards[0]?.header).toBe("⏰ 每日天气");
+    expect(sentCards[0]?.content).toBe("cron card result");
+    expect(sentCards[0]?.replyToMsgId).toBe(threadId ? "creation-message" : undefined);
+    expect(Boolean(sendCard.mock.calls[0]?.[5]?.replyInThread)).toBe(Boolean(threadId));
+
+    await pipeline.reportCronJobFailure("c1", "每日天气", "test error", false, threadId, "creation-message");
+    expect(sentCards[1]?.header).toBe("⏰ 每日天气 · 执行失败|orange");
+    expect(sentCards[1]?.replyToMsgId).toBe(threadId ? "creation-message" : undefined);
+    expect(Boolean(sendCard.mock.calls[1]?.[5]?.replyInThread)).toBe(Boolean(threadId));
+
+    await pipeline.reportCronJobFailure("c1", "每日天气", "test error", true, threadId, "creation-message");
+    expect(sentCards[2]?.header).toBe("⏰ 每日天气 · 已暂停|red");
+
+    if (threadId) {
+      sendCard.mockRejectedValueOnce(new Error("card unavailable"));
+      await pipeline.processCronJob("c1", "u2", claimed.prompt, "每日天气", id, claimed.claimToken!, threadId);
+      expect(sentCards).toHaveLength(3);
+      expect(sentReplies.at(-1)?.replyToMsgId).toBe("creation-message");
+      expect(sentReplies.at(-1)?.text).toContain("cron card result");
+    }
   });
 
   test("group Cron does not inherit the creator identity or mutable recent chat messages", async () => {

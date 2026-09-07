@@ -4145,7 +4145,9 @@ export class Pipeline {
       {
         scopeKey: threadId ? buildScopeKey(chatId, threadId) : chatId,
         threadId,
-        replyToMsgId: cronJob?.replyToMsgId ?? undefined,
+        replyToMsgId: (threadId || this.isStrictTopicChat(chatId))
+          ? cronJob?.replyToMsgId ?? undefined
+          : undefined,
       },
     );
   }
@@ -4181,11 +4183,11 @@ export class Pipeline {
       : `定时任务执行失败，后续会按计划重试。\n\n${detail || "未知错误"}`;
     const platformMsgId = await this.transport.sendCard(
       platformChatId,
-      `⏰ ${description || "定时任务"}|${paused ? "red" : "orange"}`,
+      `⏰ ${description || "定时任务"} · ${paused ? "已暂停" : "执行失败"}|${paused ? "red" : "orange"}`,
       content,
       undefined,
-      replyToMsgId,
-      { replyInThread: strict },
+      (threadId || strict) ? replyToMsgId : undefined,
+      { replyInThread: Boolean(threadId) || strict },
     );
     this.storeBotResponse(chatId, content, platformMsgId, "text", threadId);
   }
@@ -4409,16 +4411,8 @@ export class Pipeline {
       });
 
       const emoji = source === "cron" ? "⏰" : "⚡";
-      let header = `${emoji} ${description || prompt.slice(0, 40)}`;
-      let content = response.text;
-      if (cronRun) {
-        // 固定标题：会话模式 + ID + 触发节奏；任务内容作为引用放在正文开头
-        const cronJob = getCronJob(this.db, cronRun.cronJobId);
-        if (cronJob) {
-          header = `⏰ 独立会话 cron:${cronRun.cronJobId} · ${describeCronSchedule(cronJob.cronExpr, cronJob.runAt, cronJob.timezone)}`;
-          content = `> 任务：${escapeLarkMarkdownText(buildTaskPreview(prompt))}\n\n${response.text}`;
-        }
-      }
+      const header = `${emoji} ${description || prompt.slice(0, 40)}`;
+      const content = response.text;
       // 统一最终交付：卡片（带 footer）→ 文本 → 文件降级链，与主对话/Goal 同一套
       const sendResult = await this.sendPreparedFinalResponse(platformChatId, {
         scopeKey,
@@ -4426,8 +4420,8 @@ export class Pipeline {
         content,
         footer,
         replyToMsgId: scope?.replyToMsgId,
-        replyInThread: strict,
-        allowChatFallback: !strict,
+        replyInThread: Boolean(threadId) || strict,
+        allowChatFallback: !threadId && !strict,
       });
       if (!sendResult.ok) {
         this.log.warn(`${source} final response delivery failed`, {
