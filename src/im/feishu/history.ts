@@ -44,7 +44,10 @@ function extractPostText(parsed: Record<string, any>): string {
     if (el.elements) walk(el.elements);
     if (el.content) walk(el.content);
   };
-  walk(parsed.content);
+  // 新版飞书富文本使用 content_v2；旧消息仍使用 content。
+  walk(Array.isArray(parsed.content_v2) && parsed.content_v2.length > 0
+    ? parsed.content_v2
+    : parsed.content);
   return parts.join("");
 }
 

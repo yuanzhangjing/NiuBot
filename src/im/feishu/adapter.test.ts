@@ -1516,6 +1516,34 @@ describe("FeishuAdapter", () => {
       params: { card_msg_content_type: "user_card_content" },
     }]);
   });
+
+  test("reads text from Feishu post content_v2", async () => {
+    const adapter = new FeishuAdapter("app-id", "app-secret");
+    (adapter as any).client = {
+      im: {
+        message: {
+          get: async () => ({
+            data: {
+              items: [{
+                body: {
+                  content: JSON.stringify({
+                    title: "新版标题",
+                    content: [[{ tag: "text", text: "旧版内容" }]],
+                    content_v2: [[
+                      { tag: "text", text: "新版正文" },
+                      { tag: "a", text: "链接", href: "https://example.com" },
+                    ]],
+                  }),
+                },
+              }],
+            },
+          }),
+        },
+      },
+    };
+
+    await expect(adapter.getMessageContent("om-post-v2")).resolves.toBe("新版标题\n新版正文链接");
+  });
 });
 
 describe("sendCard header color", () => {

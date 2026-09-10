@@ -1057,7 +1057,10 @@ export class FeishuAdapter implements PlatformAdapter {
     const title = parsed.title;
     if (title) parts.push(title);
 
-    const content = parsed.content;
+    // 飞书新版富文本同时提供 content_v2；优先使用它，旧版继续回退到 content。
+    const content = Array.isArray(parsed.content_v2) && parsed.content_v2.length > 0
+      ? parsed.content_v2
+      : parsed.content;
     if (Array.isArray(content)) {
       for (const paragraph of content) {
         if (!Array.isArray(paragraph)) continue;
@@ -1105,7 +1108,9 @@ export class FeishuAdapter implements PlatformAdapter {
     const title = parsed.title;
     if (title) parts.push(title);
 
-    const content = parsed.content;
+    const content = Array.isArray(parsed.content_v2) && parsed.content_v2.length > 0
+      ? parsed.content_v2
+      : parsed.content;
     if (Array.isArray(content)) {
       for (const paragraph of content) {
         if (!Array.isArray(paragraph)) continue;

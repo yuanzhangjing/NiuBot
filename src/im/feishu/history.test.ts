@@ -56,6 +56,38 @@ describe("feishu history parse", () => {
     });
   });
 
+  test("reads rich text from Feishu post content_v2", () => {
+    const item = parseFeishuHistoryItem({
+      message_id: "om-post-v2",
+      chat_id: "oc-group",
+      msg_type: "post",
+      sender: { id: "ou-user", sender_type: "user" },
+      body: {
+        content: JSON.stringify({
+          content: [[{ tag: "text", text: "旧版内容" }]],
+          content_v2: [[{ tag: "text", text: "新版内容" }]],
+        }),
+      },
+    }, "oc-group");
+    expect(item?.contentText).toBe("新版内容");
+  });
+
+  test("falls back when content_v2 is empty", () => {
+    const item = parseFeishuHistoryItem({
+      message_id: "om-post-v2-empty",
+      chat_id: "oc-group",
+      msg_type: "post",
+      sender: { id: "ou-user", sender_type: "user" },
+      body: {
+        content: JSON.stringify({
+          content: [[{ tag: "text", text: "旧版内容" }]],
+          content_v2: [],
+        }),
+      },
+    }, "oc-group");
+    expect(item?.contentText).toBe("旧版内容");
+  });
+
   test("resolves a card when the history item has no body", async () => {
     const fetchOriginal = vi.fn(async (messageId: string) => {
       expect(messageId).toBe("om-card-no-body");
