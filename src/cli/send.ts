@@ -1,10 +1,23 @@
 /**
  * CLI: send — send messages and files via IPC to the running daemon.
+ *
+ * 发送类型必须显式（--text / --card / --file）且互斥：裸位置参数不再当文本发送。
+ * 写错的发文件命令（如 `nbt send file x.md`）会直接报错并给出用法，
+ * 避免被静默降级成一条文本消息、模型误以为成功。
  */
 
+import fs from "node:fs";
 import path from "node:path";
 import { localApiRequest } from "../local-api/client.js";
 import { resolveSessionBotEndpoint, type LocalIpcEndpoint } from "../platform/ipc.js";
+
+const SEND_USAGE = `Usage:
+  nbt send --text <text>                      Send a text message
+  nbt send --card <header> <content>          Send a card message
+  nbt send --file <path> [--file <path> ...]  Send one or more files
+  nbt send [--chat-id <id>] <type> ...        Send to a specific chat`;
+
+const KNOWN_SEND_FLAGS = new Set(["text", "card", "file", "chat-id", "help"]);
 
 export function resolveSendEndpoint(
   env: NodeJS.ProcessEnv = process.env,
@@ -62,7 +75,68 @@ export function resolveSendFilePaths(
 
   const fileFlag = flags["file"];
   if (fileFlag === undefined) return undefined;
-  return [fileFlag === "true" ? (positional[0] ?? "") : fileFlag];
+  return [fileFlag];
+}
+
+/** --text 的正文：标志值 + 多余位置参数拼接；未指定 --text 时返回 undefined。
+ *  parseArgs 用 "true" 表示缺省值，与字面量 "true" 无法区分；按原始参数确认是否为字面量。 */
+export function resolveSendText(
+  args: string[],
+  flags: Record<string, string>,
+  positional: string[],
+): string | undefined {
+  const flagValue = flags["text"];
+  if (flagValue === undefined) return undefined;
+  const hasLiteralTrue = flagValue === "true" && args.some(
+    (arg, index) => (arg === "--text" && args[index + 1] === "true") || arg.startsWith("--text="),
+  );
+  const parts = flagValue === "true" && !hasLiteralTrue ? [] : [flagValue];
+  return [...parts, ...positional].join(" ").trim();
+}
+
+/** 发送参数校验：类型必须显式且互斥；--file 不接受额外位置参数。返回错误列表。 */
+export function validateSendArgs(
+  positional: string[],
+  flags: Record<string, string>,
+  hasFileFlag: boolean,
+): string[] {
+  const errors: string[] = [];
+  const unknown = Object.keys(flags).filter((key) => !KNOWN_SEND_FLAGS.has(key));
+  if (unknown.length > 0) {
+    const labels = unknown.map((key) => (key.length === 1 ? `-${key}` : `--${key}`));
+    errors.push(`Unknown option: ${labels.join(", ")}`);
+  }
+  const modeCount =
+    Number(flags["text"] !== undefined) + Number(flags["card"] !== undefined) + Number(hasFileFlag);
+  if (modeCount === 0) {
+    errors.push("Missing send type: use --text, --card, or --file");
+  } else if (modeCount > 1) {
+    errors.push("Choose only one of --text, --card, or --file");
+  }
+  if (hasFileFlag && positional.length > 0) {
+    errors.push(`Unexpected argument with --file: ${positional.join(" ")} (use repeated --file)`);
+  }
+  return errors;
+}
+
+/** 逐个校验目标文件存在且是普通文件；不合法直接退出（不发送任何一部分）。 */
+function assertSendFile(filePath: string): string {
+  const absPath = path.resolve(filePath);
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(absPath);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    console.error(code === "ENOENT"
+      ? `Error: file not found: ${filePath}`
+      : `Error: cannot access file: ${filePath}`);
+    process.exit(1);
+  }
+  if (!stat.isFile()) {
+    console.error(`Error: not a file: ${filePath}`);
+    process.exit(1);
+  }
+  return absPath;
 }
 
 export function resolveSendScope(
@@ -92,6 +166,14 @@ export function handleSend(
     return;
   }
 
+  const filePaths = resolveSendFilePaths(args, positional, flags);
+  const validationErrors = validateSendArgs(positional, flags, filePaths !== undefined);
+  if (validationErrors.length > 0) {
+    for (const message of validationErrors) console.error(`Error: ${message}`);
+    console.error(SEND_USAGE);
+    process.exit(1);
+  }
+
   if (!targetChatId) {
     console.error("Error: NIUBOT_CHAT_ID not set and --chat-id not provided");
     process.exit(1);
@@ -99,18 +181,18 @@ export function handleSend(
 
   const currentScope = resolveSendScope(targetChatId, chatId);
 
-  // Send file
-  const filePaths = resolveSendFilePaths(args, positional, flags);
+  // Send files
   if (filePaths !== undefined) {
     if (filePaths.length === 0 || filePaths.some((filePath) => !filePath)) {
-      console.error("Usage: nbt send --file <path> [--file <path> ...]");
+      console.error("Error: --file requires a path");
+      console.error(SEND_USAGE);
       process.exit(1);
     }
+    const resolvedPaths = filePaths.map((filePath) => assertSendFile(filePath));
     const endpoint = resolveSendEndpoint();
     const scheduleToken = process.env["NIUBOT_SCHEDULE_TOKEN"];
     (async () => {
-      for (const filePath of filePaths) {
-        const absPath = path.resolve(filePath);
+      for (const absPath of resolvedPaths) {
         await ipcRequest(endpoint, "/send-file", {
           chat_id: targetChatId,
           file_path: absPath,
@@ -118,8 +200,8 @@ export function handleSend(
           scope_key: currentScope.scopeKey || undefined,
           thread_id: currentScope.threadId || undefined,
         }, 120_000);
+        console.log(`File sent: ${absPath}`);
       }
-      console.log(filePaths.length === 1 ? "File sent." : `${filePaths.length} files sent.`);
     })()
       .catch((err) => {
         console.error(`Error: ${err.message}`);
@@ -133,7 +215,8 @@ export function handleSend(
   if (cardHeader != null) {
     const content = positional.join(" ");
     if (!content) {
-      console.error("Usage: nbt send --card <header> <content>");
+      console.error("Error: --card requires a header and content");
+      console.error(SEND_USAGE);
       process.exit(1);
     }
     const endpoint = resolveSendEndpoint();
@@ -154,9 +237,10 @@ export function handleSend(
   }
 
   // Send text
-  const text = positional.join(" ");
+  const text = resolveSendText(args, flags, positional);
   if (!text) {
-    console.error("Usage: nbt send <text>");
+    console.error("Error: --text requires text");
+    console.error(SEND_USAGE);
     process.exit(1);
   }
   const endpoint = resolveSendEndpoint();
@@ -167,7 +251,7 @@ export function handleSend(
     scope_key: currentScope.scopeKey || undefined,
     thread_id: currentScope.threadId || undefined,
   }, 30_000)
-    .then(() => console.log("Message sent."))
+    .then(() => console.log("Text message sent."))
     .catch((err) => {
       console.error(`Error: ${err.message}`);
       process.exit(1);
@@ -177,9 +261,5 @@ export function handleSend(
 function printHelp(): void {
   console.log(`Send messages or files to the current or specified chat.
 
-  nbt send <text>                        Text message
-  nbt send --card <header> <content>     Card message
-  nbt send --file <path> [--file <path> ...]
-                                         Send one or more files
-  nbt send --chat-id <id> <text>         Send to a specific chat`);
+${SEND_USAGE}`);
 }

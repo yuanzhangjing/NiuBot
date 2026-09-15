@@ -40,6 +40,8 @@ describe("SYSTEM_RULES", () => {
     expect(SYSTEM_RULES).toContain("nbt whoami");
     expect(SYSTEM_RULES).toContain("不要把飞书 appSecret 写进用户可见回复");
     expect(SYSTEM_RULES).toContain("nbt task");
+    expect(SYSTEM_RULES).toContain("nbt send --text <文本>");
+    expect(SYSTEM_RULES).toContain("nbt send --file <绝对路径>");
     expect(SYSTEM_RULES).toContain("不要依赖普通方式启动的后台进程跨命令或会话存活");
     expect(SYSTEM_RULES).toContain("会话结束后继续运行");
     expect(SYSTEM_RULES).toContain("不要只使用普通的 \"<command> &\"");

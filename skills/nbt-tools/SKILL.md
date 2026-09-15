@@ -22,7 +22,7 @@ when_to_use: "用户提到任务/进度、记忆、身份/场景、消息或上�
 
 ## 发送
 
-- **nbt send**：`<text>` / `--card <header> <content>` / `--file <path>`。
+- **nbt send**：发送类型必须显式：`--text <文本>` / `--card <标题> <内容>` / `--file <路径>`（可重复；路径必须存在）。不带类型、裸文本或写错选项会直接报错。
 
 ## Loop 定时/循环任务（nbt schedule create）
 

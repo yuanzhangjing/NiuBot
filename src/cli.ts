@@ -543,7 +543,7 @@ Commands:
   sessions      list|search|get             Query archived sessions
   contacts      list-users|list-chats|get-user|get-chat|set-name
                Manage users and chats directory
-  send          <text>                      Send text, card, or file
+  send          --text|--card|--file        Send text, card, or file
   cron          add|list|del                Manage scheduled tasks
   schedule      create|list|cancel          Manage Loop and Cron schedules
   task          create|list|update|delete   Manage task projects
