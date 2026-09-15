@@ -13,3 +13,5 @@ Describe what this workspace is and where the main code lives. For example: `rep
 - `tmp/`: temporary files, drafts, command outputs, and one-off analysis.
 
 Do not write ad hoc files into the workspace root. Put temporary files under `tmp/`.
+
+When reviewing, report findings in the reply without automatically writing to an external issue tracker. When starting a fix, check for an existing issue first, then create or update one only when appropriate.

@@ -20,7 +20,7 @@ export async function handleGoal(args: string[]): Promise<void> {
 用法：
   nbt goal start <目标描述>
     进入 Goal 模式：创建 Goal，当前回合计入第 1 轮。
-    用于需要多轮执行/持续跟踪的任务。
+    仅在用户明确要求启动 Goal 时使用；任务复杂或需要多轮本身不自动进入。
   nbt goal progress <步骤> [--status <全局状态>]
     中间轮记录进展（静默，不发送；每轮注入防遗忘）：
     步骤一两句话；--status 为任务整体状态（进行到哪、还剩什么），覆盖式更新。

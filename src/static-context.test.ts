@@ -30,6 +30,8 @@ describe("loadStaticContextTemplate", () => {
     expect(content).toContain("`repos/`");
     expect(content).toContain("`tasks/`");
     expect(content).toContain("`tmp/`");
+    expect(content).toContain("without automatically writing to an external issue tracker");
+    expect(content).toContain("check for an existing issue first");
     expect(content).not.toContain("`.niubot/`");
     expect(content).not.toContain("## Working Rules");
     expect(content).not.toContain("## Memory Rules");

@@ -166,7 +166,7 @@ nbt restart
 - 正式任务用 `nbt task`；进度写在任务 README（目标、状态、入口、决策、下一步），不写聊天流水  
 - 用户记忆用 `nbt user-memory`（人相关偏好）；项目进度不要塞记忆  
 - 发文件 / 卡片：`nbt send`  
-- 多轮交付用 Goal（`nbt goal start/progress/finish`）；长任务直接在会话内处理
+- 多轮交付只有在用户明确要求启动 Goal 时才进入；结束用 `nbt goal finish`。长任务不因复杂自动进入 Goal。
 
 不要把个人本机绝对路径、私有未公开资料写进仓库文档。
 

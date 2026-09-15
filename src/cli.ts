@@ -548,7 +548,7 @@ Commands:
   schedule      create|list|cancel          Manage Loop and Cron schedules
   task          create|list|update|delete   Manage task projects
   restart                                   Restart the Engine (safe pipeline, notifies current chat)
-  goal          finish                      End the current Goal (token-protected)
+  goal          start|progress|finish       Manage the current Goal (token-protected)
   collab        turn                       Submit the current multi-Bot turn action
   system-rules                             Show NiuBot Engine system rules
   whoami                                    Show current scene info

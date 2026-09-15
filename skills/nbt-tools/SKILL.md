@@ -17,7 +17,7 @@ when_to_use: "用户提到任务/进度、记忆、身份/场景、消息或上�
 
 - **nbt whoami**：身份/场景恢复。**nbt feishu-creds**：当前 Bot 的飞书应用身份（`appId` / `appSecret`），调开放接口时再用。**nbt system-rules**：规则恢复。**nbt messages**：`list` / `search <query>` / `get <id>`（群聊 list/search 会先从飞书 sync 再查本库）。**nbt sessions**：`list` / `search <query>` / `get <id>`。**nbt contacts**：`list-users` / `list-chats` / `get-user` / `get-chat` / `set-name`。
 - 话题群中 `nbt messages` 和 `nbt sessions` 默认只看当前话题；`--all-threads` 看整个群（仍是本群），`--thread-id <id>` 指定话题。`--all-chats` 仅私聊可用，跨所有聊天搜索；群聊禁用，避免把其他会话内容暴露到群里。不要和 `--all-threads` 搞混。`sessions list` 默认包含进行中的活跃会话。
-- 上下文丢失按对应命令恢复；用户数据只能通过 nbt CLI 访问。
+- 上下文丢失按对应命令恢复；NiuBot 管理的消息、联系人、记忆、会话和任务元数据只能通过 nbt CLI 访问，用户提供的文件、代码仓库和外部服务数据按对应工具访问。
 - `nbt feishu-creds` 的 secret 不要写进用户可见回复。
 
 ## 发送
@@ -33,7 +33,7 @@ when_to_use: "用户提到任务/进度、记忆、身份/场景、消息或上�
 
 ## Goal 模式（nbt goal）
 
-任务需要多轮执行/持续跟踪 → 进入；一轮能做完不要进。
+只有用户明确要求启动 Goal 时才进入；任务复杂或需要多轮本身不自动进入，一轮能做完就直接处理。
 
 - `nbt goal start <目标描述>` 进入（当前回合计入第 1 轮）
 - `nbt goal progress <步骤> [--status <全局状态>]` 记录进展

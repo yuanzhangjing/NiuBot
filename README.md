@@ -8,6 +8,11 @@ Persistent AI bot runtime — plug in any agent, get infinite conversation with 
 - built-in tools: tasks, contacts, messages, cron jobs
 - configurable persona, multi-bot support
 
+## Documentation
+
+- [文档索引](docs/README.md)
+- [安装指南](INSTALL.md)
+
 ## Prompt for Your Agent
 
 Send the following prompt to your coding agent:
