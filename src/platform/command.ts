@@ -7,6 +7,8 @@ export interface RunCommandOptions {
   env?: NodeJS.ProcessEnv;
   timeoutMs?: number;
   maxOutputBytes?: number;
+  /** 写入子进程 stdin 后关闭（用于把密钥等敏感参数从命令行挪开的 CLI 约定）。 */
+  input?: string;
   onOutput?: (stream: "stdout" | "stderr", text: string) => void;
   /** 用平台 shell 执行整条命令字符串（Unix: /bin/sh -c；Windows: cmd.exe /d /s /c）。默认直接执行命令。 */
   shell?: boolean;
@@ -38,8 +40,12 @@ export async function runCommand(
       detached: shouldDetachChildProcessForTree(),
       windowsHide: true,
       windowsVerbatimArguments,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: ["pipe", "pipe", "pipe"],
     });
+    // 子进程提前退出时写入会报 EPIPE；吞掉，退出码和输出仍由 close 事件给出。
+    child.stdin.on("error", () => {});
+    if (options.input !== undefined) child.stdin.write(options.input);
+    child.stdin.end();
     let stdout = "";
     let stderr = "";
     let timedOut = false;

@@ -166,6 +166,7 @@ nbt restart
 - 正式任务用 `nbt task`；进度写在任务 README（目标、状态、入口、决策、下一步），不写聊天流水  
 - 用户记忆用 `nbt user-memory`（人相关偏好）；项目进度不要塞记忆  
 - 发文本 / 文件 / 卡片：`nbt send --text` / `--card` / `--file`  
+- 飞书操作（文档/表格/多维表格/消息/日历/任务等）走 `nbt feishu <lark-cli 参数>`（身份自动 = 当前 Bot；用户本人身份显式 `--as user`），不要手拼 Open API
 - 多轮交付只有在用户明确要求启动 Goal 时才进入；结束用 `nbt goal finish`。长任务不因复杂自动进入 Goal。
 
 不要把个人本机绝对路径、私有未公开资料写进仓库文档。

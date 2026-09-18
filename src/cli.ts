@@ -41,7 +41,7 @@ import { handleSchedule } from "./cli/schedule.js";
 import { handleTask } from "./cli/task.js";
 import { handleSessions } from "./cli/session.js";
 import { handleGoal } from "./cli/goal.js";
-import { handleFeishu } from "./cli/feishu.js";
+import { handleFeishu, handleFeishuRun } from "./cli/feishu.js";
 import { handleTimezoneCli } from "./cli/timezone.js";
 import { handleCollab } from "./cli/collab.js";
 import { parseArgs } from "./cli/args.js";
@@ -62,6 +62,7 @@ const sessionCommands = new Set([
   "schedule",
   "task",
   "whoami",
+  "feishu",
   "feishu-creds",
   "timezone",
   "tz",
@@ -205,6 +206,13 @@ async function main(): Promise<void> {
       break;
     case "whoami":
       handleWhoami();
+      break;
+    case "feishu":
+      await handleFeishuRun(args.slice(1), {
+        botName: BOT_NAME,
+        botProfilePath: BOT_PROFILE_PATH,
+        dbPath: DB_PATH,
+      });
       break;
     case "feishu-creds":
       handleFeishu(args.slice(1), {
@@ -552,6 +560,7 @@ Commands:
   collab        turn                       Submit the current multi-Bot turn action
   system-rules                             Show NiuBot Engine system rules
   whoami                                    Show current scene info
+  feishu        <args...>                   Run the official lark-cli as the current Bot (identity handled automatically)
   feishu-creds                              Show this Bot's Feishu appId/appSecret
   timezone      get|set|reset               Agent: apply display timezone
 

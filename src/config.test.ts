@@ -39,6 +39,31 @@ describe("resolveHomePath", () => {
 });
 
 describe("loadConfig", () => {
+  it("parses the optional lark brand and rejects unknown values", () => {
+    vi.stubEnv("NIUBOT_DB_PATH", undefined);
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-config-"));
+    tempDirs.push(dir);
+    const configPath = path.join(dir, "brand.yaml");
+    fs.writeFileSync(configPath, `
+bots:
+  - id: BrandBot
+    appId: app-id
+    appSecret: app-secret
+    brand: lark
+`, "utf-8");
+    expect(loadConfig(configPath).bots[0]?.brand).toBe("lark");
+
+    const invalidPath = path.join(dir, "brand-invalid.yaml");
+    fs.writeFileSync(invalidPath, `
+bots:
+  - id: BrandBot
+    appId: app-id
+    appSecret: app-secret
+    brand: feishu-cn
+`, "utf-8");
+    expect(() => loadConfig(invalidPath)).toThrow(/invalid brand/);
+  });
+
   it("loads the legacy bot name and legacy single-bot config formats", () => {
     vi.stubEnv("NIUBOT_DB_PATH", undefined);
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "niubot-config-"));

@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import yaml from "yaml";
 import { AUTO_UPDATE_DEFAULTS, type AutoUpdateConfig } from "./core/auto-update.js";
+import type { LarkBrand } from "./platform/lark-cli.js";
 import { recoverFileReplacementSync, replaceFileSync } from "./platform/files.js";
 import { acquireProcessLock } from "./process-lock.js";
 
@@ -98,6 +99,8 @@ export interface BotConfig {
   projectContextPath?: string;
   /** 主模型（可选，覆盖 backend 默认值） */
   model?: string;
+  /** 飞书品牌：feishu（国内）| lark（国际）；用于 lark-cli 身份 profile 注册，默认 feishu */
+  brand?: LarkBrand;
 }
 
 export interface RestartConfig {
@@ -414,7 +417,15 @@ function parseBotConfig(raw: Record<string, string>, legacyDefaultBackend: strin
     instructionsPath: raw["instructionsPath"] ? path.resolve(expandHome(raw["instructionsPath"])) : undefined,
     projectContextPath: raw["projectContextPath"] ? path.resolve(expandHome(raw["projectContextPath"])) : undefined,
     model: raw["model"] ?? undefined,
+    brand: parseLarkBrand(raw["brand"], id),
   };
+}
+
+function parseLarkBrand(value: string | undefined, botId: string): LarkBrand | undefined {
+  if (!value) return undefined;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "feishu" || normalized === "lark") return normalized;
+  throw new Error(`Config error: bot '${botId}' has invalid brand '${value}' (expected 'feishu' or 'lark')`);
 }
 
 function findConfigFile(): string | undefined {

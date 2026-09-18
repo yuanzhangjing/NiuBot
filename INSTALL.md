@@ -303,6 +303,20 @@ Then **create a version and publish** each app. Without this scope, Feishu only 
 
 NiuBot converts `@U4(CowBot)` in replies and `nbt send` into Feishu `<at>` tags. Final replies stay on cards (`<at id>`); `nbt send --text` sends text (`<at user_id>`). Literal `@Name` in a card is not a mention.
 
+### 5.4 Feishu operations via lark-cli (automatic)
+
+Agents operate Feishu through `nbt feishu <args>` — NiuBot resolves the current Bot's identity itself and applies it to the official [lark-cli](https://github.com/larksuite/cli):
+
+- On first use, `nbt feishu` installs lark-cli when missing (`npx -y @larksuite/cli@latest install`, which also installs the official skills) and registers/validates one identity profile per Bot (profile name = Bot config id; the appSecret goes through stdin and never reaches the model or logs). Set `NIUBOT_LARK_CLI_AUTO_INSTALL=0` to disable auto install.
+- Command details live in the official `lark-*` skills; prefix them when calling: `nbt feishu docs +fetch ...`.
+- Check identity: `nbt feishu whoami`; raw credentials for diagnostics: `nbt feishu-creds`.
+
+Notes:
+- Bot identity can only access resources the app itself is allowed to: add the Bot app as a document collaborator, or grant it access to the wiki space/node.
+- User-identity tasks (a user's private docs, calendar, mail) are explicit: `nbt feishu --as user ...` after that user completes a one-time interactive `nbt feishu auth login`; the default stays the Bot identity.
+- For international (Lark) tenants, set `brand: lark` on the Bot entry when brand-related errors appear (default is `feishu`).
+- Writing documents also requires the app scopes (`docx:document`, `drive:drive`, ...) enabled in the Feishu developer console.
+
 ## Step 6: Publish and Verify
 
 1. **Publish the app**: Create a version → Submit for review → Release

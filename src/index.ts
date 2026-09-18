@@ -20,6 +20,7 @@ import {
 import { createLogger, setLogLevel } from "./logger.js";
 import { ensureRuntimeCliShims, prependNiubotBinToPath } from "./platform/cli-runtime.js";
 import { summarizeProxyEnvironment } from "./proxy-env.js";
+import { stripInheritedLarkIdentityEnv } from "./platform/lark-cli.js";
 import { resolveBotRuntimeConfig } from "./runtime-config.js";
 import { startBotRuntime } from "./bot-startup.js";
 import { resolveEngineEndpoint, resolvePreflightEndpoint } from "./platform/ipc.js";
@@ -89,6 +90,10 @@ async function loadBackendClass(
 
 async function main(): Promise<void> {
   assertSupportedNodeRuntime();
+  // 历史遗留的身份注入：旧版本向会话注入 LARKSUITE_CLI_*，会话→restart worker→新引擎
+  // 的进程继承会让它跨重启存活并传给后续所有会话（直连 lark-cli 会落到别的 Bot 身份）。
+  // 身份现在只在 `nbt feishu` 单次调用时设置，引擎环境里不应保留这类变量。
+  stripInheritedLarkIdentityEnv(process.env);
   const preflight = process.argv.includes("--preflight");
   const runtimePath = resolve(fileURLToPath(new URL(".", import.meta.url)), "..");
   const preflightStartedAt = Date.now();

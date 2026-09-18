@@ -16,6 +16,12 @@ describe("runCommand", () => {
       .rejects.toThrow(/Command exited with code 2[\s\S]*bad/);
   });
 
+  it("writes input to stdin for commands that read it", async () => {
+    const script = "let d='';process.stdin.on('data',(c)=>d+=c);process.stdin.on('end',()=>process.stdout.write(d.toUpperCase()));";
+    const result = await runCommand(process.execPath, ["-e", script], { input: "secret", timeoutMs: 10_000 });
+    expect(result.stdout).toBe("SECRET");
+  });
+
   it("returns non-zero exit codes without throwing when throwOnNonZero is false", async () => {
     const result = await runCommand(process.execPath, ["-e", "process.stderr.write('bad');process.exit(2)"], {
       throwOnNonZero: false,

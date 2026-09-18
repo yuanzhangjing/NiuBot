@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatFeishuCreds, handleFeishu, resolveCurrentBot, type FeishuCreds } from "./feishu.js";
+import { formatFeishuCreds, handleFeishu, handleFeishuRun, resolveCurrentBot, type FeishuCreds } from "./feishu.js";
 import type { BotConfig, NiuBotConfig } from "../config.js";
 
 function bot(partial: Partial<BotConfig> & Pick<BotConfig, "id" | "appId" | "appSecret">): BotConfig {
@@ -78,5 +78,165 @@ describe("nbt feishu-creds", () => {
       "appSecret: cli_test_secret",
       "platformBotId: ou_test",
     ].join("\n"));
+  });
+});
+
+describe("nbt feishu", () => {
+  const config = {
+    bots: [bot({ id: "NiuBot", appId: "cli_test_id", appSecret: "cli_test_secret" })],
+  } as NiuBotConfig;
+
+  interface RunOptions {
+    readVersion?: () => Promise<string | undefined>;
+    install?: () => Promise<boolean>;
+    ensureProfile?: () => Promise<"present" | "created" | "failed">;
+    autoInstallEnabled?: () => boolean;
+    shouldAttemptInstall?: () => boolean;
+    exec?: (args: string[], env: NodeJS.ProcessEnv) => Promise<number>;
+  }
+
+  function run(args: string[], options: RunOptions = {}) {
+    const logs: string[] = [];
+    const errors: string[] = [];
+    const exits: number[] = [];
+    const execCalls: Array<{ args: string[]; env: NodeJS.ProcessEnv }> = [];
+    let installed = 0;
+
+    const promise = handleFeishuRun(
+      args,
+      { botName: "NiuBot" },
+      {
+        log: (text) => logs.push(text),
+        error: (text) => errors.push(text),
+        exit: (code) => exits.push(code),
+      },
+      {
+        load: () => config,
+        readVersion: options.readVersion ?? (async () => "1.0.96"),
+        install: async () => {
+          installed += 1;
+          return options.install ? options.install() : true;
+        },
+        ensureProfile: options.ensureProfile ?? (async () => "present"),
+        autoInstallEnabled: options.autoInstallEnabled ?? (() => true),
+        shouldAttemptInstall: options.shouldAttemptInstall ?? (() => true),
+        exec: options.exec ?? (async (execArgs, execEnv) => {
+          execCalls.push({ args: execArgs, env: execEnv });
+          return 0;
+        }),
+      },
+    );
+
+    return { promise, logs, errors, exits, execCalls, installedCount: () => installed };
+  }
+
+  it("ensures the identity and executes lark-cli with the current Bot profile", async () => {
+    const result = run(["docs", "+fetch", "--doc", "X"]);
+    await result.promise;
+
+    expect(result.execCalls).toHaveLength(1);
+    expect(result.execCalls[0]?.args).toEqual(["docs", "+fetch", "--doc", "X"]);
+    expect(result.execCalls[0]?.env["LARKSUITE_CLI_PROFILE"]).toBe("NiuBot");
+    expect(result.execCalls[0]?.env["LARKSUITE_CLI_DEFAULT_AS"]).toBe("bot");
+    expect(result.exits).toEqual([0]);
+  });
+
+  it("passes --as and other flags through untouched", async () => {
+    const result = run(["--as", "user", "whoami"]);
+    await result.promise;
+    expect(result.execCalls[0]?.args).toEqual(["--as", "user", "whoami"]);
+    expect(result.execCalls[0]?.env["LARKSUITE_CLI_DEFAULT_AS"]).toBe("bot");
+  });
+
+  it("propagates the lark-cli exit code", async () => {
+    const result = run(["whoami"], { exec: async () => 7 });
+    await result.promise;
+    expect(result.exits).toEqual([7]);
+  });
+
+  it("refuses to run when the profile cannot be registered", async () => {
+    const result = run(["whoami"], { ensureProfile: async () => "failed" });
+    await result.promise;
+    expect(result.execCalls).toHaveLength(0);
+    expect(result.exits).toEqual([1]);
+    expect(result.errors.join(" ")).toContain("failed to register");
+  });
+
+  it("installs lark-cli once when missing, then runs", async () => {
+    let present = false;
+    const result = run(["whoami"], {
+      readVersion: async () => (present ? "1.0.96" : undefined),
+      install: async () => {
+        present = true;
+        return true;
+      },
+    });
+    await result.promise;
+    expect(result.installedCount()).toBe(1);
+    expect(result.execCalls).toHaveLength(1);
+  });
+
+  it("does not install when auto install is disabled", async () => {
+    const result = run(["whoami"], {
+      readVersion: async () => undefined,
+      autoInstallEnabled: () => false,
+    });
+    await result.promise;
+    expect(result.installedCount()).toBe(0);
+    expect(result.exits).toEqual([1]);
+    expect(result.errors.join(" ")).toContain("lark-cli is unavailable");
+  });
+
+  it("reports an actionable error when install fails", async () => {
+    const result = run(["whoami"], {
+      readVersion: async () => undefined,
+      install: async () => false,
+    });
+    await result.promise;
+    expect(result.installedCount()).toBe(1);
+    expect(result.execCalls).toHaveLength(0);
+    expect(result.exits).toEqual([1]);
+    expect(result.errors.join(" ")).toContain("@larksuite/cli");
+  });
+
+  it("fails cleanly when the current Bot cannot be determined", async () => {
+    const errors: string[] = [];
+    const exits: number[] = [];
+    await handleFeishuRun(["whoami"], {}, {
+      log: () => {},
+      error: (text) => errors.push(text),
+      exit: (code) => exits.push(code),
+    }, {
+      load: () => ({
+        bots: [
+          bot({ id: "NiuBot", appId: "a", appSecret: "b" }),
+          bot({ id: "CowBot", appId: "c", appSecret: "d" }),
+        ],
+      } as NiuBotConfig),
+    });
+    expect(exits).toEqual([1]);
+    expect(errors.join(" ")).toContain("cannot determine current bot");
+  });
+});
+
+describe("nbt feishu install edge cases", () => {
+  it("reports a PATH problem when install succeeded but the CLI is still missing", async () => {
+    const errors: string[] = [];
+    const exits: number[] = [];
+    await handleFeishuRun(["whoami"], { botName: "NiuBot" }, {
+      log: () => {},
+      error: (text) => errors.push(text),
+      exit: (code) => exits.push(code),
+    }, {
+      load: () => ({
+        bots: [bot({ id: "NiuBot", appId: "cli_test_id", appSecret: "cli_test_secret" })],
+      } as NiuBotConfig),
+      readVersion: async () => undefined,
+      install: async () => true,
+      shouldAttemptInstall: () => true,
+      autoInstallEnabled: () => true,
+    });
+    expect(exits).toEqual([1]);
+    expect(errors.join(" ")).toContain("not visible in PATH");
   });
 });
