@@ -130,6 +130,18 @@ export function larkCliIdentityEnv(botId: string): Record<string, string> {
 
 export type LarkCliExec = (args: string[], env: NodeJS.ProcessEnv) => Promise<number>;
 
+/**
+ * 调用参数里显式带上 `--profile <botId>`。
+ *
+ * 不依赖 lark-cli 是否读取 LARKSUITE_CLI_PROFILE（不同版本行为不一致），
+ * 也避免它静默回落到配置文件里的默认 profile（多 Bot 同机时默认 profile 可能属于别人）。
+ * 调用方自己传了 `--profile` 时以调用方为准。
+ */
+export function larkCliProfileArgs(args: string[], botId: string): string[] {
+  const explicit = args.some((arg) => arg === "--profile" || arg.startsWith("--profile="));
+  return explicit ? args : ["--profile", botId, ...args];
+}
+
 /** 默认执行器：参数透传给 lark-cli，stdio 继承（保留交互与实时输出）。 */
 export function execLarkCli(args: string[], env: NodeJS.ProcessEnv): Promise<number> {
   const resolved = resolveExecutable("lark-cli", { env });
@@ -217,7 +229,7 @@ export async function handleFeishuRun(
     }
 
     const exec = deps.exec ?? execLarkCli;
-    const code = await exec(args, { ...process.env, ...larkCliIdentityEnv(bot.id) });
+    const code = await exec(larkCliProfileArgs(args, bot.id), { ...process.env, ...larkCliIdentityEnv(bot.id) });
     io.exit(code);
   } catch (err) {
     io.error(err instanceof Error ? err.message : String(err));

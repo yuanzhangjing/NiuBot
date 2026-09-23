@@ -13,5 +13,6 @@ description: 飞书操作统一入口：用 `nbt feishu <lark-cli 参数>` 以�
 ## 身份
 
 - **默认 = 当前 Bot（应用身份）**：不需要配置凭据，不要读取或回显 appSecret；不要用 `--profile` 指向其他 Bot。
+- **身份跟着会话走**：`nbt feishu` 用的永远是当前会话所属 Bot，不能换。文档报无权（`1770032` / forBidden）时，先用 `nbt feishu whoami` 确认身份，把 Bot 名称和 appId 一并告诉用户——需要被加为协作者的是这个应用；给另一个 Bot 授权不会生效（同一台机器上多个 Bot 尤其容易搞混）。
 - **用户身份是显式路径**：用户要求以其本人身份操作个人资源（私有文档、日历、邮箱等）时加 `--as user`；前提是该用户本人完成过一次交互式授权（`nbt feishu auth login`，需要用户配合，Bot 不能代办）。未登录时会返回 `identity: user` / `available: false`，把登录指引交给用户。
 - 身份与权限的完整规则（缺 scope、文档无权限、高风险写确认等）见官方 `lark-shared` 技能。

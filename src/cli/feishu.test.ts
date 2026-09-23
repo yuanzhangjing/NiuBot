@@ -135,7 +135,7 @@ describe("nbt feishu", () => {
     await result.promise;
 
     expect(result.execCalls).toHaveLength(1);
-    expect(result.execCalls[0]?.args).toEqual(["docs", "+fetch", "--doc", "X"]);
+    expect(result.execCalls[0]?.args).toEqual(["--profile", "NiuBot", "docs", "+fetch", "--doc", "X"]);
     expect(result.execCalls[0]?.env["LARKSUITE_CLI_PROFILE"]).toBe("NiuBot");
     expect(result.execCalls[0]?.env["LARKSUITE_CLI_DEFAULT_AS"]).toBe("bot");
     expect(result.exits).toEqual([0]);
@@ -144,8 +144,18 @@ describe("nbt feishu", () => {
   it("passes --as and other flags through untouched", async () => {
     const result = run(["--as", "user", "whoami"]);
     await result.promise;
-    expect(result.execCalls[0]?.args).toEqual(["--as", "user", "whoami"]);
+    expect(result.execCalls[0]?.args).toEqual(["--profile", "NiuBot", "--as", "user", "whoami"]);
     expect(result.execCalls[0]?.env["LARKSUITE_CLI_DEFAULT_AS"]).toBe("bot");
+  });
+
+  it("keeps an explicit --profile instead of injecting the current Bot", async () => {
+    const result = run(["--profile", "OtherBot", "whoami"]);
+    await result.promise;
+    expect(result.execCalls[0]?.args).toEqual(["--profile", "OtherBot", "whoami"]);
+
+    const inline = run(["--profile=OtherBot", "whoami"]);
+    await inline.promise;
+    expect(inline.execCalls[0]?.args).toEqual(["--profile=OtherBot", "whoami"]);
   });
 
   it("propagates the lark-cli exit code", async () => {
