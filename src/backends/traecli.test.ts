@@ -106,6 +106,96 @@ describe("TraeCliBackend", () => {
     expect(parsed.compactCount).toBe(2);
   });
 
+  it("counts history_mutation replace events from the session log", () => {
+    const threadId = "019f02c8-3333-7da1-b78c-d7c2c81e544b";
+    const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "trae-home-"));
+    setTestHome(tempHome);
+
+    const logDir = path.join(tempHome, ".trae", "cli", "sessions", "2026", "06", "26");
+    fs.mkdirSync(logDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(logDir, `rollout-2026-06-26T10-00-00-${threadId}.jsonl`),
+      [
+        JSON.stringify({
+          type: "history_mutation",
+          payload: {
+            operation: "replace",
+            compaction_response_id: "resp_128",
+            context_window: { window_number: 1 },
+          },
+        }),
+        // 同一次 compact 的多条 replace 不能重复计数
+        JSON.stringify({
+          type: "history_mutation",
+          payload: {
+            operation: "replace",
+            compaction_response_id: "resp_128",
+            context_window: { window_number: 1 },
+          },
+        }),
+        JSON.stringify({
+          type: "history_mutation",
+          payload: {
+            operation: "replace",
+            compaction_response_id: "resp_71",
+            context_window: { window_number: 2 },
+          },
+        }),
+        // 非 replace 的 mutation 不计
+        JSON.stringify({
+          type: "history_mutation",
+          payload: { operation: "append", compaction_response_id: "resp_999" },
+        }),
+      ].join("\n"),
+    );
+
+    const backend = new TraeCliBackend();
+    const session = backend.buildSession({ workingDirectory: tempHome });
+    const parsed = backend.parseOutput([
+      JSON.stringify({ type: "thread.started", thread_id: threadId }),
+      JSON.stringify({
+        type: "item.completed",
+        item: { type: "agent_message", text: "ok" },
+      }),
+    ].join("\n"), session);
+
+    expect(parsed.compactCount).toBe(2);
+  });
+
+  it("falls back to window_number when compaction_response_id is absent", () => {
+    const threadId = "019f02c8-4444-7da1-b78c-d7c2c81e544b";
+    const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "trae-home-"));
+    setTestHome(tempHome);
+
+    const logDir = path.join(tempHome, ".trae", "cli", "sessions", "2026", "06", "26");
+    fs.mkdirSync(logDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(logDir, `rollout-2026-06-26T10-00-00-${threadId}.jsonl`),
+      [
+        JSON.stringify({
+          type: "history_mutation",
+          payload: { operation: "replace", context_window: { window_number: 1 } },
+        }),
+        JSON.stringify({
+          type: "history_mutation",
+          payload: { operation: "replace", context_window: { window_number: 1 } },
+        }),
+        JSON.stringify({
+          type: "history_mutation",
+          payload: { operation: "replace", context_window: { window_number: 2 } },
+        }),
+      ].join("\n"),
+    );
+
+    const backend = new TraeCliBackend();
+    const session = backend.buildSession({ workingDirectory: tempHome });
+    const parsed = backend.parseOutput([
+      JSON.stringify({ type: "thread.started", thread_id: threadId }),
+    ].join("\n"), session);
+
+    expect(parsed.compactCount).toBe(2);
+  });
+
   it("resumes scanning incrementally across turns", () => {
     const threadId = "019f02c8-2222-7da1-b78c-d7c2c81e544b";
     const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "trae-home-"));

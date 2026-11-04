@@ -13,6 +13,8 @@ import { readCodexTranscript } from "../session-archive/native-transcript.js";
 interface CodexSession extends BaseCliSession {
   sessionLogPath?: string;
   sandboxMode: string;
+  /** 已计数的 compact 事件 key（compaction_response_id / window_number），避免重读日志重复计数 */
+  compactedKeys: Set<string>;
 }
 
 export interface CodexBackendOptions {
@@ -42,6 +44,7 @@ export default class CodexBackend extends CliAgentBackend<CodexSession> {
       jsonlOffset: 0,
       reasoningEffort: config.reasoningEffort,
       sandboxMode: this.sandboxMode,
+      compactedKeys: new Set<string>(),
     };
   }
 
@@ -215,6 +218,10 @@ export default class CodexBackend extends CliAgentBackend<CodexSession> {
                   };
                 };
                 type?: string;
+                /** 新版 compact 事件：history_mutation + operation=replace */
+                operation?: string;
+                compaction_response_id?: string;
+                context_window?: { window_number?: number };
                 info?: {
                   last_token_usage?: {
                     input_tokens?: number;
@@ -229,7 +236,20 @@ export default class CodexBackend extends CliAgentBackend<CodexSession> {
             if (entry.type === "turn_context") {
               model = entry.payload?.model ?? entry.payload?.collaboration_mode?.settings?.model ?? model;
             } else if (entry.type === "event_msg" && entry.payload?.type === "context_compacted") {
+              // 旧版 codex 的 compact 事件
               session.compactCount++;
+            } else if (entry.type === "history_mutation" && entry.payload?.operation === "replace") {
+              // 新版不再发 context_compacted，改用 history_mutation replace 表示一次 compact。
+              // 一次 compact 可能对应多条 replace，按 response id / window number 去重。
+              const key = entry.payload.compaction_response_id
+                ? `resp:${entry.payload.compaction_response_id}`
+                : entry.payload.context_window?.window_number
+                  ? `window:${entry.payload.context_window.window_number}`
+                  : undefined;
+              if (key && !session.compactedKeys.has(key)) {
+                session.compactedKeys.add(key);
+                session.compactCount++;
+              }
             } else if (entry.type === "event_msg" && entry.payload?.type === "token_count") {
               const lastUsage = entry.payload.info?.last_token_usage;
               const visibleTokens = lastUsage?.total_tokens
