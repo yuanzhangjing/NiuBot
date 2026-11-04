@@ -60,9 +60,16 @@ export interface ParsedOutput {
   failed?: boolean;
 }
 
+/** 回收遗留进程：先给自然退出窗口，再 SIGTERM，最后 SIGKILL */
+const LEFTOVER_GRACE_MS = 1_000;
+const LEFTOVER_SIGTERM_WAIT_MS = 2_000;
+const LEFTOVER_SIGKILL_WAIT_MS = 2_000;
+
 export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession> implements AgentBackend {
   protected sessions = new Map<string, S>();
   private activeProcesses = new Map<string, ChildProcess>();
+  /** 按 NativeSessionId 索引的活进程：EngineHandle 每轮都换，遗留进程只能靠原生 id 找到 */
+  private nativeProcesses = new Map<string, ChildProcess>();
   private cancelledSessions = new Set<string>();
   /** 每个 session 的活动状态（watchdog 用） */
   private activityMap = new Map<string, AgentSessionActivity>();
@@ -187,6 +194,7 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
     try {
       const parsed = this.parseOutput(stdout, session);
       session.agentSessionId = nativeSessionId(parsed.agentSessionId ?? session.agentSessionId, agentSession.id);
+      this.aliasActiveProcessToNative(agentSession.id);
       const parsedError = this.getParsedError(parsed);
       if (!parsedError && parsed.turnCompleted) return err;
       const next = parsed.turnCompleted && parsedError
@@ -326,6 +334,8 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
 
       const parsed = this.parseOutput(stdout, s);
       s.agentSessionId = nativeSessionId(parsed.agentSessionId ?? s.agentSessionId, agentSession.id);
+      // 有些 backend 直到回合结束才给出 native id；此时进程可能还活着，补登索引
+      this.aliasActiveProcessToNative(agentSession.id);
 
       if (!parsed.turnCompleted) {
         throw this.buildIncompleteTurnError(parsed, stdout);
@@ -386,7 +396,7 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
       activity.lastNotifiedAt = undefined;
       activity.completionDetected = false;
     }
-    const child = this.activeProcesses.get(session.id);
+    const child = this.findActiveProcess(session.id);
     if (child) {
       this.cancelledSessions.add(session.id);
       if (child.pid) terminateSpawnedProcessTree(child.pid, false);
@@ -425,11 +435,12 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
     const internal = this.sessions.get(session.id);
     if (!internal) throw new Error(`Session not found: ${session.id}`);
     if (!internal.agentSessionId) throw new AgentSessionNotStartedError(session.id);
-    let exited = await this.waitForSessionProcessExit(session.id, 10_000);
-    if (!exited) {
-      const child = this.activeProcesses.get(session.id);
-      if (child?.pid) terminateSpawnedProcessTree(child.pid, false);
-      exited = await this.waitForSessionProcessExit(session.id, 2_000);
+    // 上一轮提前 resolve 的进程可能只按 native id 登记着，不能只看 handle
+    const child = this.findActiveProcess(session.id);
+    let exited = await this.waitForChildExit(child, 10_000);
+    if (!exited && child?.pid) {
+      terminateSpawnedProcessTree(child.pid, false);
+      exited = await this.waitForChildExit(child, 2_000);
     }
     if (!exited) throw new Error(`Backend process is still running: ${session.id}`);
     return this.loadSessionTranscript(internal);
@@ -442,29 +453,105 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
     return this.loadSessionTranscript(internal);
   }
 
-  private async reapLeftoverProcess(sessionId: string): Promise<void> {
-    const child = this.activeProcesses.get(sessionId);
-    if (!child || child.exitCode !== null || child.signalCode !== null) return;
-    this.log.info("reaping leftover process before next prompt", {
-      sessionId,
-      pid: child.pid ?? null,
-    });
-    if (child.pid) terminateSpawnedProcessTree(child.pid, false);
-    const exited = await this.waitForSessionProcessExit(sessionId, 2_000);
-    if (!exited) {
-      this.log.warn("leftover process still running after reap", {
-        sessionId,
-        pid: child.pid ?? null,
-      });
-    }
-    if (this.activeProcesses.get(sessionId) === child) {
-      this.activeProcesses.delete(sessionId);
+  private nativeIdFor(sessionId: string): string | undefined {
+    return this.sessions.get(sessionId)?.agentSessionId;
+  }
+
+  private isProcessRunning(child: ChildProcess | undefined): child is ChildProcess {
+    return !!child && child.exitCode === null && child.signalCode === null;
+  }
+
+  private registerProcess(sessionId: string, child: ChildProcess): void {
+    this.activeProcesses.set(sessionId, child);
+    this.aliasProcessToNative(sessionId, child);
+  }
+
+  /**
+   * native id 可能 spawn 之后才拿到（thread.started / parseOutput），拿到就补登记。
+   * 否则下一轮换了 EngineHandle 就再也找不到这个还活着的进程。
+   */
+  private aliasProcessToNative(sessionId: string, child: ChildProcess): void {
+    const native = this.nativeIdFor(sessionId);
+    if (!native) return;
+    if (this.nativeProcesses.get(native) !== child) {
+      this.nativeProcesses.set(native, child);
     }
   }
 
-  private async waitForSessionProcessExit(sessionId: string, timeoutMs: number): Promise<boolean> {
+  private aliasActiveProcessToNative(sessionId: string): void {
     const child = this.activeProcesses.get(sessionId);
-    if (!child || child.exitCode !== null || child.signalCode !== null) return true;
+    if (!this.isProcessRunning(child)) return;
+    this.aliasProcessToNative(sessionId, child);
+  }
+
+  /** 只清理指向这个子进程的索引，避免误删新一轮已登记的进程 */
+  private unregisterProcess(child: ChildProcess): void {
+    for (const [key, value] of this.activeProcesses) {
+      if (value === child) this.activeProcesses.delete(key);
+    }
+    for (const [key, value] of this.nativeProcesses) {
+      if (value === child) this.nativeProcesses.delete(key);
+    }
+  }
+
+  private findActiveProcess(sessionId: string): ChildProcess | undefined {
+    const byHandle = this.activeProcesses.get(sessionId);
+    if (this.isProcessRunning(byHandle)) return byHandle;
+    const native = this.nativeIdFor(sessionId);
+    const byNative = native ? this.nativeProcesses.get(native) : undefined;
+    return this.isProcessRunning(byNative) ? byNative : undefined;
+  }
+
+  /** 回收上一轮遗留进程：EngineHandle 每轮都换，必须同时按 native id 找 */
+  private async reapLeftoverProcesses(sessionId: string): Promise<void> {
+    const candidates = new Set<ChildProcess>();
+    const byHandle = this.activeProcesses.get(sessionId);
+    if (this.isProcessRunning(byHandle)) candidates.add(byHandle);
+    const native = this.nativeIdFor(sessionId);
+    const byNative = native ? this.nativeProcesses.get(native) : undefined;
+    if (this.isProcessRunning(byNative)) candidates.add(byNative);
+
+    for (const child of candidates) {
+      await this.terminateLeftover(child, sessionId, native);
+    }
+  }
+
+  private async terminateLeftover(
+    child: ChildProcess,
+    sessionId: string,
+    nativeSessionId: string | undefined,
+  ): Promise<void> {
+    const pid = child.pid;
+    const meta = { sessionId, nativeSessionId: nativeSessionId ?? null, pid: pid ?? null };
+    if (!pid) {
+      this.unregisterProcess(child);
+      return;
+    }
+
+    // 先等一小会儿自然退出：上一轮可能正在收尾写 session 文件，直接打断会留下半截记录
+    if (await this.waitForChildExit(child, LEFTOVER_GRACE_MS)) {
+      this.unregisterProcess(child);
+      return;
+    }
+
+    this.log.info("reaping leftover process before next prompt", meta);
+    terminateSpawnedProcessTree(pid, false);
+    if (await this.waitForChildExit(child, LEFTOVER_SIGTERM_WAIT_MS)) {
+      this.unregisterProcess(child);
+      return;
+    }
+
+    // 忽略 SIGTERM 的进程会一直占着 native session 的锁，必须升级
+    this.log.warn("leftover process ignored SIGTERM, escalating to SIGKILL", meta);
+    terminateSpawnedProcessTree(pid, true);
+    if (!(await this.waitForChildExit(child, LEFTOVER_SIGKILL_WAIT_MS))) {
+      this.log.warn("leftover process survived SIGKILL", meta);
+    }
+    this.unregisterProcess(child);
+  }
+
+  private waitForChildExit(child: ChildProcess | undefined, timeoutMs: number): Promise<boolean> {
+    if (!this.isProcessRunning(child)) return Promise.resolve(true);
     const activeChild = child;
     return new Promise<boolean>((resolve) => {
       let settled = false;
@@ -563,7 +650,7 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
     sessionId?: string,
     hooks?: ExecHooks,
   ): Promise<string> {
-    if (sessionId) await this.reapLeftoverProcess(sessionId);
+    if (sessionId) await this.reapLeftoverProcesses(sessionId);
     return new Promise((resolve, reject) => {
       const startedAt = Date.now();
       const stdinDefined = opts?.stdin !== undefined;
@@ -600,7 +687,7 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
       const myActivity = sessionId ? this.activityMap.get(sessionId) : undefined;
 
       if (sessionId) {
-        this.activeProcesses.set(sessionId, child);
+        this.registerProcess(sessionId, child);
         if (myActivity) myActivity.pid = child.pid;
       }
 
@@ -701,6 +788,8 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
               error: String(err),
             });
           }
+          // 新 session 的 native id 通常在这时才拿到，拿到后立刻补登索引
+          if (sessionId) this.aliasProcessToNative(sessionId, child);
           // 完成检测 → 立即 resolve，不等进程退出
           try {
             if (hooks.isComplete?.(line)) completeEarly("stdout");
@@ -757,10 +846,8 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
         if (settled) {
           const afterResolveMs = earlyResolveAt ? Date.now() - earlyResolveAt : undefined;
           if (sessionId) {
-            // 只清理自己的 activeProcesses 条目（新请求可能已覆盖为新进程）
-            if (this.activeProcesses.get(sessionId) === child) {
-              this.activeProcesses.delete(sessionId);
-            }
+            // 只清理指向自己的索引（新请求可能已覆盖为新进程）
+            this.unregisterProcess(child);
             // 清理 watchdog kill 留下的 cancel 标记，防止污染下次请求
             this.cancelledSessions.delete(sessionId);
           }
@@ -775,7 +862,7 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
         }
 
         // 未提前 resolve → 正常的退出处理
-        if (sessionId) this.activeProcesses.delete(sessionId);
+        if (sessionId) this.unregisterProcess(child);
         const stdout = hooks ? lines.join("\n") : lines.join("");
         const stderr = Buffer.concat(stderrChunks).toString();
         const stdoutTail = tailForLog(stdout, 6);
@@ -863,11 +950,7 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
 
       child.on("error", (err) => {
         if (pollTimer) clearInterval(pollTimer);
-        if (sessionId) {
-          if (this.activeProcesses.get(sessionId) === child) {
-            this.activeProcesses.delete(sessionId);
-          }
-        }
+        if (sessionId) this.unregisterProcess(child);
         if (settled) {
           this.log.warn("child process error after early resolve", {
             sessionId: sessionId ?? null,

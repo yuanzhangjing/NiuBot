@@ -4,7 +4,17 @@ import { join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { CliAgentBackend, type BaseCliSession, type ParsedOutput } from "./cli-base.js";
 import { getAgentStdoutLogFilePath } from "./agent-stdout-log.js";
+import { isProcessAlive } from "../platform/process.js";
 import type { AgentSession, ExecHooks, SessionConfig } from "./types.js";
+
+async function waitForPidExit(pid: number, timeoutMs = 5_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!isProcessAlive(pid)) return true;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return !isProcessAlive(pid);
+}
 
 class FailingCliBackend extends CliAgentBackend<BaseCliSession> {
   command(): string {
@@ -449,6 +459,86 @@ describe("CliAgentBackend diagnostic logging", () => {
     await expect(backend.sendMessage(session as AgentSession, "two")).resolves.toMatchObject({ text: "ok" });
     expect((backend as any).activeProcesses.get(session.id)?.pid).not.toBe(pids[0]);
   }, 10_000);
+
+  test("reaps a leftover process by native session id across engine handles", async () => {
+    const nativeId = "019f02c8-aaaa-7da1-b78c-d7c2c81e544b";
+    let prompts = 0;
+    const backend = new (class extends ParsedOutputBackend {
+      constructor() {
+        super({ text: "ok", turnCompleted: true });
+      }
+
+      buildInput(_session: BaseCliSession, _message: string): { args: string[]; stdin?: string } {
+        prompts += 1;
+        return prompts === 1
+          ? { args: ["-e", "process.stdout.write('DONE\\n'); setTimeout(() => {}, 30000);"] }
+          : { args: ["-e", "process.stdout.write('DONE\\n');"] };
+      }
+
+      protected getExecHooks(session: BaseCliSession): ExecHooks {
+        return {
+          onLine: () => { session.agentSessionId = nativeId; },
+          isComplete: (line) => line === "DONE",
+        };
+      }
+    })();
+
+    const first = await backend.createSession({ workingDirectory: process.cwd() });
+    await expect(backend.sendMessage(first as AgentSession, "one")).resolves.toMatchObject({ text: "ok" });
+    const leftoverPid = backend.getActivity(first.id)?.pid;
+    expect(leftoverPid).toBeTruthy();
+
+    // 下一轮 EngineHandle 是新的，只有 native id 相同
+    const second = await backend.createSession({
+      workingDirectory: process.cwd(),
+      agentSessionId: nativeId,
+    });
+    await expect(backend.sendMessage(second as AgentSession, "two")).resolves.toMatchObject({ text: "ok" });
+
+    expect(await waitForPidExit(leftoverPid!)).toBe(true);
+  }, 15_000);
+
+  test("escalates to SIGKILL when the leftover process ignores SIGTERM", async () => {
+    const nativeId = "019f02c8-bbbb-7da1-b78c-d7c2c81e544b";
+    let prompts = 0;
+    const backend = new (class extends ParsedOutputBackend {
+      constructor() {
+        super({ text: "ok", turnCompleted: true });
+      }
+
+      buildInput(_session: BaseCliSession, _message: string): { args: string[]; stdin?: string } {
+        prompts += 1;
+        return prompts === 1
+          ? {
+            args: ["-e", "process.on('SIGTERM', () => {}); process.stdout.write('DONE\\n'); setInterval(() => {}, 1000);"],
+          }
+          : { args: ["-e", "process.stdout.write('DONE\\n');"] };
+      }
+
+      protected getExecHooks(session: BaseCliSession): ExecHooks {
+        return {
+          onLine: () => { session.agentSessionId = nativeId; },
+          isComplete: (line) => line === "DONE",
+        };
+      }
+    })();
+
+    const first = await backend.createSession({ workingDirectory: process.cwd() });
+    await expect(backend.sendMessage(first as AgentSession, "one")).resolves.toMatchObject({ text: "ok" });
+    const leftoverPid = backend.getActivity(first.id)?.pid;
+    expect(leftoverPid).toBeTruthy();
+
+    const startedAt = Date.now();
+    const second = await backend.createSession({
+      workingDirectory: process.cwd(),
+      agentSessionId: nativeId,
+    });
+    await expect(backend.sendMessage(second as AgentSession, "two")).resolves.toMatchObject({ text: "ok" });
+
+    expect(await waitForPidExit(leftoverPid!)).toBe(true);
+    // 必须先走完自然退出窗口 + SIGTERM 等待，才升级到 SIGKILL
+    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(2_500);
+  }, 20_000);
 
   test("rejects a zero-exit turn without a terminal event and includes the last message", async () => {
     const backend = new ParsedOutputBackend({
