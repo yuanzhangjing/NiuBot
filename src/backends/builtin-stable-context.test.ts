@@ -12,6 +12,7 @@ import OpencodeBackend from "./opencode.js";
 import TraeCliBackend from "./traecli.js";
 import PiBackend from "./pi.js";
 import GrokBackend from "./grok.js";
+import DshBackend from "./dsh.js";
 
 const BUILTIN_BACKENDS = [
   { name: "claude", backend: new ClaudeBackend(), needsPrefix: false },
@@ -21,6 +22,7 @@ const BUILTIN_BACKENDS = [
   { name: "cursor", backend: new CursorAgentBackend(), needsPrefix: false },
   { name: "pi", backend: new PiBackend(), needsPrefix: false },
   { name: "grok", backend: new GrokBackend(), needsPrefix: false },
+  { name: "dsh", backend: new DshBackend(), needsPrefix: true },
 ];
 
 describe("builtin backend stable context", () => {

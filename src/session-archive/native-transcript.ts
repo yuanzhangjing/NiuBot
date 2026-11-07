@@ -142,6 +142,52 @@ export function readPiTranscript(file: string, agentSessionId: string): SessionT
  * events.jsonl 只有 tool_started/tool_completed 生命周期，不含参数与输出，
  * 因此不再用它拼空壳 tool 事件。参数保留以兼容既有调用方。
  */
+/**
+ * DeepSeek Harness 的 session.vN.jsonl：
+ * - 只有 source.kind === "user" 的 user/message 是真实用户输入，
+ *   其余是 workspace rules / runtime context / skill 目录等注入
+ * - assistant/message 的 content 是 text / reasoning / tool-call 块
+ * - tool/call、tool/result 是独立的生命周期事件
+ */
+export function readDshTranscript(file: string, agentSessionId: string): SessionTranscript {
+  const events = messageJsonlEvents(file, (entry) => {
+    const type = string(entry["type"]);
+    const data = object(entry["data"]);
+    const eventTime = timestamp(entry["time"]);
+
+    if (type === "user/message") {
+      const source = object(data?.["source"]);
+      if (string(source?.["kind"]) !== "user") return [];
+      return messageContentEvents("user", data?.["content"], eventTime);
+    }
+    if (type === "assistant/message") {
+      const message = object(data?.["message"]);
+      return messageContentEvents("assistant", message?.["content"], eventTime);
+    }
+    if (type === "tool/call") {
+      return [{
+        timestamp: eventTime,
+        type: "tool_call",
+        name: string(data?.["name"]),
+        callId: string(data?.["callId"]),
+        content: pretty(data?.["arguments"]),
+      }];
+    }
+    if (type === "tool/result") {
+      const message = object(data?.["message"]);
+      return [{
+        timestamp: eventTime,
+        type: "tool_result",
+        name: string(data?.["name"]),
+        callId: string(data?.["toolCallId"] ?? message?.["toolCallId"]),
+        content: contentText(message?.["content"]),
+      }];
+    }
+    return [];
+  });
+  return { backend: "dsh", agentSessionId, events };
+}
+
 export function readGrokTranscript(file: string, agentSessionId: string, _eventsFile?: string): SessionTranscript {
   return { backend: "grok", agentSessionId, events: grokEvents(file) };
 }

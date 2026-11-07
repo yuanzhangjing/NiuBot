@@ -70,6 +70,11 @@ export const AGENT_REGISTRY = {
     command: "grok",
     versionArgs: ["--version"],
   },
+  dsh: {
+    aliases: ["dsh", "deepseek-harness"],
+    command: "dsh",
+    versionArgs: ["--version"],
+  },
 } as const;
 
 /** 内置 agent backend 类型 */

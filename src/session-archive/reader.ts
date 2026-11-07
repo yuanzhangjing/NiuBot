@@ -8,6 +8,7 @@ import {
   readCursorTranscript,
   readGrokTranscript,
   readPiTranscript,
+  readDshTranscript,
   transcriptFromOpencodeRows,
 } from "./native-transcript.js";
 import { SESSION_ARCHIVE_MANIFEST, type SessionArchiveManifest } from "./archive.js";
@@ -96,6 +97,9 @@ export function loadReferencedTranscript(manifest: SessionArchiveManifest): Sess
       break;
     case "pi":
       transcript = readPiTranscript(source("session"), manifest.agent_session_id);
+      break;
+    case "dsh":
+      transcript = readDshTranscript(source("session"), manifest.agent_session_id);
       break;
     case "grok": {
       const events = manifest.sources.find((candidate) => candidate.role === "events");
