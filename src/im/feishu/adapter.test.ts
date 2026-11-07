@@ -857,6 +857,58 @@ describe("FeishuAdapter", () => {
     expect(readFileSync(filePath, "utf-8")).toBe("file-data");
   });
 
+  test("downloads video messages to the configured storage directory", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-feishu-adapter-"));
+    tempDirs.push(dir);
+    const adapter = new FeishuAdapter("app-id", "app-secret");
+    adapter.setStorageDir(dir);
+    (adapter as any).client = {
+      im: {
+        messageResource: {
+          get: async () => ({
+            headers: { "content-type": "video/mp4" },
+            getReadableStream: () => Readable.from(Buffer.from("video-data")),
+          }),
+        },
+      },
+    };
+
+    const video = await (adapter as any).parseContent(
+      "media", JSON.stringify({ file_key: "video-key", file_name: "demo.mp4", duration: 3000 }), [], "message-id",
+    );
+
+    const videoPath = video.text.replace("用户发送了视频（3秒），请查看：", "");
+    expect(video).toMatchObject({ contentType: "media" });
+    expect(videoPath).toBe(path.join(dir, "files", "video-key_demo.mp4"));
+    expect(readFileSync(videoPath, "utf-8")).toBe("video-data");
+  });
+
+  test("falls back to a text marker when a video download fails", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-feishu-adapter-"));
+    tempDirs.push(dir);
+    const adapter = new FeishuAdapter("app-id", "app-secret");
+    adapter.setStorageDir(dir);
+    (adapter as any).client = {
+      im: {
+        messageResource: {
+          get: async () => {
+            throw { response: { status: "400", data: { code: 234037 } } };
+          },
+        },
+      },
+    };
+
+    const video = await (adapter as any).parseContent(
+      "media", JSON.stringify({ file_key: "video-key", file_name: "big.mov" }), [], "message-id",
+    );
+
+    expect(video).toEqual({
+      text: "[视频: big.mov]",
+      contentType: "media",
+      downloadError: "文件超过飞书 API 100MB 下载上限",
+    });
+  });
+
   test("returns a user-facing reason when Feishu rejects an oversized file download", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-feishu-adapter-"));
     tempDirs.push(dir);

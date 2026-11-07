@@ -1023,8 +1023,19 @@ export class FeishuAdapter implements PlatformAdapter {
       }
 
       case "media": {
-        const fileName = parsed.file_name ?? "视频";
-        return { text: `用户发送了视频：${fileName}，当前不支持视频消息`, contentType: "media" };
+        const fileKey: string = parsed.file_key ?? "";
+        const fileName: string = parsed.file_name ?? "视频";
+        const duration = parsed.duration ? `（${Math.round(parsed.duration / 1000)}秒）` : "";
+        if (fileKey && messageId) {
+          const result = await this.downloadFile(messageId, fileKey, fileName);
+          if (result && "path" in result) {
+            return { text: `用户发送了视频${duration}，请查看：${result.path}`, contentType: "media" };
+          }
+          if (result && "error" in result) {
+            return { text: `[视频: ${fileName}]`, contentType: "media", downloadError: result.error };
+          }
+        }
+        return { text: `[视频: ${fileName}]`, contentType: "media" };
       }
 
       default: {
