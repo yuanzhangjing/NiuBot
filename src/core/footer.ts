@@ -1,3 +1,5 @@
+import { stripNativeIdPrefix } from "../agent/session-id.js";
+
 interface ResponseFooterInput {
   sessionId: string;
   turnCount?: number;
@@ -6,8 +8,14 @@ interface ResponseFooterInput {
   model?: string;
 }
 
+/** 截断前先去 backend 前缀，否则 dsh 的短 id 会退化成 `session-` */
+function shortSessionId(id: string): string {
+  const head = stripNativeIdPrefix(id);
+  return head.length > 8 ? head.slice(0, 8) : head;
+}
+
 export function buildResponseFooter(input: ResponseFooterInput): string {
-  const shortId = input.sessionId.length > 8 ? input.sessionId.slice(0, 8) : input.sessionId;
+  const shortId = shortSessionId(input.sessionId);
   const footerParts = [`${shortId} · #${input.turnCount ?? "?"}`];
 
   if (input.contextTokens && input.contextTokens > 0) {

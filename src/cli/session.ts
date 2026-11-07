@@ -1362,7 +1362,7 @@ function printHelp(): void {
 命令:
   list                        列出进行中/已归档会话及首尾问答预览
   search <关键词>              搜索会话事件（与 list/get 一样过滤引擎注入）
-  get <session-id>            按时间线查看会话，支持事件分页（短 ID 或原生 id 都能查）
+  get <session-id>            按时间线查看会话，支持事件分页（短 ID / 唯一前缀 / 原生 id 都能查）
   get <event-id>              查看 search 返回的单个完整事件
 
 选项:

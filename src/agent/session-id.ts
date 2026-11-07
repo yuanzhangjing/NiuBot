@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
  * Session 身份只有这三种，禁止混用。
  *
  * 1. ChatSessionId — NiuBot 会话记录
- *    `sessions.id`（8 位），内部主键。`nbt sessions list` 显示这个短号；get/search 短号和原生 id 都能查。
+ *    `sessions.id`（8 位），内部主键。`nbt sessions list` 显示这个短号；get 支持短号、唯一前缀和原生 id。
  *
  * 2. EngineHandle — 引擎内部句柄
  *    `AgentSession.id`，形如 `grok_1787630975612_af90f32a`。
@@ -47,3 +47,18 @@ export function nativeSessionId(
 
 /** @deprecated 用 nativeSessionId */
 export const nativeAgentSessionId = nativeSessionId;
+
+/**
+ * 原生 id 的 backend 前缀：dsh `session-<uuid>`、opencode `ses_<id>`。
+ * footer 展示和 `nbt sessions get` 前缀查找都按这份清单去前缀。
+ */
+export const NATIVE_ID_PREFIXES = ["session-", "ses_"] as const;
+
+/** 去掉 backend 前缀，得到可展示 / 可前缀匹配的随机段；没有前缀时原样返回。 */
+export function stripNativeIdPrefix(id: string): string {
+  const trimmed = id.trim();
+  const prefix = NATIVE_ID_PREFIXES.find((p) => trimmed.toLowerCase().startsWith(p));
+  if (!prefix) return trimmed;
+  const rest = trimmed.slice(prefix.length);
+  return rest.length > 0 ? rest : trimmed;
+}

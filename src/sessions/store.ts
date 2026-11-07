@@ -1,5 +1,5 @@
 import type Database from "better-sqlite3";
-import { nativeSessionId } from "../agent/session-id.js";
+import { NATIVE_ID_PREFIXES, nativeSessionId } from "../agent/session-id.js";
 import { assertChatAccess, type ChatAccessContext } from "../core/access.js";
 import { userTimeRangeToUtc } from "../tz.js";
 
@@ -151,6 +151,41 @@ export function sessionPublicId(row: Pick<SessionRow, "id" | "agent_session_id">
   return nativeSessionId(row.agent_session_id) || row.id;
 }
 
+const SESSION_ID_PREFIX_LIMIT = 50;
+
+/** LIKE 模式里的 `%` `_` `\` 当普通字符处理 */
+function escapeLikePattern(value: string): string {
+  return value.replace(/[\\%_]/g, (ch) => `\\${ch}`);
+}
+
+/**
+ * 前缀查找的候选模式：内部 id、原生 id，以及去掉 backend 前缀的形式。
+ * 后者是卡片 footer 展示的形态（dsh `session-<uuid>` 只显示 uuid 前 8 位），
+ * 用户从 footer 复制过来的短 id 必须能反查到同一会话。
+ */
+function sessionIdPrefixPatterns(key: string): string[] {
+  const escaped = escapeLikePattern(key);
+  const patterns = new Set<string>([`${escaped}%`]);
+  for (const prefix of NATIVE_ID_PREFIXES) {
+    patterns.add(`${escapeLikePattern(prefix + key)}%`);
+  }
+  return [...patterns];
+}
+
+function findSessionsByPrefix(db: Database.Database, key: string): SessionRow[] {
+  const patterns = sessionIdPrefixPatterns(key);
+  const clause = patterns
+    .map(() => "(id LIKE ? ESCAPE '\\' OR agent_session_id LIKE ? ESCAPE '\\')")
+    .join(" OR ");
+  const params = patterns.flatMap((pattern) => [pattern, pattern]);
+  return db.prepare(`
+    SELECT ${SESSION_COLUMNS} FROM sessions
+    WHERE ${clause}
+    ORDER BY ${SESSION_ACTIVITY_COLUMN} DESC, id DESC
+    LIMIT ${SESSION_ID_PREFIX_LIMIT}
+  `).all(...params) as SessionRow[];
+}
+
 export function getSessionForAccess(
   db: Database.Database,
   id: string,
@@ -158,19 +193,26 @@ export function getSessionForAccess(
 ): SessionRow | undefined {
   const key = id.trim();
   if (!key) return undefined;
-  const rows = db.prepare(`
+  const exact = db.prepare(`
     SELECT ${SESSION_COLUMNS} FROM sessions
     WHERE id = ? OR agent_session_id = ?
   `).all(key, key) as SessionRow[];
+  const rows = exact.length > 0 ? exact : findSessionsByPrefix(db, key);
   if (rows.length === 0) return undefined;
 
   const inChat = context.currentChatId
     ? rows.filter((row) => row.chat_id === context.currentChatId)
     : rows;
   const candidates = inChat.length > 0 ? inChat : rows;
-  const row = candidates.find((item) => item.agent_session_id === key)
-    ?? candidates.find((item) => item.id === key)
-    ?? candidates[0];
+  if (exact.length === 0 && candidates.length > 1) {
+    const shown = candidates.slice(0, 5).map((row) => sessionPublicId(row)).join(", ");
+    throw new Error(`Ambiguous session id prefix "${key}" (${candidates.length} matches): ${shown}`);
+  }
+  const row = exact.length > 0
+    ? (candidates.find((item) => item.agent_session_id === key)
+      ?? candidates.find((item) => item.id === key)
+      ?? candidates[0])
+    : candidates[0];
   if (!row) return undefined;
   assertChatAccess({
     currentChatId: context.currentChatId,

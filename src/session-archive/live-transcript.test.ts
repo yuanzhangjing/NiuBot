@@ -2,6 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { encodeProjectDir } from "../backends/dsh.js";
 import { encodeGrokSessionDir } from "../backends/grok.js";
 import { encodePiSessionDir } from "../backends/pi.js";
 import { claudeProjectKey, cursorProjectKey } from "../platform/workspace-path.js";
@@ -134,6 +135,31 @@ describe("loadLiveTranscript", () => {
     expect((await collect(trae)).map((event) => event.content)).toEqual(["trae 问", "trae 答"]);
     expect((await collect(pi)).map((event) => event.content)).toEqual(["pi 问", "pi 答"]);
     expect((await collect(opencode)).map((event) => event.content)).toEqual(["opencode 问", "opencode 答"]);
+  });
+
+  it("reads the current generation of a dsh session from the NiuBot session root", async () => {
+    const home = mkdtempSync(join(tmpdir(), "niubot-live-dsh-home-"));
+    tempDirs.push(home);
+    const cwd = mkdtempSync(join(tmpdir(), "niubot-live-dsh-cwd-"));
+    tempDirs.push(cwd);
+    const nativeId = "session-aac50194-0772-484c-88f9-27d359b8eb09";
+    const dir = join(home, "dsh", "sessions", encodeProjectDir(cwd), nativeId);
+    const rows = (question: string, answer: string) => [
+      { type: "user/message", time: 1, data: { source: { kind: "user" }, content: [{ type: "text", text: question }] } },
+      { type: "assistant/message", time: 2, data: { message: { content: [{ type: "text", text: answer }] } } },
+    ];
+    writeJsonl(join(dir, "session.v4.jsonl"), rows("旧代次问", "旧代次答"));
+    writeJsonl(join(dir, "session.v5.jsonl"), rows("dsh 问", "dsh 答"));
+
+    vi.stubEnv("NIUBOT_HOME", home);
+    const transcript = loadLiveTranscript({
+      backend: "dsh",
+      agentSessionId: nativeId,
+      cwd,
+    });
+
+    expect(transcript?.backend).toBe("dsh");
+    expect((await collect(transcript)).map((event) => event.content)).toEqual(["dsh 问", "dsh 答"]);
   });
 
   it("finds a flat cursor transcript even when the cwd project key differs", async () => {

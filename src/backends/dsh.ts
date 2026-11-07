@@ -213,7 +213,8 @@ export default class DshBackend extends CliAgentBackend<DshSession> {
     return process.env["DSH_PROFILE"]?.trim() || DEFAULT_PROFILE;
   }
 
-  /** NiuBot 自己管的 session 根目录（profile 默认根会写成 zstd，读不了） */  private sessionRoot(): string {
+  /** NiuBot 自己管的 session 根目录（profile 默认根会写成 zstd，读不了） */
+  private sessionRoot(): string {
     return join(this.niubotHome(), "dsh", "sessions");
   }
 
@@ -329,26 +330,13 @@ export default class DshBackend extends CliAgentBackend<DshSession> {
       }
     }
 
-    const root = this.sessionRoot();
-    const candidates = [
-      join(root, encodeProjectDir(session.workingDirectory), session.agentSessionId),
-    ];
-    // 兜底：cwd 归一化规则变化时按 session id 扫一层
-    try {
-      for (const dir of readdirSync(root)) {
-        if (!dir.startsWith("--")) continue;
-        candidates.push(join(root, dir, session.agentSessionId));
-      }
-    } catch { /* root 还不存在 */ }
-
-    for (const dir of candidates) {
-      const file = pickCurrentGeneration(dir);
-      if (file) {
-        session.sessionFile = file;
-        return file;
-      }
-    }
-    return null;
+    const file = findSessionFileInRoot(
+      this.sessionRoot(),
+      session.workingDirectory,
+      session.agentSessionId,
+    );
+    if (file) session.sessionFile = file;
+    return file;
   }
 
   private readTailLines(file: string, size: number, count: number): string[] {
@@ -428,6 +416,29 @@ export function encodeProjectDir(cwd: string): string {
     }
   }
   return `--${(readable.replace(/^-+/, "") || "root").slice(0, 251)}--`;
+}
+
+/** 在 session 根目录下定位某个原生 session 的当前代次日志 */
+function findSessionFileInRoot(root: string, cwd: string, nativeId: string): string | null {
+  const candidates = [join(root, encodeProjectDir(cwd), nativeId)];
+  // 兜底：cwd 归一化规则变化时按 session id 扫一层
+  try {
+    for (const dir of readdirSync(root)) {
+      if (!dir.startsWith("--")) continue;
+      candidates.push(join(root, dir, nativeId));
+    }
+  } catch { /* root 还不存在 */ }
+  for (const dir of candidates) {
+    const file = pickCurrentGeneration(dir);
+    if (file) return file;
+  }
+  return null;
+}
+
+/** 供 live transcript 读取：定位 dsh 原生 session 日志（不依赖 backend 实例） */
+export function locateDshSessionJsonl(cwd: string, nativeId: string): string | null {
+  const home = process.env["NIUBOT_HOME"]?.trim() || NIUBOT_HOME;
+  return findSessionFileInRoot(join(resolve(home), "dsh", "sessions"), cwd, nativeId);
 }
 
 /** 取目录下版本号最高的 session.vN.jsonl */

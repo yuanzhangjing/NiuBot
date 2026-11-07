@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
 import type { SessionTranscript } from "../agent/types.js";
 import { nativeSessionId } from "../agent/session-id.js";
+import { locateDshSessionJsonl } from "../backends/dsh.js";
 import { locateGrokChatHistory } from "../backends/grok.js";
 import { encodePiSessionDir } from "../backends/pi.js";
 import { resolveOpencodeDatabasePath } from "../backends/opencode.js";
@@ -13,6 +14,7 @@ import {
   readClaudeTranscript,
   readCodexTranscript,
   readCursorTranscript,
+  readDshTranscript,
   readGrokTranscript,
   readPiTranscript,
   transcriptFromOpencodeRows,
@@ -44,6 +46,11 @@ const LIVE_LOADERS: Record<string, LiveLoader> = {
     (file, nativeId) => readCodexTranscript(file, nativeId, "traecli"),
   ),
   opencode: (_cwd, nativeId) => loadOpencodeTranscript(nativeId),
+  // dsh 的日志根是共享的 NIUBOT_HOME（不是 per-bot 目录）
+  dsh: (cwd, nativeId) => {
+    const file = locateDshSessionJsonl(cwd, nativeId);
+    return file ? readDshTranscript(file, nativeId) : undefined;
+  },
 };
 
 export function loadLiveTranscript(options: {

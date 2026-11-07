@@ -22,4 +22,19 @@ describe("footer formatting", () => {
       turnCount: 3,
     })).toBe("550e8400 · #3");
   });
+
+  it("drops backend prefixes before truncating", () => {
+    expect(buildResponseFooter({
+      sessionId: "session-aac50194-0772-484c-88f9-27d359b8eb09",
+      turnCount: 2,
+    })).toBe("aac50194 · #2");
+    expect(buildResponseFooter({
+      sessionId: "ses_abc123def456",
+      turnCount: 1,
+    })).toBe("abc123de · #1");
+  });
+
+  it("keeps a bare prefix id as-is", () => {
+    expect(buildResponseFooter({ sessionId: "session-" })).toBe("session- · #?");
+  });
 });
