@@ -428,6 +428,177 @@ describe("CronScheduler", () => {
     expect(peak).toBe(2);
   });
 
+  test("keeps claiming later jobs while an earlier one is still running", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-20T23:59:00Z"));
+    const db = setupDatabase();
+    const started: string[] = [];
+    const resolvers: Array<() => void> = [];
+    const scheduler = new CronScheduler(db, async (_chatId, _userId, prompt) => {
+      started.push(prompt);
+      await new Promise<void>((resolve) => resolvers.push(resolve));
+    }, { maxConcurrent: 2 });
+    addCronJob(db, {
+      chatId: "c1", creatorUserId: "u2", cronExpr: "0 0 * * *", timeZone: "UTC", prompt: "long",
+    });
+    addCronJob(db, {
+      chatId: "c1", creatorUserId: "u2", cronExpr: "1 0 * * *", timeZone: "UTC", prompt: "later",
+    });
+
+    scheduler.start();
+    await vi.advanceTimersByTimeAsync(60_000); // 00:00 — long 开始跑并且不结束
+    await vi.waitFor(() => expect(started).toEqual(["long"]));
+
+    await vi.advanceTimersByTimeAsync(60_000); // 00:01 — 不能被上一个 tick 挡住
+    await vi.waitFor(() => expect(started).toEqual(["long", "later"]));
+
+    resolvers.splice(0).forEach((resolve) => resolve());
+    await scheduler.stop();
+    expect(db.prepare("SELECT prompt, status, run_count FROM cron_jobs ORDER BY id").all()).toEqual([
+      { prompt: "long", status: "active", run_count: 1 },
+      { prompt: "later", status: "active", run_count: 1 },
+    ]);
+  });
+
+  test("caps concurrent executions across ticks instead of per tick", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-20T23:59:00Z"));
+    const db = setupDatabase();
+    let active = 0;
+    let peak = 0;
+    const resolvers: Array<() => void> = [];
+    const scheduler = new CronScheduler(db, async () => {
+      active++;
+      peak = Math.max(peak, active);
+      await new Promise<void>((resolve) => resolvers.push(resolve));
+      active--;
+    }, { maxConcurrent: 2 });
+    for (const prompt of ["a", "b", "c"]) {
+      addCronJob(db, {
+        chatId: "c1", creatorUserId: "u2", cronExpr: "* * * * *", timeZone: "UTC", prompt,
+      });
+    }
+
+    scheduler.start();
+    await vi.advanceTimersByTimeAsync(60_000);
+    await vi.waitFor(() => expect(active).toBe(2));
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(active).toBe(2);
+    expect(peak).toBe(2);
+
+    resolvers.splice(0).forEach((resolve) => resolve());
+    await vi.waitFor(() => expect(active).toBe(2)); // 排队的第三个补上空出的槽位
+    resolvers.splice(0).forEach((resolve) => resolve());
+    await vi.waitFor(() => expect(active).toBe(0));
+    await scheduler.stop();
+  });
+
+  test("hands run slots to queued jobs without leaking the concurrency budget", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-20T00:00:30Z"));
+    const db = setupDatabase();
+    const calls: string[] = [];
+    const resolvers: Array<() => void> = [];
+    const scheduler = new CronScheduler(db, async (_chatId, _userId, prompt) => {
+      calls.push(prompt);
+      await new Promise<void>((resolve) => resolvers.push(resolve));
+    }, { maxConcurrent: 1 });
+    for (const prompt of ["a", "b"]) {
+      addCronJob(db, {
+        chatId: "c1", creatorUserId: "u2", cronExpr: "* * * * *", timeZone: "UTC", prompt,
+      });
+    }
+
+    const firstTick = (scheduler as any).tick() as Promise<void>;
+    await vi.waitFor(() => expect(calls).toEqual(["a"]));
+    resolvers.shift()!(); // a 结束，槽位转交给排队的 b
+    await vi.waitFor(() => expect(calls).toEqual(["a", "b"]));
+    resolvers.shift()!();
+    await firstTick;
+    expect((scheduler as any).activeRuns).toBe(0);
+
+    // 下一分钟还能正常拿到槽位；计数一旦泄漏，这里会永远排队。
+    vi.setSystemTime(new Date("2026-07-20T00:01:30Z"));
+    const secondTick = (scheduler as any).tick() as Promise<void>;
+    await vi.waitFor(() => expect(calls).toEqual(["a", "b", "a"]));
+    resolvers.splice(0).forEach((resolve) => resolve());
+    await vi.waitFor(() => expect(calls).toEqual(["a", "b", "a", "b"]));
+    resolvers.splice(0).forEach((resolve) => resolve());
+    await secondTick;
+    expect((scheduler as any).activeRuns).toBe(0);
+  });
+
+  test("catches up a run missed inside the grace window on the first tick after start", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-20T06:03:00Z"));
+    const db = setupDatabase();
+    const calls: string[] = [];
+    const scheduler = new CronScheduler(db, async (_chatId, _userId, prompt) => { calls.push(prompt); });
+    const jobId = addCronJob(db, {
+      chatId: "c1", creatorUserId: "u2", cronExpr: "0 6 * * *", timeZone: "UTC", prompt: "missed fix",
+    });
+
+    scheduler.start();
+    await vi.advanceTimersByTimeAsync(60_000);
+    await vi.waitFor(() => expect(calls).toEqual(["missed fix"]));
+    await scheduler.stop();
+    expect(db.prepare("SELECT status, run_count FROM cron_jobs WHERE id = ?").get(jobId)).toEqual({
+      status: "active",
+      run_count: 1,
+    });
+  });
+
+  test("does not catch up runs older than the grace window", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-20T06:30:00Z"));
+    const db = setupDatabase();
+    const calls: string[] = [];
+    const scheduler = new CronScheduler(db, async (_chatId, _userId, prompt) => { calls.push(prompt); });
+    addCronJob(db, {
+      chatId: "c1", creatorUserId: "u2", cronExpr: "0 6 * * *", timeZone: "UTC", prompt: "stale",
+    });
+
+    scheduler.start();
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(calls).toEqual([]);
+    await scheduler.stop();
+  });
+
+  test("does not catch up a minute that already ran", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-20T06:03:00Z"));
+    const db = setupDatabase();
+    const calls: string[] = [];
+    const scheduler = new CronScheduler(db, async (_chatId, _userId, prompt) => { calls.push(prompt); });
+    const jobId = addCronJob(db, {
+      chatId: "c1", creatorUserId: "u2", cronExpr: "0 6 * * *", timeZone: "UTC", prompt: "already ran",
+    });
+    db.prepare("UPDATE cron_jobs SET last_run_at = '2026-07-20 06:00:00' WHERE id = ?").run(jobId);
+
+    scheduler.start();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(calls).toEqual([]);
+    await scheduler.stop();
+  });
+
+  test("catch-up can be disabled with catchUpGraceMs: 0", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-20T06:03:00Z"));
+    const db = setupDatabase();
+    const calls: string[] = [];
+    const scheduler = new CronScheduler(db, async (_chatId, _userId, prompt) => { calls.push(prompt); }, {
+      catchUpGraceMs: 0,
+    });
+    addCronJob(db, {
+      chatId: "c1", creatorUserId: "u2", cronExpr: "0 6 * * *", timeZone: "UTC", prompt: "no catch-up",
+    });
+
+    scheduler.start();
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(calls).toEqual([]);
+    await scheduler.stop();
+  });
+
   test("pauses after repeated failures and reports the terminal failure", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-20T00:00:00Z"));
@@ -491,13 +662,13 @@ describe("CronScheduler", () => {
       started++;
       await new Promise<void>((resolve) => { release = resolve; });
     }, { maxConcurrent: 1 });
-    const tick = (scheduler as any).tick();
-    (scheduler as any).currentTick = tick;
+    const tick = (scheduler as any).tick() as Promise<void>;
     await vi.waitFor(() => expect(started).toBe(1));
 
     const stop = scheduler.stop();
     release();
     await stop;
+    await tick;
     expect(started).toBe(1);
     expect(db.prepare("SELECT status FROM cron_jobs WHERE prompt = 'second'").get()).toEqual({ status: "active" });
   });

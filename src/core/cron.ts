@@ -155,6 +155,8 @@ const CHECK_INTERVAL_MS = 60_000;
 export const MAX_ACTIVE_CRON_JOBS_PER_CHAT = 20;
 export const DEFAULT_MAX_CONCURRENT_CRON_RUNS = 4;
 export const CRON_FAILURE_LIMIT = 3;
+/** 启动补跑窗口：只补最近这十分钟内错过的分钟，避免重启把历史欠账一次性引爆。 */
+export const DEFAULT_CATCH_UP_GRACE_MS = 10 * 60_000;
 
 export interface CronJob {
   id: number;
@@ -246,23 +248,31 @@ export type CronFailureReporter = (
 export interface CronSchedulerOptions {
   maxConcurrent?: number;
   reportFailure?: CronFailureReporter;
+  /** 启动后第一次 tick 允许补跑多少毫秒内错过的分钟；默认 {@link DEFAULT_CATCH_UP_GRACE_MS}，0 关闭。 */
+  catchUpGraceMs?: number;
 }
 
 export class CronScheduler {
   private db: Database.Database;
   private executor: CronExecutor;
   private timer: ReturnType<typeof setInterval> | null = null;
-  private running = false;
-  /** 当前 tick 的 Promise；stop() 等待它结束，保证 cron_jobs 更新在 DB 关闭前完成。 */
-  private currentTick: Promise<void> | null = null;
+  /** 所有在跑的 tick；stop() 等它们结束，保证 cron_jobs 更新在 DB 关闭前完成。 */
+  private readonly inFlightTicks = new Set<Promise<void>>();
   private stopping = false;
+  /** 跨 tick 共享的执行槽位：tick 只负责 claim，长任务不会再把后续到期的 job 堵死。 */
+  private activeRuns = 0;
+  private readonly slotWaiters: Array<{ grant: () => void; cancel: () => void }> = [];
+  /** 补跑窗口只在 start() 后的第一次 tick 生效，避免启动前后的偶发抖动变成重复执行。 */
+  private catchUpMsOnNextTick = 0;
   private readonly maxConcurrent: number;
+  private readonly catchUpGraceMs: number;
   private readonly reportFailure?: CronFailureReporter;
 
   constructor(db: Database.Database, executor: CronExecutor, options: CronSchedulerOptions = {}) {
     this.db = db;
     this.executor = executor;
     this.maxConcurrent = Math.max(1, Math.floor(options.maxConcurrent ?? DEFAULT_MAX_CONCURRENT_CRON_RUNS));
+    this.catchUpGraceMs = Math.max(0, Math.floor(options.catchUpGraceMs ?? DEFAULT_CATCH_UP_GRACE_MS));
     this.reportFailure = options.reportFailure;
     migrateLegacyCronTimezones(db);
   }
@@ -271,46 +281,86 @@ export class CronScheduler {
     if (this.timer) return;
     this.stopping = false;
     recoverInterruptedCronJobs(this.db);
-    this.timer = setInterval(() => {
-      if (this.running) return;
-      this.running = true;
-      this.currentTick = this.tick().catch((err) => {
-        log.error("cron tick error", { error: String(err) });
-      }).finally(() => {
-        this.running = false;
-        this.currentTick = null;
-      });
-    }, CHECK_INTERVAL_MS);
-    log.info("cron scheduler started");
+    this.catchUpMsOnNextTick = this.catchUpGraceMs;
+    // 每个 tick 独立 claim：job 状态是 running 的不会被重复 claim，
+    // 所以不需要 running 互斥——那个互斥正是长任务饿死后续 job 的原因。
+    this.timer = setInterval(() => { void this.tick(); }, CHECK_INTERVAL_MS);
+    log.info("cron scheduler started", { catchUpGraceMs: this.catchUpGraceMs });
   }
 
-  /** 停止调度并等待当前 tick 结束（tick 内会更新 cron_jobs，必须在 DB 关闭前完成）。 */
+  /** 停止调度并等待在跑的 tick 结束（tick 内会更新 cron_jobs，必须在 DB 关闭前完成）。 */
   async stop(): Promise<void> {
     this.stopping = true;
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
     }
-    await this.currentTick;
+    // 排队等槽位的 job 已经 claim 但还没执行：立刻归还 claim，否则要等到下次启动才恢复。
+    for (const waiter of this.slotWaiters.splice(0)) waiter.cancel();
+    while (this.inFlightTicks.size > 0) {
+      await Promise.allSettled([...this.inFlightTicks]);
+    }
     log.info("cron scheduler stopped");
   }
 
-  private async tick(): Promise<void> {
+  private tick(): Promise<void> {
+    const tick: Promise<void> = this.executeTick()
+      .catch((err) => {
+        log.error("cron tick error", { error: String(err) });
+      })
+      .finally(() => {
+        this.inFlightTicks.delete(tick);
+      });
+    this.inFlightTicks.add(tick);
+    return tick;
+  }
+
+  private async executeTick(): Promise<void> {
+    if (this.stopping) return;
     const now = new Date();
     const nowStr = utcDateTimeForSql(now);
-    const jobs = claimDueCronJobs(this.db, now);
-    let nextIndex = 0;
-    const workers = Array.from({ length: Math.min(this.maxConcurrent, jobs.length) }, async () => {
-      while (nextIndex < jobs.length) {
-        const job = jobs[nextIndex++]!;
-        if (this.stopping) {
-          releaseCronClaim(this.db, job);
-          continue;
-        }
-        await this.executeClaimedJob(job, nowStr);
-      }
+    const catchUpMs = this.catchUpMsOnNextTick;
+    this.catchUpMsOnNextTick = 0;
+    const jobs = claimDueCronJobs(this.db, now, { catchUpMs });
+    if (jobs.length === 0) return;
+    if (catchUpMs > 0) log.info("cron catch-up claimed missed jobs", { count: jobs.length, catchUpMs });
+    await Promise.all(jobs.map((job) => this.runClaimedJob(job, nowStr)));
+  }
+
+  /** 等一个执行槽位；limit 是全局的，长任务占着槽位时后续 job 会排队而不是被跳过。 */
+  private acquireSlot(): Promise<boolean> {
+    if (this.activeRuns < this.maxConcurrent) {
+      this.activeRuns++;
+      return Promise.resolve(true);
+    }
+    return new Promise<boolean>((resolve) => {
+      this.slotWaiters.push({
+        // 槽位由正在结束的 job 直接转交，计数不变，所以这里不加 activeRuns。
+        grant: () => resolve(true),
+        cancel: () => resolve(false),
+      });
     });
-    await Promise.all(workers);
+  }
+
+  /** 把槽位直接交给下一个等待者；没有等待者才真正释放计数。 */
+  private releaseSlot(): void {
+    const next = this.slotWaiters.shift();
+    if (next) next.grant();
+    else this.activeRuns--;
+  }
+
+  private async runClaimedJob(job: CronJob, nowStr: string): Promise<void> {
+    const acquired = await this.acquireSlot();
+    if (!acquired || this.stopping) {
+      if (acquired) this.releaseSlot();
+      releaseCronClaim(this.db, job);
+      return;
+    }
+    try {
+      await this.executeClaimedJob(job, nowStr);
+    } finally {
+      this.releaseSlot();
+    }
   }
 
   private async executeClaimedJob(job: CronJob, nowStr: string): Promise<void> {
@@ -382,9 +432,19 @@ function releaseCronClaim(db: Database.Database, job: CronJob): boolean {
   `).run(job.lastRunAt, job.id, job.claimToken).changes === 1;
 }
 
+export interface ClaimDueCronJobsOptions {
+  /** 允许补跑最近多少毫秒内错过的分钟；0 表示只匹配当前这一分钟。 */
+  catchUpMs?: number;
+}
+
 /** Select and atomically claim every job due at this instant. */
-export function claimDueCronJobs(db: Database.Database, now: Date = new Date()): CronJob[] {
+export function claimDueCronJobs(
+  db: Database.Database,
+  now: Date = new Date(),
+  options: ClaimDueCronJobsOptions = {},
+): CronJob[] {
   const nowStr = utcDateTimeForSql(now);
+  const catchUpMs = Math.max(0, options.catchUpMs ?? 0);
   const claim = db.transaction(() => {
     const rows = db.prepare("SELECT * FROM cron_jobs WHERE status = 'active' ORDER BY id").all() as RawCronRow[];
     const updateStatus = db.prepare("UPDATE cron_jobs SET status = 'completed' WHERE id = ? AND status = 'active'");
@@ -408,9 +468,10 @@ export function claimDueCronJobs(db: Database.Database, now: Date = new Date()):
       if (job.runAt) {
         shouldRun = nowStr >= normalizeDatetime(job.runAt) && job.runCount === 0;
       } else if (job.cronExpr) {
-        shouldRun = matchesCron(job.cronExpr, now, job.timezone);
-        if (shouldRun && job.lastRunAt) {
-          shouldRun = normalizeDatetime(job.lastRunAt).slice(0, 16) !== nowStr.slice(0, 16);
+        const dueMinute = latestDueMinute(job.cronExpr, now, job.timezone, catchUpMs);
+        if (dueMinute) {
+          const lastRunMinute = job.lastRunAt ? normalizeDatetime(job.lastRunAt).slice(0, 16) : null;
+          shouldRun = lastRunMinute === null || lastRunMinute < dueMinute;
         }
       }
       const claimToken = randomUUID();
@@ -622,6 +683,19 @@ export function getCronJob(db: Database.Database, id: number): (CronJob & { crea
   migrateLegacyCronTimezones(db);
   const row = db.prepare("SELECT * FROM cron_jobs WHERE id = ?").get(id) as RawCronRow | undefined;
   return row ? { ...toJob(row), createdAt: row.created_at } : undefined;
+}
+
+/**
+ * 返回 now 之前（含 now 这一分钟）最近一个命中的分钟，UTC `YYYY-MM-DD HH:MM`。
+ * catchUpMs > 0 时向前回看这个窗口，用于补跑错过的分钟；窗口外的欠账故意不补。
+ */
+function latestDueMinute(expr: string, now: Date, timeZone: string, catchUpMs: number): string | null {
+  const lookbackMinutes = Math.floor(catchUpMs / 60_000);
+  for (let offset = 0; offset <= lookbackMinutes; offset++) {
+    const candidate = offset === 0 ? now : new Date(now.getTime() - offset * 60_000);
+    if (matchesCron(expr, candidate, timeZone)) return utcDateTimeForSql(candidate).slice(0, 16);
+  }
+  return null;
 }
 
 /**
