@@ -264,6 +264,8 @@ export class CronScheduler {
   private readonly slotWaiters: Array<{ grant: () => void; cancel: () => void }> = [];
   /** 补跑窗口只在 start() 后的第一次 tick 生效，避免启动前后的偶发抖动变成重复执行。 */
   private catchUpMsOnNextTick = 0;
+  /** 上一次 tick 的时间；用来发现被挂起/阻塞跳过的 tick。 */
+  private lastTickStartedAt: number | null = null;
   private readonly maxConcurrent: number;
   private readonly catchUpGraceMs: number;
   private readonly reportFailure?: CronFailureReporter;
@@ -319,7 +321,11 @@ export class CronScheduler {
     if (this.stopping) return;
     const now = new Date();
     const nowStr = utcDateTimeForSql(now);
-    const catchUpMs = this.catchUpMsOnNextTick;
+    const gapMs = this.lastTickStartedAt === null ? 0 : now.getTime() - this.lastTickStartedAt;
+    this.lastTickStartedAt = now.getTime();
+    // tick 被跳过（进程挂起、事件循环阻塞）时补这一刻钟内的窗口；正常间隔不产生额外回看。
+    const missedTickMs = gapMs > CHECK_INTERVAL_MS * 1.2 ? Math.min(this.catchUpGraceMs, gapMs) : 0;
+    const catchUpMs = Math.max(this.catchUpMsOnNextTick, missedTickMs);
     this.catchUpMsOnNextTick = 0;
     const jobs = claimDueCronJobs(this.db, now, { catchUpMs });
     if (jobs.length === 0) return;
@@ -471,7 +477,9 @@ export function claimDueCronJobs(
         const dueMinute = latestDueMinute(job.cronExpr, now, job.timezone, catchUpMs);
         if (dueMinute) {
           const lastRunMinute = job.lastRunAt ? normalizeDatetime(job.lastRunAt).slice(0, 16) : null;
-          shouldRun = lastRunMinute === null || lastRunMinute < dueMinute;
+          // 不补 job 创建之前的那一分钟：否则启动后新建的 job 会立刻假跑一次。
+          const createdMinute = normalizeDatetime(raw.created_at).slice(0, 16);
+          shouldRun = (lastRunMinute === null || lastRunMinute < dueMinute) && dueMinute >= createdMinute;
         }
       }
       const claimToken = randomUUID();
@@ -548,9 +556,9 @@ export function addCronJob(
     }
     const result = db.prepare(`
       INSERT INTO cron_jobs (
-        chat_id, thread_id, reply_to_msg_id, creator_user_id, cron_expr, run_at, prompt, description, max_times, until_time, timezone
+        chat_id, thread_id, reply_to_msg_id, creator_user_id, cron_expr, run_at, prompt, description, max_times, until_time, timezone, created_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       opts.chatId,
       opts.threadId ?? null,
@@ -563,6 +571,8 @@ export function addCronJob(
       opts.maxTimes ?? null,
       untilTime,
       timeZone,
+      // 和 run_at/until_time 用同一个 UTC 时钟，补跑判断才能和 created_at 对齐。
+      utcDateTimeForSql(new Date()),
     );
     return Number(result.lastInsertRowid);
   });
