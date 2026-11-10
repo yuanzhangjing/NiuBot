@@ -688,6 +688,94 @@ describe("CronScheduler", () => {
     await scheduler.stop();
   });
 
+  test("skips a queued job that expired before it could start", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-20T00:00:00Z"));
+    const db = setupDatabase();
+    const calls: string[] = [];
+    const resolvers: Array<() => void> = [];
+    const scheduler = new CronScheduler(db, async (_chatId, _userId, prompt) => {
+      calls.push(prompt);
+      await new Promise<void>((resolve) => resolvers.push(resolve));
+    }, { maxConcurrent: 1 });
+    addCronJob(db, {
+      chatId: "c1", creatorUserId: "u2", cronExpr: "* * * * *", timeZone: "UTC", prompt: "long",
+    });
+    const queuedId = addCronJob(db, {
+      chatId: "c1", creatorUserId: "u2", cronExpr: "* * * * *", timeZone: "UTC",
+      prompt: "queued", untilTime: "2026-07-20 00:01:00",
+    });
+
+    const tick = (scheduler as any).tick() as Promise<void>;
+    await vi.waitFor(() => expect(calls).toEqual(["long"]));
+
+    vi.setSystemTime(new Date("2026-07-20T00:05:00Z")); // 排队期间过了截止时间
+    resolvers.shift()!(); // long 结束，queued 拿到槽位
+    await tick;
+
+    expect(calls).toEqual(["long"]); // 过期的任务不能放出去
+    expect(db.prepare("SELECT status, run_count, last_run_at FROM cron_jobs WHERE id = ?").get(queuedId)).toEqual({
+      status: "active",
+      run_count: 0,
+      last_run_at: null,
+    });
+  });
+
+  test("a claim that never started can be claimed again after a restart", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-20T05:00:00Z"));
+    const db = setupDatabase();
+    const jobId = addCronJob(db, {
+      chatId: "c1", creatorUserId: "u2", cronExpr: "0 6 * * *", timeZone: "UTC", prompt: "queued crash",
+    });
+
+    vi.setSystemTime(new Date("2026-07-20T06:00:10Z"));
+    expect(claimDueCronJobs(db).map((job) => job.prompt)).toEqual(["queued crash"]);
+    // claim 不再推进 last_run_at：否则排队时崩溃会被当成"这一分钟已经跑过"
+    expect(db.prepare("SELECT status, last_run_at FROM cron_jobs WHERE id = ?").get(jobId)).toEqual({
+      status: "running",
+      last_run_at: null,
+    });
+
+    expect(recoverInterruptedCronJobs(db)).toBe(1);
+    vi.setSystemTime(new Date("2026-07-20T06:04:00Z"));
+    expect(claimDueCronJobs(db, new Date(), { catchUpMs: 10 * 60_000 }).map((job) => job.prompt)).toEqual([
+      "queued crash",
+    ]);
+  });
+
+  test("a run interrupted after starting does not repeat within its minute", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-20T05:00:00Z"));
+    const db = setupDatabase();
+    const jobId = addCronJob(db, {
+      chatId: "c1", creatorUserId: "u2", cronExpr: "0 6 * * *", timeZone: "UTC", prompt: "started crash",
+    });
+
+    vi.setSystemTime(new Date("2026-07-20T06:00:10Z"));
+    expect(claimDueCronJobs(db)).toHaveLength(1);
+    db.prepare("UPDATE cron_jobs SET last_run_at = '2026-07-20 06:00:10' WHERE id = ?").run(jobId); // 已经开始执行
+
+    expect(recoverInterruptedCronJobs(db)).toBe(1);
+    expect(claimDueCronJobs(db, new Date("2026-07-20T06:00:40Z"))).toEqual([]);
+  });
+
+  test("a null created_at row does not break the whole claim", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-20T00:00:00Z"));
+    const db = setupDatabase();
+    addCronJob(db, {
+      chatId: "c1", creatorUserId: "u2", cronExpr: "* * * * *", timeZone: "UTC", prompt: "healthy",
+    });
+    db.prepare(`
+      INSERT INTO cron_jobs (chat_id, creator_user_id, cron_expr, prompt, status, created_at)
+      VALUES ('c1', 'u2', '* * * * *', 'dirty row', 'active', NULL)
+    `).run();
+
+    const claimed = claimDueCronJobs(db, new Date("2026-07-20T00:00:00Z")).map((job) => job.prompt);
+    expect(claimed).toEqual(["healthy", "dirty row"]);
+  });
+
   test("pauses after repeated failures and reports the terminal failure", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-20T00:00:00Z"));

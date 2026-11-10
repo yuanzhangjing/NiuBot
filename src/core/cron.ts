@@ -248,7 +248,7 @@ export type CronFailureReporter = (
 export interface CronSchedulerOptions {
   maxConcurrent?: number;
   reportFailure?: CronFailureReporter;
-  /** 启动后第一次 tick 允许补跑多少毫秒内错过的分钟；默认 {@link DEFAULT_CATCH_UP_GRACE_MS}，0 关闭。 */
+  /** 补跑窗口上限：启动后第一次 tick，以及 tick 被挂起/阻塞跳过后，最多回看这么久；0 关闭。 */
   catchUpGraceMs?: number;
 }
 
@@ -320,7 +320,6 @@ export class CronScheduler {
   private async executeTick(): Promise<void> {
     if (this.stopping) return;
     const now = new Date();
-    const nowStr = utcDateTimeForSql(now);
     const gapMs = this.lastTickStartedAt === null ? 0 : now.getTime() - this.lastTickStartedAt;
     this.lastTickStartedAt = now.getTime();
     // tick 被跳过（进程挂起、事件循环阻塞）时补这一刻钟内的窗口；正常间隔不产生额外回看。
@@ -330,7 +329,12 @@ export class CronScheduler {
     const jobs = claimDueCronJobs(this.db, now, { catchUpMs });
     if (jobs.length === 0) return;
     if (catchUpMs > 0) log.info("cron catch-up claimed missed jobs", { count: jobs.length, catchUpMs });
-    await Promise.all(jobs.map((job) => this.runClaimedJob(job, nowStr)));
+    // allSettled：单个 job 的意外异常不能把这个 tick 提前从 inFlightTicks 摘掉，
+    // 否则 stop() 会在兄弟 job 还在跑时误判"已收尾"。
+    const results = await Promise.allSettled(jobs.map((job) => this.runClaimedJob(job)));
+    for (const result of results) {
+      if (result.status === "rejected") log.error("cron job runner failed", { error: String(result.reason) });
+    }
   }
 
   /** 等一个执行槽位；limit 是全局的，长任务占着槽位时后续 job 会排队而不是被跳过。 */
@@ -355,7 +359,7 @@ export class CronScheduler {
     else this.activeRuns--;
   }
 
-  private async runClaimedJob(job: CronJob, nowStr: string): Promise<void> {
+  private async runClaimedJob(job: CronJob): Promise<void> {
     const acquired = await this.acquireSlot();
     if (!acquired || this.stopping) {
       if (acquired) this.releaseSlot();
@@ -363,13 +367,30 @@ export class CronScheduler {
       return;
     }
     try {
-      await this.executeClaimedJob(job, nowStr);
+      const startedAt = utcDateTimeForSql(new Date());
+      // 排队期间可能已经过了截止时间：执行前复核，别把过期任务放出去。
+      if (job.untilTime && startedAt > normalizeDatetime(job.untilTime)) {
+        releaseCronClaim(this.db, job);
+        log.info("cron job expired before execution", { id: job.id, untilTime: job.untilTime });
+        return;
+      }
+      // 真正开始执行时才推进 last_run_at：排队期间进程被杀，这一分钟还能被重新 claim；
+      // 已经开始执行后再被杀，则靠 last_run_at 阻止同一分钟重复执行。
+      const started = this.db.prepare(`
+        UPDATE cron_jobs SET last_run_at = ?, claimed_at = ?
+        WHERE id = ? AND status = 'running' AND claim_token = ?
+      `).run(startedAt, startedAt, job.id, job.claimToken).changes === 1;
+      if (!started) {
+        log.info("cron claim invalid before execution", { id: job.id });
+        return;
+      }
+      await this.executeClaimedJob(job, startedAt);
     } finally {
       this.releaseSlot();
     }
   }
 
-  private async executeClaimedJob(job: CronJob, nowStr: string): Promise<void> {
+  private async executeClaimedJob(job: CronJob, runStartedAt: string): Promise<void> {
     log.info("executing cron job", { id: job.id, desc: job.description });
     try {
       if (!job.claimToken) throw new Error(`Cron ${job.id} 缺少运行令牌`);
@@ -382,6 +403,16 @@ export class CronScheduler {
         job.claimToken,
         job.threadId ?? undefined,
       );
+    } catch (err) {
+      await this.recordJobFailure(job, err);
+      return;
+    }
+    this.recordJobSuccess(job, runStartedAt);
+  }
+
+  /** 执行已经成功，收尾写失败不能算成任务失败：只记日志，并把 claim 清掉避免卡在 running。 */
+  private recordJobSuccess(job: CronJob, runStartedAt: string): void {
+    try {
       const nextCount = job.runCount + 1;
       const completed = !!job.runAt || (job.maxTimes !== null && nextCount >= job.maxTimes);
       this.db.prepare(`
@@ -389,37 +420,54 @@ export class CronScheduler {
         SET status = ?, run_count = ?, last_run_at = ?, claimed_at = NULL,
             claim_token = NULL, last_error = NULL, consecutive_failures = 0
         WHERE id = ? AND status = 'running' AND claim_token = ?
-      `).run(completed ? "completed" : "active", nextCount, nowStr, job.id, job.claimToken);
+      `).run(completed ? "completed" : "active", nextCount, runStartedAt, job.id, job.claimToken);
     } catch (err) {
-      const error = String(err).slice(0, 2_000);
-      const failures = job.consecutiveFailures + 1;
-      const paused = failures >= CRON_FAILURE_LIMIT;
-      const changed = this.db.prepare(`
+      log.error("cron job finished but status update failed", { id: job.id, error: String(err) });
+      try {
+        this.db.prepare(`
+          UPDATE cron_jobs SET status = 'active', claimed_at = NULL, claim_token = NULL
+          WHERE id = ? AND status = 'running' AND claim_token = ?
+        `).run(job.id, job.claimToken);
+      } catch (cleanupError) {
+        log.error("cron claim cleanup failed", { id: job.id, error: String(cleanupError) });
+      }
+    }
+  }
+
+  private async recordJobFailure(job: CronJob, err: unknown): Promise<void> {
+    const error = String(err).slice(0, 2_000);
+    const failures = job.consecutiveFailures + 1;
+    const paused = failures >= CRON_FAILURE_LIMIT;
+    let changed = 0;
+    try {
+      changed = this.db.prepare(`
         UPDATE cron_jobs
         SET status = ?, claimed_at = NULL, claim_token = NULL,
             last_run_at = ?, last_error = ?, consecutive_failures = ?
         WHERE id = ? AND status = 'running' AND claim_token = ?
       `).run(paused ? "paused" : "active", job.lastRunAt, error, failures, job.id, job.claimToken).changes;
-      log.error("cron job execution failed", { id: job.id, error, failures, paused });
-      if (changed === 1) {
-        await Promise.resolve(
-          this.reportFailure?.(
-            job.chatId,
-            job.description || job.prompt.slice(0, 40),
-            error,
-            paused,
-            job.threadId ?? undefined,
-            job.replyToMsgId ?? undefined,
-          ),
-        )
-          .catch((reportError) => log.warn("failed to report cron failure", { id: job.id, error: String(reportError) }));
-      }
+    } catch (updateError) {
+      log.error("cron failure state update failed", { id: job.id, error: String(updateError) });
+      return;
     }
+    log.error("cron job execution failed", { id: job.id, error, failures, paused });
+    if (changed !== 1) return;
+    await Promise.resolve(
+      this.reportFailure?.(
+        job.chatId,
+        job.description || job.prompt.slice(0, 40),
+        error,
+        paused,
+        job.threadId ?? undefined,
+        job.replyToMsgId ?? undefined,
+      ),
+    ).catch((reportError) => log.warn("failed to report cron failure", { id: job.id, error: String(reportError) }));
   }
 }
 
-/** Restore claims left behind by a stopped process. Recurring jobs keep the claim minute
- * in last_run_at, so they do not repeat within that minute after restart. */
+/** Restore claims left behind by a stopped process. A run that never started left
+ * last_run_at untouched, so that minute can still be claimed again (e.g. by catch-up);
+ * a run interrupted after starting kept its start minute, so it does not repeat. */
 export function recoverInterruptedCronJobs(db: Database.Database): number {
   const restored = db.prepare(`
     UPDATE cron_jobs
@@ -455,7 +503,7 @@ export function claimDueCronJobs(
     const rows = db.prepare("SELECT * FROM cron_jobs WHERE status = 'active' ORDER BY id").all() as RawCronRow[];
     const updateStatus = db.prepare("UPDATE cron_jobs SET status = 'completed' WHERE id = ? AND status = 'active'");
     const claimJob = db.prepare(`
-      UPDATE cron_jobs SET status = 'running', claimed_at = ?, last_run_at = ?, claim_token = ?
+      UPDATE cron_jobs SET status = 'running', claimed_at = ?, claim_token = ?
       WHERE id = ? AND status = 'active'
     `);
     const claimed: CronJob[] = [];
@@ -478,12 +526,14 @@ export function claimDueCronJobs(
         if (dueMinute) {
           const lastRunMinute = job.lastRunAt ? normalizeDatetime(job.lastRunAt).slice(0, 16) : null;
           // 不补 job 创建之前的那一分钟：否则启动后新建的 job 会立刻假跑一次。
-          const createdMinute = normalizeDatetime(raw.created_at).slice(0, 16);
-          shouldRun = (lastRunMinute === null || lastRunMinute < dueMinute) && dueMinute >= createdMinute;
+          // created_at 为空的历史/外部写入行不能让整个 claim 事务回滚。
+          const createdMinute = raw.created_at ? normalizeDatetime(raw.created_at).slice(0, 16) : null;
+          shouldRun = (lastRunMinute === null || lastRunMinute < dueMinute)
+            && (createdMinute === null || dueMinute >= createdMinute);
         }
       }
       const claimToken = randomUUID();
-      if (shouldRun && claimJob.run(nowStr, nowStr, claimToken, job.id).changes === 1) {
+      if (shouldRun && claimJob.run(nowStr, claimToken, job.id).changes === 1) {
         claimed.push({ ...job, status: "running", claimedAt: nowStr, claimToken });
       }
     }
