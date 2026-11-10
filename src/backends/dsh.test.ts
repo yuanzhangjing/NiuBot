@@ -284,11 +284,16 @@ describe("dsh helpers", () => {
   });
 
   it("encodes the project directory like dsh does", () => {
-    expect(encodeProjectDir("/tmp/workspace")).toBe("--tmp-workspace--");
+    // encodeProjectDir 内部会 path.resolve：Windows 上 "/tmp/workspace" 会带上当前盘符
+    // （如 D:\tmp\workspace），编码后前缀多一个 "D-"。断言跟着平台走，别写死 POSIX 结果。
+    const drivePrefix = process.platform === "win32"
+      ? `${path.parse(process.cwd()).root.replace(/[\\/:]/g, "")}-`
+      : "";
+    expect(encodeProjectDir("/tmp/workspace")).toBe(`--${drivePrefix}tmp-workspace--`);
     // 非 [A-Za-z0-9._-] 的字符按 ~XXXX 转义
-    expect(encodeProjectDir("/tmp/项目 dir")).toBe("--tmp-~9879~76EE~0020dir--");
+    expect(encodeProjectDir("/tmp/项目 dir")).toBe(`--${drivePrefix}tmp-~9879~76EE~0020dir--`);
     // 连续分隔符折叠成一个短横线
-    expect(encodeProjectDir("/tmp//a")).toBe("--tmp-a--");
+    expect(encodeProjectDir("/tmp//a")).toBe(`--${drivePrefix}tmp-a--`);
   });
 
   it("reads provider and model from a composed config dump", () => {
