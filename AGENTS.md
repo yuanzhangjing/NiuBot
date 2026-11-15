@@ -7,7 +7,9 @@ NiuBot 是 AI 人格运行时：有记忆、有性格、能自主管理上下文
 
 | 文档 | 用途 |
 |---|---|
-| 本文件 | 整体架构、开发/测试/发版、质量门槛 |
+| 本文件 | 开发/测试/发版、质量门槛 |
+| [`docs/product-architecture.md`](docs/product-architecture.md) | 产品定位、场景、能力面与边界 |
+| [`docs/architecture.md`](docs/architecture.md) | 技术架构现状：进程、消息链路、上下文、数据、扩展点 |
 | [`src/backends/AGENTS.md`](src/backends/AGENTS.md) | 新增/修改内置 Backend 的完整契约 |
 
 ---

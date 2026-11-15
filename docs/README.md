@@ -6,6 +6,8 @@
 
 | 文档 | 状态 | 用途 | 关联任务 |
 |---|---|---|---|
+| [产品架构](product-architecture.md) | 现行 | 定位、场景、三种会话关系、能力面与产品边界 | — |
+| [技术架构](architecture.md) | 现行 | 进程模型、消息链路、上下文装配、数据、扩展点与失败恢复 | — |
 | [执行模型](execution-model.md) | 现行 | 主会话、独立任务、进度、重启和发布的实际行为 | [niubot-engine](<../../../tasks/niubot-engine/README.md>) |
 | [多 Bot 协作回合方案](bot-collab-loop-plan.md) | 现行方案 | 协作回合、交棒、恢复和幂等设计 | [bot-collab-loop](<../../../tasks/bot-collab-loop/README.md>) |
 | [上下文恢复优化方案](context-recovery-optimization-plan.md) | 已实现方案 | system rules、session、speaker 和 workspace 规则注入设计 | [niubot-engine](<../../../tasks/niubot-engine/README.md>) |
@@ -25,3 +27,4 @@
 - 新设计先放对应任务目录；只有会被代码维护者反复查阅的仓库级方案才放这里。
 - 文档顶部写清日期和状态；完成后保留文档，不删除历史决策。
 - 任务状态、验收结果和下一步只在任务 README 维护，避免两处内容漂移。
+- 架构文档以代码为准：改动进程模型、消息链路、上下文装配、数据表或调度语义时，同步更新 `architecture.md`。

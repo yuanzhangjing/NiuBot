@@ -11,6 +11,9 @@ Persistent AI bot runtime — plug in any agent, get infinite conversation with 
 ## Documentation
 
 - [文档索引](docs/README.md)
+- [产品架构](docs/product-architecture.md)
+- [技术架构](docs/architecture.md)
+- [执行模型](docs/execution-model.md)
 - [安装指南](INSTALL.md)
 
 ## Prompt for Your Agent
