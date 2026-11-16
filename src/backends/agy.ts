@@ -262,18 +262,18 @@ export default class AgyBackend extends CliAgentBackend<AgySession> {
 
     // result.response 是本轮最终回复；流式片段只在没有终态时用于诊断
     const text = (finalText || streamed).trim();
-    // agy 中途断流注入 error_message 并自动续跑后，即使最终 agent_response 已正常完成，
-    // result 仍会保留粘性的 status=ERROR 和旧错误文案。
-    const recoveredFromMidTurnError = sawResult
+    // agy 的 result.status / result.error 按整个会话累计：只要历史任意一轮出过一次
+    // error_message，同会话后续每一轮 resume 完结时 result 仍会带 status=ERROR 和旧错误文案。
+    // 只要本轮最后一步是正常 DONE 的最终 agent_response（之后无新 error_message、无待执行 tool_calls），即视为本轮成功。
+    const completedCleanlyAfterStickyError = sawResult
       && status !== "SUCCESS"
-      && lastErrorStep !== undefined
       && lastAgentDoneStep !== undefined
-      && lastAgentDoneStep > lastErrorStep
+      && (lastErrorStep === undefined || lastAgentDoneStep > lastErrorStep)
       && lastStepType === "agent_response"
       && lastStepState === "DONE"
       && !transcriptMeta.lastStepHasToolCalls
       && finalText.trim().length > 0;
-    const succeeded = sawResult && (status === "SUCCESS" || recoveredFromMidTurnError);
+    const succeeded = sawResult && (status === "SUCCESS" || completedCleanlyAfterStickyError);
     const failed = sawResult && !succeeded;
     if (failed && !errorMessage) {
       errorMessage = `agy 回合失败（status=${status ?? "unknown"}）`;

@@ -238,6 +238,42 @@ describe("AgyBackend", () => {
     expect(parsed.text).toBe("recovered final answer");
   });
 
+  it("ignores sticky conversation-level result ERROR on subsequent clean resumed turns", () => {
+    const backend = new AgyBackend({ agyHome: mkdtempSync(join(tmpdir(), "agy-home-")) });
+    const session = backend.buildSession({ workingDirectory: "/tmp" });
+    session.agentSessionId = "conv-1";
+
+    const userStep = JSON.stringify({
+      event: "step_update",
+      step_update: { conversation_id: "conv-1", step_index: 177, state: "DONE", step_type: "user_input" },
+    });
+    const cleanDoneStep = JSON.stringify({
+      event: "step_update",
+      step_update: {
+        conversation_id: "conv-1",
+        step_index: 181,
+        state: "DONE",
+        step_type: "agent_response",
+        text_delta: "all good\n",
+        usage: { input_tokens: 3361, output_tokens: 453, cache_read_tokens: 244958 },
+      },
+    });
+    const historicalStickyResult = RESULT({
+      status: "ERROR",
+      response: "all good\n",
+      error: "The stream was interrupted. Please continue the task you were working on.",
+      num_turns: 6,
+      finished_reason: "error",
+    });
+
+    const parsed = backend.parseOutput([INIT, userStep, cleanDoneStep, historicalStickyResult].join("\n"), session);
+    expect(parsed.turnCompleted).toBe(true);
+    expect(parsed.failed).toBe(false);
+    expect(parsed.error).toBeUndefined();
+    expect(parsed.text).toBe("all good");
+    expect(parsed.contextTokens).toBe(3361 + 244958 + 453);
+  });
+
   it("still fails when an error_message occurs after the last completed agent_response", () => {
     const backend = new AgyBackend({ agyHome: mkdtempSync(join(tmpdir(), "agy-home-")) });
     const session = backend.buildSession({ workingDirectory: "/tmp" });
