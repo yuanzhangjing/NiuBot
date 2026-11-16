@@ -1,4 +1,9 @@
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { AgentSessionNotStartedError } from "../agent/types.js";
+import { readAgyTranscript } from "../session-archive/native-transcript.js";
 import AgyBackend from "./agy.js";
 
 const INIT = JSON.stringify({
@@ -130,5 +135,39 @@ describe("AgyBackend", () => {
     expect(hooks.isComplete?.(INIT)).toBe(false);
     expect(hooks.isComplete?.(DELTA("x"))).toBe(false);
     expect(hooks.isComplete?.(RESULT())).toBe(true);
+  });
+});
+
+describe("AgyBackend transcript", () => {
+  it("requires a native session id before exporting a transcript", async () => {
+    const backend = new AgyBackend();
+    const session = backend.buildSession({ workingDirectory: "/tmp" });
+    await expect((backend as any).loadSessionTranscript(session)).rejects.toBeInstanceOf(AgentSessionNotStartedError);
+  });
+
+  it("strips prompt wrappers and drops system steps", async () => {
+    const file = join(mkdtempSync(join(tmpdir(), "agy-tr-")), "transcript_full.jsonl");
+    writeFileSync(file, [
+      JSON.stringify({
+        step_index: 0, source: "USER_EXPLICIT", type: "USER_INPUT",
+        created_at: "2026-11-16T15:32:52Z",
+        content: "<USER_REQUEST>\nremember pineapple\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\ntime 23:32\n</ADDITIONAL_METADATA>",
+      }),
+      JSON.stringify({
+        step_index: 1, source: "MODEL", type: "PLANNER_RESPONSE",
+        created_at: "2026-11-16T15:32:53Z", content: "got it",
+      }),
+      JSON.stringify({
+        step_index: 2, source: "SYSTEM", type: "SYSTEM_MESSAGE",
+        created_at: "2026-11-16T15:32:54Z", content: "internal note",
+      }),
+    ].join("\n"));
+
+    const collected: any[] = [];
+    for await (const event of readAgyTranscript(file, "conv-1").events as AsyncIterable<any>) collected.push(event);
+    expect(collected).toEqual([
+      { timestamp: "2026-11-16T15:32:52Z", type: "user", content: "remember pineapple" },
+      { timestamp: "2026-11-16T15:32:53Z", type: "assistant", content: "got it" },
+    ]);
   });
 });

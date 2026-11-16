@@ -188,6 +188,39 @@ export function readDshTranscript(file: string, agentSessionId: string): Session
   return { backend: "dsh", agentSessionId, events };
 }
 
+/**
+ * agy writes one readable JSONL per conversation under
+ * `~/.gemini/antigravity-cli/brain/<id>/.system_generated/logs/`.
+ * USER_INPUT carries the prompt wrapped in <USER_REQUEST> plus metadata we drop.
+ */
+export function readAgyTranscript(file: string, agentSessionId: string): SessionTranscript {
+  return {
+    backend: "agy",
+    agentSessionId,
+    events: messageJsonlEvents(file, (entry) => {
+      const type = string(entry["type"]);
+      const eventTime = timestamp(entry["created_at"]);
+      const raw = string(entry["content"]) ?? "";
+      if (type === "USER_INPUT") {
+        const text = agyUserRequest(raw);
+        return text ? [{ timestamp: eventTime, type: "user", content: text }] : [];
+      }
+      if (type === "PLANNER_RESPONSE") {
+        return raw ? [{ timestamp: eventTime, type: "assistant", content: raw }] : [];
+      }
+      return [];
+    }),
+    sources: [{ path: file, role: "transcript", format: "native-jsonl" }],
+  };
+}
+
+/** 去掉 <USER_REQUEST> 包装与 <ADDITIONAL_METADATA> 尾巴 */
+export function agyUserRequest(content: string): string {
+  const match = content.match(/<USER_REQUEST>\s*([\s\S]*?)\s*<\/USER_REQUEST>/);
+  const text = match ? match[1]! : content.replace(/<ADDITIONAL_METADATA>[\s\S]*$/, "");
+  return text.trim();
+}
+
 export function readGrokTranscript(file: string, agentSessionId: string, _eventsFile?: string): SessionTranscript {
   return { backend: "grok", agentSessionId, events: grokEvents(file) };
 }

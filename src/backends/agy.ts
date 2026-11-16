@@ -9,11 +9,12 @@
  * delivered as a user prefix by the pipeline (`needsStableUserPrefix`).
  */
 
-import { statSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { CliAgentBackend, buildNiubotEnv, type BaseCliSession, type ParsedOutput } from "../agent/cli-base.js";
-import { ERROR_DISPLAY_MAX_LEN } from "../agent/types.js";
+import { AgentSessionNotStartedError, ERROR_DISPLAY_MAX_LEN, type AgentSessionActivity } from "../agent/types.js";
+import { readAgyTranscript } from "../session-archive/native-transcript.js";
 import type { ExecHooks, SessionConfig } from "../agent/types.js";
 
 interface AgySession extends BaseCliSession {}
@@ -107,6 +108,36 @@ export default class AgyBackend extends CliAgentBackend<AgySession> {
     };
   }
 
+  /** 可读的会话记录在 brain/<id>/.system_generated/logs/ 下，SQLite 只是 protobuf 存档。 */
+  private transcriptPath(agentSessionId: string): string {
+    return join(homedir(), ".gemini", "antigravity-cli", "brain", agentSessionId,
+      ".system_generated", "logs", "transcript_full.jsonl");
+  }
+
+  protected async loadSessionTranscript(session: AgySession) {
+    if (!session.agentSessionId) throw new AgentSessionNotStartedError("unknown");
+    return readAgyTranscript(this.transcriptPath(session.agentSessionId), session.agentSessionId);
+  }
+
+  /** /status 用最近两条可读步骤，盖掉 stdout 的 JSON 碎片 */
+  protected refreshActivity(sessionId: string, activity: AgentSessionActivity): void {
+    const session = this.sessions.get(sessionId);
+    if (!session?.agentSessionId) return;
+    try {
+      const lines = readFileSync(this.transcriptPath(session.agentSessionId), "utf-8").trim().split("\n");
+      const recent: string[] = [];
+      for (const line of lines.slice(-40)) {
+        const parsed = JSON.parse(line) as { type?: string; source?: string; content?: string };
+        if (!parsed.content) continue;
+        const who = parsed.type === "USER_INPUT" ? "user" : parsed.type === "PLANNER_RESPONSE" ? "assistant" : undefined;
+        if (!who) continue;
+        const text = who === "user" ? agyPreview(parsed.content) : parsed.content.replace(/\s+/g, " ").trim();
+        if (text) recent.push(`${who}: ${text.slice(0, ERROR_DISPLAY_MAX_LEN)}`);
+      }
+      if (recent.length > 0) activity.recentLines = recent.slice(-3);
+    } catch { /* 文件还没生成 */ }
+  }
+
   /** agy 把每个会话写成独立 SQLite；mtime 用来证明长任务还活着。 */
   protected probeSessionFileMtime(session: AgySession): number | null {
     if (!session.agentSessionId) return null;
@@ -174,6 +205,12 @@ export default class AgyBackend extends CliAgentBackend<AgySession> {
       failed,
     };
   }
+}
+
+/** 预览前先剥掉 prompt 包装，避免 /status 里出现 <USER_REQUEST> */
+function agyPreview(content: string): string {
+  const match = content.match(/<USER_REQUEST>\s*([\s\S]*?)\s*<\/USER_REQUEST>/);
+  return (match ? match[1]! : content).replace(/\s+/g, " ").trim();
 }
 
 function parseEvent(line: string): AgyEvent | null {

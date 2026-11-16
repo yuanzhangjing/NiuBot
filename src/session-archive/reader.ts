@@ -3,12 +3,13 @@ import { isAbsolute, join } from "node:path";
 import Database from "better-sqlite3";
 import type { SessionTranscript } from "../agent/types.js";
 import {
+  readAgyTranscript,
   readClaudeTranscript,
   readCodexTranscript,
   readCursorTranscript,
+  readDshTranscript,
   readGrokTranscript,
   readPiTranscript,
-  readDshTranscript,
   transcriptFromOpencodeRows,
 } from "./native-transcript.js";
 import { SESSION_ARCHIVE_MANIFEST, type SessionArchiveManifest } from "./archive.js";
@@ -100,6 +101,9 @@ export function loadReferencedTranscript(manifest: SessionArchiveManifest): Sess
       break;
     case "dsh":
       transcript = readDshTranscript(source("session"), manifest.agent_session_id);
+      break;
+    case "agy":
+      transcript = readAgyTranscript(source("transcript"), manifest.agent_session_id);
       break;
     case "grok": {
       const events = manifest.sources.find((candidate) => candidate.role === "events");
