@@ -1,4 +1,4 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -74,7 +74,7 @@ describe("AgyBackend", () => {
   });
 
   it("parses a successful turn", () => {
-    const backend = new AgyBackend();
+    const backend = new AgyBackend({ agyHome: mkdtempSync(join(tmpdir(), "agy-home-")) });
     const session = backend.buildSession({ workingDirectory: "/tmp" });
 
     const parsed = backend.parseOutput([INIT, DELTA("final "), DELTA("answer"), RESULT()].join("\n"), session);
@@ -83,8 +83,84 @@ describe("AgyBackend", () => {
     expect(parsed.turnCompleted).toBe(true);
     expect(parsed.failed).toBe(false);
     expect(parsed.agentSessionId).toBe("conv-1");
-    expect(parsed.contextTokens).toBe(26247);
+    expect(parsed.contextTokens).toBe(26259);
     expect(parsed.contextWindow).toBe(1_048_576);
+  });
+
+  it("reads the resolved default model from the brain transcript when init omits model", () => {
+    const agyHome = mkdtempSync(join(tmpdir(), "agy-home-"));
+    const logDir = join(agyHome, "brain", "conv-1", ".system_generated", "logs");
+    mkdirSync(logDir, { recursive: true });
+    writeFileSync(join(logDir, "transcript.jsonl"), [
+      JSON.stringify({ step_index: 0, type: "USER_INPUT", content: "hi" }),
+      JSON.stringify({
+        step_index: 1,
+        type: "PLANNER_RESPONSE",
+        model: "gemini-4-carbon-medium",
+        input_tokens: 13678,
+        cache_read_tokens: 0,
+        output_tokens: 138,
+        content: "hello",
+      }),
+    ].join("\n"));
+
+    const backend = new AgyBackend({ agyHome });
+    const session = backend.buildSession({ workingDirectory: "/tmp" });
+    const parsed = backend.parseOutput([INIT, RESULT()].join("\n"), session);
+
+    expect(parsed.model).toBe("gemini-4-carbon-medium");
+  });
+
+  it("prefers init.model over older transcript entries and uses final step usage for contextTokens", () => {
+    const agyHome = mkdtempSync(join(tmpdir(), "agy-home-"));
+    const logDir = join(agyHome, "brain", "conv-1", ".system_generated", "logs");
+    mkdirSync(logDir, { recursive: true });
+    writeFileSync(join(logDir, "transcript.jsonl"), JSON.stringify({
+      step_index: 1,
+      type: "PLANNER_RESPONSE",
+      model: "gemini-4-carbon-medium",
+      input_tokens: 1000,
+      cache_read_tokens: 0,
+      output_tokens: 10,
+    }));
+
+    const initWithModel = JSON.stringify({
+      event: "init",
+      conversation_id: "conv-1",
+      init: { model: "gemini-4-argon-high", cwd: "/tmp", tools: [], permission_mode: "always-proceed" },
+    });
+    const step1Done = JSON.stringify({
+      event: "step_update",
+      step_update: {
+        conversation_id: "conv-1",
+        step_index: 1,
+        state: "DONE",
+        step_type: "agent_response",
+        usage: { input_tokens: 13678, output_tokens: 138, thinking_tokens: 94, cache_read_tokens: 0, total_tokens: 13816 },
+      },
+    });
+    const step3Done = JSON.stringify({
+      event: "step_update",
+      step_update: {
+        conversation_id: "conv-1",
+        step_index: 3,
+        state: "DONE",
+        step_type: "agent_response",
+        text_delta: "done\n",
+        usage: { input_tokens: 2459, output_tokens: 288, thinking_tokens: 272, cache_read_tokens: 11624, total_tokens: 2747 },
+      },
+    });
+    const cumulativeResult = RESULT({
+      response: "done",
+      usage: { input_tokens: 16137, output_tokens: 426, thinking_tokens: 366, cache_read_tokens: 11624, total_tokens: 16563 },
+    });
+
+    const backend = new AgyBackend({ agyHome });
+    const session = backend.buildSession({ workingDirectory: "/tmp", model: "gemini-4-argon-high" });
+    const parsed = backend.parseOutput([initWithModel, step1Done, step3Done, cumulativeResult].join("\n"), session);
+
+    expect(parsed.model).toBe("gemini-4-argon-high");
+    expect(parsed.contextTokens).toBe(2459 + 11624 + 288);
   });
 
   it("prefers the final response over streamed fragments", () => {

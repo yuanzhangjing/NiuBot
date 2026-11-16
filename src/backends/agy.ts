@@ -9,7 +9,7 @@
  * delivered as a user prefix by the pipeline (`needsStableUserPrefix`).
  */
 
-import { readFileSync, statSync } from "node:fs";
+import { closeSync, openSync, readSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { CliAgentBackend, buildNiubotEnv, type BaseCliSession, type ParsedOutput } from "../agent/cli-base.js";
@@ -18,6 +18,10 @@ import { readAgyTranscript } from "../session-archive/native-transcript.js";
 import type { ExecHooks, SessionConfig } from "../agent/types.js";
 
 interface AgySession extends BaseCliSession {}
+
+export interface AgyBackendOptions {
+  agyHome?: string;
+}
 
 interface AgyUsage {
   input_tokens?: number;
@@ -30,6 +34,9 @@ interface AgyUsage {
 interface AgyEvent {
   event?: string;
   conversation_id?: string;
+  init?: {
+    model?: string;
+  };
   step_update?: {
     conversation_id?: string;
     step_index?: number;
@@ -50,10 +57,14 @@ interface AgyEvent {
 
 /** Gemini 4 family runs with a 1M window; other routes fall back to the same value. */
 const DEFAULT_CONTEXT_WINDOW = 1_048_576;
+const TRANSCRIPT_TAIL_BYTES = 262_144;
 
 export default class AgyBackend extends CliAgentBackend<AgySession> {
-  constructor() {
+  private readonly agyHome: string;
+
+  constructor(options: AgyBackendOptions = {}) {
     super("agy");
+    this.agyHome = options.agyHome ?? join(homedir(), ".gemini", "antigravity-cli");
   }
 
   command(): string {
@@ -110,8 +121,13 @@ export default class AgyBackend extends CliAgentBackend<AgySession> {
 
   /** 可读的会话记录在 brain/<id>/.system_generated/logs/ 下，SQLite 只是 protobuf 存档。 */
   private transcriptPath(agentSessionId: string): string {
-    return join(homedir(), ".gemini", "antigravity-cli", "brain", agentSessionId,
+    return join(this.agyHome, "brain", agentSessionId,
       ".system_generated", "logs", "transcript_full.jsonl");
+  }
+
+  private compactTranscriptPath(agentSessionId: string): string {
+    return join(this.agyHome, "brain", agentSessionId,
+      ".system_generated", "logs", "transcript.jsonl");
   }
 
   protected async loadSessionTranscript(session: AgySession) {
@@ -123,25 +139,27 @@ export default class AgyBackend extends CliAgentBackend<AgySession> {
   protected refreshActivity(sessionId: string, activity: AgentSessionActivity): void {
     const session = this.sessions.get(sessionId);
     if (!session?.agentSessionId) return;
-    try {
-      const lines = readFileSync(this.transcriptPath(session.agentSessionId), "utf-8").trim().split("\n");
-      const recent: string[] = [];
-      for (const line of lines.slice(-40)) {
+    const lines = readTailLines(this.compactTranscriptPath(session.agentSessionId), TRANSCRIPT_TAIL_BYTES)
+      ?? readTailLines(this.transcriptPath(session.agentSessionId), TRANSCRIPT_TAIL_BYTES);
+    if (!lines) return;
+    const recent: string[] = [];
+    for (const line of lines.slice(-40)) {
+      try {
         const parsed = JSON.parse(line) as { type?: string; source?: string; content?: string };
         if (!parsed.content) continue;
         const who = parsed.type === "USER_INPUT" ? "user" : parsed.type === "PLANNER_RESPONSE" ? "assistant" : undefined;
         if (!who) continue;
         const text = who === "user" ? agyPreview(parsed.content) : parsed.content.replace(/\s+/g, " ").trim();
         if (text) recent.push(`${who}: ${text.slice(0, ERROR_DISPLAY_MAX_LEN)}`);
-      }
-      if (recent.length > 0) activity.recentLines = recent.slice(-3);
-    } catch { /* 文件还没生成 */ }
+      } catch { /* 跳过损坏行 */ }
+    }
+    if (recent.length > 0) activity.recentLines = recent.slice(-3);
   }
 
   /** agy 把每个会话写成独立 SQLite；mtime 用来证明长任务还活着。 */
   protected probeSessionFileMtime(session: AgySession): number | null {
     if (!session.agentSessionId) return null;
-    const file = join(homedir(), ".gemini", "antigravity-cli", "conversations", `${session.agentSessionId}.db`);
+    const file = join(this.agyHome, "conversations", `${session.agentSessionId}.db`);
     try {
       return statSync(file).mtimeMs;
     } catch {
@@ -149,14 +167,43 @@ export default class AgyBackend extends CliAgentBackend<AgySession> {
     }
   }
 
+  /**
+   * 默认模型下 stdout 的 init 不含 model，只有 brain transcript 的 PLANNER_RESPONSE 带实际模型名。
+   * 优先读紧凑版 transcript.jsonl，避免长会话整读大体积 transcript_full.jsonl。
+   */
+  private readTranscriptMeta(agentSessionId: string): { model?: string; contextTokens?: number } {
+    for (const file of [this.compactTranscriptPath(agentSessionId), this.transcriptPath(agentSessionId)]) {
+      const lines = readTailLines(file, TRANSCRIPT_TAIL_BYTES);
+      if (!lines) continue;
+      for (let i = lines.length - 1; i >= 0; i--) {
+        try {
+          const step = JSON.parse(lines[i]!) as {
+            type?: string;
+            model?: string;
+            input_tokens?: number;
+            cache_read_tokens?: number;
+            output_tokens?: number;
+          };
+          if (step.type !== "PLANNER_RESPONSE") continue;
+          const model = typeof step.model === "string" && step.model.trim() ? step.model.trim() : undefined;
+          const contextTokens = estimateAgyContextTokens(step);
+          if (model || contextTokens !== undefined) return { model, contextTokens };
+        } catch { /* 跳过半行或损坏行 */ }
+      }
+    }
+    return {};
+  }
+
   parseOutput(stdout: string, session: AgySession): ParsedOutput {
     let agentSessionId = session.agentSessionId;
+    let initModel: string | undefined;
     let streamed = "";
     let finalText = "";
     let sawResult = false;
     let status: string | undefined;
     let errorMessage: string | undefined;
-    let contextTokens: number | undefined;
+    let lastStepTokens: number | undefined;
+    let resultTokens: number | undefined;
 
     for (const line of stdout.split("\n")) {
       const event = parseEvent(line);
@@ -166,8 +213,15 @@ export default class AgyBackend extends CliAgentBackend<AgySession> {
         ?? event.result?.conversation_id;
       if (conversationId) agentSessionId = conversationId;
 
+      if (event.event === "init" && event.init?.model?.trim()) {
+        initModel = event.init.model.trim();
+      }
+
       if (event.event === "step_update" && event.step_update?.step_type === "agent_response") {
         if (event.step_update.text_delta) streamed += event.step_update.text_delta;
+        // result.usage 会把多步未命中缓存增量累加；最后一条 agent_response 步才是当前上下文窗口占用
+        const stepTokens = estimateAgyContextTokens(event.step_update.usage);
+        if (stepTokens !== undefined) lastStepTokens = stepTokens;
       }
 
       if (event.event === "result") {
@@ -175,12 +229,13 @@ export default class AgyBackend extends CliAgentBackend<AgySession> {
         status = event.result?.status;
         finalText = event.result?.response ?? "";
         if (event.result?.error) errorMessage = event.result.error.slice(0, ERROR_DISPLAY_MAX_LEN);
-        const usage = event.result?.usage;
-        if (usage && typeof usage.input_tokens === "number" && usage.input_tokens > 0) {
-          contextTokens = usage.input_tokens;
-        }
+        resultTokens = estimateAgyContextTokens(event.result?.usage);
       }
     }
+
+    const transcriptMeta = agentSessionId ? this.readTranscriptMeta(agentSessionId) : {};
+    const contextTokens = lastStepTokens ?? transcriptMeta.contextTokens ?? resultTokens;
+    const model = initModel ?? transcriptMeta.model ?? session.model;
 
     // result.response 是本轮最终回复；流式片段只在没有终态时用于诊断
     const text = (finalText || streamed).trim();
@@ -200,10 +255,37 @@ export default class AgyBackend extends CliAgentBackend<AgySession> {
       agentSessionId,
       contextTokens,
       contextWindow: DEFAULT_CONTEXT_WINDOW,
-      model: session.model,
+      model,
       error: errorMessage,
       failed,
     };
+  }
+}
+
+function estimateAgyContextTokens(usage: AgyUsage | undefined): number | undefined {
+  if (!usage) return undefined;
+  const total = (usage.input_tokens ?? 0) + (usage.cache_read_tokens ?? 0) + (usage.output_tokens ?? 0);
+  return total > 0 ? total : undefined;
+}
+
+function readTailLines(file: string, maxBytes: number): string[] | null {
+  try {
+    const size = statSync(file).size;
+    if (size === 0) return null;
+    const offset = Math.max(0, size - maxBytes);
+    const length = size - offset;
+    const buf = Buffer.alloc(length);
+    const fd = openSync(file, "r");
+    try {
+      readSync(fd, buf, 0, length, offset);
+    } finally {
+      closeSync(fd);
+    }
+    const lines = buf.toString("utf-8").split("\n");
+    if (offset > 0) lines.shift();
+    return lines.filter((line) => line.trim().length > 0);
+  } catch {
+    return null;
   }
 }
 
