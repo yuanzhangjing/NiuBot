@@ -75,6 +75,11 @@ export const AGENT_REGISTRY = {
     command: "dsh",
     versionArgs: ["--version"],
   },
+  agy: {
+    aliases: ["agy", "antigravity"],
+    command: "agy",
+    versionArgs: ["--version"],
+  },
 } as const;
 
 /** 内置 agent backend 类型 */

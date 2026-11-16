@@ -109,6 +109,7 @@ Speaker 不是独立一层，是回合内的说话人标注，紧挨 Normal 注�
 | pi | `pi` | ✅ | |
 | grok | `grok` | ✅ | 瞬时网络错误需要拆包 |
 | dsh | `dsh` | ✅ | 会话日志与权限预设和普通 CLI 不同 |
+| agy | `agy` | ✅ | Antigravity CLI；消息只能走 `-p`（进程列表可见），会话用 `--conversation` 续接 |
 | cursor | `cursor-agent` | — | 不支持 effort 透传 |
 
 契约要点（详见 `src/backends/AGENTS.md`）：
