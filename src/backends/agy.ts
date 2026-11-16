@@ -171,7 +171,11 @@ export default class AgyBackend extends CliAgentBackend<AgySession> {
    * 默认模型下 stdout 的 init 不含 model，只有 brain transcript 的 PLANNER_RESPONSE 带实际模型名。
    * 优先读紧凑版 transcript.jsonl，避免长会话整读大体积 transcript_full.jsonl。
    */
-  private readTranscriptMeta(agentSessionId: string): { model?: string; contextTokens?: number } {
+  private readTranscriptMeta(agentSessionId: string): {
+    model?: string;
+    contextTokens?: number;
+    lastStepHasToolCalls?: boolean;
+  } {
     for (const file of [this.compactTranscriptPath(agentSessionId), this.transcriptPath(agentSessionId)]) {
       const lines = readTailLines(file, TRANSCRIPT_TAIL_BYTES);
       if (!lines) continue;
@@ -183,11 +187,15 @@ export default class AgyBackend extends CliAgentBackend<AgySession> {
             input_tokens?: number;
             cache_read_tokens?: number;
             output_tokens?: number;
+            tool_calls?: unknown[];
           };
           if (step.type !== "PLANNER_RESPONSE") continue;
           const model = typeof step.model === "string" && step.model.trim() ? step.model.trim() : undefined;
           const contextTokens = estimateAgyContextTokens(step);
-          if (model || contextTokens !== undefined) return { model, contextTokens };
+          const lastStepHasToolCalls = Array.isArray(step.tool_calls) && step.tool_calls.length > 0;
+          if (model || contextTokens !== undefined || lastStepHasToolCalls) {
+            return { model, contextTokens, lastStepHasToolCalls };
+          }
         } catch { /* 跳过半行或损坏行 */ }
       }
     }
@@ -202,6 +210,10 @@ export default class AgyBackend extends CliAgentBackend<AgySession> {
     let sawResult = false;
     let status: string | undefined;
     let errorMessage: string | undefined;
+    let lastErrorStep: number | undefined;
+    let lastAgentDoneStep: number | undefined;
+    let lastStepType: string | undefined;
+    let lastStepState: string | undefined;
     let lastStepTokens: number | undefined;
     let resultTokens: number | undefined;
 
@@ -217,11 +229,22 @@ export default class AgyBackend extends CliAgentBackend<AgySession> {
         initModel = event.init.model.trim();
       }
 
-      if (event.event === "step_update" && event.step_update?.step_type === "agent_response") {
-        if (event.step_update.text_delta) streamed += event.step_update.text_delta;
-        // result.usage 会把多步未命中缓存增量累加；最后一条 agent_response 步才是当前上下文窗口占用
-        const stepTokens = estimateAgyContextTokens(event.step_update.usage);
-        if (stepTokens !== undefined) lastStepTokens = stepTokens;
+      if (event.event === "step_update" && event.step_update) {
+        const step = event.step_update;
+        lastStepType = step.step_type;
+        lastStepState = step.state;
+        if (step.step_type === "error_message" && typeof step.step_index === "number") {
+          lastErrorStep = step.step_index;
+        }
+        if (step.step_type === "agent_response") {
+          if (step.text_delta) streamed += step.text_delta;
+          if (step.state === "DONE" && typeof step.step_index === "number") {
+            lastAgentDoneStep = step.step_index;
+          }
+          // result.usage 会把多步未命中缓存增量累加；最后一条 agent_response 步才是当前上下文窗口占用
+          const stepTokens = estimateAgyContextTokens(step.usage);
+          if (stepTokens !== undefined) lastStepTokens = stepTokens;
+        }
       }
 
       if (event.event === "result") {
@@ -239,24 +262,33 @@ export default class AgyBackend extends CliAgentBackend<AgySession> {
 
     // result.response 是本轮最终回复；流式片段只在没有终态时用于诊断
     const text = (finalText || streamed).trim();
-    const failed = sawResult && status !== "SUCCESS";
-    if (!failed && !sawResult) {
-      errorMessage = errorMessage ?? "未收到 result 事件";
-    }
+    // agy 中途断流注入 error_message 并自动续跑后，即使最终 agent_response 已正常完成，
+    // result 仍会保留粘性的 status=ERROR 和旧错误文案。
+    const recoveredFromMidTurnError = sawResult
+      && status !== "SUCCESS"
+      && lastErrorStep !== undefined
+      && lastAgentDoneStep !== undefined
+      && lastAgentDoneStep > lastErrorStep
+      && lastStepType === "agent_response"
+      && lastStepState === "DONE"
+      && !transcriptMeta.lastStepHasToolCalls
+      && finalText.trim().length > 0;
+    const succeeded = sawResult && (status === "SUCCESS" || recoveredFromMidTurnError);
+    const failed = sawResult && !succeeded;
     if (failed && !errorMessage) {
       errorMessage = `agy 回合失败（status=${status ?? "unknown"}）`;
     }
 
     return {
-      text,
-      turnCompleted: sawResult && status === "SUCCESS",
+      text: failed ? "" : text,
+      turnCompleted: sawResult,
       lastMessage: text,
       incompleteReason: sawResult ? undefined : "未收到 result 事件",
       agentSessionId,
       contextTokens,
       contextWindow: DEFAULT_CONTEXT_WINDOW,
       model,
-      error: errorMessage,
+      error: failed ? errorMessage : undefined,
       failed,
     };
   }

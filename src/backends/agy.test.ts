@@ -184,8 +184,8 @@ describe("AgyBackend", () => {
     expect(parsed.lastMessage).toBe("工作");
   });
 
-  it("marks a non-success result as failed", () => {
-    const backend = new AgyBackend();
+  it("marks a non-success result as failed while keeping turnCompleted true", () => {
+    const backend = new AgyBackend({ agyHome: mkdtempSync(join(tmpdir(), "agy-home-")) });
     const session = backend.buildSession({ workingDirectory: "/tmp" });
 
     const parsed = backend.parseOutput(
@@ -193,8 +193,73 @@ describe("AgyBackend", () => {
       session,
     );
     expect(parsed.failed).toBe(true);
-    expect(parsed.turnCompleted).toBe(false);
+    expect(parsed.turnCompleted).toBe(true);
     expect(parsed.error).toBe("quota exhausted");
+    expect(parsed.text).toBe("");
+  });
+
+  it("treats a mid-turn stream interruption as recovered when a later agent_response completes", () => {
+    const backend = new AgyBackend({ agyHome: mkdtempSync(join(tmpdir(), "agy-home-")) });
+    const session = backend.buildSession({ workingDirectory: "/tmp" });
+
+    const interruptedStep = JSON.stringify({
+      event: "step_update",
+      step_update: { conversation_id: "conv-1", step_index: 94, state: "DONE", step_type: "agent_response" },
+    });
+    const errorStep = JSON.stringify({
+      event: "step_update",
+      step_update: { conversation_id: "conv-1", step_index: 95, state: "DONE", step_type: "error_message" },
+    });
+    const recoveredStep = JSON.stringify({
+      event: "step_update",
+      step_update: {
+        conversation_id: "conv-1",
+        step_index: 98,
+        state: "DONE",
+        step_type: "agent_response",
+        text_delta: "recovered final answer\n",
+        usage: { input_tokens: 2360, output_tokens: 690, cache_read_tokens: 177696 },
+      },
+    });
+    const stickyErrorResult = RESULT({
+      status: "ERROR",
+      response: "recovered final answer\n",
+      error: "The stream was interrupted. Please continue the task you were working on.",
+      finished_reason: "error",
+    });
+
+    const parsed = backend.parseOutput(
+      [INIT, interruptedStep, errorStep, recoveredStep, stickyErrorResult].join("\n"),
+      session,
+    );
+    expect(parsed.turnCompleted).toBe(true);
+    expect(parsed.failed).toBe(false);
+    expect(parsed.error).toBeUndefined();
+    expect(parsed.text).toBe("recovered final answer");
+  });
+
+  it("still fails when an error_message occurs after the last completed agent_response", () => {
+    const backend = new AgyBackend({ agyHome: mkdtempSync(join(tmpdir(), "agy-home-")) });
+    const session = backend.buildSession({ workingDirectory: "/tmp" });
+
+    const earlierResponse = JSON.stringify({
+      event: "step_update",
+      step_update: { conversation_id: "conv-1", step_index: 1, state: "DONE", step_type: "agent_response" },
+    });
+    const terminalErrorStep = JSON.stringify({
+      event: "step_update",
+      step_update: { conversation_id: "conv-1", step_index: 2, state: "DONE", step_type: "error_message" },
+    });
+    const failedResult = RESULT({
+      status: "ERROR",
+      response: "partial",
+      error: "The stream was interrupted.",
+    });
+
+    const parsed = backend.parseOutput([INIT, earlierResponse, terminalErrorStep, failedResult].join("\n"), session);
+    expect(parsed.turnCompleted).toBe(true);
+    expect(parsed.failed).toBe(true);
+    expect(parsed.error).toBe("The stream was interrupted.");
   });
 
   it("captures the conversation id as soon as init arrives", () => {
