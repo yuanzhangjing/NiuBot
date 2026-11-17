@@ -325,6 +325,76 @@ describe("AgyBackend", () => {
     expect(hooks.isComplete?.(DELTA("x"))).toBe(false);
     expect(hooks.isComplete?.(RESULT())).toBe(true);
   });
+
+  it("counts completed checkpoint/compaction steps once per step_index", () => {
+    const backend = new AgyBackend({ agyHome: mkdtempSync(join(tmpdir(), "agy-home-")) });
+    const session = backend.buildSession({ workingDirectory: "/tmp" });
+
+    const compactActive = JSON.stringify({
+      event: "step_update",
+      step_update: { conversation_id: "conv-1", step_index: 5, state: "ACTIVE", step_type: "checkpoint" },
+    });
+    const compactDone = JSON.stringify({
+      event: "step_update",
+      step_update: { conversation_id: "conv-1", step_index: 5, state: "DONE", step_type: "checkpoint" },
+    });
+
+    const parsed = backend.parseOutput([INIT, compactActive, compactDone, compactDone, RESULT()].join("\n"), session);
+    expect(parsed.compactCount).toBe(1);
+  });
+
+  it("tracks parallel tool execution and compaction state in activity", () => {
+    const backend = new AgyBackend({ agyHome: mkdtempSync(join(tmpdir(), "agy-home-")) });
+    const session = backend.buildSession({ workingDirectory: "/tmp" });
+    (backend as any).sessions.set("h1", session);
+    const hooks = (backend as any).getExecHooks(session) as { onLine?: (line: string) => void };
+    const activity = {
+      status: "running" as const,
+      startedAt: 0,
+      lastActiveAt: 0,
+      completionDetected: false,
+      compacting: false,
+      recentLines: [] as string[],
+      notifyCount: 0,
+      executingTool: false,
+    };
+
+    hooks.onLine?.(INIT);
+    hooks.onLine?.(JSON.stringify({
+      event: "step_update",
+      step_update: { conversation_id: "conv-1", step_index: 1, state: "ACTIVE", step_type: "tool" },
+    }));
+    hooks.onLine?.(JSON.stringify({
+      event: "step_update",
+      step_update: { conversation_id: "conv-1", step_index: 2, state: "ACTIVE", step_type: "tool" },
+    }));
+    (backend as any).refreshActivity("h1", activity);
+    expect(activity.executingTool).toBe(true);
+
+    hooks.onLine?.(JSON.stringify({
+      event: "step_update",
+      step_update: { conversation_id: "conv-1", step_index: 1, state: "DONE", step_type: "tool" },
+    }));
+    (backend as any).refreshActivity("h1", activity);
+    expect(activity.executingTool).toBe(true);
+
+    hooks.onLine?.(JSON.stringify({
+      event: "step_update",
+      step_update: { conversation_id: "conv-1", step_index: 2, state: "DONE", step_type: "tool" },
+    }));
+    hooks.onLine?.(JSON.stringify({
+      event: "step_update",
+      step_update: { conversation_id: "conv-1", step_index: 3, state: "ACTIVE", step_type: "checkpoint" },
+    }));
+    (backend as any).refreshActivity("h1", activity);
+    expect(activity.executingTool).toBe(false);
+    expect(activity.compacting).toBe(true);
+
+    hooks.onLine?.(RESULT());
+    (backend as any).refreshActivity("h1", activity);
+    expect(activity.executingTool).toBe(false);
+    expect(activity.compacting).toBe(false);
+  });
 });
 
 describe("AgyBackend transcript", () => {

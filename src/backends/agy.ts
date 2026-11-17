@@ -17,7 +17,14 @@ import { AgentSessionNotStartedError, ERROR_DISPLAY_MAX_LEN, type AgentSessionAc
 import { readAgyTranscript } from "../session-archive/native-transcript.js";
 import type { ExecHooks, SessionConfig } from "../agent/types.js";
 
-interface AgySession extends BaseCliSession {}
+interface AgySession extends BaseCliSession {
+  /** 本轮正在执行的 tool step_index（并行调用时避免单个 DONE 误清 executingTool） */
+  activeToolSteps: Set<number>;
+  /** 当前是否处于上下文压缩（checkpoint / compaction）阶段 */
+  compacting: boolean;
+  /** 已计数的 compact step_index，避免重复累加 compactCount */
+  countedCompactSteps: Set<number>;
+}
 
 export interface AgyBackendOptions {
   agyHome?: string;
@@ -86,6 +93,9 @@ export default class AgyBackend extends CliAgentBackend<AgySession> {
       cumulativeBytes: 0,
       compactCount: 0,
       jsonlOffset: 0,
+      activeToolSteps: new Set<number>(),
+      compacting: false,
+      countedCompactSteps: new Set<number>(),
     };
   }
 
@@ -111,8 +121,30 @@ export default class AgyBackend extends CliAgentBackend<AgySession> {
     return {
       onLine: (line) => {
         const event = parseEvent(line);
-        if (event?.event === "init" && event.conversation_id && !session.agentSessionId) {
-          session.agentSessionId = event.conversation_id;
+        if (!event) return;
+        if (event.event === "init") {
+          session.activeToolSteps.clear();
+          session.compacting = false;
+          if (event.conversation_id && !session.agentSessionId) {
+            session.agentSessionId = event.conversation_id;
+          }
+          return;
+        }
+        if (event.event === "step_update" && event.step_update) {
+          const step = event.step_update;
+          const stepKey = typeof step.step_index === "number" ? step.step_index : -1;
+          if (step.step_type === "tool") {
+            if (step.state === "ACTIVE") session.activeToolSteps.add(stepKey);
+            else if (step.state === "DONE") session.activeToolSteps.delete(stepKey);
+          } else if (isCompactStepType(step.step_type)) {
+            if (step.state === "ACTIVE") session.compacting = true;
+            else if (step.state === "DONE") session.compacting = false;
+          }
+          return;
+        }
+        if (event.event === "result") {
+          session.activeToolSteps.clear();
+          session.compacting = false;
         }
       },
       isComplete: (line) => parseEvent(line)?.event === "result",
@@ -135,10 +167,13 @@ export default class AgyBackend extends CliAgentBackend<AgySession> {
     return readAgyTranscript(this.transcriptPath(session.agentSessionId), session.agentSessionId);
   }
 
-  /** /status 用最近两条可读步骤，盖掉 stdout 的 JSON 碎片 */
+  /** /status 用最近两条可读步骤，盖掉 stdout 的 JSON 碎片，并同步工具与压缩状态 */
   protected refreshActivity(sessionId: string, activity: AgentSessionActivity): void {
     const session = this.sessions.get(sessionId);
-    if (!session?.agentSessionId) return;
+    if (!session) return;
+    activity.executingTool = session.activeToolSteps.size > 0;
+    activity.compacting = session.compacting;
+    if (!session.agentSessionId) return;
     const lines = readTailLines(this.compactTranscriptPath(session.agentSessionId), TRANSCRIPT_TAIL_BYTES)
       ?? readTailLines(this.transcriptPath(session.agentSessionId), TRANSCRIPT_TAIL_BYTES);
     if (!lines) return;
@@ -239,6 +274,12 @@ export default class AgyBackend extends CliAgentBackend<AgySession> {
         if (step.step_type === "error_message" && typeof step.step_index === "number") {
           lastErrorStep = step.step_index;
         }
+        if (isCompactStepType(step.step_type) && step.state === "DONE" && typeof step.step_index === "number") {
+          if (!session.countedCompactSteps.has(step.step_index)) {
+            session.countedCompactSteps.add(step.step_index);
+            session.compactCount++;
+          }
+        }
         if (step.step_type === "agent_response") {
           if (step.text_delta) streamed += step.text_delta;
           if (step.state === "DONE" && typeof step.step_index === "number") {
@@ -298,10 +339,15 @@ export default class AgyBackend extends CliAgentBackend<AgySession> {
       contextTokens,
       contextWindow: DEFAULT_CONTEXT_WINDOW,
       model,
+      compactCount: session.compactCount > 0 ? session.compactCount : undefined,
       error: failed ? errorMessage : undefined,
       failed,
     };
   }
+}
+
+function isCompactStepType(stepType: string | undefined): boolean {
+  return stepType === "checkpoint" || stepType === "compaction" || stepType === "compact";
 }
 
 function estimateAgyContextTokens(usage: AgyUsage | undefined): number | undefined {
