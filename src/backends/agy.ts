@@ -231,8 +231,11 @@ export default class AgyBackend extends CliAgentBackend<AgySession> {
 
       if (event.event === "step_update" && event.step_update) {
         const step = event.step_update;
-        lastStepType = step.step_type;
-        lastStepState = step.state;
+        // 忽略尾部可能插入的 system_message，避免覆盖最终 agent_response 状态
+        if (step.step_type && step.step_type !== "system_message") {
+          lastStepType = step.step_type;
+          lastStepState = step.state;
+        }
         if (step.step_type === "error_message" && typeof step.step_index === "number") {
           lastErrorStep = step.step_index;
         }
@@ -274,6 +277,13 @@ export default class AgyBackend extends CliAgentBackend<AgySession> {
       && !transcriptMeta.lastStepHasToolCalls
       && finalText.trim().length > 0;
     const succeeded = sawResult && (status === "SUCCESS" || completedCleanlyAfterStickyError);
+    if (completedCleanlyAfterStickyError) {
+      this.log.info("ignoring sticky agy result error", {
+        agentSessionId: agentSessionId ?? null,
+        status: status ?? null,
+        error: errorMessage ?? null,
+      });
+    }
     const failed = sawResult && !succeeded;
     if (failed && !errorMessage) {
       errorMessage = `agy 回合失败（status=${status ?? "unknown"}）`;

@@ -258,6 +258,15 @@ describe("AgyBackend", () => {
         usage: { input_tokens: 3361, output_tokens: 453, cache_read_tokens: 244958 },
       },
     });
+    const trailingSystemStep = JSON.stringify({
+      event: "step_update",
+      step_update: {
+        conversation_id: "conv-1",
+        step_index: 182,
+        state: "DONE",
+        step_type: "system_message",
+      },
+    });
     const historicalStickyResult = RESULT({
       status: "ERROR",
       response: "all good\n",
@@ -266,7 +275,10 @@ describe("AgyBackend", () => {
       finished_reason: "error",
     });
 
-    const parsed = backend.parseOutput([INIT, userStep, cleanDoneStep, historicalStickyResult].join("\n"), session);
+    const parsed = backend.parseOutput(
+      [INIT, userStep, cleanDoneStep, trailingSystemStep, historicalStickyResult].join("\n"),
+      session,
+    );
     expect(parsed.turnCompleted).toBe(true);
     expect(parsed.failed).toBe(false);
     expect(parsed.error).toBeUndefined();
