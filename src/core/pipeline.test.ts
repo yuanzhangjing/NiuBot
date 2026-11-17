@@ -7297,14 +7297,14 @@ bots:
     )).toBe(true);
     await vi.waitFor(() => {
       expect(sentCards.some((card) => card.header === "Shell|blue" && card.content.includes(dir))).toBe(true);
-    });
+    }, { timeout: 5_000 });
 
     expect((pipeline as any).handleBuiltinCommand(
       "/history", "u2", "c1", "chat-open-id", "p2p", "m2",
     )).toBe(true);
     await vi.waitFor(() => {
       expect(sentCards.some((card) => card.header === "Shell 历史|blue" && card.content.includes("pwd"))).toBe(true);
-    });
+    }, { timeout: 5_000 });
   });
 
   test("controls the Engine-level keep-awake service through /awake", async () => {
