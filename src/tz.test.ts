@@ -3,7 +3,6 @@ import {
   applyDisplayTimezone,
   dateTimeInTimeZone,
   DEFAULT_TIMEZONE,
-  isTimezoneChangeUtterance,
   timezoneCommandIsResolved,
   resolveSystemTimeZone,
   formatLocalDateTimeWithTZ,
@@ -50,13 +49,7 @@ describe("timezone display helpers", () => {
     expect(timezoneCommandIsResolved(["reset"])).toBe(true);
     expect(timezoneCommandIsResolved(["sys"])).toBe(true);
     expect(isValidTimeZone(resolveSystemTimeZone())).toBe(true);
-    expect(isTimezoneChangeUtterance("改成西雅图时间")).toBe(true);
     expect(normalizeTimeZoneInput("你能帮我改成北京时区吗？")).toBe("Asia/Shanghai");
-    expect(isTimezoneChangeUtterance("改成北京时间")).toBe(true);
-    expect(isTimezoneChangeUtterance("你能帮我改成北京时区吗？")).toBe(true);
-    expect(isTimezoneChangeUtterance("/tz 改成北京时间")).toBe(false);
-    expect(isTimezoneChangeUtterance("东京时间几点了")).toBe(false);
-    expect(isTimezoneChangeUtterance("时区怎么配")).toBe(false);
     expect(applyDisplayTimezone({})).toBe("Asia/Shanghai");
     expect(TZ).toBe("Asia/Shanghai");
     expect(applyDisplayTimezone({ config: "UTC" })).toBe("UTC");

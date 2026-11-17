@@ -75,7 +75,6 @@ import {
   dateTimeInTimeZone,
   DEFAULT_TIMEZONE,
   formatLocalDateTimeWithTZ,
-  isTimezoneChangeUtterance,
   normalizeTimeZoneInput,
   resolveSystemTimeZone,
   timezoneCommandIsResolved,
@@ -3059,15 +3058,6 @@ export class Pipeline {
     const cmd = parts[0].toLowerCase();
     const isAdmin = this.adminRoles.has(userId);
 
-    if (isTimezoneChangeUtterance(text)) {
-      if (!isAdmin) {
-        this.replyText(chatId, platformChatId, msgId, "/tz 仅管理员可用。");
-        return true;
-      }
-      this.handleTimezoneCommand([text], chatId, platformChatId, msgId);
-      return true;
-    }
-
     // 1. 内置命令
     switch (cmd) {
       case "/restart": {
@@ -3344,7 +3334,6 @@ export class Pipeline {
   }
 
   private isBuiltinCommand(text: string, userId: string): boolean {
-    if (isTimezoneChangeUtterance(text)) return true;
     if (!text.startsWith("/") || text.startsWith("//")) return false;
     const firstToken = text.split(/\s+/, 1)[0]?.toLowerCase();
     if (firstToken && HYBRID_SCHEDULE_COMMANDS.has(firstToken)) {

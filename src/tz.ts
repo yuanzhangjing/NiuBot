@@ -108,17 +108,6 @@ export function normalizeTimeZoneInput(raw: string): string | undefined {
   return undefined;
 }
 
-const TZ_CHANGE_INTENT_RE = /改成|换成|设成|设为|调成|切到|切换到/;
-const TZ_TOPIC_RE = /时区|时间/;
-
-/** True for utterances like「帮我改成北京时区」「改成北京时间」— not `/tz` itself. */
-export function isTimezoneChangeUtterance(text: string): boolean {
-  const trimmed = text.trim();
-  if (!trimmed || trimmed.startsWith("/")) return false;
-  if (!TZ_CHANGE_INTENT_RE.test(trimmed) || !TZ_TOPIC_RE.test(trimmed)) return false;
-  return Boolean(normalizeTimeZoneInput(trimmed));
-}
-
 /** Host IANA timezone: process TZ, else the OS zone from Intl. */
 export function resolveSystemTimeZone(): string {
   const fromEnv = process.env["TZ"]?.trim();

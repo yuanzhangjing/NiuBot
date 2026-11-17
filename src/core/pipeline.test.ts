@@ -2625,10 +2625,11 @@ bots:
     expect(loadConfig(configPath).timezone).toBe("Asia/Shanghai");
 
     expect((pipeline as any).handleBuiltinCommand("/tz UTC", "u2", "c1", "chat-open-id", "p2p")).toBe(true);
-    expect((pipeline as any).handleBuiltinCommand("你能帮我改成北京时区吗？", "u2", "c1", "chat-open-id", "p2p")).toBe(true);
-    expect(sentCards.at(-1)?.header).toBe("Timezone|green");
-    expect(loadConfig(configPath).timezone).toBe("Asia/Shanghai");
+    // 无 / 前缀的自然语言或带 "region":"cn" / 时间 / 设为 的文本不应被本地内置命令拦截
+    expect((pipeline as any).handleBuiltinCommand("你能帮我改成北京时区吗？", "u2", "c1", "chat-open-id", "p2p")).toBe(false);
+    expect((pipeline as any).handleBuiltinCommand('format {"region":"cn","note":"状态设为 GONE，时间范围 1~2"}', "u2", "c1", "chat-open-id", "p2p")).toBe(false);
     expect((pipeline as any).handleBuiltinCommand("东京时间几点了", "u2", "c1", "chat-open-id", "p2p")).toBe(false);
+    expect(loadConfig(configPath).timezone).toBe("UTC");
     applyDisplayTimezone({});
   });
 
