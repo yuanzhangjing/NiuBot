@@ -46,11 +46,20 @@ describe("AgyBackend", () => {
     expect(args[1]).toBe("hello");
     expect(args).toContain("--output-format");
     expect(args).toContain("stream-json");
+    expect(args).toContain("--dangerously-skip-permissions");
     expect(args).toContain("--model");
     expect(args).toContain("gemini-4-argon-high");
     expect(args).toContain("--effort");
     expect(args).toContain("high");
     expect(args).not.toContain("--conversation");
+  });
+
+  it("omits --dangerously-skip-permissions when skipPermissions is false", () => {
+    const backend = new AgyBackend({ skipPermissions: false });
+    const session = backend.buildSession({ workingDirectory: "/tmp" });
+
+    const { args } = backend.buildInput(session, "hello");
+    expect(args).not.toContain("--dangerously-skip-permissions");
   });
 
   it("resumes with --conversation once a native id exists", () => {

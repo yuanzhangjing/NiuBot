@@ -28,6 +28,8 @@ interface AgySession extends BaseCliSession {
 
 export interface AgyBackendOptions {
   agyHome?: string;
+  /** 默认全放行所有工具权限，对齐其他内置后端的 YOLO 行为 */
+  skipPermissions?: boolean;
 }
 
 interface AgyUsage {
@@ -68,10 +70,12 @@ const TRANSCRIPT_TAIL_BYTES = 262_144;
 
 export default class AgyBackend extends CliAgentBackend<AgySession> {
   private readonly agyHome: string;
+  private readonly skipPermissions: boolean;
 
   constructor(options: AgyBackendOptions = {}) {
     super("agy");
     this.agyHome = options.agyHome ?? join(homedir(), ".gemini", "antigravity-cli");
+    this.skipPermissions = options.skipPermissions ?? true;
   }
 
   command(): string {
@@ -103,6 +107,7 @@ export default class AgyBackend extends CliAgentBackend<AgySession> {
     // agy only accepts the prompt as an argument; this is the documented CLI
     // difference (message is visible in the process list, like other `-p` CLIs).
     const args = ["-p", message, "--output-format", "stream-json"];
+    if (this.skipPermissions) args.push("--dangerously-skip-permissions");
     if (session.model) args.push("--model", session.model);
     if (session.reasoningEffort) args.push("--effort", session.reasoningEffort);
     if (session.agentSessionId) args.push("--conversation", session.agentSessionId);
