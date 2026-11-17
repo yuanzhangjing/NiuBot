@@ -14,7 +14,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { CliAgentBackend, buildNiubotEnv, type BaseCliSession, type ParsedOutput } from "../agent/cli-base.js";
 import { AgentSessionNotStartedError, ERROR_DISPLAY_MAX_LEN, type AgentSessionActivity } from "../agent/types.js";
-import { readAgyTranscript } from "../session-archive/native-transcript.js";
+import { readAgyTranscript, agyUserRequest, visibleUserPayload } from "../session-archive/native-transcript.js";
 import type { ExecHooks, SessionConfig } from "../agent/types.js";
 
 interface AgySession extends BaseCliSession {
@@ -67,6 +67,9 @@ interface AgyEvent {
 /** Gemini 4 family runs with a 1M window; other routes fall back to the same value. */
 const DEFAULT_CONTEXT_WINDOW = 1_048_576;
 const TRANSCRIPT_TAIL_BYTES = 262_144;
+const ACTIVITY_LINE_MAX_LEN = 200;
+const ACTIVITY_MAX_LINES = 3;
+const TOOL_ARG_PRIORITY_KEYS = ["toolSummary", "CommandLine", "Path", "query", "Description", "Prompt", "Action", "Message"] as const;
 
 export default class AgyBackend extends CliAgentBackend<AgySession> {
   private readonly agyHome: string;
@@ -172,7 +175,7 @@ export default class AgyBackend extends CliAgentBackend<AgySession> {
     return readAgyTranscript(this.transcriptPath(session.agentSessionId), session.agentSessionId);
   }
 
-  /** /status 用最近两条可读步骤，盖掉 stdout 的 JSON 碎片，并同步工具与压缩状态 */
+  /** /status 从实时落盘的 transcript 提取最近可读步骤（含工具调用/结果/报错），盖掉 stdout 的 JSON 碎片 */
   protected refreshActivity(sessionId: string, activity: AgentSessionActivity): void {
     const session = this.sessions.get(sessionId);
     if (!session) return;
@@ -182,18 +185,18 @@ export default class AgyBackend extends CliAgentBackend<AgySession> {
     const lines = readTailLines(this.compactTranscriptPath(session.agentSessionId), TRANSCRIPT_TAIL_BYTES)
       ?? readTailLines(this.transcriptPath(session.agentSessionId), TRANSCRIPT_TAIL_BYTES);
     if (!lines) return;
-    const recent: string[] = [];
-    for (const line of lines.slice(-40)) {
+
+    const recentReversed: string[] = [];
+    for (let i = lines.length - 1; i >= 0 && recentReversed.length < ACTIVITY_MAX_LINES; i--) {
       try {
-        const parsed = JSON.parse(line) as { type?: string; source?: string; content?: string };
-        if (!parsed.content) continue;
-        const who = parsed.type === "USER_INPUT" ? "user" : parsed.type === "PLANNER_RESPONSE" ? "assistant" : undefined;
-        if (!who) continue;
-        const text = who === "user" ? agyPreview(parsed.content) : parsed.content.replace(/\s+/g, " ").trim();
-        if (text) recent.push(`${who}: ${text.slice(0, ERROR_DISPLAY_MAX_LEN)}`);
-      } catch { /* 跳过损坏行 */ }
+        const parsed = JSON.parse(lines[i]!) as AgyTranscriptStep;
+        const rendered = renderAgyStepLines(parsed);
+        for (let j = rendered.length - 1; j >= 0 && recentReversed.length < ACTIVITY_MAX_LINES; j--) {
+          recentReversed.push(rendered[j]!);
+        }
+      } catch { /* 跳过半行或损坏行 */ }
     }
-    if (recent.length > 0) activity.recentLines = recent.slice(-3);
+    if (recentReversed.length > 0) activity.recentLines = recentReversed.reverse();
   }
 
   /** agy 把每个会话写成独立 SQLite；mtime 用来证明长任务还活着。 */
@@ -382,10 +385,122 @@ function readTailLines(file: string, maxBytes: number): string[] | null {
   }
 }
 
-/** 预览前先剥掉 prompt 包装，避免 /status 里出现 <USER_REQUEST> */
+interface AgyTranscriptToolCall {
+  name?: string;
+  args?: Record<string, unknown>;
+  function?: { name?: string; arguments?: unknown };
+}
+
+interface AgyTranscriptStep {
+  type?: string;
+  status?: string;
+  content?: string;
+  error?: string;
+  tool_calls?: AgyTranscriptToolCall[];
+}
+
+function truncateActivity(text: string): string {
+  const flat = text.replace(/\s+/g, " ").trim();
+  if (!flat) return "";
+  return flat.length > ACTIVITY_LINE_MAX_LEN ? `${flat.slice(0, ACTIVITY_LINE_MAX_LEN)}…` : flat;
+}
+
+function unwrapQuotedString(raw: unknown): string {
+  if (typeof raw === "string") {
+    const trimmed = raw.trim();
+    if (trimmed.startsWith("\"") && trimmed.endsWith("\"") && trimmed.length >= 2) {
+      try {
+        const unquoted = JSON.parse(trimmed);
+        if (typeof unquoted === "string") return unquoted;
+      } catch { /* 保留原样 */ }
+    }
+    return trimmed;
+  }
+  if (typeof raw === "number" || typeof raw === "boolean") return String(raw);
+  if (raw && typeof raw === "object") {
+    try {
+      return JSON.stringify(raw);
+    } catch {
+      return "";
+    }
+  }
+  return "";
+}
+
+function summarizeAgyToolArgs(rawArgs: unknown): string {
+  let obj: Record<string, unknown> | undefined;
+  if (typeof rawArgs === "string") {
+    try {
+      const parsed = JSON.parse(rawArgs) as unknown;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        obj = parsed as Record<string, unknown>;
+      }
+    } catch {
+      return truncateActivity(unwrapQuotedString(rawArgs));
+    }
+  } else if (rawArgs && typeof rawArgs === "object" && !Array.isArray(rawArgs)) {
+    obj = rawArgs as Record<string, unknown>;
+  }
+  if (!obj) return "";
+
+  for (const key of TOOL_ARG_PRIORITY_KEYS) {
+    if (key in obj) {
+      const value = unwrapQuotedString(obj[key]);
+      if (value) return truncateActivity(value);
+    }
+  }
+  for (const value of Object.values(obj)) {
+    const text = unwrapQuotedString(value);
+    if (text) return truncateActivity(text);
+  }
+  return "";
+}
+
+function stripAgyGenericHeader(content: string): string {
+  return content
+    .replace(/^(?:(?:Created|Completed) At:[^\n]*\n)+/g, "")
+    .replace(/^Command exited with code (-?\d+)\.\s*(?:Command output:\s*)?/i, "exit $1 · ")
+    .trim();
+}
+
+function renderAgyStepLines(step: AgyTranscriptStep): string[] {
+  if (step.type === "USER_INPUT") {
+    if (!step.content) return [];
+    const text = truncateActivity(agyPreview(step.content));
+    return text ? [`user: ${text}`] : [];
+  }
+  if (step.type === "PLANNER_RESPONSE") {
+    const lines: string[] = [];
+    if (step.content) {
+      const text = truncateActivity(step.content);
+      if (text) lines.push(`assistant: ${text}`);
+    }
+    if (Array.isArray(step.tool_calls)) {
+      for (const call of step.tool_calls) {
+        const name = call.name?.trim() || call.function?.name?.trim();
+        if (!name) continue;
+        const summary = summarizeAgyToolArgs(call.args ?? call.function?.arguments);
+        lines.push(truncateActivity(summary ? `tool: ${name} ${summary}` : `tool: ${name}`));
+      }
+    }
+    return lines;
+  }
+  if (step.type === "GENERIC") {
+    if (!step.content) return [];
+    const body = truncateActivity(stripAgyGenericHeader(step.content));
+    if (!body) return [];
+    return [`${step.status === "RUNNING" ? "running" : "result"}: ${body}`];
+  }
+  if (step.type === "ERROR_MESSAGE") {
+    const msg = truncateActivity(step.error || step.content || "");
+    return msg ? [`error: ${msg}`] : [];
+  }
+  return [];
+}
+
+/** 预览前先剥掉 prompt 包装与系统前缀，避免 /status 里出现 <USER_REQUEST> 或 <niubot-system-rules> */
 function agyPreview(content: string): string {
-  const match = content.match(/<USER_REQUEST>\s*([\s\S]*?)\s*<\/USER_REQUEST>/);
-  return (match ? match[1]! : content).replace(/\s+/g, " ").trim();
+  return visibleUserPayload(agyUserRequest(content)).replace(/\s+/g, " ").trim();
 }
 
 function parseEvent(line: string): AgyEvent | null {

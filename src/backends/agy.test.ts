@@ -438,4 +438,106 @@ describe("AgyBackend transcript", () => {
       { timestamp: "2026-11-16T15:32:53Z", type: "assistant", content: "got it" },
     ]);
   });
+
+  it("populates recentLines with latest tool calls, results, errors, and clean user previews", () => {
+    const agyHome = mkdtempSync(join(tmpdir(), "agy-home-"));
+    const logDir = join(agyHome, "brain", "conv-1", ".system_generated", "logs");
+    mkdirSync(logDir, { recursive: true });
+    writeFileSync(join(logDir, "transcript.jsonl"), [
+      JSON.stringify({
+        step_index: 0,
+        type: "USER_INPUT",
+        content: "<USER_REQUEST>\n<niubot-system-rules>\nrules\n</niubot-system-rules>\n<niubot-user-message id=\"u1\" length=\"4\">\nhi\n</niubot-user-message id=\"u1\">\n</USER_REQUEST>",
+      }),
+      JSON.stringify({
+        step_index: 1,
+        type: "PLANNER_RESPONSE",
+        content: "older reply",
+      }),
+      JSON.stringify({
+        step_index: 2,
+        type: "PLANNER_RESPONSE",
+        tool_calls: [{ name: "run_command", args: { CommandLine: "\"npm test\"", toolSummary: "\"Run unit tests\"" } }],
+      }),
+      JSON.stringify({
+        step_index: 3,
+        type: "GENERIC",
+        status: "DONE",
+        content: "Created At: 2026-11-17T15:20:00+08:00\nCompleted At: 2026-11-17T15:20:05+08:00\nCreated At: 2026-11-17T15:20:00+08:00\nCompleted At: 2026-11-17T15:20:05+08:00\nCommand exited with code 0.\n\nCommand output:\nall passed",
+      }),
+      JSON.stringify({
+        step_index: 4,
+        type: "ERROR_MESSAGE",
+        error: "The stream was interrupted.",
+      }),
+    ].join("\n"));
+
+    const backend = new AgyBackend({ agyHome });
+    const session = backend.buildSession({ workingDirectory: "/tmp" });
+    session.agentSessionId = "conv-1";
+    (backend as any).sessions.set("h1", session);
+
+    const activity = {
+      status: "running" as const,
+      startedAt: 0,
+      lastActiveAt: 0,
+      completionDetected: false,
+      compacting: false,
+      recentLines: ['{"event":"step_update"}'],
+      notifyCount: 0,
+    };
+    (backend as any).refreshActivity("h1", activity);
+
+    expect(activity.recentLines).toEqual([
+      "tool: run_command Run unit tests",
+      "result: exit 0 · all passed",
+      "error: The stream was interrupted.",
+    ]);
+  });
+
+  it("finds latest steps past >40 skipped SYSTEM_MESSAGE entries and strips injected user rules", () => {
+    const agyHome = mkdtempSync(join(tmpdir(), "agy-home-"));
+    const logDir = join(agyHome, "brain", "conv-1", ".system_generated", "logs");
+    mkdirSync(logDir, { recursive: true });
+    const lines = [
+      JSON.stringify({
+        step_index: 0,
+        type: "USER_INPUT",
+        content: "<USER_REQUEST>\n<niubot-system-rules>\nsecret rules\n</niubot-system-rules>\n<niubot-user-message id=\"a1\" length=\"5\">\ncheck\n</niubot-user-message id=\"a1\">\n</USER_REQUEST>",
+      }),
+      JSON.stringify({
+        step_index: 1,
+        type: "GENERIC",
+        status: "RUNNING",
+        content: "Created At: 2026-11-17T15:20:00+08:00\nTool is running as a background task with task id: task-1",
+      }),
+      ...Array.from({ length: 45 }, (_, idx) => JSON.stringify({
+        step_index: idx + 2,
+        type: "SYSTEM_MESSAGE",
+        content: `system notice ${idx}`,
+      })),
+    ];
+    writeFileSync(join(logDir, "transcript.jsonl"), lines.join("\n"));
+
+    const backend = new AgyBackend({ agyHome });
+    const session = backend.buildSession({ workingDirectory: "/tmp" });
+    session.agentSessionId = "conv-1";
+    (backend as any).sessions.set("h1", session);
+
+    const activity = {
+      status: "running" as const,
+      startedAt: 0,
+      lastActiveAt: 0,
+      completionDetected: false,
+      compacting: false,
+      recentLines: ['{"event":"init"}'],
+      notifyCount: 0,
+    };
+    (backend as any).refreshActivity("h1", activity);
+
+    expect(activity.recentLines).toEqual([
+      "user: check",
+      "running: Tool is running as a background task with task id: task-1",
+    ]);
+  });
 });
