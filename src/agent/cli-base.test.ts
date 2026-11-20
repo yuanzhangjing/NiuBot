@@ -204,6 +204,31 @@ describe("CliAgentBackend transient retry", () => {
     expect(backend.attempts).toBe(2);
   });
 
+  test("preserves compactDelta accrued before a transient CLI retry", async () => {
+    class CompactRetryBackend extends TransientRetryBackend {
+      override parseOutput(stdout: string): ParsedOutput {
+        if (stdout.includes("reqwest")) {
+          return {
+            text: "",
+            turnCompleted: false,
+            failed: true,
+            error: "reqwest error stream",
+            incompleteReason: "grok 返回 error",
+            compactDelta: 1,
+          };
+        }
+        return { text: "recovered", turnCompleted: true };
+      }
+    }
+    const backend = new CompactRetryBackend();
+    const session = await backend.createSession({ workingDirectory: process.cwd() });
+    await expect(backend.sendMessage(session as AgentSession, "continue")).resolves.toMatchObject({
+      text: "recovered",
+      compactDelta: 1,
+    });
+    expect(backend.attempts).toBe(2);
+  });
+
   test("surfaces a missing backend session instead of starting a new one", async () => {
     const backend = new Resume404Backend();
     const session = await backend.createSession({

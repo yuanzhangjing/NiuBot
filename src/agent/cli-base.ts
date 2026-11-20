@@ -185,7 +185,11 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
   }
 
   /** 子进程非零退出时，尽量把 stdout 里的 backend 错误提成用户可见原因。 */
-  private promoteExecError(agentSession: AgentSession, err: unknown): unknown {
+  private promoteExecError(
+    agentSession: AgentSession,
+    err: unknown,
+    onParsed?: (parsed: ParsedOutput) => void,
+  ): unknown {
     if (!err || typeof err !== "object") return err;
     const stdout = "stdout" in err && typeof err.stdout === "string" ? err.stdout : undefined;
     if (!stdout) return err;
@@ -195,6 +199,7 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
     if (message && !message.startsWith("Command failed:")) return err;
     try {
       const parsed = this.parseOutput(stdout, session);
+      onParsed?.(parsed);
       session.agentSessionId = nativeSessionId(parsed.agentSessionId ?? session.agentSessionId, agentSession.id);
       this.aliasActiveProcessToNative(agentSession.id);
       const parsedError = this.getParsedError(parsed);
@@ -275,13 +280,14 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
   }
 
   async sendMessage(agentSession: AgentSession, message: string): Promise<AgentResponse> {
-    return this.sendMessageAttempt(agentSession, message, 0);
+    return this.sendMessageAttempt(agentSession, message, 0, 0);
   }
 
   private async sendMessageAttempt(
     agentSession: AgentSession,
     message: string,
     attempt: number,
+    accumulatedCompactDelta: number,
   ): Promise<AgentResponse> {
     const s = this.sessions.get(agentSession.id);
     if (!s) throw new Error(`Session not found: ${agentSession.id}`);
@@ -313,6 +319,7 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
 
     // 获取子类提供的 hooks
     const hooks = this.getExecHooks?.(s);
+    let attemptCompactDelta = 0;
 
     try {
       const stdout = await this.exec(this.command(), args, {
@@ -335,6 +342,7 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
       s.cumulativeBytes += stdout.length;
 
       const parsed = this.parseOutput(stdout, s);
+      attemptCompactDelta = parsed.compactDelta ?? 0;
       s.agentSessionId = nativeSessionId(parsed.agentSessionId ?? s.agentSessionId, agentSession.id);
       // 有些 backend 直到回合结束才给出 native id；此时进程可能还活着，补登索引
       this.aliasActiveProcessToNative(agentSession.id);
@@ -350,15 +358,17 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
         throw err;
       }
 
+      const totalCompactDelta = accumulatedCompactDelta + attemptCompactDelta;
+      const compactDelta = totalCompactDelta > 0 ? totalCompactDelta : undefined;
       const resolvedCompactCount = parsed.compactCount
-        ?? (parsed.compactDelta ? undefined : (s.compactCount || undefined));
+        ?? (compactDelta ? undefined : (s.compactCount || undefined));
       this.log.info("prompt completed", {
         sessionId: agentSession.id,
         responseLength: parsed.text.length,
         model: parsed.model ?? null,
         contextTokens: parsed.contextTokens ?? null,
         compactCount: resolvedCompactCount ?? 0,
-        compactDelta: parsed.compactDelta ?? 0,
+        compactDelta: compactDelta ?? 0,
         cumulativeBytes: s.cumulativeBytes,
       });
 
@@ -368,7 +378,7 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
         contextWindow: parsed.contextWindow,
         model: parsed.model,
         compactCount: resolvedCompactCount,
-        compactDelta: parsed.compactDelta,
+        compactDelta,
       };
     } catch (err: any) {
       const activity = this.activityMap.get(agentSession.id);
@@ -377,14 +387,23 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
         this.log.warn("prompt cancelled", { sessionId: agentSession.id });
         return { text: "", cancelled: true };
       }
-      const promoted = this.promoteExecError(agentSession, err);
+      const promoted = this.promoteExecError(agentSession, err, (parsed) => {
+        if (attemptCompactDelta === 0) {
+          attemptCompactDelta = parsed.compactDelta ?? 0;
+        }
+      });
       if (attempt < this.transientRetryLimit() && this.isTransientCliError(promoted)) {
         this.log.warn("retrying after transient CLI error", {
           sessionId: agentSession.id,
           attempt: attempt + 1,
           error: promoted instanceof Error ? promoted.message : String(promoted),
         });
-        return this.sendMessageAttempt(agentSession, message, attempt + 1);
+        return this.sendMessageAttempt(
+          agentSession,
+          message,
+          attempt + 1,
+          accumulatedCompactDelta + attemptCompactDelta,
+        );
       }
       if (activity) activity.status = "failed";
       throw promoted;

@@ -139,7 +139,7 @@ export interface TransportClient {
    */
   listChatMessages?(
     chatId: string,
-    options?: { sinceUnixSec?: number; limit?: number; threadId?: string },
+    options?: { sinceUnixSec?: number; limit?: number; threadId?: string; suppressReadErrors?: boolean },
   ): Promise<NormalizedMessage[]>;
 
   /** Reliable implementations use these hooks to connect Engine lifecycle to inbox state. */
@@ -159,3 +159,14 @@ export type OutboundRequest =
   | { kind: "card"; chatId: string; header: string; content: string; footer?: string; replyToMsgId?: string; replyInThread?: boolean }
   | { kind: "file"; chatId: string; filePath: string; fileName?: string; replyToMsgId?: string; replyInThread?: boolean }
   | { kind: "edit"; msgId: string; text: string };
+
+/** 对将入库或展示的飞书读取错误文本脱敏并截断。 */
+export function redactReadErrorText(value: string, limit: number): string {
+  return value
+    .replace(/Bearer\s+[^\s,;]+/gi, "Bearer [redacted]")
+    .replace(/((?:app[_-]?secret|access[_-]?token|refresh[_-]?token|authorization|api[_-]?key|password)["']?\s*[=:]\s*["']?)[^\s,;"'}]+/gi, "$1[redacted]")
+    .replace(/https?:\/\/[^\s]+/gi, "[URL]")
+    .replace(/[\w.+-]+@[\w.-]+\.[a-z]{2,}/gi, "[email]")
+    .replace(/[\x00-\x1f\x7f]/g, " ")
+    .slice(0, limit);
+}

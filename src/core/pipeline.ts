@@ -11,7 +11,7 @@ import type {
   NormalizedMessage,
   TransportClient,
 } from "../transport/types.js";
-import { isUnresolvedInteractiveContent, mentionMarksApp } from "../transport/types.js";
+import { isUnresolvedInteractiveContent, mentionMarksApp, redactReadErrorText } from "../transport/types.js";
 import { isDeliveryUncertainError } from "../transport/errors.js";
 import { ERROR_DISPLAY_MAX_LEN } from "../agent/types.js";
 import { AgentSessionNotStartedError, type AgentBackend, type AgentResponse, type AgentSession, type AgentSessionActivity, type SessionConfig } from "../agent/types.js";
@@ -248,23 +248,17 @@ function formatMessageReadError(error: unknown): string {
   }
   const raw = error as {
     code?: unknown; message?: unknown;
-    response?: { data?: { code?: unknown; msg?: unknown } };
-    data?: { code?: unknown; msg?: unknown };
+    response?: { data?: { code?: unknown; msg?: unknown; message?: unknown } };
+    data?: { code?: unknown; msg?: unknown; message?: unknown };
   } | null;
   const data = raw?.response?.data ?? raw?.data;
   // 只读取业务 code/msg，绝不序列化 Axios 对象及其请求、配置或响应头。
   const safe = (value: unknown, limit: number): string => {
     if (typeof value !== "string" && typeof value !== "number") return "";
-    return String(value)
-      .replace(/Bearer\s+[^\s,;]+/gi, "Bearer [redacted]")
-      .replace(/((?:app[_-]?secret|access[_-]?token|refresh[_-]?token|authorization|api[_-]?key|password)["']?\s*[=:]\s*["']?)[^\s,;"'}]+/gi, "$1[redacted]")
-      .replace(/https?:\/\/[^\s]+/gi, "[URL]")
-      .replace(/[\w.+-]+@[\w.-]+\.[a-z]{2,}/gi, "[email]")
-      .replace(/[\x00-\x1f\x7f]/g, " ")
-      .slice(0, limit);
+    return redactReadErrorText(String(value), limit);
   };
   const code = safe(data?.code ?? raw?.code, 64);
-  const message = safe(data ? data.msg : raw?.message, 500);
+  const message = safe(data ? (data.msg ?? data.message ?? raw?.message) : raw?.message, 500);
   const note = [code && `code=${code}`, message && `msg=${message}`].filter(Boolean).join("; ");
   return messageReadErrorSummary(error) + (note ? `\n\n接口附注：${note}` : "");
 }
@@ -1703,6 +1697,7 @@ export class Pipeline {
         transport: { listChatMessages },
         selfUserId: this.botUserId,
         threadId: parsed.threadId,
+        suppressReadErrors: true,
       });
     } catch (error) {
       this.log.warn("failed to recover late collaboration message", {
@@ -1776,6 +1771,7 @@ export class Pipeline {
         transport: { listChatMessages },
         selfUserId: this.botUserId,
         threadId: parsed.threadId,
+        suppressReadErrors: true,
       });
     } catch (error) {
       this.log.warn("failed to recover collaboration history", {
@@ -2695,26 +2691,24 @@ export class Pipeline {
 
     // 独立消息：纯文本（保持 skill 等模式匹配可用）
     // 回复 / 转发：标签树表达嵌套关系
-    // 仅在确认非旁观 Bot 且非被动缓冲观察者后再回源拉取被回复消息，避免旁观 Bot 触发 read warning。
-    let replyQuoted = "";
-    if (msg.parentPlatformMsgId && !isBufferedCollabObserver) {
-      replyQuoted = this.buildReplyQuoted(platform, msg.parentPlatformMsgId, msg.chatPlatformId, msg.threadId);
-    }
-    let agentText: string;
+    // 延迟到真正入队执行前再构建（含 buildReplyQuoted 回源），避免观察者/内置命令/打断词触发旁观 read warning。
     const label = getUserShortLabel(this.db, userId);
-
-    if (msg.contentType === "merge_forward" && msg.children?.length) {
-      agentText = renderForward(label, msg.children);
-      if (replyQuoted) agentText += `\n${replyQuoted}`;
-    } else if (replyQuoted) {
-      agentText = `${renderMsg(label, msg.contentText)}\n${replyQuoted}`;
-    } else {
+    const buildAgentText = (): string => {
+      const replyQuoted = msg.parentPlatformMsgId
+        ? this.buildReplyQuoted(platform, msg.parentPlatformMsgId, msg.chatPlatformId, msg.threadId)
+        : "";
+      if (msg.contentType === "merge_forward" && msg.children?.length) {
+        return replyQuoted ? `${renderForward(label, msg.children)}\n${replyQuoted}` : renderForward(label, msg.children);
+      }
+      if (replyQuoted) {
+        return `${renderMsg(label, msg.contentText)}\n${replyQuoted}`;
+      }
       // 独立消息：纯文本（hybrid 创建命令在此翻译为「任务原文 + nbt 建议」；reply/forward 保持原样）
       // 群聊 @Bot //cmd 与 @Bot /loop 创建：只剥开头 at，保留正文里的 @U4。
       const strippedLeading = stripLeadingAtMentions(msg.contentText.trim());
       const text = this.normalizeUserTextForAgent(strippedLeading.startsWith("//") ? strippedLeading : msg.contentText);
-      agentText = rewriteHybridCreationCommand(stripLeadingAtMentions(text)) ?? text;
-    }
+      return rewriteHybridCreationCommand(stripLeadingAtMentions(text)) ?? text;
+    };
 
     // Save trigger msg ID for reply-to-message（process() 会快照并清除）
     if (msg.platformMsgId) {
@@ -2726,6 +2720,7 @@ export class Pipeline {
     if (INTERRUPT_WORDS.has(trimmedText) && this.chatSessions.has(scope.scopeKey)) {
       this.stopCollabState(scope.scopeKey);
       persistIncomingMessage("processing");
+      this.emitInboundWarnings(msg, scope, recoveredMessageId);
       this.log.info("interrupt word detected", { chatId, scopeKey: scope.scopeKey, word: trimmedText });
       const activeRun = this.runtimeState.getActiveRunForScope(scope.scopeKey);
       const hasActiveRun = !!activeRun;
@@ -2766,6 +2761,7 @@ export class Pipeline {
     const commandText = extractBuiltinCommandText(msg.contentText.trim());
     if (this.isBuiltinCommand(commandText, userId)) {
       persistIncomingMessage("processing");
+      this.emitInboundWarnings(msg, scope, recoveredMessageId);
       this.handleBuiltinCommand(
         commandText,
         userId,
@@ -2794,7 +2790,7 @@ export class Pipeline {
           scopeKey: scope.scopeKey,
           threadId: msg.threadId ?? scope.threadId,
           strict: scope.strict,
-          text: agentText,
+          text: buildAgentText(),
           senderLabel: label,
           senderId: userId,
           dbMsgId: incomingMsgId,
@@ -2869,7 +2865,7 @@ export class Pipeline {
         scopeKey: scope.scopeKey,
         threadId: msg.threadId ?? scope.threadId,
         strict: scope.strict,
-        text: agentText,
+        text: buildAgentText(),
         senderLabel: label,
         senderId: userId,
         dbMsgId: incomingMsgId,
@@ -4478,12 +4474,17 @@ export class Pipeline {
         agentSession.id,
       ) ?? null;
 
+      const taskCompactCount = (response.compactCount ?? response.compactDelta) || 0;
+      if (taskCompactCount > 0) {
+        this.db.prepare("UPDATE sessions SET compact_count = ? WHERE id = ?").run(taskCompactCount, sessionId);
+      }
+
       // Build footer
       const footer = buildResponseFooter({
         sessionId: agentSessionId ?? sessionId,
         turnCount: 1,
         contextTokens: response.contextTokens,
-        compactCount: (response.compactCount ?? response.compactDelta) || undefined,
+        compactCount: taskCompactCount > 0 ? taskCompactCount : undefined,
         model: response.model,
       });
 
@@ -6288,8 +6289,12 @@ export class Pipeline {
       let collabDecision: CollabTurnDecision | undefined;
 
       if (isCollabTurn && collabState) {
-        if (discardStaleCollabRun("after agent response")) return;
+        if (discardStaleCollabRun("after agent response")) {
+          this.resolveAndPersistCompactCount(scopeKey, chatSession.sessionId, response);
+          return;
+        }
         if (!activeCollabContext) {
+          this.resolveAndPersistCompactCount(scopeKey, chatSession.sessionId, response);
           this.blockCollabState(collabState, runId, "active collaboration context missing");
           this.markRuntimeRun(runId, "failed", "collaboration context missing");
           return;
@@ -6308,18 +6313,29 @@ export class Pipeline {
           });
           const retry = await runAgent(this.buildCollabActionRetryPrompt(collabState, validation.message));
           if (retry.status === "stopped") {
+            this.resolveAndPersistCompactCount(scopeKey, chatSession.sessionId, response);
             if (!signal?.aborted) this.blockCollabState(collabState, runId, "action retry stopped");
             this.markRuntimeRun(runId, signal?.aborted ? "stopped" : "failed", "collaboration action retry stopped");
             return;
           }
+          const mergedDelta = (response.compactDelta ?? 0) + (retry.response.compactDelta ?? 0);
+          response = {
+            ...response,
+            compactCount: retry.response.compactCount ?? response.compactCount,
+            compactDelta: mergedDelta > 0 ? mergedDelta : undefined,
+          };
           validation = validateCollabTurnDecision(
             activeCollabContext.decision ?? retry.response.collabDecision,
             collabState,
             collabParticipantId!,
           );
         }
-        if (discardStaleCollabRun("after action validation")) return;
+        if (discardStaleCollabRun("after action validation")) {
+          this.resolveAndPersistCompactCount(scopeKey, chatSession.sessionId, response);
+          return;
+        }
         if (!validation.ok) {
+          this.resolveAndPersistCompactCount(scopeKey, chatSession.sessionId, response);
           this.blockCollabState(collabState, runId, validation.message);
           this.markRuntimeRun(runId, "failed", `collaboration action rejected: ${validation.message}`);
           return;
@@ -6327,7 +6343,10 @@ export class Pipeline {
         collabDecision = validation.decision;
       }
 
-      if (discardStaleCollabRun("before response delivery")) return;
+      if (discardStaleCollabRun("before response delivery")) {
+        this.resolveAndPersistCompactCount(scopeKey, chatSession.sessionId, response);
+        return;
+      }
 
       // Goal 主动进入：本回合 Agent 调用了 nbt goal start → 本回合计入第 1 轮，runGoalLoop 接管
       // （本轮不再按普通回合交付，由 Goal 流程处理：finish 则结算，否则静默继续下一轮）
@@ -6346,6 +6365,7 @@ export class Pipeline {
       // 检查后到 sendCard 之间没有 await，因此同一进程内的新取消命令不能插入这段同步路径。
       if (isLoopTurn && activeLoopJob && getLoopJob(this.db, activeLoopJob.id)?.status !== "running") {
         if (!this.activeLoopRuns.get(activeLoopJob.id)?.selfCancelled) {
+          this.resolveAndPersistCompactCount(scopeKey, chatSession.sessionId, response);
           loopSettled = true;
           clearActiveLoopRun();
           this.log.info("cancelled loop result discarded", { chatId, loopJobId: activeLoopJob.id });
@@ -6797,6 +6817,10 @@ export class Pipeline {
         this.materializeScopeConfig(scopeKey, scopeConfig);
       });
       persistNewSession();
+      if (isolated) {
+        this.lastCompactCounts.delete(chatId);
+        this.pendingCompactRecovery.delete(chatId);
+      }
     } catch (dbErr) {
       await sessionBackend.closeSession(agentSession).catch(() => {});
       throw dbErr;

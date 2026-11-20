@@ -714,6 +714,65 @@ describe("FeishuAdapter", () => {
     expect(errors).toEqual([{ messageId: "message-1", chatPlatformId: "oc-group" }]);
   });
 
+  test("suppresses read error callbacks during listChatMessages when suppressReadErrors is enabled", async () => {
+    const adapter = new FeishuAdapter("app-id", "app-secret");
+    const errors: unknown[] = [];
+    adapter.onMessageReadError((event) => errors.push(event));
+    (adapter as any).client = {
+      im: {
+        message: {
+          list: async () => ({
+            data: {
+              items: [{ message_id: "message-1", msg_type: "text", sender: { id: "ou-user" } }],
+            },
+          }),
+        },
+      },
+    };
+
+    await expect(adapter.listChatMessages("oc-group", { suppressReadErrors: true })).resolves.toEqual([]);
+    expect(errors).toEqual([]);
+  });
+
+  test("redacts secrets and preserves code/message in serialized deferred read errors", async () => {
+    const adapter = new FeishuAdapter("app-id", "app-secret");
+    (adapter as any).client = {
+      im: {
+        message: {
+          get: async () => {
+            const child = {
+              code: 99991663,
+              status: 0,
+              message: "Bearer secret-token-123 at https://open.feishu.cn/x user@example.com",
+              response: { status: 403, data: {} },
+            };
+            const cyclic: Record<string, unknown> = { readErrors: [child] };
+            (cyclic.readErrors as unknown[]).push(cyclic);
+            throw cyclic;
+          },
+        },
+      },
+    };
+    const msg = await (adapter as any).normalize({
+      sender: { sender_id: { open_id: "ou-user" }, sender_type: "user" },
+      message: {
+        message_id: "om-1",
+        chat_id: "oc-group",
+        chat_type: "group",
+        message_type: "interactive",
+        content: "[卡片消息]",
+      },
+    });
+    expect(msg.inboundReadErrors).toBeTruthy();
+    const serialized = JSON.stringify(msg.inboundReadErrors);
+    expect(serialized).not.toContain("secret-token-123");
+    expect(serialized).not.toContain("https://open.feishu.cn");
+    expect(serialized).not.toContain("user@example.com");
+    expect(serialized).toContain("Bearer [redacted]");
+    expect(serialized).toContain("99991663");
+    expect(serialized).toContain("403");
+  });
+
   test("sends image files as image messages and keeps other files as file messages", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-feishu-adapter-"));
     tempDirs.push(dir);

@@ -6,11 +6,12 @@ import { pipeline } from "node:stream/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { NormalizedMessage, MessageHandler, PlatformAdapter, MentionInfo, MessageNode } from "../types.js";
-import type {
-  BotAtPermissionStatus,
-  ChatMetadata,
-  DeliveryOptions,
-  MessageReadError,
+import {
+  redactReadErrorText,
+  type BotAtPermissionStatus,
+  type ChatMetadata,
+  type DeliveryOptions,
+  type MessageReadError,
 } from "../../transport/types.js";
 import { renderMessageNodes } from "../render.js";
 import { hasFeishuAtTag, toCardAtTags } from "../mentions.js";
@@ -68,10 +69,18 @@ type MessageReadContext = Pick<MessageReadError, "chatPlatformId" | "threadId"> 
   deferredReadErrors?: unknown[];
 };
 
-function serializeReadError(error: unknown): Record<string, unknown> {
+function serializeReadError(
+  error: unknown,
+  seen: WeakSet<object> = new WeakSet(),
+  depth = 0,
+): Record<string, unknown> {
   if (!error || typeof error !== "object") {
-    return { message: String(error ?? "").slice(0, 500) };
+    return { message: redactReadErrorText(String(error ?? ""), 500) };
   }
+  if (depth > 2 || seen.has(error)) {
+    return { message: "[truncated error]" };
+  }
+  seen.add(error);
   const raw = error as {
     readErrors?: unknown[];
     code?: unknown;
@@ -81,26 +90,39 @@ function serializeReadError(error: unknown): Record<string, unknown> {
     data?: Record<string, unknown>;
   };
   if (Array.isArray(raw.readErrors)) {
-    return { readErrors: raw.readErrors.map(serializeReadError) };
+    try {
+      return {
+        readErrors: raw.readErrors.slice(0, 5).map((item) => serializeReadError(item, seen, depth + 1)),
+      };
+    } finally {
+      seen.delete(error);
+    }
   }
-  const scalar = (value: unknown): string | number | undefined => (
-    typeof value === "string" || typeof value === "number" ? value : undefined
-  );
-  const statusCandidate = Number(raw.status ?? raw.response?.status);
-  const status = Number.isFinite(statusCandidate) && statusCandidate > 0 ? statusCandidate : undefined;
+  seen.delete(error);
+  const scalar = (value: unknown): string | number | undefined => {
+    if (typeof value === "string") return redactReadErrorText(value, 1000);
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    return undefined;
+  };
+  const pickStatus = (value: unknown): number | undefined =>
+    typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
+  const status = pickStatus(raw.status) ?? pickStatus(raw.response?.status);
   const rawData = raw.response?.data ?? raw.data;
   if (rawData && typeof rawData === "object") {
+    const record = rawData as Record<string, unknown>;
     const data: Record<string, string | number> = {};
-    const dataCode = scalar(rawData["code"]);
-    const dataMsg = scalar(rawData["msg"]);
-    const dataMessage = scalar(rawData["message"]);
+    const dataCode = scalar(record["code"]);
+    const dataMsg = scalar(record["msg"]);
+    const dataMessage = scalar(record["message"]);
     if (dataCode !== undefined) data["code"] = dataCode;
     if (dataMsg !== undefined) data["msg"] = dataMsg;
     if (dataMessage !== undefined) data["message"] = dataMessage;
-    return {
-      ...(status !== undefined ? { status } : {}),
-      data,
-    };
+    if (Object.keys(data).length > 0) {
+      return {
+        ...(status !== undefined ? { status } : {}),
+        data,
+      };
+    }
   }
   const result: Record<string, unknown> = {};
   const code = scalar(raw.code);
@@ -108,7 +130,7 @@ function serializeReadError(error: unknown): Record<string, unknown> {
   if (code !== undefined) result["code"] = code;
   if (status !== undefined) result["status"] = status;
   if (message !== undefined) result["message"] = message;
-  return Object.keys(result).length > 0 ? result : { message: String(error).slice(0, 500) };
+  return Object.keys(result).length > 0 ? result : { message: redactReadErrorText(String(error), 500) };
 }
 
 export class FeishuAdapter implements PlatformAdapter {
@@ -612,7 +634,7 @@ export class FeishuAdapter implements PlatformAdapter {
 
   async listChatMessages(
     chatId: string,
-    options?: { sinceUnixSec?: number; limit?: number; threadId?: string },
+    options?: { sinceUnixSec?: number; limit?: number; threadId?: string; suppressReadErrors?: boolean },
   ): Promise<NormalizedMessage[]> {
     const sinceUnixSec = options?.sinceUnixSec;
     const incremental = sinceUnixSec != null;
@@ -650,7 +672,9 @@ export class FeishuAdapter implements PlatformAdapter {
             },
           });
         } catch (err) {
-          this.reportMessageReadError({ chatPlatformId: chatId, threadId: options?.threadId }, err);
+          if (!options?.suppressReadErrors) {
+            this.reportMessageReadError({ chatPlatformId: chatId, threadId: options?.threadId }, err);
+          }
           throw err;
         }
         const data = resp?.data as { items?: unknown[]; has_more?: boolean; page_token?: string } | undefined;
@@ -664,6 +688,7 @@ export class FeishuAdapter implements PlatformAdapter {
             (messageId) => this.fetchOriginalCardContent(messageId, {
               chatPlatformId: chatId,
               threadId: options?.threadId,
+              deferredReadErrors: options?.suppressReadErrors ? [] : undefined,
             }),
           );
           if (!msg) {
@@ -671,7 +696,7 @@ export class FeishuAdapter implements PlatformAdapter {
             const msgType = historyItem?.msg_type ?? historyItem?.message_type ?? "text";
             const hasBody = typeof historyItem?.body?.content === "string"
               || typeof historyItem?.content === "string";
-            if (historyItem?.message_id && msgType !== "interactive" && !hasBody) {
+            if (!options?.suppressReadErrors && historyItem?.message_id && msgType !== "interactive" && !hasBody) {
               this.reportMessageReadError(
                 { messageId: historyItem.message_id, chatPlatformId: chatId, threadId: options?.threadId },
                 new Error("message body missing"),

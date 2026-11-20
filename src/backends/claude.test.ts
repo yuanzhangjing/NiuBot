@@ -112,4 +112,32 @@ describe("ClaudeBackend session metadata", () => {
     expect(parsed.error).toBe("API quota exceeded");
     expect(parsed.failed).toBe(true);
   });
+
+  it("scans compact_boundary from JSONL using existing session.agentSessionId when result omits session_id", () => {
+    const sessionId = "019d6888-07e1-7c91-8439-ef53ce51f974";
+    const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "claude-home-compact-"));
+    const workingDirectory = path.join(tempHome, "workspace");
+    fs.mkdirSync(workingDirectory, { recursive: true });
+    process.env["HOME"] = tempHome;
+    vi.stubEnv("CLAUDE_CONFIG_DIR", path.join(tempHome, ".claude"));
+
+    const projectKey = claudeProjectKey(workingDirectory);
+    const logDir = path.join(tempHome, ".claude", "projects", projectKey);
+    fs.mkdirSync(logDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(logDir, `${sessionId}.jsonl`),
+      JSON.stringify({ type: "system", subtype: "compact_boundary" }) + "\n",
+    );
+
+    const backend = new ClaudeBackend();
+    const session = backend.buildSession({ workingDirectory });
+    session.agentSessionId = sessionId;
+    const parsed = backend.parseOutput(JSON.stringify({
+      type: "result",
+      result: "ok",
+    }), session);
+
+    expect(parsed.compactCount).toBe(1);
+    expect(parsed.agentSessionId).toBe(sessionId);
+  });
 });

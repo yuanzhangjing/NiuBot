@@ -8244,6 +8244,66 @@ describe("nbt send prefers the active-run reply target", () => {
       "om-fwd-self",
       { replyInThread: true },
     );
+
+    // 协作观察者（首位 @ 了其他 Bot）既不应调用 getMessageContent（buildReplyQuoted）也不应发出告警
+    getMessageContentSpy.mockClear();
+    sendReplySpy.mockClear();
+    sentTexts.length = 0;
+
+    await pipeline.handleMessage({
+      senderPlatformId: "ou-human",
+      senderName: "Zen",
+      chatPlatformId: "oc-topic-group",
+      chatType: "group",
+      threadId: "omt-collab-observe",
+      rootId: "om-root-collab",
+      parentPlatformMsgId: "om-missing-collab-parent",
+      contentText: "@T.Ben @T.Ace 一起查一下",
+      contentType: "text",
+      botMentioned: true,
+      mentions: [
+        { platformUserId: "ou-ben", name: "T.Ben", isBot: true, isApp: true, key: "@_user_1" },
+        { platformUserId: "bot-open-id", name: "T.Ace", isBot: true, isApp: true, key: "@_user_2" },
+      ],
+      platformMsgId: "om-collab-observe",
+      timestamp: new Date(),
+      inboundReadErrors: [forwardReadError],
+      inboundDownloadError: "文件超过飞书 API 100MB 下载上限",
+      raw: {},
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(getMessageContentSpy).not.toHaveBeenCalled();
+    expect(sendReplySpy).not.toHaveBeenCalled();
+    expect(sentTexts.filter((t) => t.includes("无法读取") || t.includes("100MB"))).toEqual([]);
+
+    // 针对本 Bot 的内置命令不调用 getMessageContent（buildReplyQuoted），但会发出入站读取告警
+    await pipeline.handleMessage({
+      senderPlatformId: "ou-human",
+      senderName: "Zen",
+      chatPlatformId: "oc-topic-group",
+      chatType: "group",
+      threadId: "omt-self-bot",
+      rootId: "om-root-self",
+      parentPlatformMsgId: "om-missing-cmd-parent",
+      contentText: "@T.Ace /help",
+      contentType: "text",
+      botMentioned: true,
+      mentions: [{ platformUserId: "bot-open-id", name: "T.Ace", isBot: true, isApp: true, key: "@_user_1" }],
+      platformMsgId: "om-builtin-cmd",
+      timestamp: new Date(),
+      inboundReadErrors: [forwardReadError],
+      raw: {},
+    });
+
+    await vi.waitFor(() => expect(sendReplySpy).toHaveBeenCalledTimes(1));
+    expect(getMessageContentSpy).not.toHaveBeenCalled();
+    expect(sendReplySpy).toHaveBeenCalledWith(
+      "oc-topic-group",
+      expect.stringContaining("无法读取"),
+      "om-builtin-cmd",
+      { replyInThread: true },
+    );
     pipeline.stop();
   });
 
@@ -8324,6 +8384,88 @@ describe("nbt send prefers the active-run reply target", () => {
     expect(cards2[1]?.footer).toContain("📦×2");
     expect(cumulativeAgent.sendMessageCalls[1]).not.toContain("<compact-recovery>");
     p2.stop();
+  });
+
+  test("does not pass suppressReadErrors=false during collab history recovery", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-collab-suppress-"));
+    tempDirs.push(dir);
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
+    const agent = new CollabSequenceAgent([{ text: "不应执行", collabDecision: { action: "finish" } }]);
+    const recorder = createRecordingImStub();
+    let seenSuppressFlag: boolean | undefined;
+    recorder.im.listChatMessages = async (_chatId, options) => {
+      seenSuppressFlag = options?.suppressReadErrors;
+      return [];
+    };
+    const pipeline = new Pipeline(
+      db,
+      recorder.im,
+      agent,
+      { name: "CowBot", platform: "feishu", platformBotId: "ou-cow" },
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+    await pipeline.start();
+
+    await (pipeline as any).handleMessage(createMessage({
+      senderPlatformId: "bot-open-id",
+      senderName: "NiuBot",
+      senderIsBot: true,
+      chatPlatformId: "group-open-id",
+      chatType: "group",
+      contentText: "报告\n\n@CowBot @NiuBot\n\n〔协作 #CAFEBABE · 第 2 回合〕",
+      platformMsgId: "collab-suppress-check",
+      botMentioned: true,
+      mentions: [
+        { platformUserId: "ou-cow", name: "CowBot", isBot: true, isApp: true, key: "self" },
+        { platformUserId: "bot-open-id", name: "NiuBot", isBot: false, isApp: true, key: "other" },
+      ],
+    }));
+
+    expect(seenSuppressFlag).toBe(true);
+    pipeline.stop();
+  });
+
+  test("persists compactDelta across collab action retry and rejected retry", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-collab-compact-retry-"));
+    tempDirs.push(dir);
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
+    const agent = new CollabSequenceAgent([
+      {
+        text: "忘了写决策标签",
+        compactDelta: 1,
+      },
+      {
+        text: "仍未写决策标签",
+        compactDelta: 1,
+      },
+    ]);
+    const recorder = createRecordingImStub();
+    const pipeline = new Pipeline(db, recorder.im, agent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "agy");
+    await pipeline.start();
+
+    (pipeline as any).handleMessage(createMessage({
+      chatPlatformId: "group-open-id",
+      chatType: "group",
+      contentText: "@NiuBot @CowBot 请开始协作",
+      platformMsgId: "collab-compact-retry-start",
+      botMentioned: true,
+      mentions: [
+        { platformUserId: "bot-open-id", name: "NiuBot", isBot: true, isApp: true, key: "self" },
+        { platformUserId: "ou-cow", name: "CowBot", isBot: false, isApp: true, key: "cow" },
+      ],
+    }));
+
+    await vi.waitFor(() => expect(agent.sendMessageCalls).toHaveLength(2));
+    await vi.waitFor(() => {
+      const row = db.prepare("SELECT compact_count FROM sessions WHERE status = 'active' LIMIT 1").get() as
+        | { compact_count: number }
+        | undefined;
+      expect(row?.compact_count).toBe(2);
+    });
+    pipeline.stop();
   });
 
   test("runs one structured handoff turn and lets the Engine add the real at", async () => {

@@ -153,6 +153,7 @@ export async function syncGroupHistory(options: {
   selfUserId?: string | null;
   threadId?: string;
   nowMs?: number;
+  suppressReadErrors?: boolean;
 }): Promise<GroupHistorySyncResult> {
   const empty: GroupHistorySyncResult = {
     fetched: 0,
@@ -176,6 +177,7 @@ export async function syncGroupHistory(options: {
     // 首次只要最新一页；增量翻页把 cursor 之后的新消息都拿到。
     limit: incremental ? GROUP_HISTORY_INCREMENTAL_LIMIT : GROUP_HISTORY_LIST_LIMIT,
     threadId: options.threadId,
+    suppressReadErrors: options.suppressReadErrors,
   });
   const cached = cacheHistoryMessages(
     options.db,
@@ -212,6 +214,7 @@ export async function syncGroupChatToDb(
     selfUserId?: string | null;
     threadId?: string;
     nowMs?: number;
+    suppressReadErrors?: boolean;
   },
 ): Promise<GroupHistorySyncResult | null> {
   const target = getGroupChatSyncTarget(db, chatId);
@@ -225,6 +228,7 @@ export async function syncGroupChatToDb(
     selfUserId: options.selfUserId,
     threadId: options.threadId,
     nowMs: options.nowMs,
+    suppressReadErrors: options.suppressReadErrors,
   });
 }
 

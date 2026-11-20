@@ -701,6 +701,30 @@ describe("cron timezone schema", () => {
     // LATEST（26）是破坏性迁移（DROP COLUMN）：升级后 user_version 推进到最新，旧二进制被拒绝启动
     expect(migrated.pragma("user_version", { simple: true })).toBe(LATEST_SCHEMA_VERSION);
   });
+
+  test("upgrades schema 40 to 41 by adding sessions.compact_count with default 0", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-schema-test-"));
+    tempDirs.push(dir);
+    const dbPath = path.join(dir, "niubot.db");
+    const db = openTestDatabase(dbPath);
+    const userId = ensureUser(db, "feishu", "ou-1", "Alice");
+    const chatId = ensureChat(db, "feishu", "oc-1", "p2p", "Alice");
+    db.prepare(`
+      INSERT INTO sessions (id, chat_id, user_id, source, status)
+      VALUES ('s1', ?, ?, 'user', 'active')
+    `).run(chatId, userId);
+    db.exec("ALTER TABLE sessions DROP COLUMN compact_count");
+    db.pragma("user_version = 40");
+    db.prepare("DELETE FROM niubot_component_schema_versions WHERE component = 'core'").run();
+    db.close();
+
+    const upgraded = openTestDatabase(dbPath);
+    const sessionRow = upgraded.prepare("SELECT compact_count FROM sessions WHERE id = 's1'").get() as
+      | { compact_count: number }
+      | undefined;
+    expect(sessionRow).toEqual({ compact_count: 0 });
+    expect(upgraded.pragma("user_version", { simple: true })).toBe(LATEST_SCHEMA_VERSION);
+  });
 });
 
 describe("public upgrade rollback compatibility", () => {

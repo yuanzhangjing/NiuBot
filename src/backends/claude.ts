@@ -122,7 +122,7 @@ export default class ClaudeBackend extends CliAgentBackend<ClaudeSession> {
     let contextTokens: number | undefined;
     let model: string | undefined;
 
-    const agentSessionId = resultEvent.session_id;
+    const agentSessionId = resultEvent.session_id ?? session.agentSessionId;
     if (agentSessionId) {
       session.agentSessionId = agentSessionId;
       const meta = this.scanJsonl(session);
