@@ -64,7 +64,52 @@ function isTopicReplyUnsupported(err: unknown): boolean {
 type MessageReadContext = Pick<MessageReadError, "chatPlatformId" | "threadId"> & {
   outerMessageId?: string;
   readErrors?: Map<string, unknown>;
+  /** 入站 normalize 阶段暂存读取错误，交由 Pipeline 确认归属后再决定是否向用户提示。 */
+  deferredReadErrors?: unknown[];
 };
+
+function serializeReadError(error: unknown): Record<string, unknown> {
+  if (!error || typeof error !== "object") {
+    return { message: String(error ?? "").slice(0, 500) };
+  }
+  const raw = error as {
+    readErrors?: unknown[];
+    code?: unknown;
+    status?: unknown;
+    message?: unknown;
+    response?: { status?: unknown; data?: Record<string, unknown> };
+    data?: Record<string, unknown>;
+  };
+  if (Array.isArray(raw.readErrors)) {
+    return { readErrors: raw.readErrors.map(serializeReadError) };
+  }
+  const scalar = (value: unknown): string | number | undefined => (
+    typeof value === "string" || typeof value === "number" ? value : undefined
+  );
+  const statusCandidate = Number(raw.status ?? raw.response?.status);
+  const status = Number.isFinite(statusCandidate) && statusCandidate > 0 ? statusCandidate : undefined;
+  const rawData = raw.response?.data ?? raw.data;
+  if (rawData && typeof rawData === "object") {
+    const data: Record<string, string | number> = {};
+    const dataCode = scalar(rawData["code"]);
+    const dataMsg = scalar(rawData["msg"]);
+    const dataMessage = scalar(rawData["message"]);
+    if (dataCode !== undefined) data["code"] = dataCode;
+    if (dataMsg !== undefined) data["msg"] = dataMsg;
+    if (dataMessage !== undefined) data["message"] = dataMessage;
+    return {
+      ...(status !== undefined ? { status } : {}),
+      data,
+    };
+  }
+  const result: Record<string, unknown> = {};
+  const code = scalar(raw.code);
+  const message = scalar(raw.message);
+  if (code !== undefined) result["code"] = code;
+  if (status !== undefined) result["status"] = status;
+  if (message !== undefined) result["message"] = message;
+  return Object.keys(result).length > 0 ? result : { message: String(error).slice(0, 500) };
+}
 
 export class FeishuAdapter implements PlatformAdapter {
   private client: lark.Client;
@@ -877,22 +922,23 @@ export class FeishuAdapter implements PlatformAdapter {
       }
     }
 
+    const deferredReadErrors: unknown[] = [];
+
     // Parse content based on message type (async: may download resources)
     let { text, contentType, downloadError } = await this.parseContent(
       msgType,
       rawContent,
       mentions,
       msg.message_id,
-      { chatPlatformId: msg.chat_id, threadId: msg.thread_id },
+      { chatPlatformId: msg.chat_id, threadId: msg.thread_id, deferredReadErrors },
     );
 
     if (downloadError) {
-      log.info("file download error, notifying user", { downloadError, messageId: msg.message_id, chatId: msg.chat_id });
-      if (msg.message_id && msg.chat_id) {
-        this.sendReply(msg.chat_id, downloadError, msg.message_id).catch((e) =>
-          log.warn("failed to send download error reply", { error: String(e) }),
-        );
-      }
+      log.info("file download error captured on inbound message", {
+        downloadError,
+        messageId: msg.message_id,
+        chatId: msg.chat_id,
+      });
     }
 
     // For merge_forward, parse into structured tree + render to text
@@ -900,7 +946,7 @@ export class FeishuAdapter implements PlatformAdapter {
     if (contentType === "merge_forward" && msg.message_id) {
       const { nodes, rendered } = await this.parseMergeForward(
         msg.message_id,
-        { chatPlatformId: msg.chat_id, threadId: msg.thread_id },
+        { chatPlatformId: msg.chat_id, threadId: msg.thread_id, deferredReadErrors },
       );
       text = rendered;
       children = nodes.length > 0 ? nodes : undefined;
@@ -928,6 +974,8 @@ export class FeishuAdapter implements PlatformAdapter {
       platformTs,
       timestamp: platformTs ? new Date(platformTs) : new Date(),
       platformMsgId: msg.message_id,
+      inboundReadErrors: deferredReadErrors.length > 0 ? deferredReadErrors : undefined,
+      inboundDownloadError: downloadError,
       raw: data,
     };
   }
@@ -1239,6 +1287,10 @@ export class FeishuAdapter implements PlatformAdapter {
         this.forwardReadWarnings.delete(this.forwardReadWarnings.keys().next().value!);
       }
       this.forwardReadWarnings.set(key, now + 60_000);
+    }
+    if (context.deferredReadErrors) {
+      context.deferredReadErrors.push(serializeReadError(error));
+      return;
     }
     try {
       this.messageReadErrorHandler?.({

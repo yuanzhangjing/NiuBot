@@ -1600,6 +1600,54 @@ export class Pipeline {
   }
 
   /**
+   * 仅在确认本 Bot 确实承接该入站消息后再发出入站解析/下载告警，避免多 Bot 群里的旁观 Bot 全员报错。
+   */
+  private emitInboundWarnings(
+    msg: NormalizedMessage,
+    scope: { threadId?: string },
+    recoveredMessageId?: number,
+  ): void {
+    if (recoveredMessageId != null) return;
+    const threadId = msg.threadId ?? scope.threadId;
+    if (msg.inboundDownloadError) {
+      const inThread = Boolean(threadId);
+      const downloadError = msg.inboundDownloadError;
+      this.log.info("file download error, notifying user", {
+        downloadError,
+        messageId: msg.platformMsgId,
+        chatId: msg.chatPlatformId,
+      });
+      void this.sendPreferringReply(
+        msg.chatPlatformId,
+        "download error",
+        (replyToMsgId) => this.transport.sendReply(
+          msg.chatPlatformId,
+          downloadError,
+          replyToMsgId,
+          { replyInThread: inThread },
+        ),
+        () => this.transport.sendText(msg.chatPlatformId, downloadError),
+        msg.platformMsgId,
+        { allowChatFallback: !inThread, replyInThread: inThread },
+      ).catch((error) => {
+        this.log.warn("failed to send download error reply", { error: String(error) });
+      });
+    }
+    if (msg.inboundReadErrors?.length) {
+      for (const error of msg.inboundReadErrors) {
+        void this.warnAboutMessageReadError({
+          messageId: msg.platformMsgId,
+          chatPlatformId: msg.chatPlatformId,
+          threadId,
+          error,
+        }).catch((handlerError) => {
+          this.log.warn("message read warning handler failed", { error: String(handlerError) });
+        });
+      }
+    }
+  }
+
+  /**
    * 取本 Bot 尚未见过、且发生在本次协作启动之后的人类补充消息。
    * 每台设备各自持久化 seen 标记，下一棒无论在哪台设备都能看到同一批消息一次。
    */
@@ -2557,11 +2605,6 @@ export class Pipeline {
       }
     }
 
-    let replyQuoted = "";
-    if (msg.parentPlatformMsgId) {
-      replyQuoted = this.buildReplyQuoted(platform, msg.parentPlatformMsgId, msg.chatPlatformId, msg.threadId);
-    }
-
     // Store platform_ts as ISO string
     const platformTsStr = msg.platformTs
       ? utcDateTimeForSql(new Date(msg.platformTs))
@@ -2646,8 +2689,17 @@ export class Pipeline {
     this.platformChatIds.set(chatId, msg.chatPlatformId);
     this.rememberChatUser(chatId, userId, msg.senderIsBot);
 
+    const collabStateForHuman = activeHumanCollabContext ? getBotCollabState(this.db, scope.scopeKey) : undefined;
+    const isBufferedCollabObserver = activeHumanCollabContext
+      && !(collabStateForHuman?.status === "running" && this.isCurrentBotPlatformId(collabStateForHuman.currentBotId));
+
     // 独立消息：纯文本（保持 skill 等模式匹配可用）
     // 回复 / 转发：标签树表达嵌套关系
+    // 仅在确认非旁观 Bot 且非被动缓冲观察者后再回源拉取被回复消息，避免旁观 Bot 触发 read warning。
+    let replyQuoted = "";
+    if (msg.parentPlatformMsgId && !isBufferedCollabObserver) {
+      replyQuoted = this.buildReplyQuoted(platform, msg.parentPlatformMsgId, msg.chatPlatformId, msg.threadId);
+    }
     let agentText: string;
     const label = getUserShortLabel(this.db, userId);
 
@@ -2733,11 +2785,10 @@ export class Pipeline {
     if (activeHumanCollabContext) {
       // 协作未结束时，所有参与 Bot 都收到并保存人类输入；当前执行者还要把它送进
       // 自己的协作队列。不能依赖“远端是否正在运行”，那在分布式设备上不可知。
-      const collabState = getBotCollabState(this.db, scope.scopeKey);
-      const currentExecutor = collabState?.status === "running"
-        && this.isCurrentBotPlatformId(collabState.currentBotId);
+      const currentExecutor = !isBufferedCollabObserver;
       const incomingMsgId = persistIncomingMessage(currentExecutor ? "queued" : "completed");
       if (currentExecutor) {
+        this.emitInboundWarnings(msg, scope, recoveredMessageId);
         this.queue.push({
           chatId,
           scopeKey: scope.scopeKey,
@@ -2809,6 +2860,7 @@ export class Pipeline {
       }
 
       const incomingMsgId = persistIncomingMessage("queued");
+      this.emitInboundWarnings(msg, scope, recoveredMessageId);
       const isCollabTurn = collabPreparation === "turn";
 
       // Reaction 策略：收到即二选一；pending 先 Pin，非 pending 先 Get；pending 开始处理后再补 Get

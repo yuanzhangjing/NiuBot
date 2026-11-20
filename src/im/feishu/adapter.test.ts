@@ -224,7 +224,7 @@ describe("FeishuAdapter", () => {
     expect(errors).toEqual([{ messageId: "message-1", chatPlatformId: "chat-1" }]);
   });
 
-  test("reports message read errors from card resolution", async () => {
+  test("defers message read errors from inbound card resolution onto NormalizedMessage", async () => {
     const adapter = new FeishuAdapter("app-id", "app-secret");
     const errors: Array<{ messageId?: string; chatPlatformId?: string }> = [];
     adapter.onMessageReadError((event) => {
@@ -250,7 +250,84 @@ describe("FeishuAdapter", () => {
     });
 
     expect(message.contentText).toBe("[卡片消息]");
-    expect(errors).toEqual([{ messageId: "message-1", chatPlatformId: "chat-1" }]);
+    expect(errors).toEqual([]);
+    expect(message.inboundReadErrors).toEqual([
+      { code: 99991400, message: "Lack of necessary permissions" },
+    ]);
+  });
+
+  test("defers merge_forward read errors and file download errors during normalize without replying immediately", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-feishu-adapter-defer-"));
+    tempDirs.push(dir);
+    const adapter = new FeishuAdapter("app-id", "app-secret");
+    adapter.setStorageDir(dir);
+    const readErrors: unknown[] = [];
+    const sentReplies: unknown[] = [];
+    adapter.onMessageReadError((event) => readErrors.push(event));
+    adapter.sendReply = async (...args) => {
+      sentReplies.push(args);
+      return "reply-id";
+    };
+    (adapter as any).client = {
+      im: {
+        message: {
+          get: async (request: any) => {
+            if (request.path.message_id === "outer-fwd") {
+              return { data: { items: [{ message_id: "child-card", msg_type: "interactive" }] } };
+            }
+            throw {
+              code: "ERR_BAD_REQUEST",
+              message: "unsafe axios error",
+              config: { secret: "CONFIG_SECRET" },
+              response: {
+                status: 400,
+                headers: { authorization: "Bearer SECRET" },
+                data: { code: 230002, msg: "Bot/User can NOT be out of the chat.", secret: "DATA_SECRET" },
+              },
+            };
+          },
+        },
+        messageResource: {
+          get: async () => {
+            throw { response: { status: "400", data: { code: 234037 } } };
+          },
+        },
+      },
+    };
+
+    const fwdMsg = await (adapter as any).normalize({
+      message: {
+        chat_id: "group-1",
+        chat_type: "group",
+        thread_id: "thread-1",
+        message_id: "outer-fwd",
+        message_type: "merge_forward",
+        content: "Merged and Forwarded Message",
+      },
+      sender: { sender_id: { open_id: "ou-user" }, sender_type: "user" },
+    });
+    expect(readErrors).toEqual([]);
+    expect(sentReplies).toEqual([]);
+    expect(fwdMsg.inboundReadErrors).toEqual([
+      { readErrors: [{ status: 400, data: { code: 230002, msg: "Bot/User can NOT be out of the chat." } }] },
+    ]);
+    // 确保持久化到 transport_inbox 时完全 JSON 安全且不携带 Axios 机密
+    const roundTripped = JSON.stringify(fwdMsg.inboundReadErrors);
+    expect(roundTripped).not.toMatch(/SECRET|ERR_BAD_REQUEST|unsafe axios/);
+
+    const fileMsg = await (adapter as any).normalize({
+      message: {
+        chat_id: "group-1",
+        chat_type: "group",
+        thread_id: "thread-1",
+        message_id: "file-msg-1",
+        message_type: "file",
+        content: JSON.stringify({ file_key: "file-key", file_name: "large.zip" }),
+      },
+      sender: { sender_id: { open_id: "ou-user" }, sender_type: "user" },
+    });
+    expect(sentReplies).toEqual([]);
+    expect(fileMsg.inboundDownloadError).toBe("文件超过飞书 API 100MB 下载上限");
   });
 
   test("sends text over 10 KB as a markdown file", async () => {

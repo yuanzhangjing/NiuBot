@@ -8165,6 +8165,88 @@ describe("nbt send prefers the active-run reply target", () => {
     pipeline.stop();
   });
 
+  test("only the participating Bot emits inbound read/download warnings and quote fetches in multi-Bot threads", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-bystander-warnings-"));
+    tempDirs.push(dir);
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
+    const agent = new RecordingAgent();
+    const { im, sentTexts } = createRecordingImStub();
+    const getMessageContentSpy = vi.spyOn(im, "getMessageContent");
+    const sendReplySpy = vi.spyOn(im, "sendReply");
+    const pipeline = new Pipeline(
+      db,
+      im,
+      agent,
+      createBotIdentity({ name: "T.Ace" }),
+      dir,
+      path.join(dir, "niubot.db"),
+      0,
+      "codex",
+    );
+    await pipeline.start();
+
+    // 模拟话题群里发给另一个 Bot 的话题，本 Bot（T.Ace）是旁观者
+    const forwardReadError = {
+      readErrors: [{ status: 400, data: { code: 230002, msg: "Bot/User can NOT be out of the chat." } }],
+    };
+    await pipeline.handleMessage({
+      senderPlatformId: "ou-human",
+      senderName: "Zen",
+      chatPlatformId: "oc-topic-group",
+      chatType: "group",
+      threadId: "omt-other-bot",
+      rootId: "om-root-other",
+      parentPlatformMsgId: "om-missing-parent",
+      contentText: "【合并转发消息】\n袁章敬: hi",
+      contentType: "merge_forward",
+      platformMsgId: "om-fwd-bystander",
+      timestamp: new Date(),
+      inboundReadErrors: [forwardReadError],
+      inboundDownloadError: "文件超过飞书 API 100MB 下载上限",
+      raw: {},
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(sentTexts).toEqual([]);
+    expect(sendReplySpy).not.toHaveBeenCalled();
+    expect(getMessageContentSpy).not.toHaveBeenCalled();
+
+    // 当消息明确 @ 本 Bot 时，本 Bot 应当发出合并转发读取告警和下载失败回复（在话题内回复）
+    await pipeline.handleMessage({
+      senderPlatformId: "ou-human",
+      senderName: "Zen",
+      chatPlatformId: "oc-topic-group",
+      chatType: "group",
+      threadId: "omt-self-bot",
+      rootId: "om-root-self",
+      contentText: "【合并转发消息】\n袁章敬: hi",
+      contentType: "merge_forward",
+      botMentioned: true,
+      mentions: [{ platformUserId: "bot-open-id", name: "T.Ace", isBot: true, isApp: true, key: "@_user_1" }],
+      platformMsgId: "om-fwd-self",
+      timestamp: new Date(),
+      inboundReadErrors: [forwardReadError],
+      inboundDownloadError: "文件超过飞书 API 100MB 下载上限",
+      raw: {},
+    });
+
+    await vi.waitFor(() => expect(sentTexts.some((t) => t.includes("这份转发中部分消息无法读取"))).toBe(true));
+    await vi.waitFor(() => expect(sentTexts.some((t) => t.includes("文件超过飞书 API 100MB 下载上限"))).toBe(true));
+    expect(sendReplySpy).toHaveBeenCalledWith(
+      "oc-topic-group",
+      expect.stringContaining("code=230002"),
+      "om-fwd-self",
+      { replyInThread: true },
+    );
+    expect(sendReplySpy).toHaveBeenCalledWith(
+      "oc-topic-group",
+      "文件超过飞书 API 100MB 下载上限",
+      "om-fwd-self",
+      { replyInThread: true },
+    );
+    pipeline.stop();
+  });
+
   test("runs one structured handoff turn and lets the Engine add the real at", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-collab-loop-start-"));
     tempDirs.push(dir);

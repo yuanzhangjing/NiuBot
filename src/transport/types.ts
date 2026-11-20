@@ -57,6 +57,10 @@ export interface NormalizedMessage {
   /** @deprecated resources should be downloaded to local paths by the platform adapter */
   images?: Array<{ mimeType: string; data: Buffer }>;
   children?: MessageNode[];
+  /** 入站解析阶段收集的读取失败（JSON 安全结构），延后到 Pipeline 确认本 Bot 需响应后再提示。 */
+  inboundReadErrors?: unknown[];
+  /** 入站附件下载失败提示，延后到 Pipeline 确认本 Bot 需响应后再回复。 */
+  inboundDownloadError?: string;
   raw: unknown;
 }
 
