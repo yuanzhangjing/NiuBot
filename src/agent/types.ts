@@ -101,8 +101,10 @@ export interface AgentResponse {
   contextWindow?: number;
   /** 本次调用使用的模型 */
   model?: string;
-  /** 累计 compact 次数 */
+  /** 累计 compact 次数（由读取原生会话日志的后端上报） */
   compactCount?: number;
+  /** 本轮新增 compact 次数（由仅能从当轮 stdout 观测压缩的后端上报，如 agy） */
+  compactDelta?: number;
   /** 测试/原生后端可直接返回的结构化协作动作；普通文本不具备此语义。 */
   collabDecision?: CollabTurnDecision;
 }

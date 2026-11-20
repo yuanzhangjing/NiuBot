@@ -4061,6 +4061,7 @@ export class Pipeline {
       return true;
     }
     const response = agentResult.response;
+    this.resolveAndPersistCompactCount(scopeKey, chatSession.sessionId, response);
 
     // Agent 请求结束（finish 校验通过）
     if (goal.finishRequested) {
@@ -4169,8 +4170,9 @@ export class Pipeline {
     // （goal 自身轮次在 header 中展示，不参与 footer 的 #N）
     const agentSessionId = this.backendForSession(chatSession).getAgentSessionId?.(chatSession.agentSession.id);
     const sessionStats = this.db.prepare(
-      "SELECT turn_count FROM sessions WHERE id = ?",
-    ).get(chatSession.sessionId) as { turn_count: number } | undefined;
+      "SELECT turn_count, compact_count FROM sessions WHERE id = ?",
+    ).get(chatSession.sessionId) as { turn_count: number; compact_count: number } | undefined;
+    const footerCompactCount = sessionStats?.compact_count ?? response.compactCount ?? response.compactDelta;
     const result = await this.sendPreparedFinalResponse(chatSession.platformChatId, {
       scopeKey,
       header: buildGoalCardHeader(goal, elapsedMs),
@@ -4179,7 +4181,7 @@ export class Pipeline {
         sessionId: agentSessionId ?? chatSession.sessionId,
         turnCount: sessionStats?.turn_count,
         contextTokens: response.contextTokens,
-        compactCount: response.compactCount,
+        compactCount: footerCompactCount && footerCompactCount > 0 ? footerCompactCount : undefined,
         model: response.model,
       }),
       replyToMsgId,
@@ -4481,7 +4483,7 @@ export class Pipeline {
         sessionId: agentSessionId ?? sessionId,
         turnCount: 1,
         contextTokens: response.contextTokens,
-        compactCount: response.compactCount,
+        compactCount: (response.compactCount ?? response.compactDelta) || undefined,
         model: response.model,
       });
 
@@ -6352,7 +6354,7 @@ export class Pipeline {
         }
         this.log.info("loop self-cancelled, delivering final result", { chatId, loopJobId: activeLoopJob.id });
       }
-      const compactedThisTurn = this.updateCompactRecoveryState(scopeKey, response.compactCount);
+      const { compactCount } = this.resolveAndPersistCompactCount(scopeKey, chatSession.sessionId, response);
 
       // cancelled：有内容就发（中间结果），没内容就静默（用户已收到"已停止"）
       if (response.cancelled) {
@@ -6384,7 +6386,7 @@ export class Pipeline {
         sessionId: agentSessionId ?? chatSession.sessionId,
         turnCount: stats?.turn_count,
         contextTokens: response.contextTokens,
-        compactCount: response.compactCount,
+        compactCount: compactCount > 0 ? compactCount : undefined,
         model: response.model,
       });
 
@@ -6905,13 +6907,43 @@ cap=4 只限制本群同时跑的主 session，不含 /task。
     });
   }
 
-  private updateCompactRecoveryState(scopeKey: string, compactCount: number | undefined): boolean {
-    if (compactCount === undefined || compactCount <= 0) return false;
-    const previous = this.lastCompactCounts.get(scopeKey) ?? 0;
-    if (compactCount <= previous) return false;
-    this.lastCompactCounts.set(scopeKey, compactCount);
-    this.pendingCompactRecovery.add(scopeKey);
-    return true;
+  /**
+   * 合并并持久化会话累计 compact 次数：
+   * - compactDelta：仅能从当轮 stdout 观测压缩的后端（如 agy），在 DB 持久值上累加
+   * - compactCount：从原生会话文件重扫累计值的后端（claude/codex/dsh/pi/grok），与 DB 持久值取 max
+   * 两者都未上报时保留 DB 持久值，避免 session 卸载或单轮漏扫导致脚注 📦×N 消失，
+   * 也避免引擎重启后内存清空导致旧 compact 误触发重复恢复提醒。
+   */
+  private resolveAndPersistCompactCount(
+    scopeKey: string,
+    sessionId: string,
+    response: AgentResponse,
+  ): { compactCount: number; compactedThisTurn: boolean } {
+    const row = this.db.prepare(
+      "SELECT compact_count FROM sessions WHERE id = ?",
+    ).get(sessionId) as { compact_count: number | null } | undefined;
+    const stored = row?.compact_count ?? 0;
+    const previous = Math.max(stored, this.lastCompactCounts.get(scopeKey) ?? 0);
+
+    let next = previous;
+    if (response.compactDelta !== undefined && response.compactDelta > 0) {
+      next += response.compactDelta;
+    }
+    if (response.compactCount !== undefined && response.compactCount > next) {
+      next = response.compactCount;
+    }
+
+    if (next > stored) {
+      this.db.prepare("UPDATE sessions SET compact_count = ? WHERE id = ?").run(next, sessionId);
+    }
+    if (next > 0) {
+      this.lastCompactCounts.set(scopeKey, next);
+    }
+    const compactedThisTurn = next > previous;
+    if (compactedThisTurn) {
+      this.pendingCompactRecovery.add(scopeKey);
+    }
+    return { compactCount: next, compactedThisTurn };
   }
 
   private async archiveSession(scopeKey: string, chatId?: string): Promise<SessionEndStatus | false> {

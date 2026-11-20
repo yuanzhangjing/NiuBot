@@ -259,6 +259,7 @@ export default class AgyBackend extends CliAgentBackend<AgySession> {
     let lastStepState: string | undefined;
     let lastStepTokens: number | undefined;
     let resultTokens: number | undefined;
+    let turnCompacts = 0;
 
     for (const line of stdout.split("\n")) {
       const event = parseEvent(line);
@@ -285,7 +286,7 @@ export default class AgyBackend extends CliAgentBackend<AgySession> {
         if (isCompactStepType(step.step_type) && step.state === "DONE" && typeof step.step_index === "number") {
           if (!session.countedCompactSteps.has(step.step_index)) {
             session.countedCompactSteps.add(step.step_index);
-            session.compactCount++;
+            turnCompacts++;
           }
         }
         if (step.step_type === "agent_response") {
@@ -347,7 +348,8 @@ export default class AgyBackend extends CliAgentBackend<AgySession> {
       contextTokens,
       contextWindow: DEFAULT_CONTEXT_WINDOW,
       model,
-      compactCount: session.compactCount > 0 ? session.compactCount : undefined,
+      // agy 无法从原生文件回溯历史 compact 次数，上报本轮增量交由 Pipeline 持久化累加
+      compactDelta: turnCompacts > 0 ? turnCompacts : undefined,
       error: failed ? errorMessage : undefined,
       failed,
     };

@@ -150,6 +150,7 @@ export default class ClaudeBackend extends CliAgentBackend<ClaudeSession> {
       agentSessionId,
       contextTokens,
       model,
+      compactCount: session.compactCount > 0 ? session.compactCount : undefined,
       error: resultEvent.is_error ? (resultEvent.result ?? "").trim() || undefined : undefined,
       failed: resultEvent.is_error,
     };

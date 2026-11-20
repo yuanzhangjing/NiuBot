@@ -8247,6 +8247,85 @@ describe("nbt send prefers the active-run reply target", () => {
     pipeline.stop();
   });
 
+  test("persists compact_count across session unloads and restarts for both delta and cumulative backends", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-compact-persist-"));
+    tempDirs.push(dir);
+    const db = openTestDatabase(path.join(dir, "niubot.db"));
+
+    // 1. 增量口径后端（如 agy）：第 1 轮 compactDelta=1 → 第 2 轮卸载重载后无新压缩仍保留 📦×1 → 第 3 轮再次 compactDelta=1 累加到 📦×2 并触发恢复提醒
+    class DeltaCompactAgent extends RecordingAgent {
+      private calls = 0;
+      constructor(private readonly deltas: Array<number | undefined>) {
+        super();
+      }
+      override async sendMessage(_session: AgentSession, message: string): Promise<AgentResponse> {
+        this.sendMessageCalls.push(message);
+        const delta = this.deltas[this.calls++];
+        return { text: `delta-reply-${this.calls}`, compactDelta: delta };
+      }
+    }
+
+    const deltaAgent = new DeltaCompactAgent([1, undefined, 1, undefined]);
+    const { im: im1, sentCards: cards1 } = createRecordingImStub();
+    const p1 = new Pipeline(db, im1, deltaAgent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "agy");
+    await p1.start();
+
+    const sendP2p = async (p: Pipeline, id: string, text: string) => {
+      await p.handleMessage({
+        senderPlatformId: "ou-user",
+        senderName: "Zen",
+        chatPlatformId: "oc-p2p-1",
+        chatType: "p2p",
+        contentText: text,
+        contentType: "text",
+        platformMsgId: id,
+        timestamp: new Date(),
+        raw: {},
+      });
+    };
+
+    await sendP2p(p1, "m1", "turn 1");
+    await vi.waitFor(() => expect(cards1).toHaveLength(1));
+    expect(cards1[0]?.footer).toContain("📦×1");
+
+    // 确认每轮结束后已卸载 session，下一轮重新建 session 仍能从 DB 保留 📦×1
+    await sendP2p(p1, "m2", "turn 2");
+    await vi.waitFor(() => expect(cards1).toHaveLength(2));
+    expect(cards1[1]?.footer).toContain("📦×1");
+    expect(deltaAgent.sendMessageCalls[1]).toContain("<compact-recovery>");
+
+    // 第 3 轮再次发生 compact（增量 1）→ 累加到 📦×2，并在第 4 轮触发第 2 次恢复提醒
+    await sendP2p(p1, "m3", "turn 3");
+    await vi.waitFor(() => expect(cards1).toHaveLength(3));
+    expect(cards1[2]?.footer).toContain("📦×2");
+
+    await sendP2p(p1, "m4", "turn 4");
+    await vi.waitFor(() => expect(cards1).toHaveLength(4));
+    expect(cards1[3]?.footer).toContain("📦×2");
+    expect(deltaAgent.sendMessageCalls[3]).toContain("<compact-recovery>");
+
+    const sessionRow = db.prepare("SELECT compact_count FROM sessions WHERE status = 'active' LIMIT 1").get() as { compact_count: number };
+    expect(sessionRow.compact_count).toBe(2);
+    p1.stop();
+
+    // 2. 模拟引擎重启（新 Pipeline 实例、内存 lastCompactCounts 为空）+ 累计口径后端重扫旧值 2 或漏扫返回 undefined：
+    // 脚注保留 📦×2，且不再误触发一次重复的 <compact-recovery>
+    const cumulativeAgent = new CompactCountingAgent([2, undefined]);
+    const { im: im2, sentCards: cards2 } = createRecordingImStub();
+    const p2 = new Pipeline(db, im2, cumulativeAgent, createBotIdentity(), dir, path.join(dir, "niubot.db"), 0, "agy");
+    await p2.start();
+
+    await sendP2p(p2, "m5", "turn 5 after restart");
+    await vi.waitFor(() => expect(cards2).toHaveLength(1));
+    expect(cards2[0]?.footer).toContain("📦×2");
+
+    await sendP2p(p2, "m6", "turn 6 missing jsonl");
+    await vi.waitFor(() => expect(cards2).toHaveLength(2));
+    expect(cards2[1]?.footer).toContain("📦×2");
+    expect(cumulativeAgent.sendMessageCalls[1]).not.toContain("<compact-recovery>");
+    p2.stop();
+  });
+
   test("runs one structured handoff turn and lets the Engine add the real at", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "niubot-pipeline-collab-loop-start-"));
     tempDirs.push(dir);

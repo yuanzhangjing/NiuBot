@@ -54,6 +54,8 @@ export interface ParsedOutput {
   model?: string;
   /** 累计 compact 次数 */
   compactCount?: number;
+  /** 本轮新增 compact 次数（当后端无法从原生文件回溯历史 compact 次数时使用） */
+  compactDelta?: number;
   /** 后端提取到的原始错误信息 */
   error?: string;
   /** 后端明确表示本轮失败，但没有可用错误信息时由基类生成兜底文案 */
@@ -348,12 +350,15 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
         throw err;
       }
 
+      const resolvedCompactCount = parsed.compactCount
+        ?? (parsed.compactDelta ? undefined : (s.compactCount || undefined));
       this.log.info("prompt completed", {
         sessionId: agentSession.id,
         responseLength: parsed.text.length,
         model: parsed.model ?? null,
         contextTokens: parsed.contextTokens ?? null,
-        compactCount: s.compactCount || 0,
+        compactCount: resolvedCompactCount ?? 0,
+        compactDelta: parsed.compactDelta ?? 0,
         cumulativeBytes: s.cumulativeBytes,
       });
 
@@ -362,7 +367,8 @@ export abstract class CliAgentBackend<S extends BaseCliSession = BaseCliSession>
         contextTokens: parsed.contextTokens,
         contextWindow: parsed.contextWindow,
         model: parsed.model,
-        compactCount: s.compactCount || undefined,
+        compactCount: resolvedCompactCount,
+        compactDelta: parsed.compactDelta,
       };
     } catch (err: any) {
       const activity = this.activityMap.get(agentSession.id);

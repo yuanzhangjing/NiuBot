@@ -979,6 +979,18 @@ const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 41,
+    description: "Persist cumulative compact_count on sessions",
+    up: (db) => {
+      const hasSessions = !!db.prepare(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sessions'",
+      ).get();
+      if (hasSessions) {
+        addColumnIfMissing(db, "sessions", "compact_count", "INTEGER NOT NULL DEFAULT 0");
+      }
+    },
+  },
 ];
 
 const transportMigrations: Migration[] = [

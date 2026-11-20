@@ -335,7 +335,7 @@ describe("AgyBackend", () => {
     expect(hooks.isComplete?.(RESULT())).toBe(true);
   });
 
-  it("counts completed checkpoint/compaction steps once per step_index", () => {
+  it("counts completed checkpoint/compaction steps once per step_index as per-turn compactDelta", () => {
     const backend = new AgyBackend({ agyHome: mkdtempSync(join(tmpdir(), "agy-home-")) });
     const session = backend.buildSession({ workingDirectory: "/tmp" });
 
@@ -348,8 +348,23 @@ describe("AgyBackend", () => {
       step_update: { conversation_id: "conv-1", step_index: 5, state: "DONE", step_type: "checkpoint" },
     });
 
-    const parsed = backend.parseOutput([INIT, compactActive, compactDone, compactDone, RESULT()].join("\n"), session);
-    expect(parsed.compactCount).toBe(1);
+    const first = backend.parseOutput([INIT, compactActive, compactDone, compactDone, RESULT()].join("\n"), session);
+    expect(first.compactDelta).toBe(1);
+    expect(first.compactCount).toBeUndefined();
+
+    // 同 session 下一轮没有新压缩时，compactDelta 为 undefined，避免重复累加
+    const second = backend.parseOutput([INIT, RESULT()].join("\n"), session);
+    expect(second.compactDelta).toBeUndefined();
+    expect(second.compactCount).toBeUndefined();
+
+    // 新的 step_index 再次压缩时上报增量 1
+    const compact2Done = JSON.stringify({
+      event: "step_update",
+      step_update: { conversation_id: "conv-1", step_index: 18, state: "DONE", step_type: "compaction" },
+    });
+    const third = backend.parseOutput([INIT, compact2Done, RESULT()].join("\n"), session);
+    expect(third.compactDelta).toBe(1);
+    expect(third.compactCount).toBeUndefined();
   });
 
   it("tracks parallel tool execution and compaction state in activity", () => {
