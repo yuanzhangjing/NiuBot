@@ -1598,12 +1598,126 @@ describe("FeishuAdapter", () => {
 
     expect(result.nodes[0]?.content).toBe("转发卡片原文");
     expect(gets).toEqual([
-      { path: { message_id: "om-forward" }, params: undefined },
+      {
+        path: { message_id: "om-forward" },
+        params: {
+          user_id_type: "open_id",
+          card_msg_content_type: "user_card_content",
+          with_sender_name: "true",
+        },
+      },
       {
         path: { message_id: "om-card-child" },
         params: { card_msg_content_type: "user_card_content" },
       },
     ]);
+  });
+
+  test("resolves nested merge-forward, rich post tags, and inline cards via upper_message_id without refetching cross-chat children", async () => {
+    const adapter = new FeishuAdapter("app-id", "app-secret");
+    const errors: unknown[] = [];
+    adapter.onMessageReadError((event) => errors.push(event));
+    const gets: string[] = [];
+    (adapter as any).client = {
+      im: {
+        message: {
+          get: async ({ path }: any) => {
+            gets.push(path.message_id);
+            if (path.message_id === "om-outer") {
+              return {
+                data: {
+                  items: [
+                    { message_id: "om-outer", msg_type: "merge_forward", body: { content: "Merged and Forwarded Message" } },
+                    {
+                      message_id: "om-nested",
+                      msg_type: "merge_forward",
+                      upper_message_id: "om-outer",
+                      sender: { id: "ou-u1", sender_type: "user", sender_name: "张三" },
+                      body: { content: "Merged and Forwarded Message" },
+                    },
+                    {
+                      message_id: "om-nested-card",
+                      msg_type: "interactive",
+                      upper_message_id: "om-nested",
+                      sender: { id: "cli_u15", sender_type: "app", sender_name: "U15" },
+                      body: {
+                        content: JSON.stringify({
+                          schema: "2.0",
+                          header: { title: { tag: "plain_text", content: "当前测试版本" } },
+                          body: { elements: [{ tag: "markdown", content: "提交：9f783de" }] },
+                        }),
+                      },
+                    },
+                    {
+                      message_id: "om-nested-post",
+                      msg_type: "post",
+                      upper_message_id: "om-outer",
+                      sender: { id: "ou-u2", sender_type: "user", sender_name: "李四" },
+                      mentions: [{ key: "@_user_1", id: "ou-eli", name: "T.Eli" }],
+                      body: {
+                        content: JSON.stringify({
+                          zh_cn: {
+                            title: "部署说明",
+                            content: [[
+                              { tag: "md", text: "@_user_1 **完成**" },
+                              { tag: "code_block", language: "bash", text: "npm test" },
+                            ]],
+                          },
+                        }),
+                      },
+                    },
+                  ],
+                },
+              };
+            }
+            throw { code: 230002, message: "Bot/User can NOT be out of the chat." };
+          },
+        },
+      },
+    };
+
+    const result = await (adapter as any).parseMergeForward("om-outer");
+    expect(gets).toEqual(["om-outer"]);
+    expect(errors).toEqual([]);
+    expect(result.nodes).toHaveLength(2);
+    expect(result.nodes[0]).toMatchObject({
+      sender: "张三",
+      contentType: "forward",
+      children: [{ sender: "U15", content: "当前测试版本\n提交：9f783de" }],
+    });
+    expect(result.nodes[1]).toMatchObject({
+      sender: "李四",
+      content: "部署说明\n@T.Eli **完成**\n```bash\nnpm test\n```",
+    });
+  });
+
+  test("normalizes additional Feishu message types cleanly", async () => {
+    const adapter = new FeishuAdapter("app-id", "app-secret");
+    const cases: Array<[string, Record<string, unknown>, string]> = [
+      ["sticker", { file_key: "stk_1" }, "[表情]"],
+      ["share_chat", { chat_id: "oc_abc" }, "[分享群聊: oc_abc]"],
+      ["share_user", { user_id: "ou_xyz" }, "[分享名片: ou_xyz]"],
+      ["location", { name: "工位A" }, "[位置: 工位A]"],
+      ["folder", { file_key: "fld_1", file_name: "docs" }, "[文件夹: docs]"],
+      ["hongbao", { text: "恭喜发财" }, "[红包: 恭喜发财]"],
+      ["video_chat", { topic: "周会" }, "[视频会议: 周会]"],
+      ["todo", { summary: { title: "修转发" } }, "[待办] 修转发"],
+      ["share_calendar_event", { summary: "评审" }, "[日程] 评审"],
+    ];
+
+    for (const [message_type, payload, expected] of cases) {
+      const normalized = await (adapter as any).normalize({
+        sender: { sender_id: { open_id: "ou-user" }, sender_type: "user" },
+        message: {
+          message_id: `om-${message_type}`,
+          chat_id: "oc-group",
+          chat_type: "group",
+          message_type,
+          content: JSON.stringify(payload),
+        },
+      });
+      expect(normalized?.contentText).toBe(expected);
+    }
   });
 
   test("does not refetch when the event already has schema 2.0 card text", async () => {

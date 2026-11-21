@@ -8,6 +8,10 @@ import {
   extractInteractiveCardContent,
   resolveInteractiveCardContent,
 } from "./card-content.js";
+import {
+  formatFeishuStructuredContent,
+  parseRawFeishuMentions,
+} from "./message-content.js";
 
 export function feishuTimeToUnixSec(raw?: string | number): number | undefined {
   const n = typeof raw === "number" ? raw : Number(raw);
@@ -15,67 +19,12 @@ export function feishuTimeToUnixSec(raw?: string | number): number | undefined {
   return n > 1e12 ? Math.floor(n / 1000) : Math.floor(n);
 }
 
-function replaceMentionKeys(text: string, mentions: MentionInfo[]): string {
-  let out = text;
-  for (const mention of mentions) {
-    if (!mention.key) continue;
-    if (mention.key === "@_all" || mention.platformUserId === "@_all") {
-      out = out.replaceAll(mention.key, "@所有人");
-    } else {
-      out = out.replaceAll(mention.key, `@${mention.name || mention.platformUserId}`);
-    }
-  }
-  return out;
-}
-
-function extractPostText(parsed: Record<string, any>): string {
-  const parts: string[] = [];
-  if (parsed.title) parts.push(String(parsed.title));
-  const walk = (node: unknown): void => {
-    if (!node) return;
-    if (Array.isArray(node)) {
-      for (const child of node) walk(child);
-      return;
-    }
-    if (typeof node !== "object") return;
-    const el = node as Record<string, any>;
-    if (typeof el.text === "string") parts.push(el.text);
-    else if (el.text?.content) parts.push(el.text.content);
-    if (el.elements) walk(el.elements);
-    if (el.content) walk(el.content);
-  };
-  // 新版飞书富文本使用 content_v2；旧消息仍使用 content。
-  walk(Array.isArray(parsed.content_v2) && parsed.content_v2.length > 0
-    ? parsed.content_v2
-    : parsed.content);
-  return parts.join("");
-}
-
 function parseMentions(
   raw: unknown,
   botOpenId?: string | null,
   appId?: string | null,
 ): { mentions: MentionInfo[]; botMentioned: boolean } {
-  const mentions: MentionInfo[] = [];
-  let botMentioned = false;
-  if (!Array.isArray(raw)) return { mentions, botMentioned };
-  for (const item of raw) {
-    const mentionId = typeof item?.id === "string"
-      ? item.id
-      : (item?.id?.open_id || item?.id?.app_id || "");
-    const isBot = Boolean(
-      mentionId && (mentionId === botOpenId || mentionId === appId),
-    );
-    if (isBot) botMentioned = true;
-    mentions.push({
-      platformUserId: mentionId,
-      name: item?.name ?? "",
-      isBot,
-      isApp: isBot || item?.id_type === "app_id" || String(mentionId).startsWith("cli_"),
-      key: item?.key ?? "",
-    });
-  }
-  return { mentions, botMentioned };
+  return parseRawFeishuMentions(raw, botOpenId, appId);
 }
 
 function extractText(
@@ -102,22 +51,11 @@ function extractText(
     return { text: rawContent || `[${msgType}]`, contentType };
   }
 
-  switch (msgType) {
-    case "text":
-      return { text: replaceMentionKeys(parsed.text ?? "", mentions), contentType: "text" };
-    case "post":
-      return { text: replaceMentionKeys(extractPostText(parsed) || "[富文本]", mentions), contentType: "post" };
-    case "image":
-      return { text: "[图片]", contentType: "image" };
-    case "file":
-      return { text: parsed.file_name ? `[文件: ${parsed.file_name}]` : "[文件]", contentType: "file" };
-    case "audio":
-      return { text: "[音频]", contentType: "audio" };
-    case "media":
-      return { text: "[视频]", contentType: "media" };
-    default:
-      return { text: parsed.text ?? `[${msgType}]`, contentType: "text" };
+  const formatted = formatFeishuStructuredContent(msgType, parsed, mentions);
+  if (msgType === "post" && !formatted.text) {
+    return { text: "[富文本]", contentType: "post" };
   }
+  return formatted;
 }
 
 async function extractTextWithCardResolver(

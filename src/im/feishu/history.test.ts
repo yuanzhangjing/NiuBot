@@ -108,4 +108,65 @@ describe("feishu history parse", () => {
   test("skips items without sender or body", () => {
     expect(parseFeishuHistoryItem({ message_id: "om-x" }, "oc-group")).toBeNull();
   });
+
+  test("parses locale-wrapped post tags and additional Feishu message types", () => {
+    const richPost = parseFeishuHistoryItem({
+      message_id: "om-post-rich",
+      msg_type: "post",
+      sender: { id: "ou-user", sender_type: "user" },
+      body: {
+        content: JSON.stringify({
+          zh_cn: {
+            title: "周报",
+            content: [
+              [{ tag: "md", text: "**要点** 1" }],
+              [{ tag: "code_block", language: "ts", text: "const x = 1;" }],
+              [{ tag: "hr" }],
+            ],
+          },
+          files: [{ file_key: "f1", file_name: "report.pdf", is_folder: false }],
+        }),
+      },
+    }, "oc-group");
+    expect(richPost?.contentText).toContain("周报");
+    expect(richPost?.contentText).toContain("**要点** 1");
+    expect(richPost?.contentText).toContain("```ts\nconst x = 1;\n```");
+    expect(richPost?.contentText).toContain("---");
+    expect(richPost?.contentText).toContain("[文件: report.pdf]");
+
+    expect(parseFeishuHistoryItem({
+      message_id: "om-share-chat",
+      msg_type: "share_chat",
+      sender: { id: "ou-user", sender_type: "user" },
+      body: { content: JSON.stringify({ chat_id: "oc_123" }) },
+    }, "oc-group")?.contentText).toBe("[分享群聊: oc_123]");
+
+    expect(parseFeishuHistoryItem({
+      message_id: "om-share-user",
+      msg_type: "share_user",
+      sender: { id: "ou-user", sender_type: "user" },
+      body: { content: JSON.stringify({ user_id: "ou_456" }) },
+    }, "oc-group")?.contentText).toBe("[分享名片: ou_456]");
+
+    expect(parseFeishuHistoryItem({
+      message_id: "om-location",
+      msg_type: "location",
+      sender: { id: "ou-user", sender_type: "user" },
+      body: { content: JSON.stringify({ name: "字节跳动广场" }) },
+    }, "oc-group")?.contentText).toBe("[位置: 字节跳动广场]");
+
+    expect(parseFeishuHistoryItem({
+      message_id: "om-vote",
+      msg_type: "vote",
+      sender: { id: "ou-user", sender_type: "user" },
+      body: { content: JSON.stringify({ topic: "聚餐时间", options: ["周五", "周六"], status: 1 }) },
+    }, "oc-group")?.contentText).toBe("[投票] 聚餐时间 | • 周五 • 周六 | (已结束)");
+
+    expect(parseFeishuHistoryItem({
+      message_id: "om-sys",
+      msg_type: "system",
+      sender: { id: "ou-sys", sender_type: "user" },
+      body: { content: JSON.stringify({ template: "{from_user} 邀请 {to_chatters} 加入群聊", from_user: ["张三"], to_chatters: ["李四"] }) },
+    }, "oc-group")?.contentText).toBe("张三 邀请 李四 加入群聊");
+  });
 });

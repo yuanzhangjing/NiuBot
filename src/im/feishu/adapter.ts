@@ -22,6 +22,13 @@ import {
   isDegradedCardText,
   resolveInteractiveCardContent,
 } from "./card-content.js";
+import {
+  extractPostContentAsync,
+  extractPostTextSync,
+  formatFeishuStructuredContent,
+  isFeishuPostPayload,
+  parseRawFeishuMentions,
+} from "./message-content.js";
 import { createLogger } from "../../logger.js";
 
 const log = createLogger("feishu");
@@ -161,7 +168,7 @@ export class FeishuAdapter implements PlatformAdapter {
   private nameLookup: ((platformId: string) => string | undefined) | null = null;
 
   /** 可选：注册未知用户并返回显示名称（写入，注入自 DB） */
-  private nameRegister: ((platformId: string, isBot?: boolean) => string) | null = null;
+  private nameRegister: ((platformId: string, isBot?: boolean, name?: string) => string) | null = null;
 
   /** GET 成功确认为人的 open_id。失败不写入，下一条还能再刷。 */
   private confirmedHumans = new Set<string>();
@@ -198,7 +205,7 @@ export class FeishuAdapter implements PlatformAdapter {
   }
 
   /** 注入未知用户注册（写 DB），用于 merge_forward 等场景 */
-  setNameRegister(fn: (platformId: string, isBot?: boolean) => string): void {
+  setNameRegister(fn: (platformId: string, isBot?: boolean, name?: string) => string): void {
     this.nameRegister = fn;
   }
 
@@ -728,14 +735,22 @@ export class FeishuAdapter implements PlatformAdapter {
 
       try {
         const parsed = JSON.parse(body);
-        if (typeof parsed.text === "string") return parsed.text;
+        if (typeof parsed.text === "string" && !parsed.template && !parsed.chat_id && !parsed.user_id) {
+          return parsed.text;
+        }
 
-        if (Array.isArray(parsed.content)) {
-          const post = this.extractPostText(parsed, []);
+        if (isFeishuPostPayload(parsed)) {
+          const post = extractPostTextSync(parsed, []);
           if (post) return post;
         }
 
-        if (parsed.schema === "2.0" || parsed.header || parsed.body?.elements || parsed.elements) {
+        if (
+          parsed.json_card
+          || parsed.schema === "2.0"
+          || parsed.header
+          || parsed.body?.elements
+          || parsed.elements
+        ) {
           const card = extractInteractiveCardContent(body);
           return isDegradedCardText(card) ? undefined : card;
         }
@@ -1041,15 +1056,16 @@ export class FeishuAdapter implements PlatformAdapter {
     }
 
     switch (msgType) {
-      case "text": {
-        let text = parsed.text ?? "";
-        text = this.replaceMentions(text, mentions);
-        return { text, contentType: "text" };
-      }
+      case "text":
+        return formatFeishuStructuredContent("text", parsed, mentions);
 
       case "post": {
-        // Rich text: extract text from nested structure, download embedded images
-        const text = await this.extractPostContent(parsed, mentions, messageId);
+        // Rich text: extract text from nested structure (locales, content_v2, md/code_block/files), download embedded images
+        const text = await extractPostContentAsync(
+          parsed,
+          mentions,
+          messageId ? (imageKey) => this.downloadImage(messageId, imageKey) : undefined,
+        );
         const hasImages = text.includes("[图片:");
         return { text, contentType: hasImages ? "mixed" : "post" };
       }
@@ -1089,12 +1105,10 @@ export class FeishuAdapter implements PlatformAdapter {
         return { text: `[文件: ${fileName}]`, contentType: "file" };
       }
 
-      case "audio": {
-        const duration = parsed.duration ? `${Math.round(parsed.duration / 1000)}秒` : "";
-        const durationText = duration ? `（${duration}）` : "";
-        return { text: `用户发送了一段语音${durationText}，当前不支持语音消息`, contentType: "audio" };
-      }
+      case "audio":
+        return formatFeishuStructuredContent("audio", parsed, mentions, { audioVerbose: true });
 
+      case "video":
       case "media": {
         const fileKey: string = parsed.file_key ?? "";
         const fileName: string = parsed.file_name ?? "视频";
@@ -1111,118 +1125,9 @@ export class FeishuAdapter implements PlatformAdapter {
         return { text: `[视频: ${fileName}]`, contentType: "media" };
       }
 
-      default: {
-        // Unknown type: store with type indicator
-        return { text: `[${msgType}]`, contentType: "text" };
-      }
+      default:
+        return formatFeishuStructuredContent(msgType, parsed, mentions);
     }
-  }
-
-  /** Replace @mention placeholders with display names */
-  private replaceMentions(text: string, mentions: MentionInfo[]): string {
-    for (const m of mentions) {
-      if (m.key === "@_all" || m.platformUserId === "@_all") {
-        // @all mention → @所有人 (key is @_all, open_id may be empty)
-        text = text.replace(m.key, "@所有人");
-      } else {
-        // Replace placeholder with @name
-        text = text.replace(m.key, `@${m.name}`);
-      }
-    }
-    return text;
-  }
-
-  /**
-   * Extract text from rich text (post) messages, downloading embedded images.
-   * Used by parseContent (main flow) where image download is available.
-   */
-  private async extractPostContent(parsed: any, mentions: MentionInfo[], messageId?: string): Promise<string> {
-    const parts: string[] = [];
-    const title = parsed.title;
-    if (title) parts.push(title);
-
-    // 飞书新版富文本同时提供 content_v2；优先使用它，旧版继续回退到 content。
-    const content = Array.isArray(parsed.content_v2) && parsed.content_v2.length > 0
-      ? parsed.content_v2
-      : parsed.content;
-    if (Array.isArray(content)) {
-      for (const paragraph of content) {
-        if (!Array.isArray(paragraph)) continue;
-        const lineTexts: string[] = [];
-        for (const element of paragraph) {
-          if (element.tag === "text") {
-            lineTexts.push(element.text ?? "");
-          } else if (element.tag === "a") {
-            lineTexts.push(element.text ?? element.href ?? "");
-          } else if (element.tag === "at") {
-            const userId = element.user_id;
-            if (userId === "@_all" || userId === "all") {
-              lineTexts.push("@所有人");
-            } else {
-              const mention = mentions.find((m) => m.platformUserId === userId);
-              lineTexts.push(`@${mention?.name ?? element.user_name ?? "用户"}`);
-            }
-          } else if (element.tag === "img") {
-            const imageKey: string = element.image_key ?? "";
-            if (imageKey && messageId) {
-              const filePath = await this.downloadImage(messageId, imageKey);
-              if (filePath) {
-                lineTexts.push(`[图片: ${filePath}]`);
-                continue;
-              }
-            }
-            lineTexts.push("[图片]");
-          } else if (element.tag === "emotion") {
-            lineTexts.push(element.emoji_type ? `[${element.emoji_type}]` : "");
-          }
-        }
-        if (lineTexts.length > 0) parts.push(lineTexts.join(""));
-      }
-    }
-
-    return parts.join("\n");
-  }
-
-  /**
-   * Extract text from rich text (post) messages without downloading images.
-   * Used by extractChildMessageText (merge_forward) where image download is not supported.
-   */
-  private extractPostText(parsed: any, mentions: MentionInfo[]): string {
-    const parts: string[] = [];
-    const title = parsed.title;
-    if (title) parts.push(title);
-
-    const content = Array.isArray(parsed.content_v2) && parsed.content_v2.length > 0
-      ? parsed.content_v2
-      : parsed.content;
-    if (Array.isArray(content)) {
-      for (const paragraph of content) {
-        if (!Array.isArray(paragraph)) continue;
-        const lineTexts: string[] = [];
-        for (const element of paragraph) {
-          if (element.tag === "text") {
-            lineTexts.push(element.text ?? "");
-          } else if (element.tag === "a") {
-            lineTexts.push(element.text ?? element.href ?? "");
-          } else if (element.tag === "at") {
-            const userId = element.user_id;
-            if (userId === "@_all" || userId === "all") {
-              lineTexts.push("@所有人");
-            } else {
-              const mention = mentions.find((m) => m.platformUserId === userId);
-              lineTexts.push(`@${mention?.name ?? element.user_name ?? "用户"}`);
-            }
-          } else if (element.tag === "img") {
-            lineTexts.push("[图片]");
-          } else if (element.tag === "emotion") {
-            lineTexts.push(element.emoji_type ? `[${element.emoji_type}]` : "");
-          }
-        }
-        if (lineTexts.length > 0) parts.push(lineTexts.join(""));
-      }
-    }
-
-    return parts.join("\n");
   }
 
   /** 取得卡片原始 body；失败时保留入站占位，后续历史同步还可以重试。 */
@@ -1437,8 +1342,17 @@ export class FeishuAdapter implements PlatformAdapter {
 
     let items: any[];
     try {
+      // 带上 user_card_content 与 with_sender_name：让飞书在父消息响应里直接内联展开子卡片和发送者名称，
+      // 避免跨会话再拿 childId 查原消息触发 230002。
       const resp = await this.getMessageForContent(
-        { path: { message_id: messageId } },
+        {
+          path: { message_id: messageId },
+          params: {
+            user_id_type: "open_id",
+            card_msg_content_type: "user_card_content",
+            with_sender_name: "true",
+          },
+        },
         messageId,
         context,
       );
@@ -1452,61 +1366,92 @@ export class FeishuAdapter implements PlatformAdapter {
       return [];
     }
 
-    const nodes: MessageNode[] = [];
-    // 已解析节点索引，用于解析 reply 引用
-    const nodeMap = new Map<string, MessageNode>();
-
+    // 飞书平铺返回嵌套子项（以 upper_message_id 关联父级）。先按父节点分组，避免重复/跨会话拉取。
+    const childrenMap = new Map<string, any[]>();
     for (const item of items) {
-      const msgType: string = item.msg_type ?? "";
-      const childId: string = item.message_id ?? "";
-      if (!childId) continue;
-
-      const senderName = this.resolveSenderFromItem(item);
-
-      // Nested merge_forward: recurse
-      if (msgType === "merge_forward") {
-        const children = await this.parseForwardNodes(childId, visited, depth + 1, context);
-        if (children.length > 0) {
-          const node: MessageNode = { sender: senderName, contentType: "forward", children };
-          nodes.push(node);
-        }
-        continue;
+      const itemId: string = item?.message_id ?? "";
+      const upperId: string = item?.upper_message_id ?? "";
+      if (!itemId) continue;
+      if (itemId === messageId && !upperId) continue;
+      const parentKey = upperId || messageId;
+      let bucket = childrenMap.get(parentKey);
+      if (!bucket) {
+        bucket = [];
+        childrenMap.set(parentKey, bucket);
       }
-
-      // Leaf message: extract content
-      const text = await this.extractChildMessageText(msgType, item, context);
-      const content = text || `[${msgType || "unknown"}]`;
-      const contentType = msgType || "unknown";
-
-      const node: MessageNode = { id: childId, sender: senderName, contentType, content };
-
-      // Resolve quoted message for reply
-      const parentId: string | undefined = item.parent_id;
-      if (parentId) {
-        // 优先从当前转发组内查找
-        const quotedNode = nodeMap.get(parentId);
-        if (quotedNode) {
-          node.quoted = quotedNode;
-        } else if (this.contentResolver) {
-          // Fallback: 从 DB 查找（跨组引用）
-          const cachedText = this.contentResolver(parentId);
-          if (cachedText) {
-            node.quoted = { sender: "", contentType: "text", content: cachedText };
-          }
-        }
-      }
-
-      nodeMap.set(childId, node);
-      nodes.push(node);
+      bucket.push(item);
     }
 
-    return nodes;
+    const buildNodes = async (parentId: string, curDepth: number): Promise<MessageNode[]> => {
+      const bucket = childrenMap.get(parentId) ?? [];
+      const nodes: MessageNode[] = [];
+      // 已解析节点索引，用于解析 reply 引用
+      const nodeMap = new Map<string, MessageNode>();
+
+      for (const item of bucket) {
+        const msgType: string = item.msg_type ?? "";
+        const childId: string = item.message_id ?? "";
+        if (!childId) continue;
+
+        const senderName = this.resolveSenderFromItem(item);
+
+        // Nested merge_forward: 优先使用同次响应内联的 childrenMap，未展开时再递归 GET
+        if (msgType === "merge_forward") {
+          let children: MessageNode[] = [];
+          if (childrenMap.has(childId)) {
+            if (curDepth < 5 && !visited.has(childId)) {
+              visited.add(childId);
+              children = await buildNodes(childId, curDepth + 1);
+            }
+          } else {
+            children = await this.parseForwardNodes(childId, visited, curDepth + 1, context);
+          }
+          if (children.length > 0) {
+            const node: MessageNode = { sender: senderName, contentType: "forward", children };
+            nodes.push(node);
+          }
+          continue;
+        }
+
+        const { mentions: childMentions } = parseRawFeishuMentions(item.mentions, this.botOpenId, this.appId);
+        // Leaf message: extract content
+        const text = await this.extractChildMessageText(msgType, item, context, childMentions);
+        const content = text || `[${msgType || "unknown"}]`;
+        const contentType = msgType || "unknown";
+
+        const node: MessageNode = { id: childId, sender: senderName, contentType, content };
+
+        // Resolve quoted message for reply
+        const parentRefId: string | undefined = item.parent_id;
+        if (parentRefId) {
+          // 优先从当前转发组内查找
+          const quotedNode = nodeMap.get(parentRefId);
+          if (quotedNode) {
+            node.quoted = quotedNode;
+          } else if (this.contentResolver) {
+            // Fallback: 从 DB 查找（跨组引用）
+            const cachedText = this.contentResolver(parentRefId);
+            if (cachedText) {
+              node.quoted = { sender: "", contentType: "text", content: cachedText };
+            }
+          }
+        }
+
+        nodeMap.set(childId, node);
+        nodes.push(node);
+      }
+
+      return nodes;
+    };
+
+    return buildNodes(messageId, depth);
   }
 
   /** Resolve sender display name: lookup -> bot -> register. */
   private resolveSenderFromItem(item: any): string {
     const sender = item.sender;
     if (!sender?.id) return "未知";
+    const apiSenderName = typeof sender.sender_name === "string" ? sender.sender_name.trim() : "";
 
     // 1. DB 只读查询（已知用户直接返回）
     if (this.nameLookup) {
@@ -1522,21 +1467,20 @@ export class FeishuAdapter implements PlatformAdapter {
           const label = this.nameLookup(this.botOpenId);
           if (label) return label;
         }
-        return this.botName ?? "Bot";
+        return this.botName ?? (apiSenderName || "Bot");
       }
-      // 其他 app/bot：注册并返回 label
-      // TODO: fetchAppName — 通过飞书 API 获取 app 名称
+      // 其他 app/bot：用接口返回的 sender_name 注册并返回 label
       if (this.nameRegister) {
-        return this.nameRegister(sender.id, true);
+        return this.nameRegister(sender.id, true, apiSenderName || undefined);
       }
-      return "Bot";
+      return apiSenderName || "Bot";
     }
 
-    // 3. 未知用户：注册并返回 "U{n}(未知用户)"
+    // 3. 未知用户：注册并返回 "U{n}(名字)"
     if (this.nameRegister) {
-      return this.nameRegister(sender.id, false);
+      return this.nameRegister(sender.id, false, apiSenderName || undefined);
     }
-    return "用户";
+    return apiSenderName || "用户";
   }
 
   /** Fetch child message content: DB cache → API item body → type fallback. */
@@ -1544,6 +1488,7 @@ export class FeishuAdapter implements PlatformAdapter {
     msgType: string,
     item: any,
     context?: MessageReadContext,
+    childMentions: MentionInfo[] = [],
   ): Promise<string> {
     const childId: string = item.message_id ?? "";
 
@@ -1562,7 +1507,7 @@ export class FeishuAdapter implements PlatformAdapter {
       if (msgType === "interactive") {
         return resolveInteractiveCardContent(
           "",
-          [],
+          childMentions,
           childId ? () => this.fetchOriginalCardContent(childId, context) : undefined,
         );
       }
@@ -1575,32 +1520,14 @@ export class FeishuAdapter implements PlatformAdapter {
     if (msgType === "interactive") {
       return resolveInteractiveCardContent(
         raw,
-        [],
+        childMentions,
         childId ? () => this.fetchOriginalCardContent(childId, context) : undefined,
       );
     }
 
     try {
       const parsed = JSON.parse(raw);
-      let text: string;
-      switch (msgType) {
-        case "text":
-          text = parsed.text ?? "";
-          break;
-        case "post":
-          text = this.extractPostText(parsed, []);
-          break;
-        case "image":
-          return "[图片]";
-        case "audio":
-          return "[语音]";
-        case "file":
-          return `[文件: ${parsed.file_name ?? ""}]`;
-        case "media":
-          return `[视频: ${parsed.file_name ?? ""}]`;
-        default:
-          return `[${msgType}]`;
-      }
+      let text = formatFeishuStructuredContent(msgType, parsed, childMentions).text;
 
       // Mention 替换（API 响应中携带 mentions 列表）
       if (text && Array.isArray(item.mentions) && item.mentions.length > 0) {

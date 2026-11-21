@@ -106,8 +106,8 @@ export async function createBotInstance(
     return label; // 有名字 "U2(名字)"，无名字 "U2"
   });
   // 注册新用户：写 DB，返回 label
-  im.setNameRegister((platformId, isBot) => {
-    const userId = ensureUser(db, "feishu", platformId);
+  im.setNameRegister((platformId, isBot, name) => {
+    const userId = ensureUser(db, "feishu", platformId, name, name ? "api" : undefined);
     if (isBot) setUserIsBot(db, userId);
     return getUserShortLabel(db, userId);
   });

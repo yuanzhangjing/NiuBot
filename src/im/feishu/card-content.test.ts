@@ -80,4 +80,65 @@ describe("Feishu card content", () => {
     )).resolves.toBe("已有正文");
     expect(fetchOriginal).not.toHaveBeenCalled();
   });
+
+  test("parses raw_card_content envelope, table, collapsible_panel, list, and code_block", () => {
+    const rawCard = JSON.stringify({
+      card_schema: 2,
+      json_card: JSON.stringify({
+        schema: "2.0",
+        header: { property: { title: { tag: "plain_text", content: "当前测试版本" }, subtitle: { tag: "plain_text", content: "发布状态" } } },
+        body: {
+          property: {
+            elements: [
+              {
+                tag: "markdown",
+                property: {
+                  elements: [
+                    { tag: "plain_text", property: { content: "提交：" } },
+                    { tag: "code_span", property: { content: "9f783de" } },
+                    { tag: "br" },
+                    { tag: "at", property: { userID: "ou_t_eli" } },
+                  ],
+                },
+              },
+              {
+                tag: "table",
+                property: {
+                  columns: [
+                    { name: "env", displayName: "环境" },
+                    { name: "status", displayName: "状态" },
+                  ],
+                  rows: [{ env: { data: "prod" }, status: { data: "ok" } }],
+                },
+              },
+              {
+                tag: "collapsible_panel",
+                property: {
+                  header: { title: { tag: "plain_text", content: "详情" } },
+                  elements: [{ tag: "blockquote", property: { content: "已通过" } }],
+                },
+              },
+            ],
+          },
+        },
+      }),
+      json_attachment: JSON.stringify({
+        at_users: {
+          ou_t_eli: { content: "T.Eli", mention_key: "@_user_1", user_id: "123" },
+        },
+      }),
+    });
+
+    const text = extractInteractiveCardContent(rawCard, [
+      { platformUserId: "ou_bot", name: "T.Eli", isBot: true, isApp: true, key: "@_user_1" },
+    ]);
+    expect(text).toContain("当前测试版本");
+    expect(text).toContain("发布状态");
+    expect(text).toContain("提交：`9f783de`");
+    expect(text).toContain("@T.Eli");
+    expect(text).toContain("| 环境 | 状态 |");
+    expect(text).toContain("| prod | ok |");
+    expect(text).toContain("详情");
+    expect(text).toContain("已通过");
+  });
 });
