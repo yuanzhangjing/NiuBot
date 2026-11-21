@@ -4,6 +4,11 @@ import {
   parseFeishuHistoryItem,
   parseFeishuHistoryItemWithCardResolver,
 } from "./history.js";
+import {
+  formatFeishuDurationSec,
+  formatFeishuStructuredContent,
+  isFeishuPostPayload,
+} from "./message-content.js";
 
 describe("feishu history parse", () => {
   test("converts millisecond timestamps to seconds", () => {
@@ -168,5 +173,20 @@ describe("feishu history parse", () => {
       sender: { id: "ou-sys", sender_type: "user" },
       body: { content: JSON.stringify({ template: "{from_user} 邀请 {to_chatters} 加入群聊", from_user: ["张三"], to_chatters: ["李四"] }) },
     }, "oc-group")?.contentText).toBe("张三 邀请 李四 加入群聊");
+  });
+
+  test("guards post detection, system prototype keys, epochs, and durations", () => {
+    expect(isFeishuPostPayload([])).toBe(false);
+    expect(isFeishuPostPayload({ summary: { title: "task", content: [[{ tag: "text", text: "x" }]] }, due_time: "1795152000" })).toBe(false);
+    expect(isFeishuPostPayload({ extra: { content: [[{ tag: "text", text: "x" }]] } })).toBe(false);
+    expect(isFeishuPostPayload({ zh_tw: { content: [[{ tag: "text", text: "ok" }]] } })).toBe(true);
+
+    expect(formatFeishuDurationSec(0)).toBe("");
+    expect(formatFeishuDurationSec(-1000)).toBe("");
+    expect(formatFeishuDurationSec("bad")).toBe("");
+    expect(formatFeishuDurationSec(2500)).toBe("3秒");
+
+    expect(formatFeishuStructuredContent("todo", { summary: { title: "任务" }, due_time: "9e18" }).text).toBe("[待办] 任务");
+    expect(formatFeishuStructuredContent("system", { template: "{from_user} {toString}", from_user: ["A"] }).text).toBe("A {toString}");
   });
 });

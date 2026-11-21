@@ -25,6 +25,7 @@ import {
 import {
   extractPostContentAsync,
   extractPostTextSync,
+  formatFeishuDurationSec,
   formatFeishuStructuredContent,
   isFeishuPostPayload,
   parseRawFeishuMentions,
@@ -730,17 +731,27 @@ export class FeishuAdapter implements PlatformAdapter {
 
   async getMessageContent(msgId: string, context?: MessageReadContext): Promise<string | undefined> {
     try {
-      const body = await this.fetchMessageBody(msgId, true, context);
-      if (!body) return undefined;
+      const record = await this.fetchMessageRecord(msgId, true, context);
+      if (!record) return undefined;
+      const { body, msgType, mentions } = record;
+
+      if (msgType === "interactive") {
+        const card = extractInteractiveCardContent(body, mentions);
+        return isDegradedCardText(card) ? undefined : card;
+      }
 
       try {
         const parsed = JSON.parse(body);
+        if (msgType) {
+          const text = formatFeishuStructuredContent(msgType, parsed, mentions).text;
+          if (text) return text;
+        }
         if (typeof parsed.text === "string" && !parsed.template && !parsed.chat_id && !parsed.user_id) {
           return parsed.text;
         }
 
         if (isFeishuPostPayload(parsed)) {
-          const post = extractPostTextSync(parsed, []);
+          const post = extractPostTextSync(parsed, mentions);
           if (post) return post;
         }
 
@@ -751,7 +762,7 @@ export class FeishuAdapter implements PlatformAdapter {
           || parsed.body?.elements
           || parsed.elements
         ) {
-          const card = extractInteractiveCardContent(body);
+          const card = extractInteractiveCardContent(body, mentions);
           return isDegradedCardText(card) ? undefined : card;
         }
       } catch {
@@ -1112,7 +1123,8 @@ export class FeishuAdapter implements PlatformAdapter {
       case "media": {
         const fileKey: string = parsed.file_key ?? "";
         const fileName: string = parsed.file_name ?? "视频";
-        const duration = parsed.duration ? `（${Math.round(parsed.duration / 1000)}秒）` : "";
+        const dur = formatFeishuDurationSec(parsed.duration);
+        const duration = dur ? `（${dur}）` : "";
         if (fileKey && messageId) {
           const result = await this.downloadFile(messageId, fileKey, fileName);
           if (result && "path" in result) {
@@ -1136,18 +1148,18 @@ export class FeishuAdapter implements PlatformAdapter {
     context?: MessageReadContext,
   ): Promise<string | undefined> {
     try {
-      return await this.fetchMessageBody(messageId, true, context);
+      return (await this.fetchMessageRecord(messageId, true, context))?.body;
     } catch (err) {
       log.warn("fetch original card failed", { messageId, error: String(err) });
       return undefined;
     }
   }
 
-  private async fetchMessageBody(
+  private async fetchMessageRecord(
     messageId: string,
     originalCardContent: boolean,
     context?: MessageReadContext,
-  ): Promise<string | undefined> {
+  ): Promise<{ body: string; msgType: string; mentions: MentionInfo[] } | undefined> {
     const request: any = { path: { message_id: messageId } };
     if (originalCardContent) {
       request.params = { card_msg_content_type: "user_card_content" };
@@ -1163,7 +1175,9 @@ export class FeishuAdapter implements PlatformAdapter {
       this.reportMessageReadError({ messageId, ...context }, new Error("message body degraded"));
       return undefined;
     }
-    return body;
+    const msgType = typeof msg?.msg_type === "string" ? msg.msg_type : "";
+    const { mentions } = parseRawFeishuMentions(msg?.mentions, this.botOpenId, this.appId);
+    return { body, msgType, mentions };
   }
 
   private async getMessage(
@@ -1366,7 +1380,8 @@ export class FeishuAdapter implements PlatformAdapter {
       return [];
     }
 
-    // 飞书平铺返回嵌套子项（以 upper_message_id 关联父级）。先按父节点分组，避免重复/跨会话拉取。
+    // 飞书平铺返回嵌套子项（以 upper_message_id 关联父级）。先按父节点分组并按时间升序排列，
+    // 保证渲染顺序一致及前向引用查找命中。
     const childrenMap = new Map<string, any[]>();
     for (const item of items) {
       const itemId: string = item?.message_id ?? "";
@@ -1381,8 +1396,13 @@ export class FeishuAdapter implements PlatformAdapter {
       }
       bucket.push(item);
     }
+    for (const bucket of childrenMap.values()) {
+      bucket.sort((a, b) => (Number(a?.create_time) || 0) - (Number(b?.create_time) || 0));
+    }
 
+    const visitedBuckets = new Set<string>();
     const buildNodes = async (parentId: string, curDepth: number): Promise<MessageNode[]> => {
+      visitedBuckets.add(parentId);
       const bucket = childrenMap.get(parentId) ?? [];
       const nodes: MessageNode[] = [];
       // 已解析节点索引，用于解析 reply 引用
@@ -1399,7 +1419,7 @@ export class FeishuAdapter implements PlatformAdapter {
         if (msgType === "merge_forward") {
           let children: MessageNode[] = [];
           if (childrenMap.has(childId)) {
-            if (curDepth < 5 && !visited.has(childId)) {
+            if (curDepth < 5 && !visited.has(childId) && !visitedBuckets.has(childId)) {
               visited.add(childId);
               children = await buildNodes(childId, curDepth + 1);
             }
@@ -1444,7 +1464,20 @@ export class FeishuAdapter implements PlatformAdapter {
       return nodes;
     };
 
-    return buildNodes(messageId, depth);
+    const rootNodes = await buildNodes(messageId, depth);
+    // 若中间某层嵌套容器缺失（如已删除），不丢失其下的可读子节点；优先处理自身不是现有子转发的孤儿桶。
+    const nestedForwardIds = new Set(
+      items.filter((i) => i?.msg_type === "merge_forward" && i?.message_id).map((i) => String(i.message_id)),
+    );
+    for (const parentKey of childrenMap.keys()) {
+      if (visitedBuckets.has(parentKey) || nestedForwardIds.has(parentKey)) continue;
+      rootNodes.push(...(await buildNodes(parentKey, depth + 1)));
+    }
+    for (const parentKey of childrenMap.keys()) {
+      if (visitedBuckets.has(parentKey)) continue;
+      rootNodes.push(...(await buildNodes(parentKey, depth + 1)));
+    }
+    return rootNodes;
   }
 
   /** Resolve sender display name: lookup -> bot -> register. */
@@ -1452,16 +1485,20 @@ export class FeishuAdapter implements PlatformAdapter {
     const sender = item.sender;
     if (!sender?.id) return "未知";
     const apiSenderName = typeof sender.sender_name === "string" ? sender.sender_name.trim() : "";
+    const isBot = sender.sender_type === "app";
+    const lookupId = isBot && typeof sender.open_bot_id === "string" && sender.open_bot_id
+      ? sender.open_bot_id
+      : sender.id;
 
-    // 1. DB 只读查询（已知用户直接返回）
+    // 1. DB 只读查询（已有完整姓名直接返回；无名占位如 "U2" 时仍用 apiSenderName 补齐）
     if (this.nameLookup) {
-      const name = this.nameLookup(sender.id);
-      if (name) return name;
+      const name = this.nameLookup(lookupId) ?? (lookupId !== sender.id ? this.nameLookup(sender.id) : undefined);
+      if (name && (!apiSenderName || name.includes("("))) return name;
     }
 
     // 2. App/Bot 识别
-    if (sender.sender_type === "app") {
-      if (sender.id === this.botOpenId || sender.id === this.appId) {
+    if (isBot) {
+      if (lookupId === this.botOpenId || sender.id === this.botOpenId || sender.id === this.appId) {
         // 用 bot 的 open_id 查 DB，保持 "U3(NiuBot)" 统一格式
         if (this.nameLookup && this.botOpenId) {
           const label = this.nameLookup(this.botOpenId);
@@ -1471,14 +1508,14 @@ export class FeishuAdapter implements PlatformAdapter {
       }
       // 其他 app/bot：用接口返回的 sender_name 注册并返回 label
       if (this.nameRegister) {
-        return this.nameRegister(sender.id, true, apiSenderName || undefined);
+        return this.nameRegister(lookupId, true, apiSenderName || undefined);
       }
       return apiSenderName || "Bot";
     }
 
     // 3. 未知用户：注册并返回 "U{n}(名字)"
     if (this.nameRegister) {
-      return this.nameRegister(sender.id, false, apiSenderName || undefined);
+      return this.nameRegister(lookupId, false, apiSenderName || undefined);
     }
     return apiSenderName || "用户";
   }
@@ -1527,33 +1564,10 @@ export class FeishuAdapter implements PlatformAdapter {
 
     try {
       const parsed = JSON.parse(raw);
-      let text = formatFeishuStructuredContent(msgType, parsed, childMentions).text;
-
-      // Mention 替换（API 响应中携带 mentions 列表）
-      if (text && Array.isArray(item.mentions) && item.mentions.length > 0) {
-        text = this.applyItemMentions(text, item.mentions);
-      }
-
-      return text;
+      return formatFeishuStructuredContent(msgType, parsed, childMentions).text;
     } catch {
       return raw;
     }
-  }
-
-  /** Apply mention replacements from message.get() API response */
-  private applyItemMentions(text: string, mentions: any[]): string {
-    for (const m of mentions) {
-      const key: string = m.key ?? "";
-      if (!key) continue;
-      const id: string = m.id ?? "";
-      if (id && this.botOpenId && id === this.botOpenId) {
-        text = text.replace(key, "").trim();
-      } else {
-        const name: string = m.name ?? "";
-        text = text.replace(key, name ? `@${name}` : "");
-      }
-    }
-    return text;
   }
 }
 

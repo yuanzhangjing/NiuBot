@@ -1720,6 +1720,102 @@ describe("FeishuAdapter", () => {
     }
   });
 
+  test("getMessageContent formats todo/hongbao/system/text mentions accurately", async () => {
+    const adapter = new FeishuAdapter("app-id", "app-secret");
+    const mockMsgs: Record<string, any> = {
+      "om-todo": {
+        msg_type: "todo",
+        body: {
+          content: JSON.stringify({
+            summary: { title: "上线检查", content: [[{ tag: "text", text: "跑单测" }]] },
+            due_time: "1795152000",
+          }),
+        },
+      },
+      "om-hongbao": {
+        msg_type: "hongbao",
+        body: { content: JSON.stringify({ text: "新年快乐" }) },
+      },
+      "om-sys": {
+        msg_type: "system",
+        body: {
+          content: JSON.stringify({
+            template: "{from_user} 更新了公告",
+            from_user: ["$& Alice"],
+          }),
+        },
+      },
+      "om-text": {
+        msg_type: "text",
+        body: { content: JSON.stringify({ text: "hi @_user_1" }) },
+        mentions: [{ key: "@_user_1", id: "ou-bob", name: "Bob" }],
+      },
+    };
+    (adapter as any).client = {
+      im: { message: { get: async ({ path }: any) => ({ data: { items: [mockMsgs[path.message_id]] } }) } },
+    };
+
+    await expect(adapter.getMessageContent("om-todo")).resolves.toMatch(/^\[待办\] 上线检查 \| 跑单测 \| 截止: /);
+    await expect(adapter.getMessageContent("om-hongbao")).resolves.toBe("[红包: 新年快乐]");
+    await expect(adapter.getMessageContent("om-sys")).resolves.toBe("$& Alice 更新了公告");
+    await expect(adapter.getMessageContent("om-text")).resolves.toBe("hi @Bob");
+  });
+
+  test("parseMergeForward sorts out-of-order items, keeps orphan buckets, and backfills nameless users", async () => {
+    const adapter = new FeishuAdapter("app-id", "app-secret");
+    const registered: Array<{ id: string; isBot?: boolean; name?: string }> = [];
+    adapter.setNameLookup((id) => (id === "ou-nameless" ? "U2" : undefined));
+    adapter.setNameRegister((id, isBot, name) => {
+      registered.push({ id, isBot, name });
+      return name ? `U(${name})` : "U";
+    });
+    (adapter as any).client = {
+      im: {
+        message: {
+          get: async () => ({
+            data: {
+              items: [
+                {
+                  message_id: "om-child-reply",
+                  msg_type: "text",
+                  create_time: "2000",
+                  parent_id: "om-child-first",
+                  sender: { id: "cli_bot", open_bot_id: "ou_bot_real", sender_type: "app", sender_name: "HelperBot" },
+                  body: { content: JSON.stringify({ text: "收到" }) },
+                },
+                {
+                  message_id: "om-child-first",
+                  msg_type: "text",
+                  create_time: "1000",
+                  sender: { id: "ou-nameless", sender_type: "user", sender_name: "Zen" },
+                  body: { content: JSON.stringify({ text: "先看这个" }) },
+                },
+                {
+                  message_id: "om-orphan-leaf",
+                  msg_type: "text",
+                  create_time: "3000",
+                  upper_message_id: "om-deleted-mid",
+                  sender: { id: "ou-nameless", sender_type: "user", sender_name: "Zen" },
+                  body: { content: JSON.stringify({ text: "孤儿桶消息" }) },
+                },
+              ],
+            },
+          }),
+        },
+      },
+    };
+
+    const result = await (adapter as any).parseMergeForward("om-root");
+    expect(result.nodes.map((n: any) => n.id)).toEqual([
+      "om-child-first",
+      "om-child-reply",
+      "om-orphan-leaf",
+    ]);
+    expect(result.nodes[1].quoted).toMatchObject({ sender: "U(Zen)", content: "先看这个" });
+    expect(registered).toContainEqual({ id: "ou-nameless", isBot: false, name: "Zen" });
+    expect(registered).toContainEqual({ id: "ou_bot_real", isBot: true, name: "HelperBot" });
+  });
+
   test("does not refetch when the event already has schema 2.0 card text", async () => {
     const adapter = new FeishuAdapter("app-id", "app-secret");
     let fetched = false;

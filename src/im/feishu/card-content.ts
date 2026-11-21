@@ -36,7 +36,7 @@ function unwrapProperty(obj: CardObj): CardObj {
   return asCardObj(obj.property) ?? obj;
 }
 
-function extractI18nOrText(value: unknown): string {
+function extractI18nOrText(value: unknown, ctx?: CardAttachmentContext): string {
   if (typeof value === "string") return value;
   const obj = asCardObj(value);
   if (!obj) return "";
@@ -49,10 +49,11 @@ function extractI18nOrText(value: unknown): string {
   }
   if (typeof prop.content === "string") return prop.content;
   if (Array.isArray(prop.elements)) {
+    if (ctx) return renderInlineElements(prop.elements, ctx);
     return prop.elements.map((el) => extractI18nOrText(el)).filter(Boolean).join("");
   }
   if (typeof prop.text === "string") return prop.text;
-  if (prop.text) return extractI18nOrText(prop.text);
+  if (prop.text) return extractI18nOrText(prop.text, ctx);
   return "";
 }
 
@@ -98,7 +99,7 @@ function renderInlineElements(elements: unknown[], ctx: CardAttachmentContext): 
       case "plain_text":
       case "text":
       case "lark_md":
-        out += extractI18nOrText(prop);
+        out += extractI18nOrText(prop, ctx);
         break;
       case "code_span":
         out += typeof prop.content === "string" ? `\`${prop.content}\`` : "";
@@ -123,26 +124,31 @@ function renderInlineElements(elements: unknown[], ctx: CardAttachmentContext): 
   return out.trim();
 }
 
-function formatTableCell(data: unknown): string {
+function formatTableCell(data: unknown, ctx: CardAttachmentContext): string {
   if (typeof data === "string") return data;
-  if (typeof data === "number") return String(data);
+  if (typeof data === "number" || typeof data === "boolean") return String(data);
   if (Array.isArray(data)) {
     return data
       .map((item) => {
+        if (typeof item === "string") return item;
         const obj = asCardObj(item);
-        return typeof obj?.text === "string" ? obj.text : "";
+        if (!obj) return "";
+        if (typeof obj.text === "string") return obj.text;
+        return extractElementText(obj, ctx) || extractI18nOrText(obj, ctx);
       })
       .filter(Boolean)
       .join(", ");
   }
-  return extractI18nOrText(data);
+  const obj = asCardObj(data);
+  if (!obj) return "";
+  return extractElementText(obj, ctx) || extractI18nOrText(obj, ctx);
 }
 
-function renderTable(prop: CardObj): string {
+function renderTable(prop: CardObj, ctx: CardAttachmentContext): string {
   const columns = Array.isArray(prop.columns) ? prop.columns.map(asCardObj).filter((c): c is CardObj => Boolean(c)) : [];
   if (columns.length === 0) return "";
-  const colNames = columns.map((c) => String(c.displayName || c.name || ""));
-  const colKeys = columns.map((c) => String(c.name || ""));
+  const colNames = columns.map((c) => String(c.displayName ?? c.display_name ?? c.name ?? ""));
+  const colKeys = columns.map((c) => String(c.name ?? ""));
   const rows = Array.isArray(prop.rows) ? prop.rows.map(asCardObj).filter((r): r is CardObj => Boolean(r)) : [];
   const lines = [
     `| ${colNames.join(" | ")} |`,
@@ -150,8 +156,10 @@ function renderTable(prop: CardObj): string {
   ];
   for (const row of rows) {
     const cells = colKeys.map((key) => {
-      const cell = asCardObj(row[key]);
-      return cell && cell.data !== undefined ? formatTableCell(cell.data) : "";
+      const rawCell = row[key];
+      const cellObj = asCardObj(rawCell);
+      const cellData = cellObj && "data" in cellObj ? cellObj.data : rawCell;
+      return cellData !== undefined && cellData !== null ? formatTableCell(cellData, ctx) : "";
     });
     lines.push(`| ${cells.join(" | ")} |`);
   }
@@ -202,14 +210,14 @@ function extractElementText(value: unknown, ctx: CardAttachmentContext): string 
     case "lark_md":
     case "plain_text":
     case "text":
-      return extractI18nOrText(prop);
+      return extractI18nOrText(prop, ctx);
     case "div": {
       const parts: string[] = [];
-      if (prop.text) parts.push(extractElementText(prop.text, ctx) || extractI18nOrText(prop.text));
+      if (prop.text) parts.push(extractElementText(prop.text, ctx) || extractI18nOrText(prop.text, ctx));
       if (Array.isArray(prop.fields)) {
         for (const f of prop.fields) {
           const fm = asCardObj(f);
-          if (fm?.text) parts.push(extractElementText(fm.text, ctx) || extractI18nOrText(fm.text));
+          if (fm?.text) parts.push(extractElementText(fm.text, ctx) || extractI18nOrText(fm.text, ctx));
         }
       }
       if (prop.extra) parts.push(extractElementText(prop.extra, ctx));
@@ -235,7 +243,8 @@ function extractElementText(value: unknown, ctx: CardAttachmentContext): string 
     case "collapsible_panel": {
       const parts: string[] = [];
       const header = asCardObj(prop.header);
-      const title = header?.title ? extractI18nOrText(header.title) : "";
+      const headerProp = header ? unwrapProperty(header) : undefined;
+      const title = headerProp?.title ? extractI18nOrText(headerProp.title, ctx) : "";
       if (title) parts.push(title);
       if (Array.isArray(prop.elements)) {
         const inner = prop.elements.map((el) => extractElementText(el, ctx)).filter(Boolean).join("\n");
@@ -244,7 +253,7 @@ function extractElementText(value: unknown, ctx: CardAttachmentContext): string 
       return parts.join("\n");
     }
     case "table":
-      return renderTable(prop);
+      return renderTable(prop, ctx);
     case "list":
       return Array.isArray(prop.items)
         ? prop.items.map((item) => {
@@ -270,7 +279,7 @@ function extractElementText(value: unknown, ctx: CardAttachmentContext): string 
     case "code_span":
       return typeof prop.content === "string" ? `\`${prop.content}\`` : "";
     case "button": {
-      const label = extractI18nOrText(prop.text ?? prop.content);
+      const label = extractI18nOrText(prop.text ?? prop.content, ctx);
       return label;
     }
     case "at":
@@ -291,15 +300,18 @@ function extractElementText(value: unknown, ctx: CardAttachmentContext): string 
         : "";
     case "local_datetime": {
       const ms = Number(prop.milliseconds);
-      if (Number.isFinite(ms) && ms > 0) return new Date(ms).toISOString();
+      if (Number.isFinite(ms) && ms > 0 && ms <= 8.64e15) {
+        const d = new Date(ms);
+        if (!Number.isNaN(d.getTime())) return d.toISOString();
+      }
       return typeof prop.fallbackText === "string" ? prop.fallbackText : "";
     }
     case "text_tag":
     case "number_tag":
-      return extractI18nOrText(prop.text);
+      return extractI18nOrText(prop.text, ctx);
     case "fallback_text":
       return prop.text
-        ? extractI18nOrText(prop.text)
+        ? extractI18nOrText(prop.text, ctx)
         : (Array.isArray(prop.elements) ? renderInlineElements(prop.elements, ctx) : "");
     case "hr":
       return "---";
@@ -309,7 +321,7 @@ function extractElementText(value: unknown, ctx: CardAttachmentContext): string 
       // 递归常见容器字段，覆盖未知或自定义嵌套卡片结构。
       const parts: string[] = [];
       for (const key of ["content", "text", "title", "label", "placeholder"]) {
-        const extracted = extractI18nOrText(prop[key]);
+        const extracted = extractI18nOrText(prop[key], ctx);
         if (extracted) {
           parts.push(extracted);
           break;
@@ -366,12 +378,12 @@ export function extractInteractiveText(parsed: unknown, mentions: MentionInfo[] 
   const parts: string[] = [];
   const header = asCardObj(root.header);
   const headerProp = header ? unwrapProperty(header) : undefined;
-  const headerTitle = headerProp ? extractI18nOrText(headerProp.title) : "";
-  const rootTitle = extractI18nOrText(root.title);
+  const headerTitle = headerProp ? extractI18nOrText(headerProp.title, ctx) : "";
+  const rootTitle = extractI18nOrText(root.title, ctx);
   const titleText = (headerTitle || rootTitle).trim();
   if (titleText) parts.push(titleText);
 
-  const headerSubtitle = headerProp ? extractI18nOrText(headerProp.subtitle).trim() : "";
+  const headerSubtitle = headerProp ? extractI18nOrText(headerProp.subtitle, ctx).trim() : "";
   if (headerSubtitle) parts.push(headerSubtitle);
 
   const body = asCardObj(root.body);
@@ -418,7 +430,7 @@ function replaceCardMentions(text: string, mentions: MentionInfo[]): string {
   return mapFeishuAtTags(out, (platformId, inner) => {
     if (platformId === "_all" || platformId === "@_all") return "@所有人";
     const mention = mentions.find((item) => item.platformUserId === platformId);
-    const name = mention?.name?.trim() || inner.trim();
+    const name = mention?.name?.trim() || inner.trim() || platformId;
     return name ? `@${name}` : "";
   });
 }

@@ -141,4 +141,45 @@ describe("Feishu card content", () => {
     expect(text).toContain("详情");
     expect(text).toContain("已通过");
   });
+
+  test("preserves unmatched <at> ids, schema 2.0 table cells, collapsible_panel.header.property, and out-of-range local_datetime", () => {
+    const schema2Card = JSON.stringify({
+      schema: "2.0",
+      body: {
+        elements: [
+          { tag: "markdown", content: "<at id=ou_unmatched></at> 请跟进" },
+          {
+            tag: "table",
+            columns: [
+              { name: "service", display_name: "服务" },
+              { name: "state", display_name: "状态" },
+            ],
+            rows: [{ service: "worker", state: "healthy" }],
+          },
+          {
+            tag: "collapsible_panel",
+            header: { property: { title: { tag: "plain_text", content: "折叠标题" } } },
+            elements: [
+              {
+                tag: "plain_text",
+                elements: [
+                  { tag: "at", userID: "ou_x" },
+                  { tag: "code_span", content: "v0.2.60" },
+                ],
+              },
+              { tag: "local_datetime", milliseconds: 9e18, fallbackText: "未知时间" },
+            ],
+          },
+        ],
+      },
+    });
+
+    const text = extractInteractiveCardContent(schema2Card);
+    expect(text).toContain("@ou_unmatched 请跟进");
+    expect(text).toContain("| 服务 | 状态 |");
+    expect(text).toContain("| worker | healthy |");
+    expect(text).toContain("折叠标题");
+    expect(text).toContain("@ou_x`v0.2.60`");
+    expect(text).toContain("未知时间");
+  });
 });

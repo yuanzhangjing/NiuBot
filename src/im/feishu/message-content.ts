@@ -4,6 +4,7 @@
  */
 
 import type { MentionInfo, NormalizedMessage } from "../types.js";
+import { dateTimeInTimeZone } from "../../tz.js";
 
 /** 替换文本中的飞书 @_user_k / @_all 占位符。 */
 export function replaceFeishuMentionKeys(text: string, mentions: MentionInfo[]): string {
@@ -45,32 +46,34 @@ export function parseRawFeishuMentions(
   return { mentions, botMentioned };
 }
 
+const POST_LOCALE_KEY_RE = /^[a-z]{2}(?:_[a-z0-9]{2,4})?$/i;
+
+function hasPostBlocks(obj: unknown): boolean {
+  if (!obj || typeof obj !== "object" || Array.isArray(obj)) return false;
+  const candidate = obj as Record<string, any>;
+  return Array.isArray(candidate.content_v2) || Array.isArray(candidate.content);
+}
+
 /** 展开飞书富文本（post）的语言包装层，兼容直接 body 与 { zh_cn / en_us / ... } 结构。 */
 export function unwrapPostLocale(parsed: unknown): Record<string, any> | undefined {
-  if (!parsed || typeof parsed !== "object") return undefined;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
   const root = parsed as Record<string, any>;
-  if ("content" in root || "content_v2" in root || "title" in root) return root;
+  if (hasPostBlocks(root)) return root;
+  if ("summary" in root && ("due_time" in root || "task_id" in root)) return undefined;
   for (const locale of ["zh_cn", "en_us", "ja_jp"]) {
-    const candidate = root[locale];
-    if (candidate && typeof candidate === "object" && !Array.isArray(candidate)) {
-      return candidate as Record<string, any>;
-    }
+    if (hasPostBlocks(root[locale])) return root[locale];
   }
   for (const key of Object.keys(root).sort()) {
-    if (key === "files") continue;
-    const candidate = root[key];
-    if (candidate && typeof candidate === "object" && !Array.isArray(candidate)) {
-      return candidate as Record<string, any>;
-    }
+    if (!POST_LOCALE_KEY_RE.test(key)) continue;
+    if (hasPostBlocks(root[key])) return root[key];
   }
+  if (typeof root.title === "string" && !("summary" in root) && !("template" in root)) return root;
   return undefined;
 }
 
 /** 判断解析后的 JSON 是否像飞书 post 富文本结构。 */
 export function isFeishuPostPayload(parsed: unknown): boolean {
-  const body = unwrapPostLocale(parsed);
-  if (!body) return false;
-  return Array.isArray(body.content_v2) || Array.isArray(body.content);
+  return hasPostBlocks(unwrapPostLocale(parsed));
 }
 
 function selectPostBlocks(body: Record<string, any>): unknown[] {
@@ -193,16 +196,23 @@ export async function extractPostContentAsync(
   return replaceFeishuMentionKeys(parts.join("\n").trim(), mentions);
 }
 
-/** 把飞书秒/毫秒时间戳字符串格式化为本地时间文本。 */
+/** 格式化音视频毫秒时长为秒数标签；非法或非正数返回空串。 */
+export function formatFeishuDurationSec(raw: unknown): string {
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? `${Math.round(n / 1000)}秒` : "";
+}
+
+/** 把飞书秒/毫秒时间戳字符串格式化为配置时区的时间文本。 */
 function formatFeishuEpoch(raw: unknown): string {
   const str = typeof raw === "number" ? String(raw) : typeof raw === "string" ? raw.trim() : "";
   if (!str) return "";
   const num = Number(str);
   if (!Number.isFinite(num) || num <= 0) return "";
   const ms = num > 1e12 ? num : num * 1000;
+  if (!Number.isFinite(ms) || ms > 8.64e15) return "";
   const d = new Date(ms);
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  if (Number.isNaN(d.getTime())) return "";
+  return dateTimeInTimeZone(d);
 }
 
 function formatCalendarSummary(parsed: Record<string, any>): string {
@@ -249,11 +259,16 @@ function formatSystemMessage(parsed: Record<string, any>): string {
   const dividerText = parsed.divider_text && typeof parsed.divider_text === "object"
     ? String((parsed.divider_text as Record<string, any>).text ?? "")
     : "";
+  const fixedFields: Record<string, string> = {
+    from_user: joinList(parsed.from_user),
+    to_chatters: joinList(parsed.to_chatters),
+    divider_text: dividerText,
+  };
   const out = template
-    .replaceAll("{from_user}", joinList(parsed.from_user))
-    .replaceAll("{to_chatters}", joinList(parsed.to_chatters))
-    .replaceAll("{divider_text}", dividerText)
-    .replace(/\{(\w+)\}/g, (match, key) => (typeof parsed[key] === "string" && parsed[key] ? parsed[key] : match))
+    .replace(/\{(\w+)\}/g, (match, key: string) => {
+      if (Object.hasOwn(fixedFields, key)) return fixedFields[key];
+      return Object.hasOwn(parsed, key) && typeof parsed[key] === "string" && parsed[key] ? parsed[key] : match;
+    })
     .trim();
   return out || "[系统消息]";
 }
@@ -285,14 +300,13 @@ export function formatFeishuStructuredContent(
     case "folder":
       return { text: parsed.file_name ? `[文件夹: ${parsed.file_name}]` : "[文件夹]", contentType: "file" };
     case "audio": {
+      const dur = formatFeishuDurationSec(parsed.duration);
       if (options?.audioVerbose) {
-        const dur = parsed.duration ? `${Math.round(Number(parsed.duration) / 1000)}秒` : "";
         return {
           text: `用户发送了一段语音${dur ? `（${dur}）` : ""}，当前不支持语音消息`,
           contentType: "audio",
         };
       }
-      const dur = parsed.duration ? `${Math.round(Number(parsed.duration) / 1000)}秒` : "";
       return { text: dur ? `[语音（${dur}）]` : "[语音]", contentType: "audio" };
     }
     case "video":
@@ -322,7 +336,9 @@ export function formatFeishuStructuredContent(
       return { text: formatSystemMessage(parsed), contentType: "text" };
     default:
       return {
-        text: typeof parsed.text === "string" && parsed.text ? parsed.text : `[${msgType || "unknown"}]`,
+        text: typeof parsed.text === "string" && parsed.text
+          ? replaceFeishuMentionKeys(parsed.text, mentions)
+          : `[${msgType || "unknown"}]`,
         contentType: "text",
       };
   }
